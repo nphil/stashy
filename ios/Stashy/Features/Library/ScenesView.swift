@@ -3,12 +3,12 @@ import SwiftUI
 @Observable
 @MainActor
 final class ScenesViewModel {
-    var scenes: [Scene] = []
+    var scenes: [StashScene] = []
     var isLoading = false
     var errorMessage: String?
     private var hasMore = true
     private var currentPage = 1
-    private let pageSize = 25
+    let pageSize = 25
 
     func loadFirstPage(client: StashClient) async {
         guard !isLoading else { return }
@@ -94,7 +94,7 @@ struct ScenesView: View {
                 }
             }
             .navigationTitle("Scenes")
-            .navigationDestination(for: Scene.self) { scene in
+            .navigationDestination(for: StashScene.self) { scene in
                 SceneDetailView(scene: scene)
             }
             .toolbar {
@@ -116,7 +116,7 @@ struct ScenesView: View {
         }
     }
 
-    private func prefetchThumbnails(around scene: Scene) {
+    private func prefetchThumbnails(around scene: StashScene) {
         guard let idx = viewModel.scenes.firstIndex(where: { $0.id == scene.id }),
               let apiKey = appState.client?.apiKey else { return }
         let start = min(idx + 1, viewModel.scenes.count - 1)
@@ -132,7 +132,7 @@ struct ScenesView: View {
 // MARK: - Scene card
 
 struct SceneCard: View {
-    let scene: Scene
+    let scene: StashScene
     let apiKey: String
     @Environment(\.imageCache) private var imageCache
     @State private var thumbnail: UIImage?

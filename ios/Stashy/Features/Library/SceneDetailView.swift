@@ -2,7 +2,7 @@ import SwiftUI
 import AVKit
 
 struct SceneDetailView: View {
-    let scene: Scene
+    let scene: StashScene
     @Environment(AppState.self) private var appState
     @Environment(ThemeManager.self) private var themeManager
     @State private var player: AVPlayer?
@@ -95,8 +95,8 @@ struct SceneDetailView: View {
         guard let client = appState.client,
               let streamURL = scene.preferredStreamURL(apiKey: client.apiKey) else { return }
         let item = AVPlayerItem(url: streamURL)
+        item.preferredForwardBufferDuration = 5
         let p = AVPlayer(playerItem: item)
-        p.preferredForwardBufferDuration = 5
         player = p
         p.play()
     }

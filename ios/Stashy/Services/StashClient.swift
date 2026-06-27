@@ -144,7 +144,7 @@ struct StatsData: Decodable, Sendable {
 struct FindScenesResponse: Decodable, Sendable { let findScenes: FindScenesResult }
 struct FindScenesResult: Decodable, Sendable {
     let count: Int
-    let scenes: [Scene]
+    let scenes: [StashScene]
 }
 
 struct FindPerformersResponse: Decodable, Sendable { let findPerformers: FindPerformersResult }

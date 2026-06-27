@@ -1,6 +1,6 @@
 import Foundation
 
-struct Scene: Codable, Identifiable, Sendable, Hashable {
+struct StashScene: Codable, Identifiable, Sendable, Hashable {
     let id: String
     let title: String?
     let date: String?
@@ -12,7 +12,7 @@ struct Scene: Codable, Identifiable, Sendable, Hashable {
     let sceneStreams: [SceneStreamEndpoint]
 
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
-    static func == (lhs: Scene, rhs: Scene) -> Bool { lhs.id == rhs.id }
+    static func == (lhs: StashScene, rhs: StashScene) -> Bool { lhs.id == rhs.id }
 }
 
 struct ScenePaths: Codable, Sendable {
@@ -30,7 +30,7 @@ struct Tag: Codable, Identifiable, Sendable {
     let name: String
 }
 
-extension Scene {
+extension StashScene {
     func preferredStreamURL(apiKey: String) -> URL? {
         let stream = sceneStreams.first { $0.mime_type == "application/x-mpegURL" }
             ?? sceneStreams.first

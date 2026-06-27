@@ -54,7 +54,7 @@ actor ImageCache {
 import SwiftUI
 
 private struct ImageCacheKey: EnvironmentKey {
-    nonisolated(unsafe) static let defaultValue = ImageCache()
+    static let defaultValue = ImageCache()
 }
 
 extension EnvironmentValues {

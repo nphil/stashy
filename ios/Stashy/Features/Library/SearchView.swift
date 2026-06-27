@@ -4,7 +4,7 @@ import SwiftUI
 @MainActor
 final class SearchViewModel {
     var query = ""
-    var scenes: [Scene] = []
+    var scenes: [StashScene] = []
     var performers: [Performer] = []
     var isSearching = false
     private var searchTask: Task<Void, Never>?
@@ -72,7 +72,7 @@ struct SearchView: View {
             .listStyle(.plain)
             .navigationTitle("Search")
             .searchable(text: Bindable(viewModel).query, prompt: "Search scenes and performers")
-            .navigationDestination(for: Scene.self) { scene in
+            .navigationDestination(for: StashScene.self) { scene in
                 SceneDetailView(scene: scene)
             }
             .onChange(of: viewModel.query) {
@@ -84,7 +84,7 @@ struct SearchView: View {
 }
 
 struct SearchSceneRow: View {
-    let scene: Scene
+    let scene: StashScene
     let apiKey: String
     @Environment(\.imageCache) private var imageCache
     @State private var thumbnail: UIImage?
