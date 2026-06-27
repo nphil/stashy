@@ -1,0 +1,120 @@
+import SwiftUI
+
+@Observable
+@MainActor
+final class PerformersViewModel {
+    var performers: [Performer] = []
+    var isLoading = false
+    var errorMessage: String?
+    private var hasMore = true
+    private var currentPage = 1
+    private let pageSize = 30
+
+    func loadFirstPage(client: StashClient) async {
+        guard !isLoading else { return }
+        isLoading = true
+        errorMessage = nil
+        currentPage = 1
+        performers = []
+        hasMore = true
+        await fetchPage(client: client)
+        isLoading = false
+    }
+
+    func loadNextPageIfNeeded(triggerID: String, client: StashClient) async {
+        guard hasMore, !isLoading,
+              performers.suffix(pageSize / 2).contains(where: { $0.id == triggerID })
+        else { return }
+        isLoading = true
+        currentPage += 1
+        await fetchPage(client: client)
+        isLoading = false
+    }
+
+    private func fetchPage(client: StashClient) async {
+        do {
+            let result = try await client.findPerformers(page: currentPage, perPage: pageSize)
+            performers.append(contentsOf: result.performers)
+            hasMore = performers.count < result.count
+        } catch {
+            if currentPage > 1 { currentPage -= 1 }
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+struct PerformersView: View {
+    @Environment(AppState.self) private var appState
+    @Environment(\.imageCache) private var imageCache
+    @State private var viewModel = PerformersViewModel()
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if viewModel.performers.isEmpty && viewModel.isLoading {
+                    ProgressView("Loading performers…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if viewModel.performers.isEmpty {
+                    ContentUnavailableView("No Performers", systemImage: "person.2")
+                } else {
+                    List {
+                        ForEach(viewModel.performers) { performer in
+                            PerformerRow(performer: performer, apiKey: appState.client?.apiKey ?? "")
+                                .onAppear {
+                                    guard let client = appState.client else { return }
+                                    Task {
+                                        await viewModel.loadNextPageIfNeeded(
+                                            triggerID: performer.id,
+                                            client: client
+                                        )
+                                    }
+                                }
+                        }
+                        if viewModel.isLoading {
+                            HStack { Spacer(); ProgressView(); Spacer() }
+                                .listRowBackground(Color.clear)
+                        }
+                    }
+                    .listStyle(.plain)
+                }
+            }
+            .navigationTitle("Performers")
+        }
+        .task {
+            guard viewModel.performers.isEmpty, let client = appState.client else { return }
+            await viewModel.loadFirstPage(client: client)
+        }
+    }
+}
+
+struct PerformerRow: View {
+    let performer: Performer
+    let apiKey: String
+    @Environment(\.imageCache) private var imageCache
+    @State private var avatar: UIImage?
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Group {
+                if let img = avatar {
+                    Image(uiImage: img)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    Image(systemName: "person.circle.fill")
+                        .resizable()
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .frame(width: 44, height: 44)
+            .clipShape(Circle())
+
+            Text(performer.name)
+                .font(.body)
+        }
+        .task(id: performer.id) {
+            guard let url = performer.imageURL(apiKey: apiKey) else { return }
+            avatar = try? await imageCache.image(for: url)
+        }
+    }
+}

@@ -1,0 +1,196 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'android/**'
+      - '.github/workflows/android.yml'
+      - '**/*.md'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and release
+    runs-on: macos-15
+
+    env:
+      SCHEME:       Stashy
+      PROJECT:      Stashy.xcodeproj
+      ARCHIVE_PATH: build/Stashy.xcarchive
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: ver
+        run: |
+          cd ios
+          CURRENT=$(python3 -c "import plistlib; print(plistlib.load(open('Info.plist','rb'))['CFBundleShortVersionString'])")
+          BUILD=$(python3 -c "import plistlib; print(plistlib.load(open('Info.plist','rb'))['CFBundleVersion'])")
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          NEW_VER="$MAJOR.$MINOR.$((PATCH + 1))"
+          NEW_BUILD="$((BUILD + 1))"
+          echo "version=$NEW_VER" >> "$GITHUB_OUTPUT"
+          echo "build=$NEW_BUILD"  >> "$GITHUB_OUTPUT"
+          echo "tag=v$NEW_VER"     >> "$GITHUB_OUTPUT"
+
+      - name: Update version in source files
+        run: |
+          cd ios
+          python3 - <<PYEOF
+          import plistlib, re
+          ver   = "${{ steps.ver.outputs.version }}"
+          build = "${{ steps.ver.outputs.build }}"
+
+          with open('Info.plist', 'rb') as f:
+              p = plistlib.load(f)
+          p['CFBundleShortVersionString'] = ver
+          p['CFBundleVersion'] = build
+          with open('Info.plist', 'wb') as f:
+              plistlib.dump(p, f, fmt=plistlib.FMT_XML)
+
+          with open('project.yml') as f:
+              text = f.read()
+          text = re.sub(r'CFBundleShortVersionString:\s*"[^"]*"',
+                        f'CFBundleShortVersionString: "{ver}"', text)
+          text = re.sub(r'CFBundleVersion:\s*"[^"]*"',
+                        f'CFBundleVersion: "{build}"', text)
+          text = re.sub(r'MARKETING_VERSION:\s*"[^"]*"',
+                        f'MARKETING_VERSION: "{ver}"', text)
+          text = re.sub(r'CURRENT_PROJECT_VERSION:\s*"[^"]*"',
+                        f'CURRENT_PROJECT_VERSION: "{build}"', text)
+          with open('project.yml', 'w') as f:
+              f.write(text)
+          print(f"Bumped to {ver} (build {build})")
+          PYEOF
+
+      - name: Select Xcode
+        run: |
+          LATEST=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          echo "Using: $LATEST"
+          sudo xcode-select -s "$LATEST"
+          xcodebuild -version
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: |
+          cd ios
+          xcodegen generate
+
+      - name: Resolve Swift packages
+        run: |
+          cd ios
+          xcodebuild -resolvePackageDependencies \
+            -project "$PROJECT" \
+            -scheme  "$SCHEME"
+
+      - name: Archive (unsigned)
+        run: |
+          cd ios
+          set -o pipefail
+          xcodebuild archive \
+            -project      "$PROJECT" \
+            -scheme       "$SCHEME" \
+            -configuration Release \
+            -destination  "generic/platform=iOS" \
+            -archivePath  "$ARCHIVE_PATH" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            SKIP_INSTALL=NO \
+            INSTALL_PATH="/Applications" \
+            | xcpretty
+
+      - name: Package into IPA
+        run: |
+          cd ios
+          APP_PATH=$(find "$ARCHIVE_PATH" \
+            -name "*.app" \
+            ! -name "*.xctest" \
+            ! -path "*/SwiftSupport/*" \
+            2>/dev/null | head -1)
+
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ .app not found in archive:"
+            find "$ARCHIVE_PATH" -maxdepth 6 2>/dev/null || echo "(archive missing)"
+            exit 1
+          fi
+
+          echo "✅ Found: $APP_PATH"
+          mkdir -p Payload
+          cp -r "$APP_PATH" Payload/
+          zip -r Stashy.ipa Payload/
+          echo "IPA size: $(du -sh Stashy.ipa | cut -f1)"
+
+      - name: Commit version bump, update apps.json, tag, and publish release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          VERSION="${{ steps.ver.outputs.version }}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          PUBLISHED_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          IPA_SIZE=$(wc -c < ios/Stashy.ipa | tr -d ' ')
+          DOWNLOAD_URL="https://github.com/nphil/stashy/releases/download/$TAG/Stashy.ipa"
+          RELEASE_NOTES="Unsigned IPA — sideload with Feather/AltStore. Built from \`$SHORT_SHA\` on $(date -u +'%Y-%m-%d %H:%M UTC')"
+
+          VERSION="$VERSION" PUBLISHED_DATE="$PUBLISHED_DATE" DOWNLOAD_URL="$DOWNLOAD_URL" \
+          IPA_SIZE="$IPA_SIZE" RELEASE_NOTES="$RELEASE_NOTES" \
+          python3 - <<'PYEOF'
+          import json, os
+
+          version = os.environ['VERSION']
+          date    = os.environ['PUBLISHED_DATE']
+          url     = os.environ['DOWNLOAD_URL']
+          size    = int(os.environ['IPA_SIZE'])
+          body    = os.environ['RELEASE_NOTES']
+
+          with open('apps.json') as f:
+              data = json.load(f)
+
+          app = data['apps'][0]
+          new_ver = {
+              "version": version,
+              "buildVersion": version,
+              "date": date,
+              "localizedDescription": body,
+              "downloadURL": url,
+              "size": size
+          }
+
+          app['versions'] = [v for v in app['versions']
+                             if v['version'] != version]
+          app['versions'].insert(0, new_ver)
+
+          with open('apps.json', 'w') as f:
+              json.dump(data, f, indent=2)
+              f.write('\n')
+
+          print(f"apps.json patched for {version} (size {size})")
+          PYEOF
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ios/Info.plist ios/project.yml apps.json
+          git commit -m "chore: bump version to $VERSION [skip ci]"
+
+          git fetch origin main
+          git rebase origin/main
+          git push origin main
+
+          git tag "$TAG"
+          git push origin "$TAG"
+
+          gh release create "$TAG" \
+            ios/Stashy.ipa \
+            --title "$TAG" \
+            --notes "$RELEASE_NOTES"

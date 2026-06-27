@@ -1,0 +1,25 @@
+{
+  "name": "Stashy Repo",
+  "subtitle": "Repository for the Stashy iOS app",
+  "description": "An unofficial AltStore/Feather compatible source for Stashy — a native iOS client for your self-hosted Stash instance.",
+  "iconURL": "https://raw.githubusercontent.com/nphil/stashy/main/ios/Stashy/Assets.xcassets/AppIcon.appiconset/AppIcon.png",
+  "website": "https://github.com/nphil/stashy",
+  "tintColor": "#E85D4A",
+  "apps": [
+    {
+      "name": "Stashy",
+      "bundleIdentifier": "com.nphil.stashy",
+      "developerName": "Nitin",
+      "subtitle": "Stash iOS Client",
+      "localizedDescription": "Native iOS client for your self-hosted Stash instance. Browse your scene library, stream video with HLS, view performers and tags — all with a fast, themeable Liquid Glass UI.",
+      "iconURL": "https://raw.githubusercontent.com/nphil/stashy/main/ios/Stashy/Assets.xcassets/AppIcon.appiconset/AppIcon.png",
+      "tintColor": "#E85D4A",
+      "category": "utilities",
+      "deviceFamilies": [
+        1,
+        2
+      ],
+      "versions": []
+    }
+  ]
+}

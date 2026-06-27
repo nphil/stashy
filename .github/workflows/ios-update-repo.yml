@@ -1,0 +1,73 @@
+name: Update Feather repo
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update:
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Patch apps.json
+        env:
+          TAG_NAME:     ${{ github.event.release.tag_name }}
+          PUBLISHED_AT: ${{ github.event.release.published_at }}
+          RELEASE_BODY: ${{ github.event.release.body }}
+          ASSETS_JSON:  ${{ toJson(github.event.release.assets) }}
+        run: |
+          python3 - << 'PYEOF'
+          import json, os
+
+          tag     = os.environ['TAG_NAME']
+          version = tag.lstrip('v')
+          date    = os.environ['PUBLISHED_AT']
+          body    = os.environ.get('RELEASE_BODY', '')
+          assets  = json.loads(os.environ['ASSETS_JSON'])
+
+          ipa = next((a for a in assets if a['name'].endswith('.ipa')), None)
+          if not ipa:
+              print("No IPA found in release assets. Skipping.")
+              exit(0)
+
+          url  = ipa['browser_download_url']
+          size = ipa['size']
+
+          with open('apps.json') as f:
+              data = json.load(f)
+
+          app = data['apps'][0]
+          new_ver = {
+              "version": version,
+              "buildVersion": version,
+              "date": date,
+              "localizedDescription": body,
+              "downloadURL": url,
+              "size": size
+          }
+
+          app['versions'] = [v for v in app['versions'] if v['version'] != version]
+          app['versions'].insert(0, new_ver)
+
+          with open('apps.json', 'w') as f:
+              json.dump(data, f, indent=2)
+              f.write('\n')
+
+          print(f"apps.json patched for {version}")
+          PYEOF
+
+      - name: Commit and push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add apps.json
+          git diff --cached --quiet && echo "Nothing to commit" && exit 0
+          git commit -m "Update Feather repo for ${{ github.event.release.tag_name }} [skip ci]"
+          git push

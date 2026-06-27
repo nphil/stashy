@@ -1,0 +1,64 @@
+import Foundation
+
+struct Scene: Codable, Identifiable, Sendable, Hashable {
+    let id: String
+    let title: String?
+    let date: String?
+    let duration: Double?
+    let paths: ScenePaths?
+    let studio: Studio?
+    let performers: [Performer]
+    let tags: [Tag]
+    let sceneStreams: [SceneStreamEndpoint]
+
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
+    static func == (lhs: Scene, rhs: Scene) -> Bool { lhs.id == rhs.id }
+}
+
+struct ScenePaths: Codable, Sendable {
+    let screenshot: String?
+}
+
+struct SceneStreamEndpoint: Codable, Sendable {
+    let url: String
+    let mime_type: String?
+    let label: String?
+}
+
+struct Tag: Codable, Identifiable, Sendable {
+    let id: String
+    let name: String
+}
+
+extension Scene {
+    func preferredStreamURL(apiKey: String) -> URL? {
+        let stream = sceneStreams.first { $0.mime_type == "application/x-mpegURL" }
+            ?? sceneStreams.first
+        guard let urlString = stream?.url else { return nil }
+        return appendingAPIKey(apiKey, to: urlString)
+    }
+
+    func thumbnailURL(apiKey: String) -> URL? {
+        guard let screenshot = paths?.screenshot else { return nil }
+        return appendingAPIKey(apiKey, to: screenshot)
+    }
+
+    func formattedDuration() -> String? {
+        guard let d = duration else { return nil }
+        let h = Int(d) / 3600
+        let m = Int(d) % 3600 / 60
+        let s = Int(d) % 60
+        return h > 0
+            ? String(format: "%d:%02d:%02d", h, m, s)
+            : String(format: "%d:%02d", m, s)
+    }
+}
+
+private func appendingAPIKey(_ key: String, to urlString: String) -> URL? {
+    guard var components = URLComponents(string: urlString) else { return nil }
+    var items = components.queryItems ?? []
+    items.removeAll { $0.name == "apikey" }
+    items.append(URLQueryItem(name: "apikey", value: key))
+    components.queryItems = items
+    return components.url
+}
