@@ -1,7 +1,7 @@
 {
   "name": "Stashy Repo",
   "subtitle": "Repository for the Stashy iOS app",
-  "description": "An unofficial AltStore/Feather compatible source for Stashy — a native iOS client for your self-hosted Stash instance.",
+  "description": "An unofficial AltStore/Feather compatible source for Stashy \u2014 a native iOS client for your self-hosted Stash instance.",
   "iconURL": "https://raw.githubusercontent.com/nphil/stashy/main/ios/Stashy/Assets.xcassets/AppIcon.appiconset/AppIcon.png",
   "website": "https://github.com/nphil/stashy",
   "tintColor": "#E85D4A",
@@ -11,7 +11,7 @@
       "bundleIdentifier": "com.nphil.stashy",
       "developerName": "Nitin",
       "subtitle": "Stash iOS Client",
-      "localizedDescription": "Native iOS client for your self-hosted Stash instance. Browse your scene library, stream video with HLS, view performers and tags — all with a fast, themeable Liquid Glass UI.",
+      "localizedDescription": "Native iOS client for your self-hosted Stash instance. Browse your scene library, stream video with HLS, view performers and tags \u2014 all with a fast, themeable Liquid Glass UI.",
       "iconURL": "https://raw.githubusercontent.com/nphil/stashy/main/ios/Stashy/Assets.xcassets/AppIcon.appiconset/AppIcon.png",
       "tintColor": "#E85D4A",
       "category": "utilities",
@@ -19,7 +19,16 @@
         1,
         2
       ],
-      "versions": []
+      "versions": [
+        {
+          "version": "1.0.1",
+          "buildVersion": "1.0.1",
+          "date": "2026-06-27T13:28:34Z",
+          "localizedDescription": "Unsigned IPA \u2014 sideload with Feather/AltStore. Built from `c1ae161` on 2026-06-27 13:28 UTC",
+          "downloadURL": "https://github.com/nphil/stashy/releases/download/v1.0.1/Stashy.ipa",
+          "size": 192565
+        }
+      ]
     }
   ]
 }
