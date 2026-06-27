@@ -4,7 +4,7 @@ struct StashScene: Codable, Identifiable, Sendable, Hashable {
     let id: String
     let title: String?
     let date: String?
-    let duration: Double?
+    let files: [SceneFile]
     let paths: ScenePaths?
     let studio: Studio?
     let performers: [Performer]
@@ -13,6 +13,11 @@ struct StashScene: Codable, Identifiable, Sendable, Hashable {
 
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
     static func == (lhs: StashScene, rhs: StashScene) -> Bool { lhs.id == rhs.id }
+}
+
+// Modern Stash exposes duration (and other media metadata) on the file, not the scene.
+struct SceneFile: Codable, Sendable, Hashable {
+    let duration: Double?
 }
 
 struct ScenePaths: Codable, Sendable {
@@ -44,7 +49,7 @@ extension StashScene {
     }
 
     func formattedDuration() -> String? {
-        guard let d = duration else { return nil }
+        guard let d = files.first?.duration else { return nil }
         let h = Int(d) / 3600
         let m = Int(d) % 3600 / 60
         let s = Int(d) % 60

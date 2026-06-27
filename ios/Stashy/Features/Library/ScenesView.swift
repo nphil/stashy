@@ -58,11 +58,24 @@ struct ScenesView: View {
                     ProgressView("Loading scenes…")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if viewModel.scenes.isEmpty && !viewModel.isLoading {
-                    ContentUnavailableView(
-                        "No Scenes",
-                        systemImage: "film.stack",
-                        description: Text("Your Stash library is empty.")
-                    )
+                    if let err = viewModel.errorMessage {
+                        ContentUnavailableView {
+                            Label("Couldn't Load Scenes", systemImage: "exclamationmark.triangle")
+                        } description: {
+                            Text(err)
+                        } actions: {
+                            Button("Retry") {
+                                guard let client = appState.client else { return }
+                                Task { await viewModel.loadFirstPage(client: client) }
+                            }
+                        }
+                    } else {
+                        ContentUnavailableView(
+                            "No Scenes",
+                            systemImage: "film.stack",
+                            description: Text("Your Stash library is empty.")
+                        )
+                    }
                 } else {
                     ScrollView {
                         LazyVGrid(columns: columns, spacing: 10) {

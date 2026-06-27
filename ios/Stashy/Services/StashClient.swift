@@ -68,7 +68,8 @@ struct StashClient: Sendable {
           findScenes(filter: $filter) {
             count
             scenes {
-              id title date duration
+              id title date
+              files { duration }
               paths { screenshot }
               studio { id name }
               performers { id name image_path }
