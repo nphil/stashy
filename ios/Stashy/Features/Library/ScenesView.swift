@@ -120,7 +120,7 @@ struct ScenesView: View {
         guard let idx = viewModel.scenes.firstIndex(where: { $0.id == scene.id }),
               let apiKey = appState.client?.apiKey else { return }
         let start = min(idx + 1, viewModel.scenes.count - 1)
-        let end = min(idx + pageSize, viewModel.scenes.count)
+        let end = min(idx + viewModel.pageSize, viewModel.scenes.count)
         guard start < end else { return }
         let urls = viewModel.scenes[start..<end].compactMap { $0.thumbnailURL(apiKey: apiKey) }
         Task.detached(priority: .background) {
