@@ -32,16 +32,11 @@ actor ImageCache {
         for url in urls {
             let key = url.absoluteString as NSString
             guard memoryCache.object(forKey: key) == nil else { continue }
-            Task.detached(priority: .background) { [session] in
-                guard let (data, _) = try? await session.data(from: url),
-                      let img = UIImage(data: data) else { return }
-                await self.store(img, data: data, key: key)
+            // Capture only Sendable values (self + url); `image(for:)` populates the cache.
+            Task.detached(priority: .background) { [weak self] in
+                _ = try? await self?.image(for: url)
             }
         }
-    }
-
-    private func store(_ image: UIImage, data: Data, key: NSString) {
-        memoryCache.setObject(image, forKey: key, cost: data.count)
     }
 
     enum ImageCacheError: Error {
