@@ -91,7 +91,25 @@ jobs:
           cd ios
           xcodebuild -resolvePackageDependencies \
             -project "$PROJECT" \
-            -scheme  "$SCHEME"
+            -scheme  "$SCHEME" \
+            -derivedDataPath build/DD
+
+      - name: Fix invalid framework bundle identifiers
+        run: |
+          cd ios
+          # KSPlayer's FFmpeg xcframeworks (e.g. libshaderc_combined) ship Info.plists with
+          # underscored CFBundleIdentifiers, which Xcode's embedded-framework validation rejects.
+          # Strip underscores from any offending bundle id in the resolved packages.
+          find build/DD/SourcePackages -name "Info.plist" 2>/dev/null | while read -r plist; do
+            id=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$plist" 2>/dev/null) || continue
+            case "$id" in
+              *_*)
+                newid="${id//_/}"
+                /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $newid" "$plist" && \
+                  echo "Fixed $plist: $id -> $newid"
+                ;;
+            esac
+          done
 
       - name: Build (unsigned)
         run: |
