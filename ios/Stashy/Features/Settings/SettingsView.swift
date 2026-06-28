@@ -3,12 +3,16 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AppState.self) private var appState
     @Environment(ThemeManager.self) private var themeManager
+    @Environment(\.imageCache) private var imageCache
+    @Environment(\.previewCache) private var previewCache
     @State private var showDisconnectAlert = false
     @State private var editingURL = ""
     @State private var editingKey = ""
     @State private var isSaving = false
     @State private var saveError: String?
     @State private var saveSuccess = false
+    @State private var cacheSize = 0
+    @State private var isClearingCache = false
 
     private let swatchColumns = [GridItem(.adaptive(minimum: 64), spacing: 12)]
 
@@ -65,6 +69,20 @@ struct SettingsView: View {
                     .padding(.vertical, 8)
                 }
 
+                // Cache section
+                Section {
+                    LabeledContent(
+                        "Cached previews & images",
+                        value: ByteCountFormatter.string(fromByteCount: Int64(cacheSize), countStyle: .file)
+                    )
+                    Button("Clear Cache", role: .destructive) { clearCache() }
+                        .disabled(isClearingCache || cacheSize == 0)
+                } header: {
+                    Text("Cache")
+                } footer: {
+                    Text("Preview clips and images are cached on this device for smooth, instant playback. Clearing frees the space; it rebuilds automatically as you browse.")
+                }
+
                 // About section
                 Section("About") {
                     LabeledContent("Version", value: appVersion())
@@ -86,6 +104,23 @@ struct SettingsView: View {
                 editingURL = KeychainService.read("serverURL") ?? ""
                 editingKey = KeychainService.read("apiKey") ?? ""
             }
+            .task { await refreshCacheSize() }
+        }
+    }
+
+    private func refreshCacheSize() async {
+        let previews = await previewCache.totalSize()
+        let images = await imageCache.diskUsage()
+        cacheSize = previews + images
+    }
+
+    private func clearCache() {
+        isClearingCache = true
+        Task {
+            await previewCache.clear()
+            await imageCache.clear()
+            await refreshCacheSize()
+            isClearingCache = false
         }
     }
 

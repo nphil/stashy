@@ -51,10 +51,11 @@ final class ScenesViewModel {
 struct ScenesView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.imageCache) private var imageCache
+    @Environment(\.previewCache) private var previewCache
     @Environment(ThemeManager.self) private var themeManager
     @State private var viewModel = ScenesViewModel()
     @State private var path = NavigationPath()
-    @State private var previewPresenter = ScenePreviewPresenter()
+    @State private var isScrolling = false
 
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
@@ -90,6 +91,7 @@ struct ScenesView: View {
                                 SceneGridCell(
                                     scene: scene,
                                     apiKey: appState.client?.apiKey ?? "",
+                                    isScrolling: $isScrolling,
                                     path: $path
                                 ) {
                                     guard let client = appState.client else { return }
@@ -99,8 +101,9 @@ struct ScenesView: View {
                                             client: client
                                         )
                                     }
-                                    // Prefetch thumbnails for next batch
+                                    // Prefetch thumbnails and preview clips for the next batch.
                                     prefetchThumbnails(around: scene)
+                                    prefetchPreviews(around: scene)
                                 }
                             }
                         }
@@ -110,6 +113,9 @@ struct ScenesView: View {
                             ProgressView()
                                 .padding()
                         }
+                    }
+                    .onScrollPhaseChange { _, newPhase in
+                        isScrolling = newPhase != .idle
                     }
                     .refreshable {
                         guard let client = appState.client else { return }
@@ -125,8 +131,6 @@ struct ScenesView: View {
                 SceneDetailView(scene: scene)
             }
         }
-        .environment(\.scenePreviewPresenter, previewPresenter)
-        .overlay { ScenePreviewOverlay(presenter: previewPresenter) }
         .task {
             guard viewModel.scenes.isEmpty, let client = appState.client else { return }
             await viewModel.loadFirstPage(client: client)
@@ -144,6 +148,20 @@ struct ScenesView: View {
             await imageCache.prefetch(urls: urls)
         }
     }
+
+    /// Warm the preview-clip disk cache a short window ahead so playback is instant once the grid
+    /// settles. Kept smaller than the thumbnail window since previews are full video files.
+    private func prefetchPreviews(around scene: StashScene) {
+        guard let idx = viewModel.scenes.firstIndex(where: { $0.id == scene.id }),
+              let apiKey = appState.client?.apiKey else { return }
+        let start = min(idx, viewModel.scenes.count - 1)
+        let end = min(idx + 8, viewModel.scenes.count)
+        guard start < end else { return }
+        let urls = viewModel.scenes[start..<end].compactMap { $0.previewURL(apiKey: apiKey) }
+        Task.detached(priority: .background) {
+            await previewCache.prefetch(urls)
+        }
+    }
 }
 
 // MARK: - Scene card
@@ -151,6 +169,8 @@ struct ScenesView: View {
 struct SceneCard: View {
     let scene: StashScene
     let apiKey: String
+    /// When non-nil, the preview clip plays in place over the thumbnail.
+    var player: AVPlayer? = nil
     @Environment(\.imageCache) private var imageCache
     @Environment(ThemeManager.self) private var themeManager
     @State private var thumbnail: UIImage?
@@ -162,14 +182,20 @@ struct SceneCard: View {
                 .fill(themeManager.current.surfaceColor)
                 .aspectRatio(16 / 9, contentMode: .fit)
                 .overlay {
-                    if let img = thumbnail {
-                        Image(uiImage: img)
-                            .resizable()
-                            .scaledToFill()
-                    } else {
-                        Image(systemName: "film")
-                            .font(.title2)
-                            .foregroundStyle(themeManager.current.foregroundColor.opacity(0.25))
+                    ZStack {
+                        if let img = thumbnail {
+                            Image(uiImage: img)
+                                .resizable()
+                                .scaledToFill()
+                        } else {
+                            Image(systemName: "film")
+                                .font(.title2)
+                                .foregroundStyle(themeManager.current.foregroundColor.opacity(0.25))
+                        }
+                        // Sits over the thumbnail; transparent until the first decoded frame.
+                        if let player {
+                            PlayerLayerView(player: player)
+                        }
                     }
                 }
                 .overlay {

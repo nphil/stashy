@@ -39,6 +39,16 @@ actor ImageCache {
         }
     }
 
+    /// Bytes used by the on-disk HTTP cache backing image loads.
+    func diskUsage() -> Int {
+        session.configuration.urlCache?.currentDiskUsage ?? 0
+    }
+
+    func clear() {
+        session.configuration.urlCache?.removeAllCachedResponses()
+        memoryCache.removeAllObjects()
+    }
+
     enum ImageCacheError: Error {
         case invalidData
     }
