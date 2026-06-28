@@ -63,7 +63,10 @@ targets:
         Release:
           SWIFT_OPTIMIZATION_LEVEL: -O
           DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
-          VALIDATE_PRODUCT: YES
+          # Off: KSPlayer's bundled FFmpeg frameworks (e.g. libshaderc_combined) use
+          # underscored CFBundleIdentifiers that product validation rejects. We ship an
+          # unsigned IPA for sideloading, so validation is unnecessary.
+          VALIDATE_PRODUCT: NO
         Debug:
           SWIFT_OPTIMIZATION_LEVEL: -Onone
           DEBUG_INFORMATION_FORMAT: dwarf
