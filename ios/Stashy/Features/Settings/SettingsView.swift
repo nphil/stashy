@@ -72,6 +72,8 @@ struct SettingsView: View {
                     Link("Stash Docs", destination: URL(string: "https://docs.stashapp.cc")!)
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(themeManager.current.backgroundColor.ignoresSafeArea())
             .navigationTitle("Settings")
             .alert("Disconnect?", isPresented: $showDisconnectAlert) {
                 Button("Disconnect", role: .destructive) { appState.disconnect() }

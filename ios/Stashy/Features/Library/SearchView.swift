@@ -37,6 +37,7 @@ final class SearchViewModel {
 
 struct SearchView: View {
     @Environment(AppState.self) private var appState
+    @Environment(ThemeManager.self) private var themeManager
     @Environment(\.imageCache) private var imageCache
     @State private var viewModel = SearchViewModel()
 
@@ -70,6 +71,8 @@ struct SearchView: View {
                 }
             }
             .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(themeManager.current.backgroundColor.ignoresSafeArea())
             .navigationTitle("Search")
             .searchable(text: Bindable(viewModel).query, prompt: "Search scenes and performers")
             .navigationDestination(for: StashScene.self) { scene in

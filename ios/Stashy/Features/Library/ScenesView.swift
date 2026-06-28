@@ -1,4 +1,5 @@
 import SwiftUI
+import AVFoundation
 
 @Observable
 @MainActor
@@ -106,6 +107,8 @@ struct ScenesView: View {
                     }
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(themeManager.current.backgroundColor.ignoresSafeArea())
             .navigationTitle("Scenes")
             .navigationDestination(for: StashScene.self) { scene in
                 SceneDetailView(scene: scene)
@@ -148,33 +151,40 @@ struct SceneCard: View {
     let scene: StashScene
     let apiKey: String
     @Environment(\.imageCache) private var imageCache
+    @Environment(ThemeManager.self) private var themeManager
     @State private var thumbnail: UIImage?
+    @GestureState private var holding = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            Group {
-                if let img = thumbnail {
-                    Image(uiImage: img)
-                        .resizable()
-                        .aspectRatio(16 / 9, contentMode: .fill)
-                } else {
-                    Rectangle()
-                        .fill(.tertiary)
-                        .aspectRatio(16 / 9, contentMode: .fill)
-                        .overlay {
-                            Image(systemName: "film")
-                                .foregroundStyle(.quaternary)
-                        }
+            // Thumbnail layer: a fixed 16:9 frame the image fills + crops into (no distortion).
+            Rectangle()
+                .fill(themeManager.current.surfaceColor)
+                .aspectRatio(16 / 9, contentMode: .fit)
+                .overlay {
+                    if let img = thumbnail {
+                        Image(uiImage: img)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        Image(systemName: "film")
+                            .font(.title2)
+                            .foregroundStyle(themeManager.current.foregroundColor.opacity(0.25))
+                    }
                 }
-            }
-            .clipped()
-
-            // Gradient overlay + info
-            LinearGradient(
-                colors: [.clear, .black.opacity(0.75)],
-                startPoint: .center,
-                endPoint: .bottom
-            )
+                .overlay {
+                    LinearGradient(
+                        colors: [.clear, .black.opacity(0.75)],
+                        startPoint: .center,
+                        endPoint: .bottom
+                    )
+                }
+                .overlay {
+                    if holding, let previewURL = scene.previewURL(apiKey: apiKey) {
+                        ScenePreviewView(url: previewURL)
+                    }
+                }
+                .clipped()
 
             VStack(alignment: .leading, spacing: 2) {
                 if let studio = scene.studio {
@@ -196,11 +206,74 @@ struct SceneCard: View {
             }
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .opacity(holding ? 0 : 1)
         }
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .animation(.easeInOut(duration: 0.2), value: holding)
+        // Press-and-hold → play the Stash-generated preview; release → stop. Tap still navigates.
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.35)
+                .sequenced(before: DragGesture(minimumDistance: 0))
+                .updating($holding) { value, state, _ in
+                    if case .second(true, _) = value { state = true }
+                }
+        )
         .task(id: scene.id) {
             guard let url = scene.thumbnailURL(apiKey: apiKey) else { return }
             thumbnail = try? await imageCache.image(for: url)
         }
     }
+}
+
+// MARK: - Looping muted scene preview (long-press)
+
+/// Plays a Stash scene preview clip, muted and looping, filling its frame. No controls.
+struct ScenePreviewView: View {
+    let url: URL
+    @State private var player: AVQueuePlayer?
+    @State private var looper: AVPlayerLooper?
+
+    var body: some View {
+        Group {
+            if let player {
+                PlayerLayerView(player: player)
+            } else {
+                Color.black
+            }
+        }
+        .onAppear {
+            let item = AVPlayerItem(url: url)
+            let queue = AVQueuePlayer()
+            queue.isMuted = true
+            looper = AVPlayerLooper(player: queue, templateItem: item)
+            player = queue
+            queue.play()
+        }
+        .onDisappear {
+            player?.pause()
+            player = nil
+            looper = nil
+        }
+    }
+}
+
+/// A thin `AVPlayerLayer`-backed view that fills + crops without playback controls.
+struct PlayerLayerView: UIViewRepresentable {
+    let player: AVPlayer
+
+    func makeUIView(context: Context) -> PlayerHostView {
+        let view = PlayerHostView()
+        view.playerLayer.player = player
+        view.playerLayer.videoGravity = .resizeAspectFill
+        return view
+    }
+
+    func updateUIView(_ uiView: PlayerHostView, context: Context) {
+        uiView.playerLayer.player = player
+    }
+}
+
+final class PlayerHostView: UIView {
+    override class var layerClass: AnyClass { AVPlayerLayer.self }
+    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
 }

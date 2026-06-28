@@ -62,24 +62,46 @@ struct StashClient: Sendable {
         return response.stats
     }
 
+    // Shared scene selection set, reused across scene queries.
+    private static let sceneFields = """
+      id title date
+      files { duration video_codec width height }
+      paths { screenshot preview sprite vtt }
+      studio { id name }
+      performers { id name image_path rating100 scene_count country birthdate gender urls }
+      tags { id name }
+      sceneStreams { url mime_type label }
+    """
+
+    private static let performerFields = "id name image_path rating100 scene_count country birthdate gender urls"
+
     func findScenes(page: Int = 1, perPage: Int = 25, query q: String = "") async throws -> FindScenesResult {
         let gql = """
         query FindScenes($filter: FindFilterType) {
           findScenes(filter: $filter) {
             count
-            scenes {
-              id title date
-              files { duration }
-              paths { screenshot }
-              studio { id name }
-              performers { id name image_path }
-              tags { id name }
-              sceneStreams { url mime_type label }
-            }
+            scenes { \(Self.sceneFields) }
           }
         }
         """
         let vars = FindScenesVariables(filter: FindFilter(q: q.isEmpty ? nil : q, page: page, per_page: perPage))
+        let response: FindScenesResponse = try await query(gql, variables: vars)
+        return response.findScenes
+    }
+
+    func findScenes(performerID: String, page: Int = 1, perPage: Int = 25) async throws -> FindScenesResult {
+        let gql = """
+        query FindScenesByPerformer($filter: FindFilterType, $scene_filter: SceneFilterType) {
+          findScenes(filter: $filter, scene_filter: $scene_filter) {
+            count
+            scenes { \(Self.sceneFields) }
+          }
+        }
+        """
+        let vars = FindScenesByPerformerVariables(
+            filter: FindFilter(page: page, per_page: perPage, sort: "date"),
+            scene_filter: SceneFilter(performers: MultiCriterion(value: [performerID], modifier: "INCLUDES"))
+        )
         let response: FindScenesResponse = try await query(gql, variables: vars)
         return response.findScenes
     }
@@ -89,7 +111,7 @@ struct StashClient: Sendable {
         query FindPerformers($filter: FindFilterType) {
           findPerformers(filter: $filter) {
             count
-            performers { id name image_path }
+            performers { \(Self.performerFields) }
           }
         }
         """
@@ -133,6 +155,19 @@ struct FindFilter: Encodable, Sendable {
 
 private struct FindScenesVariables: Encodable, Sendable { let filter: FindFilter }
 private struct FindPerformersVariables: Encodable, Sendable { let filter: FindFilter }
+private struct FindScenesByPerformerVariables: Encodable, Sendable {
+    let filter: FindFilter
+    let scene_filter: SceneFilter
+}
+
+struct SceneFilter: Encodable, Sendable {
+    let performers: MultiCriterion?
+}
+
+struct MultiCriterion: Encodable, Sendable {
+    let value: [String]
+    let modifier: String
+}
 
 struct StatsResponse: Decodable, Sendable { let stats: StatsData }
 struct StatsData: Decodable, Sendable {

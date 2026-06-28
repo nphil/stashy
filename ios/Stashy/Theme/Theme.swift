@@ -1,8 +1,25 @@
 import SwiftUI
+import UIKit
 
 // MARK: - Color helpers
 
 extension Color {
+    /// Linearly blends toward `other` by `fraction` (0…1). Used to derive elevated surfaces from the theme background.
+    func blended(with other: Color, fraction: Double) -> Color {
+        let f = CGFloat(max(0, min(1, fraction)))
+        let c1 = UIColor(self)
+        let c2 = UIColor(other)
+        var r1: CGFloat = 0, g1: CGFloat = 0, b1: CGFloat = 0, a1: CGFloat = 0
+        var r2: CGFloat = 0, g2: CGFloat = 0, b2: CGFloat = 0, a2: CGFloat = 0
+        c1.getRed(&r1, green: &g1, blue: &b1, alpha: &a1)
+        c2.getRed(&r2, green: &g2, blue: &b2, alpha: &a2)
+        return Color(
+            red: Double(r1 + (r2 - r1) * f),
+            green: Double(g1 + (g2 - g1) * f),
+            blue: Double(b1 + (b2 - b1) * f)
+        )
+    }
+
     init(h: Double, s: Double, l: Double) {
         let c = (1 - abs(2 * l - 1)) * s
         let hPrime = h / 60
@@ -42,6 +59,11 @@ struct ThemeColors {
     let backgroundLightness: Double
 
     var preferredColorScheme: ColorScheme { backgroundLightness > 0.5 ? .light : .dark }
+
+    /// Card/row surface, nudged slightly off the background toward the foreground.
+    var surface: Color { background.blended(with: foreground, fraction: 0.07) }
+    /// A more elevated surface for stacked/secondary content.
+    var elevatedSurface: Color { background.blended(with: foreground, fraction: 0.13) }
 }
 
 // MARK: - App themes
@@ -135,6 +157,8 @@ enum AppTheme: String, CaseIterable, Identifiable, Hashable {
     var foregroundColor: Color { colors.foreground }
     var accentColor: Color { colors.primary }
     var secondaryColor: Color { colors.accent }
+    var surfaceColor: Color { colors.surface }
+    var elevatedSurfaceColor: Color { colors.elevatedSurface }
     var preferredColorScheme: ColorScheme { colors.preferredColorScheme }
 }
 

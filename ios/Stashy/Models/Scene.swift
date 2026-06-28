@@ -18,10 +18,16 @@ struct StashScene: Codable, Identifiable, Sendable, Hashable {
 // Modern Stash exposes duration (and other media metadata) on the file, not the scene.
 struct SceneFile: Codable, Sendable, Hashable {
     let duration: Double?
+    let video_codec: String?
+    let width: Int?
+    let height: Int?
 }
 
 struct ScenePaths: Codable, Sendable {
     let screenshot: String?
+    let preview: String?
+    let sprite: String?
+    let vtt: String?
 }
 
 struct SceneStreamEndpoint: Codable, Sendable {
@@ -46,6 +52,30 @@ extension StashScene {
     func thumbnailURL(apiKey: String) -> URL? {
         guard let screenshot = paths?.screenshot else { return nil }
         return appendingAPIKey(apiKey, to: screenshot)
+    }
+
+    func previewURL(apiKey: String) -> URL? {
+        guard let preview = paths?.preview else { return nil }
+        return appendingAPIKey(apiKey, to: preview)
+    }
+
+    func spriteURL(apiKey: String) -> URL? {
+        guard let sprite = paths?.sprite else { return nil }
+        return appendingAPIKey(apiKey, to: sprite)
+    }
+
+    func vttURL(apiKey: String) -> URL? {
+        guard let vtt = paths?.vtt else { return nil }
+        return appendingAPIKey(apiKey, to: vtt)
+    }
+
+    var resolutionLabel: String? {
+        guard let h = files.first?.height, h > 0 else { return nil }
+        return "\(h)p"
+    }
+
+    var codecLabel: String? {
+        files.first?.video_codec?.uppercased()
     }
 
     func formattedDuration() -> String? {
