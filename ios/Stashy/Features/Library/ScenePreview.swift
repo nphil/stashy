@@ -5,7 +5,8 @@ import UIKit
 // MARK: - Presenter
 
 /// Drives the floating press-and-hold scene preview. A single presenter lives in the
-/// environment; cards call `begin`/`setScrub`/`end` and a screen-level overlay renders the popup.
+/// environment; cards call `begin`/`scrub`/`end` and a screen-level overlay renders the popup.
+/// The presenter owns the player so scrubbing can anchor to the live playhead (no jump).
 @Observable
 @MainActor
 final class ScenePreviewPresenter {
@@ -18,9 +19,20 @@ final class ScenePreviewPresenter {
         var scrubProgress: CGFloat
     }
 
+    /// Vertical finger travel (points) that spans the whole clip. Large = fine control.
+    private let scrubSpan: CGFloat = 520
+
     var active: Active?
+    private(set) var model: PreviewScrubModel?
+    private var anchorProgress: CGFloat?
 
     func begin(scene: StashScene, apiKey: String, sourceRect: CGRect, thumbnail: UIImage?) {
+        anchorProgress = nil
+        if let url = scene.previewURL(apiKey: apiKey) {
+            let m = PreviewScrubModel(url: url)
+            m.start()
+            model = m
+        }
         active = Active(
             id: scene.id,
             scene: scene,
@@ -31,13 +43,22 @@ final class ScenePreviewPresenter {
         )
     }
 
-    /// Absolute scrub position (0…1) computed from the finger's horizontal screen position.
-    func setScrub(_ progress: CGFloat) {
-        guard active != nil else { return }
-        active?.scrubProgress = max(0, min(1, progress))
+    /// Relative scrub: `deltaPoints` is upward finger travel since the press point (up = forward).
+    /// The first call anchors to the live playhead, so there's no jump when scrubbing starts.
+    func scrub(deltaPoints: CGFloat) {
+        guard active != nil, let model else { return }
+        if anchorProgress == nil { anchorProgress = model.currentProgress }
+        let progress = max(0, min(1, (anchorProgress ?? 0) + deltaPoints / scrubSpan))
+        active?.scrubProgress = progress
+        model.seek(progress: progress)
     }
 
-    func end() { active = nil }
+    func end() {
+        model?.stop()
+        model = nil
+        active = nil
+        anchorProgress = nil
+    }
 }
 
 private struct ScenePreviewPresenterKey: EnvironmentKey {
@@ -55,10 +76,11 @@ extension EnvironmentValues {
 
 /// Bridges a UIKit `UILongPressGestureRecognizer` into SwiftUI. Unlike a SwiftUI `DragGesture`,
 /// this fails on pre-trigger movement (so the enclosing `ScrollView` still scrolls) and never
-/// competes with a quick tap (so single-tap navigation still works). After it fires (~1.5s hold)
+/// competes with a quick tap (so single-tap navigation still works). After it fires (~1s hold)
 /// it keeps delivering `.changed` with the live touch location, which drives the scrub.
 struct LongPressScrubRecognizer: UIGestureRecognizerRepresentable {
     var onBegan: () -> Void
+    /// Upward vertical travel (points) since the press point — positive scrubs forward.
     var onScrub: (CGFloat) -> Void
     var onEnded: () -> Void
 
@@ -66,7 +88,7 @@ struct LongPressScrubRecognizer: UIGestureRecognizerRepresentable {
 
     func makeUIGestureRecognizer(context: Context) -> UILongPressGestureRecognizer {
         let recognizer = UILongPressGestureRecognizer()
-        recognizer.minimumPressDuration = 1.5
+        recognizer.minimumPressDuration = 1.0
         recognizer.delegate = context.coordinator
         context.coordinator.haptic.prepare()
         return recognizer
@@ -77,16 +99,16 @@ struct LongPressScrubRecognizer: UIGestureRecognizerRepresentable {
     func handleUIGestureRecognizerAction(_ recognizer: UILongPressGestureRecognizer, context: Context) {
         switch recognizer.state {
         case .began:
+            context.coordinator.anchorY = recognizer.location(in: recognizer.view?.window).y
             context.coordinator.haptic.impactOccurred()
             context.coordinator.haptic.prepare()
             onBegan()
         case .changed:
-            guard let window = recognizer.view?.window else { return }
-            let x = recognizer.location(in: window).x
-            let inset: CGFloat = 20
-            let usable = max(1, window.bounds.width - inset * 2)
-            onScrub(max(0, min(1, (x - inset) / usable)))
+            guard let anchorY = context.coordinator.anchorY else { return }
+            let y = recognizer.location(in: recognizer.view?.window).y
+            onScrub(anchorY - y) // finger up -> y decreases -> positive -> forward
         case .ended, .cancelled, .failed:
+            context.coordinator.anchorY = nil
             onEnded()
         default:
             break
@@ -96,6 +118,7 @@ struct LongPressScrubRecognizer: UIGestureRecognizerRepresentable {
     @MainActor
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         let haptic = UIImpactFeedbackGenerator(style: .medium)
+        var anchorY: CGFloat?
 
         func gestureRecognizer(
             _ gestureRecognizer: UIGestureRecognizer,
@@ -109,7 +132,7 @@ struct LongPressScrubRecognizer: UIGestureRecognizerRepresentable {
 // MARK: - Grid cell (tap navigates, hold previews)
 
 /// Wraps a `SceneCard` with the tap-vs-hold gesture composition. A quick tap appends the scene
-/// to the navigation path; a 1.5s hold starts the floating preview and scrubs as the finger moves.
+/// to the navigation path; a 1s hold starts the floating preview and scrubs as the finger moves.
 struct SceneGridCell: View {
     let scene: StashScene
     let apiKey: String
@@ -142,7 +165,7 @@ struct SceneGridCell: View {
                         isPreviewing = true
                         presenter?.begin(scene: scene, apiKey: apiKey, sourceRect: frame, thumbnail: thumbnail)
                     },
-                    onScrub: { presenter?.setScrub($0) },
+                    onScrub: { presenter?.scrub(deltaPoints: $0) },
                     onEnded: {
                         presenter?.end()
                         // Suppress a stray trailing tap right after release, then re-enable taps.
@@ -176,7 +199,7 @@ struct ScenePreviewOverlay: View {
                     .transition(.opacity)
             }
             if let active = presenter.active {
-                ScenePreviewCard(active: active)
+                ScenePreviewCard(active: active, model: presenter.model)
                     .transition(.scale(scale: 0.6).combined(with: .opacity))
             }
         }
@@ -187,7 +210,7 @@ struct ScenePreviewOverlay: View {
 
 private struct ScenePreviewCard: View {
     let active: ScenePreviewPresenter.Active
-    @State private var model: PreviewScrubModel?
+    let model: PreviewScrubModel?
 
     var body: some View {
         GeometryReader { geo in
@@ -211,15 +234,6 @@ private struct ScenePreviewCard: View {
                 .position(x: cx, y: cy)
         }
         .ignoresSafeArea()
-        .onAppear {
-            if let url = active.scene.previewURL(apiKey: active.apiKey) {
-                let m = PreviewScrubModel(url: url)
-                m.start()
-                model = m
-            }
-        }
-        .onChange(of: active.scrubProgress) { _, p in model?.seek(progress: p) }
-        .onDisappear { model?.stop() }
     }
 
     /// Thumbnail sits under a transparent player layer so the popup shows the image instantly
@@ -266,6 +280,14 @@ final class PreviewScrubModel {
     }
 
     func start() { player.play() }
+
+    /// Current playhead as a 0…1 fraction of the clip (0 if not ready yet).
+    var currentProgress: CGFloat {
+        guard let item = player.currentItem else { return 0 }
+        let dur = item.duration.seconds
+        guard dur.isFinite, dur > 0 else { return 0 }
+        return CGFloat(max(0, min(1, player.currentTime().seconds / dur)))
+    }
 
     func seek(progress: CGFloat) {
         guard let item = player.currentItem else { return }
