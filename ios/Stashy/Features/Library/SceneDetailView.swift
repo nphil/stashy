@@ -16,7 +16,7 @@ struct SceneDetailView: View {
                 // Video player — KSPlayer provides its own controls (scrubber, fullscreen, rotation).
                 Group {
                     if let streamURL {
-                        ScenePlayerView(url: streamURL)
+                        ScenePlayerView(scene: scene, apiKey: apiKey, url: streamURL)
                     } else {
                         Rectangle()
                             .fill(.black)
