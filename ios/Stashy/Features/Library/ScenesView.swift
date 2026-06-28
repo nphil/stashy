@@ -219,8 +219,12 @@ struct PlayerLayerView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> PlayerHostView {
         let view = PlayerHostView()
+        // Clear so any view layered underneath (e.g. a poster thumbnail) shows until the
+        // first decoded frame arrives, avoiding a black flash.
+        view.backgroundColor = .clear
         view.playerLayer.player = player
         view.playerLayer.videoGravity = .resizeAspectFill
+        view.playerLayer.backgroundColor = UIColor.clear.cgColor
         return view
     }
 

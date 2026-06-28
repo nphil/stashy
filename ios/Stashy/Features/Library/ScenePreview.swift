@@ -5,7 +5,7 @@ import UIKit
 // MARK: - Presenter
 
 /// Drives the floating press-and-hold scene preview. A single presenter lives in the
-/// environment; cards call `begin`/`scrub`/`end` and a screen-level overlay renders the popup.
+/// environment; cards call `begin`/`setScrub`/`end` and a screen-level overlay renders the popup.
 @Observable
 @MainActor
 final class ScenePreviewPresenter {
@@ -14,20 +14,27 @@ final class ScenePreviewPresenter {
         let scene: StashScene
         let apiKey: String
         let sourceRect: CGRect
+        let thumbnail: UIImage?
         var scrubProgress: CGFloat
     }
 
     var active: Active?
 
-    func begin(scene: StashScene, apiKey: String, sourceRect: CGRect) {
-        active = Active(id: scene.id, scene: scene, apiKey: apiKey, sourceRect: sourceRect, scrubProgress: 0)
+    func begin(scene: StashScene, apiKey: String, sourceRect: CGRect, thumbnail: UIImage?) {
+        active = Active(
+            id: scene.id,
+            scene: scene,
+            apiKey: apiKey,
+            sourceRect: sourceRect,
+            thumbnail: thumbnail,
+            scrubProgress: 0
+        )
     }
 
-    /// Map horizontal drag (points) to a 0…1 scrub position. ~260pt sweeps the whole clip.
-    func scrub(translationX: CGFloat) {
+    /// Absolute scrub position (0…1) computed from the finger's horizontal screen position.
+    func setScrub(_ progress: CGFloat) {
         guard active != nil else { return }
-        let span: CGFloat = 260
-        active?.scrubProgress = max(0, min(1, translationX / span))
+        active?.scrubProgress = max(0, min(1, progress))
     }
 
     func end() { active = nil }
@@ -41,6 +48,203 @@ extension EnvironmentValues {
     var scenePreviewPresenter: ScenePreviewPresenter? {
         get { self[ScenePreviewPresenterKey.self] }
         set { self[ScenePreviewPresenterKey.self] = newValue }
+    }
+}
+
+// MARK: - 3D-Touch-style long-press + scrub recognizer
+
+/// Bridges a UIKit `UILongPressGestureRecognizer` into SwiftUI. Unlike a SwiftUI `DragGesture`,
+/// this fails on pre-trigger movement (so the enclosing `ScrollView` still scrolls) and never
+/// competes with a quick tap (so single-tap navigation still works). After it fires (~1.5s hold)
+/// it keeps delivering `.changed` with the live touch location, which drives the scrub.
+struct LongPressScrubRecognizer: UIGestureRecognizerRepresentable {
+    var onBegan: () -> Void
+    var onScrub: (CGFloat) -> Void
+    var onEnded: () -> Void
+
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator { Coordinator() }
+
+    func makeUIGestureRecognizer(context: Context) -> UILongPressGestureRecognizer {
+        let recognizer = UILongPressGestureRecognizer()
+        recognizer.minimumPressDuration = 1.5
+        recognizer.delegate = context.coordinator
+        context.coordinator.haptic.prepare()
+        return recognizer
+    }
+
+    func updateUIGestureRecognizer(_ recognizer: UILongPressGestureRecognizer, context: Context) {}
+
+    func handleUIGestureRecognizerAction(_ recognizer: UILongPressGestureRecognizer, context: Context) {
+        switch recognizer.state {
+        case .began:
+            context.coordinator.haptic.impactOccurred()
+            context.coordinator.haptic.prepare()
+            onBegan()
+        case .changed:
+            guard let window = recognizer.view?.window else { return }
+            let x = recognizer.location(in: window).x
+            let inset: CGFloat = 20
+            let usable = max(1, window.bounds.width - inset * 2)
+            onScrub(max(0, min(1, (x - inset) / usable)))
+        case .ended, .cancelled, .failed:
+            onEnded()
+        default:
+            break
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        let haptic = UIImpactFeedbackGenerator(style: .medium)
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            true
+        }
+    }
+}
+
+// MARK: - Grid cell (tap navigates, hold previews)
+
+/// Wraps a `SceneCard` with the tap-vs-hold gesture composition. A quick tap appends the scene
+/// to the navigation path; a 1.5s hold starts the floating preview and scrubs as the finger moves.
+struct SceneGridCell: View {
+    let scene: StashScene
+    let apiKey: String
+    @Binding var path: NavigationPath
+    var onAppear: () -> Void
+
+    @Environment(\.scenePreviewPresenter) private var presenter
+    @Environment(\.imageCache) private var imageCache
+    @State private var frame: CGRect = .zero
+    @State private var thumbnail: UIImage?
+    @State private var isPreviewing = false
+
+    var body: some View {
+        SceneCard(scene: scene, apiKey: apiKey)
+            .background(
+                GeometryReader { geo in
+                    Color.clear
+                        .onAppear { frame = geo.frame(in: .global) }
+                        .onChange(of: geo.frame(in: .global)) { _, new in frame = new }
+                }
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .onTapGesture {
+                guard !isPreviewing else { return }
+                path.append(scene)
+            }
+            .gesture(
+                LongPressScrubRecognizer(
+                    onBegan: {
+                        isPreviewing = true
+                        presenter?.begin(scene: scene, apiKey: apiKey, sourceRect: frame, thumbnail: thumbnail)
+                    },
+                    onScrub: { presenter?.setScrub($0) },
+                    onEnded: {
+                        presenter?.end()
+                        // Suppress a stray trailing tap right after release, then re-enable taps.
+                        Task {
+                            try? await Task.sleep(for: .milliseconds(350))
+                            isPreviewing = false
+                        }
+                    }
+                )
+            )
+            .onAppear(perform: onAppear)
+            .task(id: scene.id) {
+                guard let url = scene.thumbnailURL(apiKey: apiKey) else { return }
+                thumbnail = try? await imageCache.image(for: url)
+            }
+    }
+}
+
+// MARK: - Floating preview overlay
+
+/// Screen-level overlay; renders the magnified preview without capturing touches so the
+/// underlying card gesture keeps driving the scrub.
+struct ScenePreviewOverlay: View {
+    let presenter: ScenePreviewPresenter
+
+    var body: some View {
+        ZStack {
+            if presenter.active != nil {
+                Color.black.opacity(0.4)
+                    .ignoresSafeArea()
+                    .transition(.opacity)
+            }
+            if let active = presenter.active {
+                ScenePreviewCard(active: active)
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+            }
+        }
+        .allowsHitTesting(false)
+        .animation(.spring(response: 0.3, dampingFraction: 0.82), value: presenter.active?.id)
+    }
+}
+
+private struct ScenePreviewCard: View {
+    let active: ScenePreviewPresenter.Active
+    @State private var model: PreviewScrubModel?
+
+    var body: some View {
+        GeometryReader { geo in
+            let cardW = max(active.sourceRect.width, 120)
+            let popW = min(cardW * 2, geo.size.width - 24)
+            let popH = popW * 9 / 16
+            let cx = min(max(active.sourceRect.midX, popW / 2 + 12), geo.size.width - popW / 2 - 12)
+            let cy = min(max(active.sourceRect.midY, popH / 2 + 40), geo.size.height - popH / 2 - 40)
+
+            content
+                .frame(width: popW, height: popH)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay(alignment: .bottom) {
+                    progressBar.padding(10)
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .strokeBorder(.white.opacity(0.15), lineWidth: 1)
+                }
+                .shadow(color: .black.opacity(0.5), radius: 24, y: 10)
+                .position(x: cx, y: cy)
+        }
+        .ignoresSafeArea()
+        .onAppear {
+            if let url = active.scene.previewURL(apiKey: active.apiKey) {
+                let m = PreviewScrubModel(url: url)
+                m.start()
+                model = m
+            }
+        }
+        .onChange(of: active.scrubProgress) { _, p in model?.seek(progress: p) }
+        .onDisappear { model?.stop() }
+    }
+
+    /// Thumbnail sits under a transparent player layer so the popup shows the image instantly
+    /// and the video fades in over it — no black flash before the first frame.
+    @ViewBuilder private var content: some View {
+        ZStack {
+            if let thumb = active.thumbnail {
+                Image(uiImage: thumb).resizable().scaledToFill()
+            } else {
+                Color.black
+            }
+            if let model {
+                PlayerLayerView(player: model.player)
+            }
+        }
+    }
+
+    private var progressBar: some View {
+        GeometryReader { g in
+            ZStack(alignment: .leading) {
+                Capsule().fill(.white.opacity(0.25)).frame(height: 3)
+                Capsule().fill(.white).frame(width: g.size.width * active.scrubProgress, height: 3)
+            }
+        }
+        .frame(height: 3)
     }
 }
 
@@ -74,141 +278,4 @@ final class PreviewScrubModel {
     }
 
     func stop() { player.pause() }
-}
-
-// MARK: - Grid cell (tap navigates, hold previews)
-
-/// Wraps a `SceneCard` with the tap-vs-hold gesture composition. Tapping appends the scene to
-/// the navigation path; holding starts the floating preview and scrubs as the finger moves.
-struct SceneGridCell: View {
-    let scene: StashScene
-    let apiKey: String
-    @Binding var path: NavigationPath
-    var onAppear: () -> Void
-
-    @Environment(\.scenePreviewPresenter) private var presenter
-    @State private var frame: CGRect = .zero
-
-    var body: some View {
-        SceneCard(scene: scene, apiKey: apiKey)
-            .background(
-                GeometryReader { geo in
-                    Color.clear
-                        .onAppear { frame = geo.frame(in: .global) }
-                        .onChange(of: geo.frame(in: .global)) { _, new in frame = new }
-                }
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .gesture(
-                ExclusiveGesture(
-                    pressGesture,
-                    TapGesture().onEnded { path.append(scene) }
-                )
-            )
-            .onAppear(perform: onAppear)
-    }
-
-    private var pressGesture: some Gesture {
-        LongPressGesture(minimumDuration: 0.3)
-            .sequenced(before: DragGesture(minimumDistance: 0))
-            .onChanged { value in
-                guard case .second(true, let drag) = value else { return }
-                if presenter?.active?.id != scene.id {
-                    presenter?.begin(scene: scene, apiKey: apiKey, sourceRect: frame)
-                }
-                if let drag {
-                    presenter?.scrub(translationX: drag.translation.width)
-                }
-            }
-            .onEnded { _ in presenter?.end() }
-    }
-}
-
-// MARK: - Floating preview overlay
-
-/// Screen-level overlay; renders the magnified preview without capturing touches so the
-/// underlying card gesture keeps driving the scrub.
-struct ScenePreviewOverlay: View {
-    let presenter: ScenePreviewPresenter
-
-    var body: some View {
-        ZStack {
-            if presenter.active != nil {
-                Color.black.opacity(0.4)
-                    .ignoresSafeArea()
-                    .transition(.opacity)
-            }
-            if let active = presenter.active {
-                ScenePreviewCard(active: active)
-                    .transition(.scale(scale: 0.6).combined(with: .opacity))
-            }
-        }
-        .allowsHitTesting(false)
-        .animation(.spring(response: 0.3, dampingFraction: 0.82), value: presenter.active?.id)
-    }
-}
-
-private struct ScenePreviewCard: View {
-    let active: ScenePreviewPresenter.Active
-    @Environment(\.imageCache) private var imageCache
-    @State private var model: PreviewScrubModel?
-    @State private var thumbnail: UIImage?
-
-    var body: some View {
-        GeometryReader { geo in
-            let cardW = max(active.sourceRect.width, 120)
-            let popW = min(cardW * 2, geo.size.width - 24)
-            let popH = popW * 9 / 16
-            let cx = min(max(active.sourceRect.midX, popW / 2 + 12), geo.size.width - popW / 2 - 12)
-            let cy = min(max(active.sourceRect.midY, popH / 2 + 40), geo.size.height - popH / 2 - 40)
-
-            content
-                .frame(width: popW, height: popH)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .overlay(alignment: .bottom) {
-                    progressBar.padding(10)
-                }
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(.white.opacity(0.15), lineWidth: 1)
-                }
-                .shadow(color: .black.opacity(0.5), radius: 24, y: 10)
-                .position(x: cx, y: cy)
-        }
-        .ignoresSafeArea()
-        .onAppear {
-            if let url = active.scene.previewURL(apiKey: active.apiKey) {
-                let m = PreviewScrubModel(url: url)
-                m.start()
-                model = m
-            }
-        }
-        .task {
-            if let url = active.scene.thumbnailURL(apiKey: active.apiKey) {
-                thumbnail = try? await imageCache.image(for: url)
-            }
-        }
-        .onChange(of: active.scrubProgress) { _, p in model?.seek(progress: p) }
-        .onDisappear { model?.stop() }
-    }
-
-    @ViewBuilder private var content: some View {
-        if let model {
-            PlayerLayerView(player: model.player)
-        } else if let thumbnail {
-            Image(uiImage: thumbnail).resizable().scaledToFill()
-        } else {
-            Color.black
-        }
-    }
-
-    private var progressBar: some View {
-        GeometryReader { g in
-            ZStack(alignment: .leading) {
-                Capsule().fill(.white.opacity(0.25)).frame(height: 3)
-                Capsule().fill(.white).frame(width: g.size.width * active.scrubProgress, height: 3)
-            }
-        }
-        .frame(height: 3)
-    }
 }
