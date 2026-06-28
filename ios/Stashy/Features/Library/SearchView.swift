@@ -60,7 +60,9 @@ struct SearchView: View {
                 if !viewModel.performers.isEmpty {
                     Section("Performers") {
                         ForEach(viewModel.performers) { performer in
-                            PerformerRow(performer: performer, apiKey: appState.client?.apiKey ?? "")
+                            NavigationLink(value: performer) {
+                                PerformerRow(performer: performer, apiKey: appState.client?.apiKey ?? "")
+                            }
                         }
                     }
                 }
@@ -77,6 +79,9 @@ struct SearchView: View {
             .searchable(text: Bindable(viewModel).query, prompt: "Search scenes and performers")
             .navigationDestination(for: StashScene.self) { scene in
                 SceneDetailView(scene: scene)
+            }
+            .navigationDestination(for: Performer.self) { performer in
+                PerformerDetailView(performer: performer)
             }
             .onChange(of: viewModel.query) {
                 guard let client = appState.client else { return }

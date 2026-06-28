@@ -56,8 +56,21 @@ struct SceneDetailView: View {
 
                     // Performers
                     if !scene.performers.isEmpty {
-                        ChipSection(title: "Performers", systemImage: "person.2") {
-                            scene.performers.map(\.name)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("Performers", systemImage: "person.2")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(alignment: .top, spacing: 12) {
+                                    ForEach(scene.performers) { performer in
+                                        NavigationLink(value: performer) {
+                                            PerformerCard(performer: performer, apiKey: apiKey, width: 104)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -73,7 +86,12 @@ struct SceneDetailView: View {
         }
         .background(themeManager.current.backgroundColor.ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
+        .navigationDestination(for: Performer.self) { performer in
+            PerformerDetailView(performer: performer)
+        }
     }
+
+    private var apiKey: String { appState.client?.apiKey ?? "" }
 }
 
 // MARK: - Chip section

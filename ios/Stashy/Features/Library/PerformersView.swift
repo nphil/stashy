@@ -45,8 +45,11 @@ final class PerformersViewModel {
 
 struct PerformersView: View {
     @Environment(AppState.self) private var appState
+    @Environment(ThemeManager.self) private var themeManager
     @Environment(\.imageCache) private var imageCache
     @State private var viewModel = PerformersViewModel()
+
+    private let columns = [GridItem(.adaptive(minimum: 110), spacing: 12)]
 
     var body: some View {
         NavigationStack {
@@ -57,9 +60,13 @@ struct PerformersView: View {
                 } else if viewModel.performers.isEmpty {
                     ContentUnavailableView("No Performers", systemImage: "person.2")
                 } else {
-                    List {
-                        ForEach(viewModel.performers) { performer in
-                            PerformerRow(performer: performer, apiKey: appState.client?.apiKey ?? "")
+                    ScrollView {
+                        LazyVGrid(columns: columns, spacing: 16) {
+                            ForEach(viewModel.performers) { performer in
+                                NavigationLink(value: performer) {
+                                    PerformerCard(performer: performer, apiKey: appState.client?.apiKey ?? "")
+                                }
+                                .buttonStyle(.plain)
                                 .onAppear {
                                     guard let client = appState.client else { return }
                                     Task {
@@ -69,16 +76,22 @@ struct PerformersView: View {
                                         )
                                     }
                                 }
+                            }
                         }
+                        .padding(12)
+
                         if viewModel.isLoading {
-                            HStack { Spacer(); ProgressView(); Spacer() }
-                                .listRowBackground(Color.clear)
+                            ProgressView().padding()
                         }
                     }
-                    .listStyle(.plain)
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(themeManager.current.backgroundColor.ignoresSafeArea())
             .navigationTitle("Performers")
+            .navigationDestination(for: Performer.self) { performer in
+                PerformerDetailView(performer: performer)
+            }
         }
         .task {
             guard viewModel.performers.isEmpty, let client = appState.client else { return }
