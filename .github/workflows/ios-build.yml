@@ -108,6 +108,7 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             SKIP_INSTALL=NO \
             INSTALL_PATH="/Applications" \
+            VALIDATE_PRODUCT=NO \
             | xcpretty
 
       - name: Package into IPA
