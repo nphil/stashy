@@ -13,6 +13,7 @@ struct SettingsView: View {
     @State private var saveSuccess = false
     @State private var cacheSize = 0
     @State private var isClearingCache = false
+    @AppStorage("animatedPreviews") private var animatedPreviews = true
 
     private let swatchColumns = [GridItem(.adaptive(minimum: 64), spacing: 12)]
 
@@ -67,6 +68,15 @@ struct SettingsView: View {
                         }
                     }
                     .padding(.vertical, 8)
+                }
+
+                // Scenes section
+                Section {
+                    Toggle("Animated previews", isOn: $animatedPreviews)
+                } header: {
+                    Text("Scenes")
+                } footer: {
+                    Text("Play scene preview clips on the cards when the grid is at rest. Turn off to show static thumbnails only.")
                 }
 
                 // Cache section

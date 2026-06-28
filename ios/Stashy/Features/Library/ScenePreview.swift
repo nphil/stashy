@@ -16,21 +16,24 @@ struct SceneGridCell: View {
     var onAppear: () -> Void
 
     @Environment(\.previewCache) private var previewCache
+    @AppStorage("animatedPreviews") private var animatedPreviews = true
     @State private var player: AVQueuePlayer?
     @State private var looper: AVPlayerLooper?
 
     var body: some View {
-        SceneCard(scene: scene, apiKey: apiKey, player: isScrolling ? nil : player)
+        SceneCard(scene: scene, apiKey: apiKey, player: (animatedPreviews && !isScrolling) ? player : nil)
             .onTapGesture { path.append(scene) }
             .onAppear {
                 onAppear()
                 updatePlayback()
             }
             .onChange(of: isScrolling) { _, _ in updatePlayback() }
+            .onChange(of: animatedPreviews) { _, _ in updatePlayback() }
             .onDisappear { teardown() }
     }
 
     private func updatePlayback() {
+        guard animatedPreviews else { teardown(); return }
         if isScrolling {
             player?.pause()
         } else {
@@ -46,11 +49,15 @@ struct SceneGridCell: View {
         guard let remote = scene.previewURL(apiKey: apiKey) else { return }
         Task {
             guard let local = await previewCache.localURL(for: remote) else { return }
-            // Bail if scrolling resumed or another task already built the player while downloading.
-            guard !isScrolling, player == nil else { return }
+            // Bail if scrolling resumed, previews were disabled, or another task already built the
+            // player while downloading.
+            guard !isScrolling, animatedPreviews, player == nil else { return }
             let item = AVPlayerItem(url: local)
             let queue = AVQueuePlayer()
             queue.isMuted = true
+            // Local file: don't pause to "minimize stalling" at the loop boundary — that re-check
+            // is what causes the brief hitch between loops. Off => AVPlayerLooper is gapless.
+            queue.automaticallyWaitsToMinimizeStalling = false
             looper = AVPlayerLooper(player: queue, templateItem: item)
             player = queue
             queue.play()

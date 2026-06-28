@@ -11,42 +11,93 @@ struct PlayerControlsView: View {
     @State private var isScrubbing = false
     @State private var scrubTime: TimeInterval = 0
     @State private var hideTask: Task<Void, Never>?
+    @State private var dragSeekActive = false
+    @State private var dragAnchorTime: TimeInterval = 0
 
     var body: some View {
-        ZStack {
-            Color.black.opacity(showControls ? 0.2 : 0.001)
-                .contentShape(Rectangle())
-                .onTapGesture { toggleControls() }
-                .gesture(
-                    DragGesture(minimumDistance: 20)
-                        .onEnded { value in
-                            // Swipe down to exit fullscreen (portrait or landscape).
-                            if isFullscreen,
-                               value.translation.height > 60,
-                               abs(value.translation.height) > abs(value.translation.width) {
-                                isFullscreen = false
-                            }
-                        }
-                )
+        GeometryReader { geo in
+            ZStack {
+                Color.black.opacity(showControls ? 0.2 : 0.001)
+                    .contentShape(Rectangle())
+                    .onTapGesture { toggleControls() }
+                    .gesture(seekDragGesture(width: geo.size.width))
 
-            if showControls {
-                VStack {
-                    Spacer()
-                    Button { model.togglePlayPause(); scheduleHide() } label: {
-                        Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 34, weight: .bold))
-                            .foregroundStyle(.white)
-                            .shadow(radius: 4)
-                    }
-                    Spacer()
-                    controlBar
+                // One-handed scrub heads-up display: sprite preview + time at the drag position.
+                if dragSeekActive {
+                    scrubHUD
                 }
-                .transition(.opacity)
+
+                if showControls {
+                    VStack {
+                        Spacer()
+                        Button { model.togglePlayPause(); scheduleHide() } label: {
+                            Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
+                                .font(.system(size: 34, weight: .bold))
+                                .foregroundStyle(.white)
+                                .shadow(radius: 4)
+                        }
+                        Spacer()
+                        controlBar
+                    }
+                    .transition(.opacity)
+                }
             }
+            .animation(.easeInOut(duration: 0.2), value: showControls)
+            .onAppear { scheduleHide() }
+            .onDisappear { hideTask?.cancel() }
         }
-        .animation(.easeInOut(duration: 0.2), value: showControls)
-        .onAppear { scheduleHide() }
-        .onDisappear { hideTask?.cancel() }
+    }
+
+    /// Drag anywhere to seek (horizontal) or swipe down to exit fullscreen — both reachable
+    /// one-handed. A horizontal drag maps proportionally to the timeline (full width ≈ whole clip)
+    /// and previews via the sprite HUD; the actual seek happens on release.
+    private func seekDragGesture(width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 12)
+            .onChanged { value in
+                if !dragSeekActive {
+                    // Commit to scrubbing only once the drag is clearly horizontal.
+                    guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                    dragSeekActive = true
+                    dragAnchorTime = model.currentTime
+                    isScrubbing = true
+                    showControls = true
+                    hideTask?.cancel()
+                }
+                let span = max(model.duration, 1)
+                let delta = Double(value.translation.width / max(width, 1)) * span
+                scrubTime = max(0, min(model.duration, dragAnchorTime + delta))
+            }
+            .onEnded { value in
+                if dragSeekActive {
+                    model.seek(to: scrubTime)
+                    isScrubbing = false
+                    dragSeekActive = false
+                    scheduleHide()
+                } else if isFullscreen,
+                          value.translation.height > 60,
+                          abs(value.translation.height) > abs(value.translation.width) {
+                    isFullscreen = false
+                }
+            }
+    }
+
+    private var scrubHUD: some View {
+        VStack(spacing: 10) {
+            if let image = sprites.thumbnail(at: scrubTime) {
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 220, height: 124)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.6), lineWidth: 1))
+            }
+            Text("\(Self.timeString(scrubTime)) / \(Self.timeString(model.duration))")
+                .font(.callout.weight(.semibold).monospacedDigit())
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .background(.black.opacity(0.6), in: Capsule())
+        }
     }
 
     private var controlBar: some View {

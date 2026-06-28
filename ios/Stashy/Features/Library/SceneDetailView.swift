@@ -39,6 +39,7 @@ struct SceneDetailView: View {
             .background(.black)
         }
         .background(themeManager.current.backgroundColor.ignoresSafeArea())
+        .navigationTitle(scene.title ?? "Untitled")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(isFullscreen ? .hidden : .visible, for: .navigationBar, .tabBar)
         .statusBarHidden(isFullscreen)
