@@ -53,11 +53,13 @@ struct ScenesView: View {
     @Environment(\.imageCache) private var imageCache
     @Environment(ThemeManager.self) private var themeManager
     @State private var viewModel = ScenesViewModel()
+    @State private var path = NavigationPath()
+    @State private var previewPresenter = ScenePreviewPresenter()
 
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             Group {
                 if viewModel.scenes.isEmpty && viewModel.isLoading {
                     ProgressView("Loading scenes…")
@@ -85,11 +87,11 @@ struct ScenesView: View {
                     ScrollView {
                         LazyVGrid(columns: columns, spacing: 10) {
                             ForEach(viewModel.scenes) { scene in
-                                NavigationLink(value: scene) {
-                                    SceneCard(scene: scene, apiKey: appState.client?.apiKey ?? "")
-                                }
-                                .buttonStyle(.plain)
-                                .onAppear {
+                                SceneGridCell(
+                                    scene: scene,
+                                    apiKey: appState.client?.apiKey ?? "",
+                                    path: $path
+                                ) {
                                     guard let client = appState.client else { return }
                                     Task {
                                         await viewModel.loadNextPageIfNeeded(
@@ -123,6 +125,8 @@ struct ScenesView: View {
                 SceneDetailView(scene: scene)
             }
         }
+        .environment(\.scenePreviewPresenter, previewPresenter)
+        .overlay { ScenePreviewOverlay(presenter: previewPresenter) }
         .task {
             guard viewModel.scenes.isEmpty, let client = appState.client else { return }
             await viewModel.loadFirstPage(client: client)
@@ -200,21 +204,6 @@ struct SceneCard: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        // Native long-press peek shows the Stash preview clip; tap still navigates, scroll works.
-        .contextMenu {
-            EmptyView()
-        } preview: {
-            Group {
-                if let previewURL = scene.previewURL(apiKey: apiKey) {
-                    ScenePreviewView(url: previewURL)
-                } else if let thumbnail {
-                    Image(uiImage: thumbnail).resizable().scaledToFill()
-                } else {
-                    Color.black
-                }
-            }
-            .frame(width: 360, height: 202)
-        }
         .task(id: scene.id) {
             guard let url = scene.thumbnailURL(apiKey: apiKey) else { return }
             thumbnail = try? await imageCache.image(for: url)
@@ -222,37 +211,7 @@ struct SceneCard: View {
     }
 }
 
-// MARK: - Looping muted scene preview (long-press)
-
-/// Plays a Stash scene preview clip, muted and looping, filling its frame. No controls.
-struct ScenePreviewView: View {
-    let url: URL
-    @State private var player: AVQueuePlayer?
-    @State private var looper: AVPlayerLooper?
-
-    var body: some View {
-        Group {
-            if let player {
-                PlayerLayerView(player: player)
-            } else {
-                Color.black
-            }
-        }
-        .onAppear {
-            let item = AVPlayerItem(url: url)
-            let queue = AVQueuePlayer()
-            queue.isMuted = true
-            looper = AVPlayerLooper(player: queue, templateItem: item)
-            player = queue
-            queue.play()
-        }
-        .onDisappear {
-            player?.pause()
-            player = nil
-            looper = nil
-        }
-    }
-}
+// MARK: - Player layer
 
 /// A thin `AVPlayerLayer`-backed view that fills + crops without playback controls.
 struct PlayerLayerView: UIViewRepresentable {
