@@ -35,8 +35,12 @@ final class ScenesViewModel {
     private func fetchPage(client: StashClient) async {
         do {
             let result = try await client.findScenes(page: currentPage, perPage: pageSize)
-            scenes.append(contentsOf: result.scenes)
-            hasMore = scenes.count < result.count
+            // Dedupe: paginated pages can overlap and return scenes already in the list.
+            // Duplicate ids confuse ForEach identity, mis-routing taps to the wrong card.
+            let existing = Set(scenes.map(\.id))
+            let newScenes = result.scenes.filter { !existing.contains($0.id) }
+            scenes.append(contentsOf: newScenes)
+            hasMore = scenes.count < result.count && !newScenes.isEmpty
         } catch {
             if currentPage > 1 { currentPage -= 1 }
             errorMessage = error.localizedDescription
@@ -195,6 +199,7 @@ struct SceneCard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         // Native long-press peek shows the Stash preview clip; tap still navigates, scroll works.
         .contextMenu {
             EmptyView()

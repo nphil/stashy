@@ -34,8 +34,10 @@ final class PerformerScenesViewModel {
     private func fetchPage(performerID: String, client: StashClient) async {
         do {
             let result = try await client.findScenes(performerID: performerID, page: currentPage, perPage: pageSize)
-            scenes.append(contentsOf: result.scenes)
-            hasMore = scenes.count < result.count
+            let existing = Set(scenes.map(\.id))
+            let newScenes = result.scenes.filter { !existing.contains($0.id) }
+            scenes.append(contentsOf: newScenes)
+            hasMore = scenes.count < result.count && !newScenes.isEmpty
         } catch {
             if currentPage > 1 { currentPage -= 1 }
             errorMessage = error.localizedDescription

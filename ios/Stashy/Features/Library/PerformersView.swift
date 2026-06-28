@@ -34,8 +34,10 @@ final class PerformersViewModel {
     private func fetchPage(client: StashClient) async {
         do {
             let result = try await client.findPerformers(page: currentPage, perPage: pageSize)
-            performers.append(contentsOf: result.performers)
-            hasMore = performers.count < result.count
+            let existing = Set(performers.map(\.id))
+            let newPerformers = result.performers.filter { !existing.contains($0.id) }
+            performers.append(contentsOf: newPerformers)
+            hasMore = performers.count < result.count && !newPerformers.isEmpty
         } catch {
             if currentPage > 1 { currentPage -= 1 }
             errorMessage = error.localizedDescription

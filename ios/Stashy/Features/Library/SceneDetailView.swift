@@ -40,7 +40,7 @@ struct SceneDetailView: View {
         }
         .background(themeManager.current.backgroundColor.ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar(isFullscreen ? .hidden : .visible, for: .navigationBar)
+        .toolbar(isFullscreen ? .hidden : .visible, for: .navigationBar, .tabBar)
         .statusBarHidden(isFullscreen)
         .navigationDestination(for: Performer.self) { performer in
             PerformerDetailView(performer: performer)
