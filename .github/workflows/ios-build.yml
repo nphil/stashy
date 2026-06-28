@@ -93,36 +93,34 @@ jobs:
             -project "$PROJECT" \
             -scheme  "$SCHEME"
 
-      - name: Archive (unsigned)
+      - name: Build (unsigned)
         run: |
           cd ios
           set -o pipefail
-          xcodebuild archive \
+          # Use `build` (not `archive`): archiving runs an embedded-framework validation
+          # step that rejects KSPlayer's FFmpeg frameworks (underscored CFBundleIdentifiers).
+          # `build` produces the same unsigned .app without that step.
+          xcodebuild build \
             -project      "$PROJECT" \
             -scheme       "$SCHEME" \
             -configuration Release \
             -destination  "generic/platform=iOS" \
-            -archivePath  "$ARCHIVE_PATH" \
+            -derivedDataPath build/DD \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            SKIP_INSTALL=NO \
-            INSTALL_PATH="/Applications" \
-            VALIDATE_PRODUCT=NO \
             | xcpretty
 
       - name: Package into IPA
         run: |
           cd ios
-          APP_PATH=$(find "$ARCHIVE_PATH" \
-            -name "*.app" \
-            ! -name "*.xctest" \
-            ! -path "*/SwiftSupport/*" \
+          APP_PATH=$(find build/DD/Build/Products/Release-iphoneos \
+            -maxdepth 1 -name "*.app" \
             2>/dev/null | head -1)
 
           if [ -z "$APP_PATH" ]; then
-            echo "❌ .app not found in archive:"
-            find "$ARCHIVE_PATH" -maxdepth 6 2>/dev/null || echo "(archive missing)"
+            echo "❌ .app not found in build products:"
+            find build/DD/Build/Products -maxdepth 3 2>/dev/null || echo "(build products missing)"
             exit 1
           fi
 
