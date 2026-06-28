@@ -4,6 +4,9 @@ struct SceneDetailView: View {
     let scene: StashScene
     @Environment(AppState.self) private var appState
     @Environment(ThemeManager.self) private var themeManager
+    @State private var isFullscreen = false
+
+    private let inlineHeight: CGFloat = 240
 
     private var streamURL: URL? {
         guard let client = appState.client else { return nil }
@@ -11,24 +14,41 @@ struct SceneDetailView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                // Video player — KSPlayer provides its own controls (scrubber, fullscreen, rotation).
-                Group {
-                    if let streamURL {
-                        ScenePlayerView(scene: scene, apiKey: apiKey, url: streamURL)
-                    } else {
-                        Rectangle()
-                            .fill(.black)
-                            .overlay { ProgressView().tint(.white) }
-                    }
+        ZStack(alignment: .top) {
+            // Metadata scrolls behind the inline player (reserve space with a clear spacer).
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    Color.clear.frame(height: inlineHeight)
+                    metadata
                 }
-                .frame(height: 240)
-                .frame(maxWidth: .infinity)
-                .background(.black)
+            }
+            .opacity(isFullscreen ? 0 : 1)
 
-                // Metadata
-                VStack(alignment: .leading, spacing: 20) {
+            // Single player instance — resized in place for fullscreen (no re-parenting), which
+            // keeps the render surface alive across the rotation that previously blanked it.
+            Group {
+                if let streamURL {
+                    ScenePlayerView(scene: scene, apiKey: apiKey, url: streamURL, isFullscreen: $isFullscreen)
+                } else {
+                    Rectangle()
+                        .fill(.black)
+                        .overlay { ProgressView().tint(.white) }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: isFullscreen ? .infinity : inlineHeight)
+            .background(.black)
+        }
+        .background(themeManager.current.backgroundColor.ignoresSafeArea())
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(isFullscreen ? .hidden : .visible, for: .navigationBar)
+        .statusBarHidden(isFullscreen)
+        .navigationDestination(for: Performer.self) { performer in
+            PerformerDetailView(performer: performer)
+        }
+    }
+
+    private var metadata: some View {
+        VStack(alignment: .leading, spacing: 20) {
                     // Title + studio
                     VStack(alignment: .leading, spacing: 4) {
                         Text(scene.title ?? "Untitled")
@@ -82,14 +102,7 @@ struct SceneDetailView: View {
                     }
                 }
                 .padding(16)
-            }
         }
-        .background(themeManager.current.backgroundColor.ignoresSafeArea())
-        .navigationBarTitleDisplayMode(.inline)
-        .navigationDestination(for: Performer.self) { performer in
-            PerformerDetailView(performer: performer)
-        }
-    }
 
     private var apiKey: String { appState.client?.apiKey ?? "" }
 }

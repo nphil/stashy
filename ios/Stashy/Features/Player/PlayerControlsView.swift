@@ -17,6 +17,17 @@ struct PlayerControlsView: View {
             Color.black.opacity(showControls ? 0.2 : 0.001)
                 .contentShape(Rectangle())
                 .onTapGesture { toggleControls() }
+                .gesture(
+                    DragGesture(minimumDistance: 20)
+                        .onEnded { value in
+                            // Swipe down to exit fullscreen (portrait or landscape).
+                            if isFullscreen,
+                               value.translation.height > 60,
+                               abs(value.translation.height) > abs(value.translation.width) {
+                                isFullscreen = false
+                            }
+                        }
+                )
 
             if showControls {
                 VStack {

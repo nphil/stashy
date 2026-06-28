@@ -80,56 +80,53 @@ struct KSPlayerSurface: UIViewRepresentable {
     }
 }
 
-/// Inline + fullscreen scene player with custom controls and sprite scrubbing.
+/// Scene player with custom controls and sprite scrubbing. Fullscreen is driven by a binding
+/// from the parent, which simply resizes this same view in place — the render surface is never
+/// re-parented, so it doesn't blank when rotating between inline and fullscreen.
 struct ScenePlayerView: View {
     let scene: StashScene
     let apiKey: String
+    @Binding var isFullscreen: Bool
     @Environment(\.imageCache) private var imageCache
     @State private var model: ScenePlayerModel
     @State private var sprites = SpriteThumbnails()
-    @State private var isFullscreen = false
+    @State private var suppressAutoFullscreen = false
 
-    init(scene: StashScene, apiKey: String, url: URL) {
+    init(scene: StashScene, apiKey: String, url: URL, isFullscreen: Binding<Bool>) {
         self.scene = scene
         self.apiKey = apiKey
+        _isFullscreen = isFullscreen
         _model = State(initialValue: ScenePlayerModel(url: url))
     }
 
     var body: some View {
-        surface(fullscreen: false)
-            .fullScreenCover(isPresented: $isFullscreen) {
-                ZStack {
-                    Color.black.ignoresSafeArea()
-                    surface(fullscreen: true)
-                        .ignoresSafeArea()
-                }
-            }
-            .task {
-                guard let vtt = scene.vttURL(apiKey: apiKey),
-                      let sprite = scene.spriteURL(apiKey: apiKey) else { return }
-                await sprites.load(vttURL: vtt, spriteURL: sprite, imageCache: imageCache)
-            }
-            // Rotate to landscape → fullscreen; back to portrait → inline.
-            .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
-                let orientation = UIDevice.current.orientation
-                if orientation.isLandscape, !isFullscreen {
-                    isFullscreen = true
-                } else if orientation.isPortrait, isFullscreen {
-                    isFullscreen = false
-                }
-            }
-            .onAppear { UIDevice.current.beginGeneratingDeviceOrientationNotifications() }
-            .onDisappear { if !isFullscreen { model.pause() } }
-    }
-
-    private func surface(fullscreen: Bool) -> some View {
         ZStack {
             KSPlayerSurface(model: model, isReady: model.isReady)
-            PlayerControlsView(
-                model: model,
-                sprites: sprites,
-                isFullscreen: $isFullscreen
-            )
+                .ignoresSafeArea(edges: isFullscreen ? .all : [])
+            PlayerControlsView(model: model, sprites: sprites, isFullscreen: $isFullscreen)
         }
+        .task {
+            guard let vtt = scene.vttURL(apiKey: apiKey),
+                  let sprite = scene.spriteURL(apiKey: apiKey) else { return }
+            await sprites.load(vttURL: vtt, spriteURL: sprite, imageCache: imageCache)
+        }
+        // Rotate to landscape → fullscreen; back to portrait → inline. A manual exit while still
+        // landscape suppresses auto re-entry until the device returns to portrait.
+        .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+            let orientation = UIDevice.current.orientation
+            if orientation.isLandscape {
+                if !suppressAutoFullscreen { isFullscreen = true }
+            } else if orientation.isPortrait {
+                suppressAutoFullscreen = false
+                isFullscreen = false
+            }
+        }
+        .onChange(of: isFullscreen) { _, now in
+            if !now, UIDevice.current.orientation.isLandscape {
+                suppressAutoFullscreen = true
+            }
+        }
+        .onAppear { UIDevice.current.beginGeneratingDeviceOrientationNotifications() }
+        .onDisappear { if !isFullscreen { model.pause() } }
     }
 }
