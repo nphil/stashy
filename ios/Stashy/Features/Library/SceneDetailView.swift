@@ -1,43 +1,31 @@
 import SwiftUI
-import AVKit
 
 struct SceneDetailView: View {
     let scene: StashScene
     @Environment(AppState.self) private var appState
     @Environment(ThemeManager.self) private var themeManager
-    @State private var player: AVPlayer?
-    @State private var showFullscreen = false
+
+    private var streamURL: URL? {
+        guard let client = appState.client else { return nil }
+        return scene.preferredStreamURL(apiKey: client.apiKey)
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                // Video player
-                ZStack(alignment: .bottomTrailing) {
-                    Group {
-                        if let player {
-                            VideoPlayer(player: player)
-                        } else {
-                            Rectangle()
-                                .fill(.black)
-                                .overlay { ProgressView().tint(.white) }
-                        }
-                    }
-                    .frame(height: 220)
-                    .background(.black)
-
-                    // Fullscreen button
-                    if player != nil {
-                        Button {
-                            showFullscreen = true
-                        } label: {
-                            Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                .font(.system(size: 13, weight: .semibold))
-                                .padding(8)
-                        }
-                        .glassEffect(.regular.interactive(), in: Circle())
-                        .padding(10)
+                // Video player — KSPlayer provides its own controls (scrubber, fullscreen, rotation).
+                Group {
+                    if let streamURL {
+                        ScenePlayerView(url: streamURL)
+                    } else {
+                        Rectangle()
+                            .fill(.black)
+                            .overlay { ProgressView().tint(.white) }
                     }
                 }
+                .frame(height: 240)
+                .frame(maxWidth: .infinity)
+                .background(.black)
 
                 // Metadata
                 VStack(alignment: .leading, spacing: 20) {
@@ -83,50 +71,8 @@ struct SceneDetailView: View {
                 .padding(16)
             }
         }
+        .background(themeManager.current.backgroundColor.ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
-        .task { setupPlayer() }
-        .onDisappear { player?.pause() }
-        .fullScreenCover(isPresented: $showFullscreen) {
-            FullscreenPlayerView(player: player)
-        }
-    }
-
-    private func setupPlayer() {
-        guard let client = appState.client,
-              let streamURL = scene.preferredStreamURL(apiKey: client.apiKey) else { return }
-        let item = AVPlayerItem(url: streamURL)
-        item.preferredForwardBufferDuration = 5
-        let p = AVPlayer(playerItem: item)
-        player = p
-        p.play()
-    }
-}
-
-// MARK: - Fullscreen player
-
-struct FullscreenPlayerView: View {
-    let player: AVPlayer?
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        ZStack(alignment: .topTrailing) {
-            Color.black.ignoresSafeArea()
-
-            if let player {
-                VideoPlayer(player: player)
-                    .ignoresSafeArea()
-            }
-
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.title2)
-            }
-            .glassEffect(.regular.interactive(), in: Circle())
-            .padding()
-        }
-        .onAppear { player?.play() }
     }
 }
 

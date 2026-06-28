@@ -9,6 +9,11 @@ options:
 settings:
   SWIFT_VERSION: 6.0
 
+packages:
+  KSPlayer:
+    url: https://github.com/kingslay/KSPlayer.git
+    exactVersion: "2.3.4"
+
 targets:
   Stashy:
     type: application
@@ -18,6 +23,8 @@ targets:
       - path: Stashy
         excludes:
           - "**/.DS_Store"
+    dependencies:
+      - package: KSPlayer
     info:
       path: Info.plist
       properties:
