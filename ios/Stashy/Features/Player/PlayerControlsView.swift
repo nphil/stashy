@@ -22,11 +22,6 @@ struct PlayerControlsView: View {
                     .onTapGesture { toggleControls() }
                     .gesture(seekDragGesture(width: geo.size.width))
 
-                // One-handed scrub heads-up display: sprite preview + time at the drag position.
-                if dragSeekActive {
-                    scrubHUD
-                }
-
                 if showControls {
                     VStack {
                         Spacer()
@@ -49,8 +44,9 @@ struct PlayerControlsView: View {
     }
 
     /// Drag anywhere to seek (horizontal) or swipe down to exit fullscreen — both reachable
-    /// one-handed. A horizontal drag maps proportionally to the timeline (full width ≈ whole clip)
-    /// and previews via the sprite HUD; the actual seek happens on release.
+    /// one-handed. A horizontal drag maps proportionally to the timeline (full width ≈ whole clip);
+    /// the scrubber bar (with its sprite preview) reflects the position and the seek commits on
+    /// release.
     private func seekDragGesture(width: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 12)
             .onChanged { value in
@@ -79,25 +75,6 @@ struct PlayerControlsView: View {
                     isFullscreen = false
                 }
             }
-    }
-
-    private var scrubHUD: some View {
-        VStack(spacing: 10) {
-            if let image = sprites.thumbnail(at: scrubTime) {
-                Image(uiImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: 220, height: 124)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.6), lineWidth: 1))
-            }
-            Text("\(Self.timeString(scrubTime)) / \(Self.timeString(model.duration))")
-                .font(.callout.weight(.semibold).monospacedDigit())
-                .foregroundStyle(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 7)
-                .background(.black.opacity(0.6), in: Capsule())
-        }
     }
 
     private var controlBar: some View {

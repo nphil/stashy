@@ -8,51 +8,107 @@ struct SettingsView: View {
     @State private var showDisconnectAlert = false
     @State private var editingURL = ""
     @State private var editingKey = ""
+    @State private var savedURL = ""
+    @State private var savedKey = ""
     @State private var isSaving = false
     @State private var saveError: String?
-    @State private var saveSuccess = false
     @State private var cacheSize = 0
     @State private var isClearingCache = false
     @AppStorage("animatedPreviews") private var animatedPreviews = true
 
     private let swatchColumns = [GridItem(.adaptive(minimum: 64), spacing: 12)]
 
+    private var isConnected: Bool { appState.isAuthenticated }
+    private var hasChanges: Bool {
+        editingURL.trimmed != savedURL || editingKey.trimmed != savedKey
+    }
+    private var canSave: Bool { hasChanges && !editingURL.trimmed.isEmpty && !isSaving }
+
     var body: some View {
         NavigationStack {
             List {
-                // Server section
-                Section("Server") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        TextField("Server URL", text: $editingURL)
+                // Connection status
+                Section {
+                    HStack(spacing: 12) {
+                        Image(systemName: isConnected ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .font(.title2)
+                            .foregroundStyle(isConnected ? .green : .orange)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(isConnected ? "Connected" : "Not Connected")
+                                .font(.subheadline.weight(.semibold))
+                            Text(isConnected ? (URL(string: savedURL)?.host() ?? savedURL) : "Enter your server details below")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+
+                // Server connection fields
+                Section {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Server URL")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TextField("https://stash.example.com:9999", text: $editingURL)
                             .keyboardType(.URL)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
+                            .submitLabel(.next)
+                    }
+                    .padding(.vertical, 2)
 
-                        SecureField("API Key", text: $editingKey)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("API Key")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        SecureField("Leave blank if your server has no login", text: $editingKey)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
+                            .submitLabel(.go)
+                            .onSubmit { if canSave { saveServer() } }
+                    }
+                    .padding(.vertical, 2)
 
-                        if let err = saveError {
-                            Text(err).font(.caption).foregroundStyle(.red)
-                        }
-                        if saveSuccess {
-                            Label("Saved", systemImage: "checkmark.circle.fill")
-                                .font(.caption).foregroundStyle(.green)
-                        }
+                    if let err = saveError {
+                        Label(err, systemImage: "exclamationmark.circle")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
 
-                        HStack {
-                            Button("Save") { saveServer() }
-                                .buttonStyle(.glass)
-                                .disabled(isSaving || editingURL.isEmpty || editingKey.isEmpty)
-
-                            Spacer()
-
-                            Button("Disconnect", role: .destructive) {
-                                showDisconnectAlert = true
+                    if hasChanges {
+                        Button(action: saveServer) {
+                            HStack {
+                                Spacer()
+                                if isSaving {
+                                    ProgressView().tint(.white)
+                                } else {
+                                    Text(isConnected ? "Update & Reconnect" : "Connect")
+                                        .fontWeight(.semibold)
+                                }
+                                Spacer()
                             }
                         }
+                        .buttonStyle(.borderedProminent)
+                        .tint(themeManager.current.accentColor)
+                        .disabled(!canSave)
+                        .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
                     }
-                    .padding(.vertical, 4)
+                } header: {
+                    Text("Connection")
+                } footer: {
+                    Text("Your Stash server address (including http:// or https:// and port). The API key lives in Stash under Settings → Security → API Key — only needed if your server requires a login.")
+                }
+
+                // Disconnect
+                if isConnected {
+                    Section {
+                        Button("Disconnect", role: .destructive) {
+                            showDisconnectAlert = true
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
                 }
 
                 // Theme section
@@ -105,14 +161,20 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .alert("Disconnect?", isPresented: $showDisconnectAlert) {
-                Button("Disconnect", role: .destructive) { appState.disconnect() }
+                Button("Disconnect", role: .destructive) {
+                    appState.disconnect()
+                    savedURL = ""; savedKey = ""
+                    editingURL = ""; editingKey = ""
+                }
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text("Your server URL and API key will be removed from this device.")
             }
             .onAppear {
-                editingURL = KeychainService.read("serverURL") ?? ""
-                editingKey = KeychainService.read("apiKey") ?? ""
+                savedURL = KeychainService.read("serverURL") ?? ""
+                savedKey = KeychainService.read("apiKey") ?? ""
+                editingURL = savedURL
+                editingKey = savedKey
             }
             .task { await refreshCacheSize() }
         }
@@ -137,11 +199,14 @@ struct SettingsView: View {
     private func saveServer() {
         isSaving = true
         saveError = nil
-        saveSuccess = false
         Task {
             do {
                 try await appState.connect(serverURL: editingURL, apiKey: editingKey)
-                saveSuccess = true
+                // Normalize fields to the stored (trimmed) values so the form is no longer "dirty".
+                savedURL = KeychainService.read("serverURL") ?? editingURL.trimmed
+                savedKey = KeychainService.read("apiKey") ?? editingKey.trimmed
+                editingURL = savedURL
+                editingKey = savedKey
             } catch {
                 saveError = error.localizedDescription
             }
@@ -154,4 +219,8 @@ struct SettingsView: View {
         let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—"
         return "\(v) (\(b))"
     }
+}
+
+private extension String {
+    var trimmed: String { trimmingCharacters(in: .whitespacesAndNewlines) }
 }
