@@ -75,6 +75,7 @@ struct SettingsView: View {
             .scrollContentBackground(.hidden)
             .background(themeManager.current.backgroundColor.ignoresSafeArea())
             .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
             .alert("Disconnect?", isPresented: $showDisconnectAlert) {
                 Button("Disconnect", role: .destructive) { appState.disconnect() }
                 Button("Cancel", role: .cancel) {}

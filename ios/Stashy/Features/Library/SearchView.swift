@@ -84,6 +84,7 @@ struct SearchView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(themeManager.current.backgroundColor.ignoresSafeArea())
             .navigationTitle("Search")
+            .navigationBarTitleDisplayMode(.inline)
             .searchable(text: Bindable(viewModel).query, prompt: "Search scenes and performers")
             .navigationDestination(for: StashScene.self) { scene in
                 SceneDetailView(scene: scene)

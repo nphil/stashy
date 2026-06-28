@@ -89,6 +89,7 @@ struct PerformersView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(themeManager.current.backgroundColor.ignoresSafeArea())
             .navigationTitle("Performers")
+            .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: Performer.self) { performer in
                 PerformerDetailView(performer: performer)
             }
