@@ -41,39 +41,47 @@ struct SearchView: View {
     @Environment(\.imageCache) private var imageCache
     @State private var viewModel = SearchViewModel()
 
+    private var hasResults: Bool { !viewModel.scenes.isEmpty || !viewModel.performers.isEmpty }
+
     var body: some View {
         NavigationStack {
-            List {
-                if viewModel.isSearching {
-                    HStack { Spacer(); ProgressView(); Spacer() }
-                        .listRowBackground(Color.clear)
-                } else if !viewModel.scenes.isEmpty {
-                    Section("Scenes") {
-                        ForEach(viewModel.scenes) { scene in
-                            NavigationLink(value: scene) {
-                                SearchSceneRow(scene: scene, apiKey: appState.client?.apiKey ?? "")
-                            }
-                        }
-                    }
-                }
-
-                if !viewModel.performers.isEmpty {
-                    Section("Performers") {
-                        ForEach(viewModel.performers) { performer in
-                            NavigationLink(value: performer) {
-                                PerformerRow(performer: performer, apiKey: appState.client?.apiKey ?? "")
-                            }
-                        }
-                    }
-                }
-
-                if !viewModel.isSearching && viewModel.scenes.isEmpty && viewModel.performers.isEmpty
-                    && !viewModel.query.isEmpty {
+            Group {
+                if viewModel.query.isEmpty {
+                    ContentUnavailableView(
+                        "Search Your Library",
+                        systemImage: "magnifyingglass",
+                        description: Text("Find scenes and performers.")
+                    )
+                } else if viewModel.isSearching && !hasResults {
+                    ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if !hasResults {
                     ContentUnavailableView.search(text: viewModel.query)
+                } else {
+                    List {
+                        if !viewModel.scenes.isEmpty {
+                            Section("Scenes") {
+                                ForEach(viewModel.scenes) { scene in
+                                    NavigationLink(value: scene) {
+                                        SearchSceneRow(scene: scene, apiKey: appState.client?.apiKey ?? "")
+                                    }
+                                }
+                            }
+                        }
+                        if !viewModel.performers.isEmpty {
+                            Section("Performers") {
+                                ForEach(viewModel.performers) { performer in
+                                    NavigationLink(value: performer) {
+                                        PerformerRow(performer: performer, apiKey: appState.client?.apiKey ?? "")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
                 }
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(themeManager.current.backgroundColor.ignoresSafeArea())
             .navigationTitle("Search")
             .searchable(text: Bindable(viewModel).query, prompt: "Search scenes and performers")

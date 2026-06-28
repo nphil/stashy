@@ -105,6 +105,10 @@ struct ScenesView: View {
                                 .padding()
                         }
                     }
+                    .refreshable {
+                        guard let client = appState.client else { return }
+                        await viewModel.loadFirstPage(client: client)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -112,18 +116,6 @@ struct ScenesView: View {
             .navigationTitle("Scenes")
             .navigationDestination(for: StashScene.self) { scene in
                 SceneDetailView(scene: scene)
-            }
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        Task {
-                            guard let client = appState.client else { return }
-                            await viewModel.loadFirstPage(client: client)
-                        }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                }
             }
         }
         .task {
@@ -153,7 +145,6 @@ struct SceneCard: View {
     @Environment(\.imageCache) private var imageCache
     @Environment(ThemeManager.self) private var themeManager
     @State private var thumbnail: UIImage?
-    @GestureState private var holding = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -179,11 +170,6 @@ struct SceneCard: View {
                         endPoint: .bottom
                     )
                 }
-                .overlay {
-                    if holding, let previewURL = scene.previewURL(apiKey: apiKey) {
-                        ScenePreviewView(url: previewURL)
-                    }
-                }
                 .clipped()
 
             VStack(alignment: .leading, spacing: 2) {
@@ -206,18 +192,23 @@ struct SceneCard: View {
             }
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .opacity(holding ? 0 : 1)
         }
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .animation(.easeInOut(duration: 0.2), value: holding)
-        // Press-and-hold → play the Stash-generated preview; release → stop. Tap still navigates.
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.35)
-                .sequenced(before: DragGesture(minimumDistance: 0))
-                .updating($holding) { value, state, _ in
-                    if case .second(true, _) = value { state = true }
+        // Native long-press peek shows the Stash preview clip; tap still navigates, scroll works.
+        .contextMenu {
+            EmptyView()
+        } preview: {
+            Group {
+                if let previewURL = scene.previewURL(apiKey: apiKey) {
+                    ScenePreviewView(url: previewURL)
+                } else if let thumbnail {
+                    Image(uiImage: thumbnail).resizable().scaledToFill()
+                } else {
+                    Color.black
                 }
-        )
+            }
+            .frame(width: 360, height: 202)
+        }
         .task(id: scene.id) {
             guard let url = scene.thumbnailURL(apiKey: apiKey) else { return }
             thumbnail = try? await imageCache.image(for: url)
