@@ -161,7 +161,7 @@ struct PerformerDetailView: View {
             return out
         }()
         return HStack(spacing: 14) {
-            ForEach(items, id: \.1) { item in
+            ForEach(items, id: \.0) { item in
                 Label(item.1, systemImage: item.0)
                     .font(.caption)
                     .foregroundStyle(.secondary)

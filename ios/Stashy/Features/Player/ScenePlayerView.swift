@@ -8,10 +8,9 @@ struct ScenePlayerView: UIViewRepresentable {
     let url: URL
 
     func makeUIView(context: Context) -> IOSVideoPlayerView {
+        KSOptions.isAutoPlay = true
         let playerView = IOSVideoPlayerView()
-        let options = KSOptions()
-        options.isAutoPlay = true
-        let resource = KSPlayerResource(url: url, options: options)
+        let resource = KSPlayerResource(url: url, options: KSOptions())
         playerView.set(resource: resource)
         return playerView
     }
