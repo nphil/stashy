@@ -40,13 +40,15 @@ struct SearchView: View {
     @Environment(ThemeManager.self) private var themeManager
     @Environment(\.imageCache) private var imageCache
     @State private var viewModel = SearchViewModel()
+    @State private var path = NavigationPath()
+    @State private var previewPresenter = ScenePreviewPresenter()
 
     private var hasResults: Bool {
         !viewModel.scenes.isEmpty || !viewModel.performers.isEmpty || !viewModel.tags.isEmpty
     }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             Group {
                 if viewModel.query.isEmpty {
                     ContentUnavailableView(
@@ -81,9 +83,8 @@ struct SearchView: View {
                         if !viewModel.scenes.isEmpty {
                             Section("Scenes") {
                                 ForEach(viewModel.scenes) { scene in
-                                    NavigationLink(value: scene) {
-                                        SearchSceneRow(scene: scene, apiKey: appState.client?.apiKey ?? "")
-                                    }
+                                    SearchSceneRow(scene: scene, apiKey: appState.client?.apiKey ?? "")
+                                        .scenePreview(scene, apiKey: appState.client?.apiKey ?? "") { path.append($0) }
                                 }
                             }
                         }
@@ -111,6 +112,8 @@ struct SearchView: View {
                 viewModel.search(client: client)
             }
         }
+        .environment(\.scenePreviewPresenter, previewPresenter)
+        .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: { path.append($0) }) }
     }
 }
 

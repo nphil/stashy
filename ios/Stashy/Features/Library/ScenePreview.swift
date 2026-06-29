@@ -69,13 +69,15 @@ struct LongPressTrigger: UIGestureRecognizerRepresentable {
     }
 }
 
-// MARK: - Grid cell
+// MARK: - Reusable preview gesture
 
-struct SceneGridCell: View {
+/// Adds tap-to-open + press-hold-to-preview to any scene view (card, row, …) so the preview works
+/// everywhere a scene appears. Requires a `scenePreviewPresenter` in the environment and a host
+/// `ScenePreviewOverlay`.
+struct ScenePreviewGesture: ViewModifier {
     let scene: StashScene
     let apiKey: String
     var onOpen: (StashScene) -> Void
-    var onAppear: () -> Void
 
     @Environment(\.scenePreviewPresenter) private var presenter
     @Environment(\.imageCache) private var imageCache
@@ -83,8 +85,8 @@ struct SceneGridCell: View {
     @State private var frame: CGRect = .zero
     @State private var thumbnail: UIImage?
 
-    var body: some View {
-        SceneCard(scene: scene, apiKey: apiKey)
+    func body(content: Content) -> some View {
+        content
             .background(
                 GeometryReader { geo in
                     Color.clear
@@ -92,7 +94,7 @@ struct SceneGridCell: View {
                         .onChange(of: geo.frame(in: .global)) { _, new in frame = new }
                 }
             )
-            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .contentShape(Rectangle())
             // Don't navigate if a long-press already opened the preview (avoids tap+preview both firing).
             .onTapGesture { if presenter?.active == nil { onOpen(scene) } }
             .gesture(
@@ -101,11 +103,31 @@ struct SceneGridCell: View {
                     presenter?.begin(scene: scene, apiKey: apiKey, sourceRect: frame, thumbnail: thumbnail)
                 }
             )
-            .onAppear(perform: onAppear)
             .task(id: scene.id) {
                 guard let url = scene.thumbnailURL(apiKey: apiKey) else { return }
                 thumbnail = try? await imageCache.image(for: url)
             }
+    }
+}
+
+extension View {
+    func scenePreview(_ scene: StashScene, apiKey: String, onOpen: @escaping (StashScene) -> Void) -> some View {
+        modifier(ScenePreviewGesture(scene: scene, apiKey: apiKey, onOpen: onOpen))
+    }
+}
+
+// MARK: - Grid cell
+
+struct SceneGridCell: View {
+    let scene: StashScene
+    let apiKey: String
+    var onOpen: (StashScene) -> Void
+    var onAppear: () -> Void
+
+    var body: some View {
+        SceneCard(scene: scene, apiKey: apiKey)
+            .scenePreview(scene, apiKey: apiKey, onOpen: onOpen)
+            .onAppear(perform: onAppear)
     }
 }
 
