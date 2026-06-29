@@ -62,9 +62,7 @@ struct ScenePlayerView: View {
     @Binding var isFullscreen: Bool
     var onBack: (() -> Void)?
     @Environment(\.imageCache) private var imageCache
-    @Environment(\.previewCache) private var previewCache
     @State private var model: ScenePlayerModel
-    @State private var blurModel = BlurVideoModel()
     @State private var sprites = SpriteThumbnails()
     @State private var suppressAutoFullscreen = false
     @State private var zoomScale: CGFloat = 1
@@ -98,21 +96,15 @@ struct ScenePlayerView: View {
             let surfaceSize = isFullscreen ? avail : Self.fitSize(aspect: aspect, in: videoArea)
 
             ZStack(alignment: .bottom) {
-                // Background: a moving, blurred copy of the same video inline (fills the gaps and the
-                // status-bar strip so portrait/odd-ratio videos blend seamlessly with their own
-                // footage); plain black in fullscreen, where letterbox bars are fine (the video zooms).
-                ZStack {
+                // Background: a slowly-evolving blurred backdrop drawn from the scene's sprite tile at
+                // the current playhead (real frame content, so it matches and blends with the gaps and
+                // the status-bar strip) — no second decode. Plain black in fullscreen, where letterbox
+                // bars are fine because the video zooms.
+                Group {
                     if isFullscreen {
                         Color.black
                     } else {
-                        // Blurred poster shows through until the blur stream has frames (no black flash);
-                        // the live blur (clear-backed) then blurs the moving video over it.
-                        if let poster {
-                            Image(uiImage: poster).resizable().scaledToFill().blur(radius: 32)
-                        } else {
-                            Color.black
-                        }
-                        LiveBlurVideoView(player: blurModel.player)
+                        AmbientBlurBackdrop(sprites: sprites, time: model.currentTime, fallback: poster)
                     }
                 }
                 .frame(width: avail.width, height: avail.height)
@@ -170,13 +162,6 @@ struct ScenePlayerView: View {
             guard let url = scene.thumbnailURL(apiKey: apiKey) else { return }
             poster = try? await imageCache.image(for: url)
         }
-        // Load the cached preview clip for the moving blurred backdrop (inline only).
-        .task(id: scene.id) {
-            guard let preview = scene.previewURL(apiKey: apiKey),
-                  let local = await previewCache.localURL(for: preview) else { return }
-            blurModel.load(local)
-            if !isFullscreen { blurModel.play() }
-        }
         // Landscape videos: rotating to landscape enters fullscreen (and back to portrait exits).
         // Portrait videos never auto-rotate into a landscape fullscreen — they go fullscreen in
         // portrait via the button instead.
@@ -194,7 +179,6 @@ struct ScenePlayerView: View {
             if now {
                 // Portrait videos go fullscreen in portrait; everything else uses landscape.
                 OrientationController.lock(scene.isPortraitVideo ? .portrait : [.landscapeLeft, .landscapeRight])
-                blurModel.pause() // no blur backdrop in fullscreen
             } else {
                 // Force back to portrait even if the phone is still held in landscape. Zoom is reset
                 // automatically by the surface once zoom is disabled (zoomEnabled = isFullscreen).
@@ -202,17 +186,14 @@ struct ScenePlayerView: View {
                 if UIDevice.current.orientation.isLandscape {
                     suppressAutoFullscreen = true
                 }
-                blurModel.play()
             }
         }
         .onAppear {
             UIDevice.current.beginGeneratingDeviceOrientationNotifications()
-            if !isFullscreen { blurModel.play() }
         }
         .onDisappear {
             OrientationController.lock(.portrait)
             hideTask?.cancel()
-            blurModel.pause()
             if !isFullscreen { model.pause() }
         }
     }
