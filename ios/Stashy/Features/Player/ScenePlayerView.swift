@@ -12,22 +12,30 @@ final class ScenePlayerModel {
     var isPlaying = false
     var isReady = false
 
-    @ObservationIgnored private let engine: PlaybackEngine
+    @ObservationIgnored private var engine: PlaybackEngine?
     @ObservationIgnored private let route: PlaybackRoute
 
     /// The sharp-video render surface (re-parented into the zoom container).
-    var renderView: UIView? { engine.renderView }
+    var renderView: UIView? { engine?.renderView }
     /// A live blurred backdrop, present only on the AVPlayer path; nil → use a static blur.
-    var liveBlurView: UIView? { engine.liveBlurView }
+    var liveBlurView: UIView? { engine?.liveBlurView }
 
     var backendName: String { route.engine == .avPlayer ? "AVPlayer" : "KSPlayer (FFmpeg)" }
     var streamType: String { route.streamType }
     var routingReason: String { route.reason }
 
+    /// Side-effect-free on purpose. SwiftUI evaluates `State(initialValue:)` on *every* view init, so
+    /// building the engine here (which creates an AVPlayer, activates the audio session, and starts
+    /// playback) spun up multiple overlapping players — duplicate audio that kept playing after pause.
+    /// The engine is created exactly once in `start()`, from `.onAppear`.
     init(route: PlaybackRoute) {
         self.route = route
-        engine = route.engine == .avPlayer ? AVPlaybackEngine(url: route.url) : KSPlaybackEngine(url: route.url)
+    }
 
+    /// Create the engine and begin playback. Idempotent — safe to call on every `onAppear`.
+    func start() {
+        guard engine == nil else { return }
+        let engine = route.engine == .avPlayer ? AVPlaybackEngine(url: route.url) : KSPlaybackEngine(url: route.url)
         engine.onTime = { [weak self] current, duration in
             guard let self else { return }
             self.currentTime = current
@@ -42,17 +50,21 @@ final class ScenePlayerModel {
             guard let self, self.isPlaying != playing else { return }
             self.isPlaying = playing
         }
+        self.engine = engine
         isPlaying = true
     }
 
-    func play() { engine.play() }
-    func pause() { engine.pause() }
+    /// Stop playback when leaving the scene so audio can't continue in the background.
+    func stop() { engine?.pause() }
+
+    func play() { engine?.play() }
+    func pause() { engine?.pause() }
     func togglePlayPause() { isPlaying ? pause() : play() }
 
     func seek(to time: TimeInterval) {
         let clamped = max(0, min(time, duration > 0 ? duration : time))
         currentTime = clamped
-        engine.seek(to: clamped)
+        engine?.seek(to: clamped)
     }
 
     /// Assemble a diagnostics snapshot for the Stats overlay: routing/backend facts + static media
@@ -62,7 +74,7 @@ final class ScenePlayerModel {
 
         sections.append(StatSection(title: "Playback", lines: [
             StatLine(label: "Backend", value: backendName),
-            StatLine(label: "Decode", value: engine.decodeDescription),
+            StatLine(label: "Decode", value: engine?.decodeDescription ?? "—"),
             StatLine(label: "Stream", value: streamType),
             StatLine(label: "AVPlayer use", value: routingReason),
         ]))
@@ -77,7 +89,7 @@ final class ScenePlayerModel {
         if let f = scene.frameRateLabel { media.append(StatLine(label: "Frame rate", value: f)) }
         if !media.isEmpty { sections.append(StatSection(title: "Media", lines: media)) }
 
-        sections.append(StatSection(title: "Network", lines: engine.liveStats()))
+        sections.append(StatSection(title: "Network", lines: engine?.liveStats() ?? []))
 
         // Reserved home for future Stash-transcoder details (only when actually transcoding).
         if streamType.localizedCaseInsensitiveContains("transcod") || streamType.localizedCaseInsensitiveContains("hls") {
@@ -253,11 +265,13 @@ struct ScenePlayerView: View {
         }
         .onAppear {
             UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+            model.start()
         }
         .onDisappear {
             OrientationController.lock(.portrait)
             hideTask?.cancel()
-            if !isFullscreen { model.pause() }
+            // Leaving the scene: stop playback so audio can't keep running in the background.
+            model.stop()
         }
     }
 
