@@ -56,24 +56,37 @@ struct ScenesView: View {
     @State private var viewModel = ScenesViewModel()
     @State private var path = NavigationPath()
     @State private var previewPresenter = ScenePreviewPresenter()
+    @State private var filterExpanded = false
 
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
+    private var filterActive: Bool {
+        !viewModel.query.tags.isEmpty || viewModel.query.sort != .date || viewModel.query.direction != .desc
+    }
+
     var body: some View {
         NavigationStack(path: $path) {
-            VStack(spacing: 0) {
-                SceneFilterBar(query: $viewModel.query)
-                    .padding(.vertical, 8)
-
-                content
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(themeManager.current.backgroundColor.ignoresSafeArea())
-            .navigationTitle("Scenes")
-            .navigationBarTitleDisplayMode(.inline)
-            .navigationDestination(for: StashScene.self) { scene in
-                SceneDetailView(scene: scene)
-            }
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(themeManager.current.backgroundColor.ignoresSafeArea())
+                // Filter panel floats over the immersive list.
+                .overlay(alignment: .top) {
+                    if filterExpanded {
+                        SceneFilterPanel(query: $viewModel.query)
+                            .padding(.top, 4)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                }
+                .navigationTitle("Scenes")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
+                    }
+                }
+                .navigationDestination(for: StashScene.self) { scene in
+                    SceneDetailView(scene: scene)
+                }
         }
         .environment(\.scenePreviewPresenter, previewPresenter)
         .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: { path.append($0) }) }
