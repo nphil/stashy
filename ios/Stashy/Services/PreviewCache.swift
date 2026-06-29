@@ -9,6 +9,8 @@ import SwiftUI
 actor PreviewCache {
     private let directory: URL
     private let session: URLSession
+    /// Soft cap on disk used by cached preview clips. Least-recently-used files are evicted past it.
+    private let maxBytes = 300 * 1024 * 1024
 
     init() {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -20,7 +22,10 @@ actor PreviewCache {
     /// Local file URL for a preview, downloading + caching it on first use. Returns nil on failure.
     func localURL(for remoteURL: URL) async -> URL? {
         let file = directory.appendingPathComponent(filename(for: remoteURL))
-        if FileManager.default.fileExists(atPath: file.path) { return file }
+        if FileManager.default.fileExists(atPath: file.path) {
+            touch(file) // mark recently used for LRU
+            return file
+        }
         do {
             let (tmp, response) = try await session.download(from: remoteURL)
             if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
@@ -29,6 +34,8 @@ actor PreviewCache {
             }
             try? FileManager.default.removeItem(at: file)
             try FileManager.default.moveItem(at: tmp, to: file)
+            touch(file)
+            enforceLimit()
             return file
         } catch {
             return nil
@@ -41,6 +48,31 @@ actor PreviewCache {
             let file = directory.appendingPathComponent(filename(for: url))
             if FileManager.default.fileExists(atPath: file.path) { continue }
             _ = await localURL(for: url)
+        }
+    }
+
+    /// Mark a file as just-used so LRU eviction keeps it around.
+    private func touch(_ file: URL) {
+        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: file.path)
+    }
+
+    /// Evict least-recently-used files until under the size cap. Newest files (currently playing)
+    /// are touched on access, so they're never the ones removed.
+    private func enforceLimit() {
+        let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey]
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: keys
+        ) else { return }
+        var entries = urls.compactMap { url -> (url: URL, size: Int, date: Date)? in
+            guard let v = try? url.resourceValues(forKeys: Set(keys)) else { return nil }
+            return (url, v.fileSize ?? 0, v.contentModificationDate ?? .distantPast)
+        }
+        var total = entries.reduce(0) { $0 + $1.size }
+        guard total > maxBytes else { return }
+        entries.sort { $0.date < $1.date } // oldest first
+        for entry in entries where total > maxBytes {
+            try? FileManager.default.removeItem(at: entry.url)
+            total -= entry.size
         }
     }
 

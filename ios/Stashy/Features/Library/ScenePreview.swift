@@ -1,17 +1,17 @@
 import SwiftUI
 import AVFoundation
 
-/// A scene card in the grid. Tapping navigates to the scene. When the grid is at rest the card
-/// plays the Stash preview clip in place (muted, looping) over its thumbnail; while the grid is
-/// scrolling only the static thumbnail is shown. Decoding several videos during a scroll competes
-/// for GPU/CPU/memory bandwidth and drops frames, so pausing playback while scrolling is what keeps
-/// scrolling smooth. The preview file is served from `PreviewCache` (local disk) so playback starts
-/// instantly with no buffering stall, and the thumbnail sits under a transparent player layer so
-/// there's no black flash before the first frame.
+/// A scene card in the grid. Tapping navigates to the scene. The card plays the Stash preview clip
+/// in place (muted, looping) over its thumbnail. Once a preview is playing it keeps playing through
+/// scrolling — it's never paused or swapped back to the thumbnail, so videos don't visibly restart
+/// when you stop. To keep fast flicks smooth, *new* players aren't created while flinging quickly;
+/// those cells show their thumbnail and begin playing when the scroll slows or stops. Preview files
+/// come from `PreviewCache` (local disk) so playback starts instantly with no buffering stall, and
+/// the thumbnail sits under a transparent player layer so there's no black flash.
 struct SceneGridCell: View {
     let scene: StashScene
     let apiKey: String
-    @Binding var isScrolling: Bool
+    @Binding var isFastScrolling: Bool
     @Binding var path: NavigationPath
     var onAppear: () -> Void
 
@@ -21,37 +21,31 @@ struct SceneGridCell: View {
     @State private var looper: AVPlayerLooper?
 
     var body: some View {
-        SceneCard(scene: scene, apiKey: apiKey, player: (animatedPreviews && !isScrolling) ? player : nil)
+        SceneCard(scene: scene, apiKey: apiKey, player: animatedPreviews ? player : nil)
             .onTapGesture { path.append(scene) }
             .onAppear {
                 onAppear()
-                updatePlayback()
+                startPreviewIfNeeded()
             }
-            .onChange(of: isScrolling) { _, _ in updatePlayback() }
-            .onChange(of: animatedPreviews) { _, _ in updatePlayback() }
+            // When a fast flick settles, start previews for cells that deferred creation.
+            .onChange(of: isFastScrolling) { _, fast in
+                if !fast { startPreviewIfNeeded() }
+            }
+            .onChange(of: animatedPreviews) { _, on in
+                if on { startPreviewIfNeeded() } else { teardown() }
+            }
             .onDisappear { teardown() }
     }
 
-    private func updatePlayback() {
-        guard animatedPreviews else { teardown(); return }
-        if isScrolling {
-            player?.pause()
-        } else {
-            playPreview()
-        }
-    }
-
-    private func playPreview() {
-        if let player {
-            player.play()
-            return
-        }
+    private func startPreviewIfNeeded() {
+        // Already playing, previews off, or flinging too fast to reasonably load — skip. Crucially
+        // we never pause an existing player, so playback is continuous and never restarts on stop.
+        guard animatedPreviews, player == nil, !isFastScrolling else { return }
         guard let remote = scene.previewURL(apiKey: apiKey) else { return }
         Task {
             guard let local = await previewCache.localURL(for: remote) else { return }
-            // Bail if scrolling resumed, previews were disabled, or another task already built the
-            // player while downloading.
-            guard !isScrolling, animatedPreviews, player == nil else { return }
+            // Re-check after the (possibly slow) download: don't create if state changed meanwhile.
+            guard animatedPreviews, player == nil, !isFastScrolling else { return }
             let item = AVPlayerItem(url: local)
             let queue = AVQueuePlayer()
             queue.isMuted = true

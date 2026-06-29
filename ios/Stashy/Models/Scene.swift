@@ -21,6 +21,8 @@ struct SceneFile: Codable, Sendable, Hashable {
     let video_codec: String?
     let width: Int?
     let height: Int?
+    let basename: String?
+    let size: Int?
 }
 
 struct ScenePaths: Codable, Sendable {

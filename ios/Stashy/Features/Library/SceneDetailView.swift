@@ -75,6 +75,42 @@ struct SceneDetailView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
+                    // File(s)
+                    if !scene.files.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label(scene.files.count > 1 ? "Files" : "File", systemImage: "doc")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+
+                            ForEach(Array(scene.files.enumerated()), id: \.offset) { _, file in
+                                if let name = file.basename {
+                                    Text(name)
+                                        .font(.footnote)
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(2)
+                                        .textSelection(.enabled)
+                                }
+                            }
+
+                            HStack(spacing: 12) {
+                                if let res = scene.resolutionLabel {
+                                    Label(res, systemImage: "rectangle.compress.vertical")
+                                }
+                                if let codec = scene.codecLabel {
+                                    Label(codec, systemImage: "film")
+                                }
+                                if let size = scene.files.first?.size {
+                                    Label(
+                                        ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file),
+                                        systemImage: "internaldrive"
+                                    )
+                                }
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+
                     // Performers
                     if !scene.performers.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {

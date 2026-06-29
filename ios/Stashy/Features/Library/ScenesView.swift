@@ -55,7 +55,10 @@ struct ScenesView: View {
     @Environment(ThemeManager.self) private var themeManager
     @State private var viewModel = ScenesViewModel()
     @State private var path = NavigationPath()
-    @State private var isScrolling = false
+    @State private var isFastScrolling = false
+    @State private var lastOffsetY: CGFloat = 0
+    @State private var lastSampleTime = Date()
+    @State private var settleTask: Task<Void, Never>?
 
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
@@ -91,7 +94,7 @@ struct ScenesView: View {
                                 SceneGridCell(
                                     scene: scene,
                                     apiKey: appState.client?.apiKey ?? "",
-                                    isScrolling: $isScrolling,
+                                    isFastScrolling: $isFastScrolling,
                                     path: $path
                                 ) {
                                     guard let client = appState.client else { return }
@@ -101,9 +104,10 @@ struct ScenesView: View {
                                             client: client
                                         )
                                     }
-                                    // Prefetch thumbnails and preview clips for the next batch.
                                     prefetchThumbnails(around: scene)
-                                    prefetchPreviews(around: scene)
+                                    // Don't fetch previews for everything flying by during a fast
+                                    // flick; only warm a few ahead while moving at a manageable pace.
+                                    if !isFastScrolling { prefetchPreviews(around: scene) }
                                 }
                             }
                         }
@@ -114,8 +118,25 @@ struct ScenesView: View {
                                 .padding()
                         }
                     }
+                    // Estimate scroll velocity to distinguish a normal drag from a fast flick.
+                    .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, newY in
+                        let now = Date()
+                        let dt = now.timeIntervalSince(lastSampleTime)
+                        if dt > 0 {
+                            let velocity = abs(newY - lastOffsetY) / dt
+                            if velocity > 2500 { isFastScrolling = true }
+                        }
+                        lastOffsetY = newY
+                        lastSampleTime = now
+                        // Clear the fast flag shortly after movement settles.
+                        settleTask?.cancel()
+                        settleTask = Task {
+                            try? await Task.sleep(for: .milliseconds(120))
+                            isFastScrolling = false
+                        }
+                    }
                     .onScrollPhaseChange { _, newPhase in
-                        isScrolling = newPhase != .idle
+                        if newPhase == .idle { isFastScrolling = false }
                     }
                     .refreshable {
                         guard let client = appState.client else { return }
@@ -155,7 +176,7 @@ struct ScenesView: View {
         guard let idx = viewModel.scenes.firstIndex(where: { $0.id == scene.id }),
               let apiKey = appState.client?.apiKey else { return }
         let start = min(idx, viewModel.scenes.count - 1)
-        let end = min(idx + 8, viewModel.scenes.count)
+        let end = min(idx + 4, viewModel.scenes.count)
         guard start < end else { return }
         let urls = viewModel.scenes[start..<end].compactMap { $0.previewURL(apiKey: apiKey) }
         Task.detached(priority: .background) {

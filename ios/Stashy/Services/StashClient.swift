@@ -65,7 +65,7 @@ struct StashClient: Sendable {
     // Shared scene selection set, reused across scene queries.
     private static let sceneFields = """
       id title date
-      files { duration video_codec width height }
+      files { duration video_codec width height basename size }
       paths { screenshot preview sprite vtt }
       studio { id name }
       performers { id name image_path rating100 scene_count country birthdate gender urls }
