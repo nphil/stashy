@@ -44,7 +44,15 @@ final class AVPlaybackEngine: PlaybackEngine {
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         try? AVAudioSession.sharedInstance().setActive(true)
 
-        item = AVPlayerItem(url: url)
+        // Inject the Stash apikey as an HTTP header so HLS segment requests — which can drop the query
+        // param when AVPlayer resolves relative segment URLs — still authenticate (otherwise HLS plays
+        // audio/black or errors on auth, not on rendering).
+        var assetOptions: [String: Any] = [:]
+        if let apiKey = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?.first(where: { $0.name == "apikey" })?.value {
+            assetOptions["AVURLAssetHTTPHeaderFieldsKey"] = ["ApiKey": apiKey]
+        }
+        item = AVPlayerItem(asset: AVURLAsset(url: url, options: assetOptions))
         videoOutput = AVPlayerItemVideoOutput(pixelBufferAttributes: [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
         ])

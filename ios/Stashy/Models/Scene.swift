@@ -65,16 +65,19 @@ extension StashScene {
     /// and KSPlayer/FFmpeg for everything else (exotic containers/codecs), preserving codec support.
     /// `reason` records the exact AVPlayer-incompatibility so the Stats overlay can show it.
     func playbackRoute(apiKey: String) -> PlaybackRoute? {
-        // Prefer the direct file stream (Stash also offers HLS/DASH transcode endpoints we skip for now).
+        // TEST (temporary): route the AVPlayer path through Stash's HLS (transcoded) stream. AVPlayer
+        // plays HLS reliably, so this confirms whether the black-video direct-stream files are an
+        // AVPlayer input-probing issue (to be fixed by the local FFmpeg remux) rather than AVPlayer
+        // being unable to render the content. Revert to direct-play once the FFmpeg pipeline lands.
+        if let hls = sceneStreams.first(where: { $0.isHLS }), let url = appendingAPIKey(apiKey, to: hls.url) {
+            return PlaybackRoute(url: url, engine: .avPlayer,
+                                 streamType: "HLS (transcoded)", reason: "TEST: AVPlayer via Stash HLS")
+        }
+
+        // No HLS stream offered → fall back to direct-play routing.
         let direct = sceneStreams.first { !$0.isHLS && !$0.isDASH }
         let chosen = direct ?? sceneStreams.first
         guard let urlString = chosen?.url, let url = appendingAPIKey(apiKey, to: urlString) else { return nil }
-
-        // If only a transcoded HLS stream exists, AVPlayer plays it natively regardless of source codec.
-        if direct == nil, let chosen, chosen.isHLS {
-            return PlaybackRoute(url: url, engine: .avPlayer,
-                                 streamType: "HLS (transcoded)", reason: "Only an HLS stream was offered")
-        }
 
         let container = fileContainer
         let codec = (files.first?.video_codec ?? "").lowercased()
