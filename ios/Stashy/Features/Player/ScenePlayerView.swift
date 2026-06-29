@@ -63,6 +63,7 @@ struct ScenePlayerView: View {
     var onBack: (() -> Void)?
     @Environment(\.imageCache) private var imageCache
     @State private var model: ScenePlayerModel
+    @State private var blurModel: BlurVideoModel
     @State private var sprites = SpriteThumbnails()
     @State private var suppressAutoFullscreen = false
     @State private var zoomScale: CGFloat = 1
@@ -79,6 +80,7 @@ struct ScenePlayerView: View {
         _isFullscreen = isFullscreen
         self.onBack = onBack
         _model = State(initialValue: ScenePlayerModel(url: url))
+        _blurModel = State(initialValue: BlurVideoModel(url: url))
     }
 
     /// The video's display aspect (from file metadata, available immediately).
@@ -96,14 +98,21 @@ struct ScenePlayerView: View {
             let surfaceSize = isFullscreen ? avail : Self.fitSize(aspect: aspect, in: videoArea)
 
             ZStack(alignment: .bottom) {
-                // Background: blurred poster inline (fills the gaps and the status-bar strip so
-                // portrait/odd-ratio videos blend seamlessly); plain black in fullscreen, where
-                // letterbox bars are fine because the video can be zoomed.
-                Group {
-                    if !isFullscreen, let poster {
-                        Image(uiImage: poster).resizable().scaledToFill().blur(radius: 32)
-                    } else {
+                // Background: a moving, blurred copy of the same video inline (fills the gaps and the
+                // status-bar strip so portrait/odd-ratio videos blend seamlessly with their own
+                // footage); plain black in fullscreen, where letterbox bars are fine (the video zooms).
+                ZStack {
+                    if isFullscreen {
                         Color.black
+                    } else {
+                        // Blurred poster shows through until the blur stream has frames (no black flash);
+                        // the live blur (clear-backed) then blurs the moving video over it.
+                        if let poster {
+                            Image(uiImage: poster).resizable().scaledToFill().blur(radius: 32)
+                        } else {
+                            Color.black
+                        }
+                        LiveBlurVideoView(player: blurModel.player)
                     }
                 }
                 .frame(width: avail.width, height: avail.height)
@@ -178,6 +187,7 @@ struct ScenePlayerView: View {
             if now {
                 // Portrait videos go fullscreen in portrait; everything else uses landscape.
                 OrientationController.lock(scene.isPortraitVideo ? .portrait : [.landscapeLeft, .landscapeRight])
+                blurModel.pause() // no blur backdrop in fullscreen
             } else {
                 // Force back to portrait even if the phone is still held in landscape. Zoom is reset
                 // automatically by the surface once zoom is disabled (zoomEnabled = isFullscreen).
@@ -185,12 +195,24 @@ struct ScenePlayerView: View {
                 if UIDevice.current.orientation.isLandscape {
                     suppressAutoFullscreen = true
                 }
+                blurModel.sync(to: model.currentTime, playing: model.isPlaying)
             }
         }
-        .onAppear { UIDevice.current.beginGeneratingDeviceOrientationNotifications() }
+        // Keep the blurred backdrop loosely matched to the main player (inline only).
+        .onChange(of: model.currentTime) { _, t in
+            if !isFullscreen { blurModel.sync(to: t, playing: model.isPlaying) }
+        }
+        .onChange(of: model.isPlaying) { _, playing in
+            if !isFullscreen { playing ? blurModel.play() : blurModel.pause() }
+        }
+        .onAppear {
+            UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+            if !isFullscreen { blurModel.play() }
+        }
         .onDisappear {
             OrientationController.lock(.portrait)
             hideTask?.cancel()
+            blurModel.pause()
             if !isFullscreen { model.pause() }
         }
     }
