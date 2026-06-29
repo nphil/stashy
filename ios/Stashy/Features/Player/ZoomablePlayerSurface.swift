@@ -70,8 +70,10 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
         coordinator.attachPlayerView()
         scroll.maximumZoomScale = zoomEnabled ? 4 : 1
         if !coordinator.isScrubbing { scroll.isScrollEnabled = zoomEnabled }
-        if !zoomEnabled, scroll.zoomScale != 1 {
-            scroll.setZoomScale(1, animated: false)
+        // Fully reset zoom/pan whenever zooming is disabled (e.g. leaving fullscreen) so the video
+        // never returns to the inline player still zoomed or offset.
+        if !zoomEnabled {
+            coordinator.resetZoom()
         }
         coordinator.layoutContainer()
     }
@@ -108,6 +110,14 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
                 scroll.contentSize = scroll.bounds.size
                 parent.model.layer.player.view?.frame = container.bounds
             }
+        }
+
+        /// Reset zoom, pan offset, and centring insets — used when zooming is disabled.
+        func resetZoom() {
+            guard let scroll = scrollView else { return }
+            if scroll.zoomScale != 1 { scroll.setZoomScale(1, animated: false) }
+            scroll.contentInset = .zero
+            scroll.contentOffset = .zero
         }
 
         // MARK: - UIScrollViewDelegate

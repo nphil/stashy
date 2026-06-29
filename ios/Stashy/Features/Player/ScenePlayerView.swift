@@ -56,6 +56,9 @@ final class ScenePlayerModel: KSPlayerLayerDelegate {
 struct ScenePlayerView: View {
     let scene: StashScene
     let apiKey: String
+    /// Inline only: top safe-area inset so the sharp video sits below the status bar while the
+    /// blurred backdrop bleeds up behind the status bar / Dynamic Island.
+    var contentTopInset: CGFloat = 0
     @Binding var isFullscreen: Bool
     var onBack: (() -> Void)?
     @Environment(\.imageCache) private var imageCache
@@ -69,60 +72,80 @@ struct ScenePlayerView: View {
     @State private var scrubTime: TimeInterval = 0
     @State private var hideTask: Task<Void, Never>?
 
-    init(scene: StashScene, apiKey: String, url: URL, isFullscreen: Binding<Bool>, onBack: (() -> Void)? = nil) {
+    init(scene: StashScene, apiKey: String, url: URL, contentTopInset: CGFloat = 0, isFullscreen: Binding<Bool>, onBack: (() -> Void)? = nil) {
         self.scene = scene
         self.apiKey = apiKey
+        self.contentTopInset = contentTopInset
         _isFullscreen = isFullscreen
         self.onBack = onBack
         _model = State(initialValue: ScenePlayerModel(url: url))
     }
 
+    /// The video's display aspect (from file metadata, available immediately).
+    private var aspect: CGFloat { scene.videoAspect ?? 16.0 / 9.0 }
+
     var body: some View {
-        ZStack {
-            // Blurred poster fills the frame so portrait/odd-ratio videos sit on a seamless
-            // backdrop instead of black bars (GPU blur, cheap — it's a single still image).
-            Group {
-                if let poster {
-                    Image(uiImage: poster).resizable().scaledToFill().blur(radius: 30)
-                } else {
-                    Color.black
+        GeometryReader { geo in
+            let avail = geo.size
+            // Inline reserves the top strip for the status bar; the sharp video fits the area below.
+            let inset = isFullscreen ? 0 : contentTopInset
+            let videoArea = CGSize(width: avail.width, height: max(avail.height - inset, 1))
+            let fit = Self.fitSize(aspect: aspect, in: videoArea)
+
+            ZStack {
+                // Background: blurred poster inline (fills the letterbox gaps and the status-bar
+                // strip so portrait/odd-ratio videos blend seamlessly); plain black in fullscreen,
+                // where letterbox bars are fine because the video can be zoomed.
+                Group {
+                    if !isFullscreen, let poster {
+                        Image(uiImage: poster).resizable().scaledToFill().blur(radius: 32)
+                    } else {
+                        Color.black
+                    }
                 }
+                .frame(width: avail.width, height: avail.height)
+                .clipped()
+                .allowsHitTesting(false)
+
+                // Tapping anywhere (including the blurred letterbox) toggles the controls.
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { toggleControls() }
+
+                ZoomablePlayerSurface(
+                    model: model,
+                    isReady: model.isReady,
+                    zoomEnabled: isFullscreen,
+                    zoomScale: $zoomScale,
+                    isScrubbing: $isScrubbing,
+                    scrubTime: $scrubTime,
+                    onSingleTap: { toggleControls() },
+                    onScrubStart: { hideTask?.cancel(); showControls = true },
+                    onScrubEnd: { scheduleHide() },
+                    onSwipeDownDismiss: { if isFullscreen { isFullscreen = false } }
+                )
+                .frame(width: fit.width, height: fit.height)
+                .offset(y: inset / 2) // center within the area below the status bar (inline)
+
+                if !model.isReady {
+                    ProgressView()
+                        .controlSize(.large)
+                        .tint(.white)
+                }
+
+                PlayerControlsView(
+                    model: model,
+                    sprites: sprites,
+                    isFullscreen: $isFullscreen,
+                    showControls: $showControls,
+                    isScrubbing: $isScrubbing,
+                    scrubTime: $scrubTime,
+                    spritePreviewTopLeading: isFullscreen && scene.isPortraitVideo,
+                    scheduleHide: { scheduleHide() },
+                    onBack: onBack
+                )
             }
-            .ignoresSafeArea(edges: isFullscreen ? .all : [])
-            .clipped()
-            .allowsHitTesting(false)
-
-            ZoomablePlayerSurface(
-                model: model,
-                isReady: model.isReady,
-                zoomEnabled: isFullscreen,
-                zoomScale: $zoomScale,
-                isScrubbing: $isScrubbing,
-                scrubTime: $scrubTime,
-                onSingleTap: { toggleControls() },
-                onScrubStart: { hideTask?.cancel(); showControls = true },
-                onScrubEnd: { scheduleHide() },
-                onSwipeDownDismiss: { if isFullscreen { isFullscreen = false } }
-            )
-            .ignoresSafeArea(edges: isFullscreen ? .all : [])
-
-            // Smooth loading indicator while the file spins up (e.g. NAS) before the first frame.
-            if !model.isReady {
-                ProgressView()
-                    .controlSize(.large)
-                    .tint(.white)
-            }
-
-            PlayerControlsView(
-                model: model,
-                sprites: sprites,
-                isFullscreen: $isFullscreen,
-                showControls: $showControls,
-                isScrubbing: $isScrubbing,
-                scrubTime: $scrubTime,
-                scheduleHide: { scheduleHide() },
-                onBack: onBack
-            )
+            .frame(width: avail.width, height: avail.height)
         }
         .task {
             guard let vtt = scene.vttURL(apiKey: apiKey),
@@ -133,9 +156,11 @@ struct ScenePlayerView: View {
             guard let url = scene.thumbnailURL(apiKey: apiKey) else { return }
             poster = try? await imageCache.image(for: url)
         }
-        // Rotate to landscape → fullscreen; back to portrait → inline. A manual exit while still
-        // landscape suppresses auto re-entry until the device returns to portrait.
+        // Landscape videos: rotating to landscape enters fullscreen (and back to portrait exits).
+        // Portrait videos never auto-rotate into a landscape fullscreen — they go fullscreen in
+        // portrait via the button instead.
         .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+            guard !scene.isPortraitVideo else { return }
             let orientation = UIDevice.current.orientation
             if orientation.isLandscape {
                 if !suppressAutoFullscreen { isFullscreen = true }
@@ -146,8 +171,8 @@ struct ScenePlayerView: View {
         }
         .onChange(of: isFullscreen) { _, now in
             if now {
-                // Fullscreen is the only landscape surface in the app.
-                OrientationController.lock([.landscapeLeft, .landscapeRight])
+                // Portrait videos go fullscreen in portrait; everything else uses landscape.
+                OrientationController.lock(scene.isPortraitVideo ? .portrait : [.landscapeLeft, .landscapeRight])
             } else {
                 // Force back to portrait even if the phone is still held in landscape. Zoom is reset
                 // automatically by the surface once zoom is disabled (zoomEnabled = isFullscreen).
@@ -162,6 +187,17 @@ struct ScenePlayerView: View {
             OrientationController.lock(.portrait)
             hideTask?.cancel()
             if !isFullscreen { model.pause() }
+        }
+    }
+
+    /// Aspect-fit a video of `aspect` (w/h) inside `size`, returning the displayed size.
+    static func fitSize(aspect: CGFloat, in size: CGSize) -> CGSize {
+        guard size.width > 0, size.height > 0, aspect > 0 else { return size }
+        let containerAspect = size.width / size.height
+        if aspect > containerAspect {
+            return CGSize(width: size.width, height: size.width / aspect)
+        } else {
+            return CGSize(width: size.height * aspect, height: size.height)
         }
     }
 

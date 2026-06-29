@@ -52,6 +52,7 @@ struct PerformersView: View {
     @Environment(\.imageCache) private var imageCache
     @State private var viewModel = PerformersViewModel()
     @State private var filterExpanded = false
+    @State private var path: [Route] = []
 
     private let columns = [GridItem(.adaptive(minimum: 110), spacing: 12)]
 
@@ -61,7 +62,7 @@ struct PerformersView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(themeManager.current.backgroundColor.ignoresSafeArea())
@@ -79,8 +80,8 @@ struct PerformersView: View {
                         FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
                     }
                 }
-                .navigationDestination(for: Performer.self) { performer in
-                    PerformerDetailView(performer: performer)
+                .navigationDestination(for: Route.self) { route in
+                    RouteDestination(route: route, path: $path)
                 }
         }
         .onChange(of: viewModel.query) { _, _ in
@@ -108,7 +109,7 @@ struct PerformersView: View {
             ScrollView {
                 LazyVGrid(columns: columns, spacing: 16) {
                     ForEach(viewModel.performers) { performer in
-                        NavigationLink(value: performer) {
+                        NavigationLink(value: Route.performer(performer)) {
                             PerformerCard(performer: performer, apiKey: appState.client?.apiKey ?? "")
                         }
                         .buttonStyle(.plain)

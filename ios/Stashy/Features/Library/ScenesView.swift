@@ -55,7 +55,7 @@ struct ScenesView: View {
     @Environment(ThemeManager.self) private var themeManager
     @Environment(AppRouter.self) private var router
     @State private var viewModel = ScenesViewModel()
-    @State private var path = NavigationPath()
+    @State private var path: [Route] = []
     @State private var previewPresenter = ScenePreviewPresenter()
     @State private var filterExpanded = false
 
@@ -85,12 +85,12 @@ struct ScenesView: View {
                         FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
                     }
                 }
-                .navigationDestination(for: StashScene.self) { scene in
-                    SceneDetailView(scene: scene)
+                .navigationDestination(for: Route.self) { route in
+                    RouteDestination(route: route, path: $path)
                 }
         }
         .environment(\.scenePreviewPresenter, previewPresenter)
-        .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: { path.append($0) }) }
+        .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: { path.append(.scene($0)) }) }
         .onChange(of: viewModel.query) { _, _ in
             guard let client = appState.client else { return }
             Task { await viewModel.loadFirstPage(client: client) }
@@ -98,7 +98,7 @@ struct ScenesView: View {
         // A tag tapped elsewhere filters scenes to just that tag (pops to the grid).
         .onChange(of: router.sceneTagFilter) { _, tag in
             guard let tag else { return }
-            path = NavigationPath()
+            path = []
             viewModel.query = SceneQuery(tags: [tag])
             router.sceneTagFilter = nil
         }
@@ -147,7 +147,7 @@ struct ScenesView: View {
                         SceneGridCell(
                             scene: scene,
                             apiKey: appState.client?.apiKey ?? "",
-                            onOpen: { path.append($0) }
+                            onOpen: { path.append(.scene($0)) }
                         ) {
                             guard let client = appState.client else { return }
                             Task {

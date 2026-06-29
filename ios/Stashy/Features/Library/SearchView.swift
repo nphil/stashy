@@ -40,7 +40,7 @@ struct SearchView: View {
     @Environment(ThemeManager.self) private var themeManager
     @Environment(\.imageCache) private var imageCache
     @State private var viewModel = SearchViewModel()
-    @State private var path = NavigationPath()
+    @State private var path: [Route] = []
     @State private var previewPresenter = ScenePreviewPresenter()
 
     private var hasResults: Bool {
@@ -65,7 +65,7 @@ struct SearchView: View {
                         if !viewModel.performers.isEmpty {
                             Section("Performers") {
                                 ForEach(viewModel.performers) { performer in
-                                    NavigationLink(value: performer) {
+                                    NavigationLink(value: Route.performer(performer)) {
                                         PerformerRow(performer: performer, apiKey: appState.client?.apiKey ?? "")
                                     }
                                 }
@@ -84,7 +84,7 @@ struct SearchView: View {
                             Section("Scenes") {
                                 ForEach(viewModel.scenes) { scene in
                                     SearchSceneRow(scene: scene, apiKey: appState.client?.apiKey ?? "")
-                                        .scenePreview(scene, apiKey: appState.client?.apiKey ?? "") { path.append($0) }
+                                        .scenePreview(scene, apiKey: appState.client?.apiKey ?? "") { path.append(.scene($0)) }
                                 }
                             }
                         }
@@ -98,14 +98,11 @@ struct SearchView: View {
             .navigationTitle("Search")
             .navigationBarTitleDisplayMode(.inline)
             .searchable(text: Bindable(viewModel).query, prompt: "Search scenes and performers")
-            .navigationDestination(for: StashScene.self) { scene in
-                SceneDetailView(scene: scene)
-            }
-            .navigationDestination(for: Performer.self) { performer in
-                PerformerDetailView(performer: performer)
+            .navigationDestination(for: Route.self) { route in
+                RouteDestination(route: route, path: $path)
             }
             .navigationDestination(for: Tag.self) { tag in
-                TagScenesView(tag: tag)
+                TagScenesView(tag: tag, path: $path)
             }
             .onChange(of: viewModel.query) {
                 guard let client = appState.client else { return }
@@ -113,7 +110,7 @@ struct SearchView: View {
             }
         }
         .environment(\.scenePreviewPresenter, previewPresenter)
-        .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: { path.append($0) }) }
+        .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: { path.append(.scene($0)) }) }
     }
 }
 
@@ -159,6 +156,7 @@ struct SearchSceneRow: View {
 /// Scenes filtered to a single tag (pushed from search). Reuses the paginated scenes model.
 struct TagScenesView: View {
     let tag: Tag
+    @Binding var path: [Route]
     @Environment(AppState.self) private var appState
     @Environment(ThemeManager.self) private var themeManager
     @State private var viewModel = ScenesViewModel()
@@ -169,7 +167,7 @@ struct TagScenesView: View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 10) {
                 ForEach(viewModel.scenes) { scene in
-                    NavigationLink(value: scene) {
+                    NavigationLink(value: Route.scene(scene)) {
                         SceneCard(scene: scene, apiKey: appState.client?.apiKey ?? "")
                     }
                     .buttonStyle(.plain)

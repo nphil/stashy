@@ -2,14 +2,12 @@ import SwiftUI
 
 struct SceneDetailView: View {
     let scene: StashScene
+    @Binding var path: [Route]
     @Environment(AppState.self) private var appState
     @Environment(ThemeManager.self) private var themeManager
     @Environment(\.dismiss) private var dismiss
     @AppStorage("blurTitles") private var blurTitles = false
     @State private var isFullscreen = false
-
-    // Inline player fills the width at 16:9 and sits at the very top (below the status bar).
-    private var inlineHeight: CGFloat { UIScreen.main.bounds.width * 9 / 16 }
 
     private var streamURL: URL? {
         guard let client = appState.client else { return nil }
@@ -17,33 +15,42 @@ struct SceneDetailView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .top) {
-            // Fixed (no-scroll) layout: player up top, compact metadata fills the rest.
-            VStack(spacing: 0) {
-                Color.clear.frame(height: inlineHeight)
-                metadata
-            }
-            .opacity(isFullscreen ? 0 : 1)
+        GeometryReader { geo in
+            let topInset = geo.safeAreaInsets.top
+            // Inline player box is a constant 35% of the usable height (excludes the status bar),
+            // regardless of the video's aspect ratio. The player also extends up behind the status
+            // bar, where the blurred backdrop fills the Dynamic Island area.
+            let boxHeight = geo.size.height * 0.35
 
-            // Single player instance — resized in place for fullscreen (no re-parenting), which
-            // keeps the render surface alive across the rotation that previously blanked it.
-            Group {
-                if let streamURL {
-                    ScenePlayerView(
-                        scene: scene,
-                        apiKey: apiKey,
-                        url: streamURL,
-                        isFullscreen: $isFullscreen,
-                        onBack: { dismiss() }
-                    )
-                } else {
-                    Rectangle()
-                        .fill(.black)
-                        .overlay { ProgressView().tint(.white) }
+            ZStack(alignment: .top) {
+                // Fixed (no-scroll) layout: player up top, compact metadata fills the rest.
+                VStack(spacing: 0) {
+                    Color.clear.frame(height: boxHeight)
+                    metadata
                 }
+                .opacity(isFullscreen ? 0 : 1)
+
+                // Single player instance — resized in place for fullscreen (no re-parenting), which
+                // keeps the render surface alive across the rotation that previously blanked it.
+                Group {
+                    if let streamURL {
+                        ScenePlayerView(
+                            scene: scene,
+                            apiKey: apiKey,
+                            url: streamURL,
+                            contentTopInset: topInset,
+                            isFullscreen: $isFullscreen,
+                            onBack: { dismiss() }
+                        )
+                    } else {
+                        Rectangle()
+                            .fill(.black)
+                            .overlay { ProgressView().tint(.white) }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: isFullscreen ? .infinity : boxHeight + topInset, alignment: .top)
+                .ignoresSafeArea(edges: isFullscreen ? .all : .top)
             }
-            .frame(maxWidth: .infinity, maxHeight: isFullscreen ? .infinity : inlineHeight)
-            .background(.black)
         }
         .background(themeManager.current.backgroundColor.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
@@ -51,9 +58,6 @@ struct SceneDetailView: View {
         .navigationBarBackButtonHidden(true)
         .statusBarHidden(isFullscreen)
         .background(EnableSwipeBack()) // keep edge-swipe back even with the nav bar hidden
-        .navigationDestination(for: Performer.self) { performer in
-            PerformerDetailView(performer: performer)
-        }
     }
 
     private var metadata: some View {
@@ -81,8 +85,10 @@ struct SceneDetailView: View {
 
                 // Performer card (left, enlarged) + socials stack (right, truncated to fit).
                 HStack(alignment: .top, spacing: spacing) {
-                    ScenePerformerCard(performers: scene.performers, apiKey: apiKey)
-                        .frame(width: 150, height: topRowHeight)
+                    ScenePerformerCard(performers: scene.performers, apiKey: apiKey) { performer in
+                        path.openPerformer(performer)
+                    }
+                    .frame(width: 150, height: topRowHeight)
                     SocialsCard(links: socialLinks ?? [])
                         .frame(maxWidth: .infinity)
                         .frame(height: topRowHeight)
@@ -149,6 +155,7 @@ struct SceneDetailView: View {
 struct ScenePerformerCard: View {
     let performers: [Performer]
     let apiKey: String
+    var onOpen: (Performer) -> Void
     @Environment(\.imageCache) private var imageCache
     @Environment(ThemeManager.self) private var themeManager
     @AppStorage("blurThumbnails") private var blurThumbnails = false
@@ -157,7 +164,7 @@ struct ScenePerformerCard: View {
 
     var body: some View {
         if let performer = performers.first {
-            NavigationLink(value: performer) {
+            Button { onOpen(performer) } label: {
                 ZStack(alignment: .bottomLeading) {
                     Rectangle().fill(themeManager.current.surfaceColor)
                         .overlay {

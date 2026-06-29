@@ -9,6 +9,9 @@ struct PlayerControlsView: View {
     @Binding var showControls: Bool
     @Binding var isScrubbing: Bool
     @Binding var scrubTime: TimeInterval
+    /// In portrait-video fullscreen the scrubber sits low on a tall screen, so the sprite preview
+    /// is pinned to the top-left instead of floating above the thumb.
+    var spritePreviewTopLeading = false
     let scheduleHide: () -> Void
     var onBack: (() -> Void)? = nil
 
@@ -53,6 +56,19 @@ struct PlayerControlsView: View {
                     .transition(.opacity)
                 }
             }
+
+            // Portrait-fullscreen scrub preview, pinned top-left (shows whenever scrubbing).
+            if spritePreviewTopLeading, isScrubbing, let image = sprites.thumbnail(at: scrubTime) {
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 160, height: 90)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.7), lineWidth: 1))
+                    .padding(.leading, 16)
+                    .padding(.top, 16)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
         }
         .animation(.easeInOut(duration: 0.2), value: showControls)
         .onAppear { scheduleHide() }
@@ -64,7 +80,7 @@ struct PlayerControlsView: View {
                 duration: model.duration,
                 currentTime: model.currentTime,
                 sprites: sprites,
-                showSpritePreview: true, // always show the 100% sprite preview, even when zoomed
+                showSpritePreview: !spritePreviewTopLeading, // top-left variant renders separately
                 isScrubbing: $isScrubbing,
                 scrubTime: $scrubTime,
                 onSeek: { model.seek(to: $0); scheduleHide() }

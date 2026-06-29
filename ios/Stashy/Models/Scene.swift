@@ -73,6 +73,19 @@ extension StashScene {
         return appendingAPIKey(apiKey, to: vtt)
     }
 
+    /// Width / height of the primary file, when known (used to lay out the player without waiting
+    /// for the first decoded frame).
+    var videoAspect: CGFloat? {
+        guard let w = files.first?.width, let h = files.first?.height, w > 0, h > 0 else { return nil }
+        return CGFloat(w) / CGFloat(h)
+    }
+
+    /// True when the video is taller than it is wide (shot in portrait).
+    var isPortraitVideo: Bool {
+        guard let aspect = videoAspect else { return false }
+        return aspect < 1
+    }
+
     var resolutionLabel: String? {
         guard let h = files.first?.height, h > 0 else { return nil }
         return "\(h)p"

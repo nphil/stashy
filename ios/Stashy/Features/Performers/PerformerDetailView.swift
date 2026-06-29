@@ -48,13 +48,13 @@ final class PerformerScenesViewModel {
 
 struct PerformerDetailView: View {
     let performer: Performer
+    @Binding var path: [Route]
     @Environment(AppState.self) private var appState
     @Environment(ThemeManager.self) private var themeManager
     @Environment(\.imageCache) private var imageCache
     @State private var viewModel = PerformerScenesViewModel()
     @State private var portrait: UIImage?
     @State private var previewPresenter = ScenePreviewPresenter()
-    @State private var openedScene: StashScene?
     @State private var showImageViewer = false
     @AppStorage("blurThumbnails") private var blurThumbnails = false
     @AppStorage("blurTitles") private var blurTitles = false
@@ -81,7 +81,7 @@ struct PerformerDetailView: View {
                             SceneGridCell(
                                 scene: scene,
                                 apiKey: apiKey,
-                                onOpen: { openedScene = $0 }
+                                onOpen: { path.openScene($0) }
                             ) {
                                 guard let client = appState.client else { return }
                                 Task {
@@ -112,12 +112,9 @@ struct PerformerDetailView: View {
         }
         .background(themeManager.current.backgroundColor.ignoresSafeArea())
         .environment(\.scenePreviewPresenter, previewPresenter)
-        .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: { openedScene = $0 }) }
+        .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: { path.openScene($0) }) }
         .navigationTitle(performer.name)
         .navigationBarTitleDisplayMode(.inline)
-        .navigationDestination(item: $openedScene) { scene in
-            SceneDetailView(scene: scene)
-        }
         .fullScreenCover(isPresented: $showImageViewer) {
             if let portrait {
                 FullScreenImageViewer(image: portrait)
