@@ -233,7 +233,7 @@ struct ScenePlayerView: View {
 
                 if showStats {
                     // Anchored top-leading just below the back chevron, kept within the video rect.
-                    StatsOverlayView(scene: scene, model: model)
+                    StatsOverlayView(scene: scene, model: model, probeURL: scene.directFileURL(apiKey: apiKey))
                         .padding(.leading, max(videoRect.minX, safeArea.leading) + 12)
                         .padding(.top, max(videoRect.minY, safeArea.top) + 52)
                         .frame(width: avail.width, height: avail.height, alignment: .topLeading)

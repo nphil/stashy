@@ -84,6 +84,14 @@ extension StashScene {
                              reason: "Direct (AVPlayer); local FFmpeg pipeline pending")
     }
 
+    /// The direct (non-HLS/DASH) file stream URL — the actual media file the FFmpeg pipeline reads,
+    /// used by the demux probe and (later) the on-device remux/transcode path.
+    func directFileURL(apiKey: String) -> URL? {
+        let direct = sceneStreams.first { !$0.isHLS && !$0.isDASH } ?? sceneStreams.first
+        guard let urlString = direct?.url else { return nil }
+        return appendingAPIKey(apiKey, to: urlString)
+    }
+
     /// Lowercased container extension from the primary file's basename (e.g. "mp4", "mkv").
     var fileContainer: String {
         guard let basename = files.first?.basename,

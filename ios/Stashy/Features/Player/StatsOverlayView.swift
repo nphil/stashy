@@ -6,10 +6,17 @@ import SwiftUI
 struct StatsOverlayView: View {
     let scene: StashScene
     let model: ScenePlayerModel
+    /// The direct file URL to demux-probe with FFmpeg (debug; runs once when the overlay opens).
+    var probeURL: URL?
+    @State private var demux = "probing…"
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
             panel(model.snapshotStats(scene: scene))
+        }
+        .task(id: probeURL) {
+            guard let probeURL else { demux = "no direct stream"; return }
+            demux = await FFmpegSource(url: probeURL).probeSummary()
         }
     }
 
@@ -33,6 +40,17 @@ struct StatsOverlayView: View {
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
                         }
                     }
+                }
+
+                // FFmpeg demux probe of the direct file (proof the custom-AVIO interop works).
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("FFMPEG DEMUX")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.55))
+                    Text(demux)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             .padding(12)
