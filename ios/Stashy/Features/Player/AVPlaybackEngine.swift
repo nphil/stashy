@@ -90,11 +90,13 @@ final class AVPlaybackEngine: PlaybackEngine {
     func pause() { player.pause() }
 
     func seek(to time: TimeInterval) {
-        player.seek(
-            to: CMTime(seconds: time, preferredTimescale: 600),
-            toleranceBefore: .zero,
-            toleranceAfter: .zero
-        )
+        // Allow a small tolerance so the player can snap to the nearest already-decodable keyframe
+        // instead of fetching a frame-exact position. On HLS (server transcode) a zero-tolerance seek
+        // is the worst case — it stalls while the server produces the precise frame; tolerance makes
+        // scrubbing land and repaint far faster. On a local/direct file it's near-instant either way.
+        let tolerance = CMTime(seconds: 1, preferredTimescale: 600)
+        player.seek(to: CMTime(seconds: time, preferredTimescale: 600),
+                    toleranceBefore: tolerance, toleranceAfter: tolerance)
     }
 
     // MARK: - Stats
