@@ -121,6 +121,39 @@ struct StashClient: Sendable {
         return response.findPerformers
     }
 
+    /// Unified performer query: name search, sort + direction, optional ethnicity and tag filters.
+    func findPerformers(_ q: PerformerQuery, page: Int = 1, perPage: Int = 30) async throws -> FindPerformersResult {
+        let gql = """
+        query FindPerformers($filter: FindFilterType, $performer_filter: PerformerFilterType) {
+          findPerformers(filter: $filter, performer_filter: $performer_filter) {
+            count
+            performers { \(Self.performerFields) }
+          }
+        }
+        """
+        var performerFilter: PerformerFilter?
+        let ethnicity = q.ethnicity?.trimmingCharacters(in: .whitespaces)
+        if let ethnicity, !ethnicity.isEmpty {
+            performerFilter = PerformerFilter(ethnicity: StringCriterion(value: ethnicity, modifier: "EQUALS"))
+        }
+        if !q.tagIDs.isEmpty {
+            performerFilter = (performerFilter ?? PerformerFilter())
+            performerFilter?.tags = HierarchicalMultiCriterion(value: q.tagIDs, modifier: "INCLUDES_ALL", depth: 0)
+        }
+        let vars = FindPerformersFilterVariables(
+            filter: FindFilter(
+                q: q.search.isEmpty ? nil : q.search,
+                page: page,
+                per_page: perPage,
+                sort: q.sort.apiKey,
+                direction: q.direction.rawValue
+            ),
+            performer_filter: performerFilter
+        )
+        let response: FindPerformersResponse = try await query(gql, variables: vars)
+        return response.findPerformers
+    }
+
     /// Tag lookup for the tag filter / search. Defaults to name-sorted; pass sort "scenes_count"
     /// (desc) for popularity.
     func findTags(query q: String, limit: Int = 20, sort: String = "name", direction: String = "ASC") async throws -> [Tag] {
@@ -190,6 +223,49 @@ struct SceneQuery: Sendable, Equatable {
     var tagIDs: [String] { tags.map(\.id) }
 }
 
+enum PerformerSort: String, CaseIterable, Sendable, Identifiable, Hashable {
+    case name, sceneCount, rating, createdAt
+
+    var id: String { rawValue }
+
+    var apiKey: String {
+        switch self {
+        case .name: return "name"
+        case .sceneCount: return "scenes_count"
+        case .rating: return "rating"
+        case .createdAt: return "created_at"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .name: return "Name"
+        case .sceneCount: return "Scene Count"
+        case .rating: return "Rating"
+        case .createdAt: return "Date Added"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .name: return "textformat"
+        case .sceneCount: return "film.stack"
+        case .rating: return "star"
+        case .createdAt: return "clock"
+        }
+    }
+}
+
+struct PerformerQuery: Sendable, Equatable {
+    var search: String = ""
+    var sort: PerformerSort = .name
+    var direction: SortDirection = .asc
+    var ethnicity: String? = nil
+    var tags: [Tag] = []
+
+    var tagIDs: [String] { tags.map(\.id) }
+}
+
 // MARK: - Request / response types
 
 private struct GraphQLRequest<V: Encodable>: Encodable {
@@ -228,6 +304,20 @@ private struct FilterVariables: Encodable, Sendable { let filter: FindFilter }
 private struct FindScenesVariables: Encodable, Sendable {
     let filter: FindFilter
     let scene_filter: SceneFilter?
+}
+private struct FindPerformersFilterVariables: Encodable, Sendable {
+    let filter: FindFilter
+    let performer_filter: PerformerFilter?
+}
+
+struct PerformerFilter: Encodable, Sendable {
+    var ethnicity: StringCriterion? = nil
+    var tags: HierarchicalMultiCriterion? = nil
+}
+
+struct StringCriterion: Encodable, Sendable {
+    let value: String
+    let modifier: String
 }
 
 struct SceneFilter: Encodable, Sendable {

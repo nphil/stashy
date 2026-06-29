@@ -4,6 +4,7 @@ import SwiftUI
 @MainActor
 final class PerformersViewModel {
     var performers: [Performer] = []
+    var query = PerformerQuery()
     var isLoading = false
     var errorMessage: String?
     private var hasMore = true
@@ -33,7 +34,7 @@ final class PerformersViewModel {
 
     private func fetchPage(client: StashClient) async {
         do {
-            let result = try await client.findPerformers(page: currentPage, perPage: pageSize)
+            let result = try await client.findPerformers(query, page: currentPage, perPage: pageSize)
             let existing = Set(performers.map(\.id))
             let newPerformers = result.performers.filter { !existing.contains($0.id) }
             performers.append(contentsOf: newPerformers)
@@ -50,55 +51,84 @@ struct PerformersView: View {
     @Environment(ThemeManager.self) private var themeManager
     @Environment(\.imageCache) private var imageCache
     @State private var viewModel = PerformersViewModel()
+    @State private var filterExpanded = false
 
     private let columns = [GridItem(.adaptive(minimum: 110), spacing: 12)]
 
+    private var filterActive: Bool {
+        !viewModel.query.search.isEmpty || viewModel.query.ethnicity != nil
+            || !viewModel.query.tags.isEmpty || viewModel.query.sort != .name || viewModel.query.direction != .asc
+    }
+
     var body: some View {
         NavigationStack {
-            Group {
-                if viewModel.performers.isEmpty && viewModel.isLoading {
-                    ProgressView("Loading performers…")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if viewModel.performers.isEmpty {
-                    ContentUnavailableView("No Performers", systemImage: "person.2")
-                } else {
-                    ScrollView {
-                        LazyVGrid(columns: columns, spacing: 16) {
-                            ForEach(viewModel.performers) { performer in
-                                NavigationLink(value: performer) {
-                                    PerformerCard(performer: performer, apiKey: appState.client?.apiKey ?? "")
-                                }
-                                .buttonStyle(.plain)
-                                .onAppear {
-                                    guard let client = appState.client else { return }
-                                    Task {
-                                        await viewModel.loadNextPageIfNeeded(
-                                            triggerID: performer.id,
-                                            client: client
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                        .padding(12)
-
-                        if viewModel.isLoading {
-                            ProgressView().padding()
-                        }
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(themeManager.current.backgroundColor.ignoresSafeArea())
+                .overlay(alignment: .top) {
+                    if filterExpanded {
+                        PerformerFilterPanel(query: $viewModel.query)
+                            .padding(.top, 4)
+                            .transition(.move(edge: .top).combined(with: .opacity))
                     }
                 }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(themeManager.current.backgroundColor.ignoresSafeArea())
-            .navigationTitle("Performers")
-            .navigationBarTitleDisplayMode(.inline)
-            .navigationDestination(for: Performer.self) { performer in
-                PerformerDetailView(performer: performer)
-            }
+                .navigationTitle("Performers")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
+                    }
+                }
+                .navigationDestination(for: Performer.self) { performer in
+                    PerformerDetailView(performer: performer)
+                }
+        }
+        .onChange(of: viewModel.query) { _, _ in
+            guard let client = appState.client else { return }
+            Task { await viewModel.loadFirstPage(client: client) }
         }
         .task {
             guard viewModel.performers.isEmpty, let client = appState.client else { return }
             await viewModel.loadFirstPage(client: client)
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if viewModel.performers.isEmpty && viewModel.isLoading {
+            ProgressView("Loading performers…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if viewModel.performers.isEmpty {
+            ContentUnavailableView(
+                filterActive ? "No Matches" : "No Performers",
+                systemImage: "person.2",
+                description: Text(filterActive ? "No performers match these filters." : "Your Stash has no performers.")
+            )
+        } else {
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 16) {
+                    ForEach(viewModel.performers) { performer in
+                        NavigationLink(value: performer) {
+                            PerformerCard(performer: performer, apiKey: appState.client?.apiKey ?? "")
+                        }
+                        .buttonStyle(.plain)
+                        .onAppear {
+                            guard let client = appState.client else { return }
+                            Task {
+                                await viewModel.loadNextPageIfNeeded(
+                                    triggerID: performer.id,
+                                    client: client
+                                )
+                            }
+                        }
+                    }
+                }
+                .padding(12)
+
+                if viewModel.isLoading {
+                    ProgressView().padding()
+                }
+            }
         }
     }
 }

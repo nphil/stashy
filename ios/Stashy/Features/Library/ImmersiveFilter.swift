@@ -71,6 +71,101 @@ struct SceneFilterPanel: View {
     }
 }
 
+/// Performer filter panel: name search, sort, ethnicity, and inline tags — mirrors the scenes
+/// panel and updates the list in real time.
+struct PerformerFilterPanel: View {
+    @Binding var query: PerformerQuery
+    @Environment(ThemeManager.self) private var themeManager
+    @State private var name = ""
+    @State private var nameTask: Task<Void, Never>?
+
+    private let ethnicities = ["Caucasian", "Black", "Asian", "Latin", "Indian", "Middle Eastern", "Mixed"]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            TextField("Performer name…", text: $name)
+                .autocorrectionDisabled()
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(themeManager.current.backgroundColor.opacity(0.6), in: Capsule())
+
+            HStack {
+                Text("Sort").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Spacer()
+                sortMenu
+            }
+            HStack {
+                Text("Ethnicity").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Spacer()
+                ethnicityMenu
+            }
+            Divider().opacity(0.25)
+            InlineTagEditor(selected: $query.tags)
+        }
+        .padding(14)
+        .background(themeManager.current.surfaceColor.opacity(0.96), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(.white.opacity(0.08)))
+        .shadow(color: .black.opacity(0.3), radius: 14, y: 8)
+        .padding(.horizontal, 12)
+        .onAppear { name = query.search }
+        .onChange(of: name) { _, value in
+            nameTask?.cancel()
+            nameTask = Task {
+                try? await Task.sleep(for: .milliseconds(300))
+                guard !Task.isCancelled else { return }
+                query.search = value
+            }
+        }
+    }
+
+    private var sortMenu: some View {
+        Menu {
+            Picker("Sort by", selection: $query.sort) {
+                ForEach(PerformerSort.allCases) { sort in
+                    Label(sort.label, systemImage: sort.symbol).tag(sort)
+                }
+            }
+            Picker("Order", selection: $query.direction) {
+                Label("Ascending", systemImage: "arrow.up").tag(SortDirection.asc)
+                Label("Descending", systemImage: "arrow.down").tag(SortDirection.desc)
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: query.sort.symbol).font(.caption)
+                Text(query.sort.label)
+                Image(systemName: query.direction == .asc ? "arrow.up" : "arrow.down").font(.caption2)
+            }
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(themeManager.current.foregroundColor)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(themeManager.current.backgroundColor.opacity(0.6), in: Capsule())
+        }
+    }
+
+    private var ethnicityMenu: some View {
+        Menu {
+            Picker("Ethnicity", selection: Binding(
+                get: { query.ethnicity ?? "" },
+                set: { query.ethnicity = $0.isEmpty ? nil : $0 }
+            )) {
+                Text("Any").tag("")
+                ForEach(ethnicities, id: \.self) { Text($0).tag($0) }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "globe").font(.caption)
+                Text(query.ethnicity ?? "Any")
+            }
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(themeManager.current.foregroundColor)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(themeManager.current.backgroundColor.opacity(0.6), in: Capsule())
+        }
+    }
+}
+
 /// Inline, live tag picker: selected chips + a search field with suggestions (popular by default).
 struct InlineTagEditor: View {
     @Binding var selected: [Tag]
