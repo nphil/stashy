@@ -6,6 +6,7 @@ struct PlayerControlsView: View {
     let model: ScenePlayerModel
     let sprites: SpriteThumbnails
     @Binding var isFullscreen: Bool
+    @Binding var zoomScale: CGFloat
     var onBack: (() -> Void)? = nil
 
     @State private var showControls = true
@@ -57,6 +58,20 @@ struct PlayerControlsView: View {
                     }
                 }
             }
+            .overlay(alignment: .bottomTrailing) {
+                // While zoomed, show a compact (60%) scrub preview in the corner so it doesn't
+                // cover the zoomed area.
+                if isScrubbing, zoomScale > 1, let img = sprites.thumbnail(at: scrubTime) {
+                    Image(uiImage: img)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 96, height: 54)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(.white.opacity(0.7), lineWidth: 1))
+                        .padding(.trailing, 16)
+                        .padding(.bottom, 80)
+                }
+            }
             .animation(.easeInOut(duration: 0.2), value: showControls)
             .onAppear { scheduleHide() }
             .onDisappear { hideTask?.cancel() }
@@ -89,10 +104,14 @@ struct PlayerControlsView: View {
                     isScrubbing = false
                     dragSeekActive = false
                     scheduleHide()
-                } else if isFullscreen,
-                          value.translation.height > 60,
+                } else if value.translation.height > 60,
                           abs(value.translation.height) > abs(value.translation.width) {
-                    isFullscreen = false
+                    // Swipe down: reset zoom first if zoomed in, otherwise exit fullscreen.
+                    if zoomScale > 1 {
+                        withAnimation(.easeOut(duration: 0.2)) { zoomScale = 1 }
+                    } else if isFullscreen {
+                        isFullscreen = false
+                    }
                 }
             }
     }
@@ -103,6 +122,7 @@ struct PlayerControlsView: View {
                 duration: model.duration,
                 currentTime: model.currentTime,
                 sprites: sprites,
+                showSpritePreview: zoomScale <= 1, // when zoomed, the corner preview is used instead
                 isScrubbing: $isScrubbing,
                 scrubTime: $scrubTime,
                 onSeek: { model.seek(to: $0); scheduleHide() }
@@ -156,6 +176,7 @@ struct ScrubBar: View {
     let duration: TimeInterval
     let currentTime: TimeInterval
     let sprites: SpriteThumbnails
+    var showSpritePreview = true
     @Binding var isScrubbing: Bool
     @Binding var scrubTime: TimeInterval
     let onSeek: (TimeInterval) -> Void
@@ -192,7 +213,7 @@ struct ScrubBar: View {
                     }
             )
             .overlay(alignment: .topLeading) {
-                if isScrubbing, let image = sprites.thumbnail(at: scrubTime) {
+                if showSpritePreview, isScrubbing, let image = sprites.thumbnail(at: scrubTime) {
                     let x = min(max(width * clampedProgress - previewWidth / 2, 0), width - previewWidth)
                     Image(uiImage: image)
                         .resizable()
