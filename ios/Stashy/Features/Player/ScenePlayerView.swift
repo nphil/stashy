@@ -13,14 +13,20 @@ final class ScenePlayerModel {
     var isReady = false
 
     @ObservationIgnored private let engine: PlaybackEngine
+    @ObservationIgnored private let route: PlaybackRoute
 
     /// The sharp-video render surface (re-parented into the zoom container).
     var renderView: UIView? { engine.renderView }
     /// A live blurred backdrop, present only on the AVPlayer path; nil → use a static blur.
     var liveBlurView: UIView? { engine.liveBlurView }
 
-    init(url: URL, preferAVPlayer: Bool) {
-        engine = preferAVPlayer ? AVPlaybackEngine(url: url) : KSPlaybackEngine(url: url)
+    var backendName: String { route.engine == .avPlayer ? "AVPlayer" : "KSPlayer (FFmpeg)" }
+    var streamType: String { route.streamType }
+    var routingReason: String { route.reason }
+
+    init(route: PlaybackRoute) {
+        self.route = route
+        engine = route.engine == .avPlayer ? AVPlaybackEngine(url: route.url) : KSPlaybackEngine(url: route.url)
 
         engine.onTime = { [weak self] current, duration in
             guard let self else { return }
@@ -48,6 +54,40 @@ final class ScenePlayerModel {
         currentTime = clamped
         engine.seek(to: clamped)
     }
+
+    /// Assemble a diagnostics snapshot for the Stats overlay: routing/backend facts + static media
+    /// metadata + the engine's live metrics. Called ~1 Hz by the overlay, never on the render path.
+    func snapshotStats(scene: StashScene) -> PlaybackStats {
+        var sections: [StatSection] = []
+
+        sections.append(StatSection(title: "Playback", lines: [
+            StatLine(label: "Backend", value: backendName),
+            StatLine(label: "Decode", value: engine.decodeDescription),
+            StatLine(label: "Stream", value: streamType),
+            StatLine(label: "AVPlayer use", value: routingReason),
+        ]))
+
+        var media: [StatLine] = []
+        if let c = scene.codecLabel { media.append(StatLine(label: "Codec", value: c)) }
+        let container = scene.fileContainer
+        if !container.isEmpty { media.append(StatLine(label: "Container", value: ".\(container)")) }
+        if let r = scene.resolutionLabel { media.append(StatLine(label: "Resolution", value: r)) }
+        if let ar = scene.aspectRatioLabel { media.append(StatLine(label: "Aspect", value: ar)) }
+        if let b = scene.bitrateLabel { media.append(StatLine(label: "File bitrate", value: b)) }
+        if let f = scene.frameRateLabel { media.append(StatLine(label: "Frame rate", value: f)) }
+        if !media.isEmpty { sections.append(StatSection(title: "Media", lines: media)) }
+
+        sections.append(StatSection(title: "Network", lines: engine.liveStats()))
+
+        // Reserved home for future Stash-transcoder details (only when actually transcoding).
+        if streamType.localizedCaseInsensitiveContains("transcod") || streamType.localizedCaseInsensitiveContains("hls") {
+            sections.append(StatSection(title: "Transcode", lines: [
+                StatLine(label: "Source", value: "Stash transcoder"),
+            ]))
+        }
+
+        return PlaybackStats(sections: sections)
+    }
 }
 
 /// Scene player with custom controls and sprite scrubbing. Fullscreen is driven by a binding
@@ -56,9 +96,10 @@ final class ScenePlayerModel {
 struct ScenePlayerView: View {
     let scene: StashScene
     let apiKey: String
-    /// Inline only: top safe-area inset so the sharp video sits below the status bar while the
-    /// blurred backdrop bleeds up behind the status bar / Dynamic Island.
-    var contentTopInset: CGFloat = 0
+    /// The device safe-area insets, passed in because the player subtree zeroes them via
+    /// `ignoresSafeArea`. Used to keep controls clear of the notch / home indicator in every mode, and
+    /// (top edge) to reserve the status-bar strip for the blurred backdrop inline.
+    var safeArea: EdgeInsets = EdgeInsets()
     @Binding var isFullscreen: Bool
     var onBack: (() -> Void)?
     @Environment(\.imageCache) private var imageCache
@@ -68,17 +109,18 @@ struct ScenePlayerView: View {
     @State private var zoomScale: CGFloat = 1
     @State private var poster: UIImage?
     @State private var showControls = true
+    @State private var showStats = false
     @State private var isScrubbing = false
     @State private var scrubTime: TimeInterval = 0
     @State private var hideTask: Task<Void, Never>?
 
-    init(scene: StashScene, apiKey: String, url: URL, preferAVPlayer: Bool, contentTopInset: CGFloat = 0, isFullscreen: Binding<Bool>, onBack: (() -> Void)? = nil) {
+    init(scene: StashScene, apiKey: String, route: PlaybackRoute, safeArea: EdgeInsets = EdgeInsets(), isFullscreen: Binding<Bool>, onBack: (() -> Void)? = nil) {
         self.scene = scene
         self.apiKey = apiKey
-        self.contentTopInset = contentTopInset
+        self.safeArea = safeArea
         _isFullscreen = isFullscreen
         self.onBack = onBack
-        _model = State(initialValue: ScenePlayerModel(url: url, preferAVPlayer: preferAVPlayer))
+        _model = State(initialValue: ScenePlayerModel(route: route))
     }
 
     /// The video's display aspect (from file metadata, available immediately).
@@ -91,9 +133,17 @@ struct ScenePlayerView: View {
             // bottom sits flush with the box (never blurred) — the blur fills the top / sides as needed.
             // Fullscreen: the surface fills the whole screen so zoom is immersive (uses the entire
             // display, including behind the Dynamic Island) instead of being trapped in a fit box.
-            let inset = isFullscreen ? 0 : contentTopInset
+            let inset = isFullscreen ? 0 : safeArea.top
             let videoArea = CGSize(width: avail.width, height: max(avail.height - inset, 1))
             let surfaceSize = isFullscreen ? avail : Self.fitSize(aspect: aspect, in: videoArea)
+            // The rectangle the sharp video actually occupies (bottom-aligned, horizontally centred),
+            // used to centre the play/pause control and anchor the bottom control bar in every mode.
+            let videoRect = CGRect(
+                x: (avail.width - surfaceSize.width) / 2,
+                y: avail.height - surfaceSize.height,
+                width: surfaceSize.width,
+                height: surfaceSize.height
+            )
 
             ZStack(alignment: .bottom) {
                 // Background blur that fills the status-bar strip and any letterbox gaps. On the AVPlayer
@@ -145,13 +195,24 @@ struct ScenePlayerView: View {
                     sprites: sprites,
                     isFullscreen: $isFullscreen,
                     showControls: $showControls,
+                    showStats: $showStats,
                     isScrubbing: $isScrubbing,
                     scrubTime: $scrubTime,
+                    videoRect: videoRect,
+                    safeArea: safeArea,
                     spritePreviewTopLeading: isFullscreen && scene.isPortraitVideo,
                     scheduleHide: { scheduleHide() },
                     onBack: onBack
                 )
                 .frame(width: avail.width, height: avail.height)
+
+                if showStats {
+                    // Anchored top-leading just below the back chevron, kept within the video rect.
+                    StatsOverlayView(scene: scene, model: model)
+                        .padding(.leading, max(videoRect.minX, safeArea.leading) + 12)
+                        .padding(.top, max(videoRect.minY, safeArea.top) + 52)
+                        .frame(width: avail.width, height: avail.height, alignment: .topLeading)
+                }
             }
             .frame(width: avail.width, height: avail.height)
         }

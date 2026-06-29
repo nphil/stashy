@@ -88,4 +88,77 @@ final class AVPlaybackEngine: PlaybackEngine {
             toleranceAfter: .zero
         )
     }
+
+    // MARK: - Stats
+
+    // AVPlayer plays only VideoToolbox-decodable formats (H.264/HEVC), so decode is always hardware.
+    var decodeDescription: String { "Hardware (VideoToolbox)" }
+
+    func liveStats() -> [StatLine] {
+        var lines: [StatLine] = []
+
+        // Playback state / why it's waiting (buffering, etc.).
+        switch player.timeControlStatus {
+        case .paused: lines.append(StatLine(label: "State", value: "Paused"))
+        case .waitingToPlayAtSpecifiedRate:
+            let reason = player.reasonForWaitingToPlay?.rawValue ?? "waiting"
+            lines.append(StatLine(label: "State", value: "Waiting (\(reason))"))
+        case .playing: lines.append(StatLine(label: "State", value: "Playing"))
+        @unknown default: lines.append(StatLine(label: "State", value: "—"))
+        }
+
+        // Buffer ahead of the playhead.
+        let now = player.currentTime().seconds
+        if let ahead = item.loadedTimeRanges.compactMap({ range -> Double? in
+            let r = range.timeRangeValue
+            let start = r.start.seconds, end = (r.start + r.duration).seconds
+            return (now >= start && now <= end) ? end - now : nil
+        }).max() {
+            lines.append(StatLine(label: "Buffer ahead", value: String(format: "%.1f s", ahead)))
+        }
+
+        let presentation = item.presentationSize
+        if presentation.width > 0 {
+            lines.append(StatLine(label: "Decoded size",
+                                  value: "\(Int(presentation.width))×\(Int(presentation.height))"))
+        }
+
+        // Network access log (most recent event).
+        if let event = item.accessLog()?.events.last {
+            if event.observedBitrate > 0 {
+                lines.append(StatLine(label: "Throughput", value: Self.mbps(event.observedBitrate)))
+            }
+            if event.indicatedBitrate > 0 {
+                lines.append(StatLine(label: "Stream bitrate", value: Self.mbps(event.indicatedBitrate)))
+            }
+            if event.numberOfBytesTransferred > 0 {
+                lines.append(StatLine(label: "Transferred",
+                                      value: ByteCountFormatter.string(fromByteCount: event.numberOfBytesTransferred, countStyle: .file)))
+            }
+            if event.numberOfStalls >= 0 {
+                lines.append(StatLine(label: "Stalls", value: "\(event.numberOfStalls)"))
+            }
+            if event.numberOfDroppedVideoFrames >= 0 {
+                lines.append(StatLine(label: "Dropped frames", value: "\(event.numberOfDroppedVideoFrames)"))
+            }
+            if !event.playbackType.isNilOrEmpty {
+                lines.append(StatLine(label: "Playback type", value: event.playbackType ?? "—"))
+            }
+            if let server = event.serverAddress, !server.isEmpty {
+                lines.append(StatLine(label: "Server", value: server))
+            }
+        } else {
+            lines.append(StatLine(label: "Network", value: "no access log yet"))
+        }
+
+        return lines
+    }
+
+    private static func mbps(_ bitsPerSecond: Double) -> String {
+        String(format: "%.1f Mbps", bitsPerSecond / 1_000_000)
+    }
+}
+
+private extension Optional where Wrapped == String {
+    var isNilOrEmpty: Bool { self?.isEmpty ?? true }
 }

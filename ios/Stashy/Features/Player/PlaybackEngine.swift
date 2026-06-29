@@ -21,4 +21,9 @@ protocol PlaybackEngine: AnyObject {
     func play()
     func pause()
     func seek(to time: TimeInterval)
+
+    /// Short description of the decode path for the Stats overlay (e.g. "Hardware (VideoToolbox)").
+    var decodeDescription: String { get }
+    /// Backend-specific live diagnostics (buffer, throughput, dropped frames, …) for the Stats overlay.
+    func liveStats() -> [StatLine]
 }

@@ -50,4 +50,17 @@ final class KSPlaybackEngine: PlaybackEngine, KSPlayerLayerDelegate {
     }
 
     func player(layer: KSPlayerLayer, bufferedCount: Int, consumeTime: TimeInterval) {}
+
+    // MARK: - Stats
+
+    // KSPlayer decodes via VideoToolbox when the codec is supported and falls back to FFmpeg software
+    // decoding otherwise (which is exactly why exotic codecs are routed here).
+    var decodeDescription: String { "VideoToolbox if supported, else FFmpeg (software)" }
+
+    func liveStats() -> [StatLine] {
+        // KSPlayer's live decode/network counters aren't part of its stable public surface, so we keep
+        // this backend's diagnostics to what's guaranteed; the Media section (codec/res/bitrate/fps)
+        // still comes from the scene metadata. A live-metrics hook can be added here later.
+        [StatLine(label: "Live metrics", value: "n/a (KSPlayer backend)")]
+    }
 }
