@@ -6,105 +6,56 @@ struct PlayerControlsView: View {
     let model: ScenePlayerModel
     let sprites: SpriteThumbnails
     @Binding var isFullscreen: Bool
-    @Binding var zoomScale: CGFloat
+    @Binding var showControls: Bool
+    @Binding var isScrubbing: Bool
+    @Binding var scrubTime: TimeInterval
+    let scheduleHide: () -> Void
     var onBack: (() -> Void)? = nil
 
-    @State private var showControls = true
-    @State private var isScrubbing = false
-    @State private var scrubTime: TimeInterval = 0
-    @State private var hideTask: Task<Void, Never>?
-    @State private var dragAnchorTime: TimeInterval = 0
-    private let scrubHaptic = UIImpactFeedbackGenerator(style: .medium)
-
     var body: some View {
-        GeometryReader { geo in
-            ZStack {
-                Color.black.opacity(showControls ? 0.2 : 0.001)
-                    .contentShape(Rectangle())
-                    .onTapGesture { toggleControls() }
-                    .gesture(playerGesture(width: geo.size.width))
+        ZStack {
+            // Dim layer only — taps/zoom/scrub are handled by the zoomable surface underneath, so
+            // this never captures touches (otherwise it would block pinch-to-zoom and panning).
+            Color.black.opacity(showControls ? 0.2 : 0)
+                .allowsHitTesting(false)
+                .ignoresSafeArea()
 
-                if showControls {
-                    VStack {
-                        Spacer()
-                        // Only show the play/pause control once the video is ready (during
-                        // buffering only the spinner shows, never a play button).
-                        if model.isReady {
-                            Button { model.togglePlayPause(); scheduleHide() } label: {
-                                Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
-                                    .font(.system(size: 34, weight: .bold))
-                                    .foregroundStyle(.white)
-                                    .shadow(radius: 4)
-                            }
-                        }
-                        Spacer()
-                        controlBar
-                    }
-                    .transition(.opacity)
-
-                    if let onBack {
-                        Button(action: onBack) {
-                            Image(systemName: "chevron.left")
-                                .font(.headline.weight(.semibold))
+            if showControls {
+                VStack {
+                    Spacer()
+                    // Only show the play/pause control once the video is ready (during
+                    // buffering only the spinner shows, never a play button).
+                    if model.isReady {
+                        Button { model.togglePlayPause(); scheduleHide() } label: {
+                            Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
+                                .font(.system(size: 34, weight: .bold))
                                 .foregroundStyle(.white)
-                                .padding(10)
-                                .background(.black.opacity(0.4), in: Circle())
                                 .shadow(radius: 4)
                         }
-                        .padding(.leading, 12)
-                        .padding(.top, 8)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                        .transition(.opacity)
                     }
+                    Spacer()
+                    controlBar
+                }
+                .transition(.opacity)
+
+                if let onBack {
+                    Button(action: onBack) {
+                        Image(systemName: "chevron.left")
+                            .font(.headline.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(10)
+                            .background(.black.opacity(0.4), in: Circle())
+                            .shadow(radius: 4)
+                    }
+                    .padding(.leading, 12)
+                    .padding(.top, 8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .transition(.opacity)
                 }
             }
-            .animation(.easeInOut(duration: 0.2), value: showControls)
-            .onAppear { scheduleHide() }
-            .onDisappear { hideTask?.cancel() }
         }
-    }
-
-    /// Press-and-hold then drag to scrub (so it never clashes with panning a zoomed video); a quick
-    /// swipe down exits fullscreen (or resets zoom first if zoomed in). Scrubbing maps the horizontal
-    /// drag proportionally to the timeline and shows the 100% sprite preview on the bar.
-    private func playerGesture(width: CGFloat) -> some Gesture {
-        let scrub = LongPressGesture(minimumDuration: 0.4)
-            .sequenced(before: DragGesture(minimumDistance: 0))
-            .onChanged { value in
-                guard case .second(true, let drag) = value else { return }
-                if !isScrubbing {
-                    isScrubbing = true
-                    dragAnchorTime = model.currentTime
-                    showControls = true
-                    hideTask?.cancel()
-                    scrubHaptic.impactOccurred()
-                }
-                if let drag {
-                    let span = max(model.duration, 1)
-                    let delta = Double(drag.translation.width / max(width, 1)) * span
-                    scrubTime = max(0, min(model.duration, dragAnchorTime + delta))
-                }
-            }
-            .onEnded { _ in
-                if isScrubbing {
-                    model.seek(to: scrubTime)
-                    isScrubbing = false
-                    scheduleHide()
-                }
-            }
-
-        let swipeDown = DragGesture(minimumDistance: 24)
-            .onEnded { value in
-                guard value.translation.height > 60,
-                      abs(value.translation.height) > abs(value.translation.width) else { return }
-                if zoomScale > 1 {
-                    withAnimation(.easeOut(duration: 0.2)) { zoomScale = 1 }
-                } else if isFullscreen {
-                    isFullscreen = false
-                }
-            }
-
-        return ExclusiveGesture(scrub, swipeDown)
+        .animation(.easeInOut(duration: 0.2), value: showControls)
+        .onAppear { scheduleHide() }
     }
 
     private var controlBar: some View {
@@ -138,20 +89,6 @@ struct PlayerControlsView: View {
         .background(
             LinearGradient(colors: [.clear, .black.opacity(0.7)], startPoint: .top, endPoint: .bottom)
         )
-    }
-
-    private func toggleControls() {
-        showControls.toggle()
-        if showControls { scheduleHide() }
-    }
-
-    private func scheduleHide() {
-        hideTask?.cancel()
-        hideTask = Task {
-            try? await Task.sleep(for: .seconds(3))
-            guard !Task.isCancelled, model.isPlaying, !isScrubbing else { return }
-            showControls = false
-        }
     }
 
     static func timeString(_ t: TimeInterval) -> String {

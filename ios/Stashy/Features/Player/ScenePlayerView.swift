@@ -50,38 +50,6 @@ final class ScenePlayerModel: KSPlayerLayerDelegate {
     func player(layer: KSPlayerLayer, bufferedCount: Int, consumeTime: TimeInterval) {}
 }
 
-/// Hosts the KSPlayer render surface (`player.view`), which may appear asynchronously once
-/// the player is ready; we (re)attach it on each SwiftUI update.
-struct KSPlayerSurface: UIViewRepresentable {
-    let model: ScenePlayerModel
-    /// Reading an observable (passed from the parent) forces `updateUIView` to run once the
-    /// player's render view exists, so we can attach it.
-    var isReady: Bool
-
-    func makeUIView(context: Context) -> UIView {
-        let container = UIView()
-        // Clear so the blurred poster behind shows through any letterbox bars.
-        container.backgroundColor = .clear
-        attach(to: container)
-        return container
-    }
-
-    func updateUIView(_ uiView: UIView, context: Context) {
-        attach(to: uiView)
-    }
-
-    private func attach(to container: UIView) {
-        guard let playerView = model.layer.player.view else { return }
-        playerView.backgroundColor = .clear
-        if playerView.superview !== container {
-            playerView.removeFromSuperview()
-            playerView.frame = container.bounds
-            playerView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            container.addSubview(playerView)
-        }
-    }
-}
-
 /// Scene player with custom controls and sprite scrubbing. Fullscreen is driven by a binding
 /// from the parent, which simply resizes this same view in place — the render surface is never
 /// re-parented, so it doesn't blank when rotating between inline and fullscreen.
@@ -95,9 +63,11 @@ struct ScenePlayerView: View {
     @State private var sprites = SpriteThumbnails()
     @State private var suppressAutoFullscreen = false
     @State private var zoomScale: CGFloat = 1
-    @State private var baseZoom: CGFloat = 1
-    @State private var zoomAnchor: UnitPoint = .center
     @State private var poster: UIImage?
+    @State private var showControls = true
+    @State private var isScrubbing = false
+    @State private var scrubTime: TimeInterval = 0
+    @State private var hideTask: Task<Void, Never>?
 
     init(scene: StashScene, apiKey: String, url: URL, isFullscreen: Binding<Bool>, onBack: (() -> Void)? = nil) {
         self.scene = scene
@@ -122,10 +92,19 @@ struct ScenePlayerView: View {
             .clipped()
             .allowsHitTesting(false)
 
-            KSPlayerSurface(model: model, isReady: model.isReady)
-                .scaleEffect(isFullscreen ? zoomScale : 1, anchor: zoomAnchor)
-                .ignoresSafeArea(edges: isFullscreen ? .all : [])
-                .clipped()
+            ZoomablePlayerSurface(
+                model: model,
+                isReady: model.isReady,
+                zoomEnabled: isFullscreen,
+                zoomScale: $zoomScale,
+                isScrubbing: $isScrubbing,
+                scrubTime: $scrubTime,
+                onSingleTap: { toggleControls() },
+                onScrubStart: { hideTask?.cancel(); showControls = true },
+                onScrubEnd: { scheduleHide() },
+                onSwipeDownDismiss: { if isFullscreen { isFullscreen = false } }
+            )
+            .ignoresSafeArea(edges: isFullscreen ? .all : [])
 
             // Smooth loading indicator while the file spins up (e.g. NAS) before the first frame.
             if !model.isReady {
@@ -138,12 +117,13 @@ struct ScenePlayerView: View {
                 model: model,
                 sprites: sprites,
                 isFullscreen: $isFullscreen,
-                zoomScale: $zoomScale,
+                showControls: $showControls,
+                isScrubbing: $isScrubbing,
+                scrubTime: $scrubTime,
+                scheduleHide: { scheduleHide() },
                 onBack: onBack
             )
         }
-        // Pinch to zoom into the focal point (fullscreen only); the zoom persists after release.
-        .simultaneousGesture(magnifyGesture)
         .task {
             guard let vtt = scene.vttURL(apiKey: apiKey),
                   let sprite = scene.spriteURL(apiKey: apiKey) else { return }
@@ -169,48 +149,33 @@ struct ScenePlayerView: View {
                 // Fullscreen is the only landscape surface in the app.
                 OrientationController.lock([.landscapeLeft, .landscapeRight])
             } else {
-                // Force back to portrait even if the phone is still held in landscape.
+                // Force back to portrait even if the phone is still held in landscape. Zoom is reset
+                // automatically by the surface once zoom is disabled (zoomEnabled = isFullscreen).
                 OrientationController.lock(.portrait)
-                resetZoom()
                 if UIDevice.current.orientation.isLandscape {
                     suppressAutoFullscreen = true
                 }
             }
         }
-        // Keep the stored base zoom in sync when the controls reset zoom (swipe down while zoomed).
-        .onChange(of: zoomScale) { _, value in
-            if value <= 1 { baseZoom = 1; zoomAnchor = .center }
-        }
         .onAppear { UIDevice.current.beginGeneratingDeviceOrientationNotifications() }
         .onDisappear {
             OrientationController.lock(.portrait)
-            resetZoom()
+            hideTask?.cancel()
             if !isFullscreen { model.pause() }
         }
     }
 
-    private func resetZoom() {
-        zoomScale = 1
-        baseZoom = 1
-        zoomAnchor = .center
+    private func scheduleHide() {
+        hideTask?.cancel()
+        hideTask = Task {
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled, model.isPlaying, !isScrubbing else { return }
+            showControls = false
+        }
     }
 
-    private var magnifyGesture: some Gesture {
-        MagnifyGesture()
-            .onChanged { value in
-                guard isFullscreen else { return }
-                zoomAnchor = value.startAnchor
-                zoomScale = min(4, max(1, baseZoom * value.magnification))
-            }
-            .onEnded { _ in
-                guard isFullscreen else { return }
-                if zoomScale < 1.05 {
-                    withAnimation(.easeOut(duration: 0.2)) { zoomScale = 1 }
-                    baseZoom = 1
-                    zoomAnchor = .center
-                } else {
-                    baseZoom = zoomScale
-                }
-            }
+    private func toggleControls() {
+        showControls.toggle()
+        if showControls { scheduleHide() }
     }
 }
