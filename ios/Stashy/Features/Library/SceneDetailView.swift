@@ -57,64 +57,48 @@ struct SceneDetailView: View {
     }
 
     private var metadata: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // Title + studio + date — deliberately understated.
-            VStack(alignment: .leading, spacing: 2) {
-                Text(scene.title ?? "Untitled")
-                    .font(.headline)
-                    .foregroundStyle(themeManager.current.foregroundColor)
-                    .lineLimit(1)
-                    .blur(radius: blurTitles ? 6 : 0)
-                HStack(spacing: 6) {
-                    if let studio = scene.studio { Text(studio.name).lineLimit(1) }
-                    if let date = scene.date { Text("· \(date)").lineLimit(1) }
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-
-            // Performers: who, age, country.
-            if !scene.performers.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(scene.performers) { performer in
-                            NavigationLink(value: performer) {
-                                CompactPerformerChip(performer: performer, apiKey: apiKey)
-                            }
-                            .buttonStyle(.plain)
-                        }
+        let spacing: CGFloat = 10
+        return GeometryReader { geo in
+            // Top row (performer + socials) is sized so the enlarged performer card reaches at least
+            // the bottom of the socials card; the tags card then fills down to just above the specs box.
+            let topRowHeight = min(max(geo.size.height * 0.46, 170), 230)
+            VStack(spacing: spacing) {
+                // Title + studio + date — deliberately understated.
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(scene.title ?? "Untitled")
+                        .font(.headline)
+                        .foregroundStyle(themeManager.current.foregroundColor)
+                        .lineLimit(1)
+                        .blur(radius: blurTitles ? 6 : 0)
+                    HStack(spacing: 6) {
+                        if let studio = scene.studio { Text(studio.name).lineLimit(1) }
+                        if let date = scene.date { Text("· \(date)").lineLimit(1) }
                     }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
-            }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-            // Social links (merged across performers), truncated.
-            if let links = socialLinks {
-                FlowLayout(spacing: 6) {
-                    ForEach(links.prefix(4), id: \.url) { link in
-                        Link(destination: link.url) {
-                            Label(link.label, systemImage: link.symbol)
-                                .font(.caption2.weight(.medium))
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 4)
-                                .glassEffect(.regular.tint(themeManager.current.accentColor), in: Capsule())
-                        }
-                        .buttonStyle(.plain)
-                    }
+                // Performer card (left, enlarged) + socials stack (right, truncated to fit).
+                HStack(alignment: .top, spacing: spacing) {
+                    ScenePerformerCard(performers: scene.performers, apiKey: apiKey)
+                        .frame(width: 150, height: topRowHeight)
+                    SocialsCard(links: socialLinks ?? [])
+                        .frame(maxWidth: .infinity)
+                        .frame(height: topRowHeight)
                 }
+
+                // Tags card — full width of the two cards above, scrolls internally when it overflows.
+                TagsCard(tags: scene.tags)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                techBox
             }
-
-            // Tags (ranked + truncated).
-            if !scene.tags.isEmpty {
-                TagChipsView(tags: scene.tags)
-            }
-
-            Spacer(minLength: 0)
-
-            techBox
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .padding(.horizontal, 14)
+            .padding(.top, spacing)
+            .padding(.bottom, 12)
         }
-        .padding(.horizontal, 14)
-        .padding(.top, 10)
-        .padding(.bottom, 12)
     }
 
     private var socialLinks: [SocialLink]? {
@@ -159,9 +143,11 @@ struct SceneDetailView: View {
     private var apiKey: String { appState.client?.apiKey ?? "" }
 }
 
-/// Compact performer chip for the scene screen: small portrait + name + age · country.
-struct CompactPerformerChip: View {
-    let performer: Performer
+/// Enlarged, left-aligned performer card for the scene screen: a large portrait of the primary
+/// performer with name + age · country overlaid, tappable to open the performer. A "+N" badge marks
+/// scenes with extra performers.
+struct ScenePerformerCard: View {
+    let performers: [Performer]
     let apiKey: String
     @Environment(\.imageCache) private var imageCache
     @Environment(ThemeManager.self) private var themeManager
@@ -170,116 +156,67 @@ struct CompactPerformerChip: View {
     @State private var image: UIImage?
 
     var body: some View {
-        HStack(spacing: 8) {
-            Group {
-                if let image {
-                    Image(uiImage: image).resizable().scaledToFill()
-                        .blur(radius: blurThumbnails ? 14 : 0)
-                } else {
-                    Image(systemName: "person.fill").foregroundStyle(.secondary)
-                }
-            }
-            .frame(width: 38, height: 38)
-            .clipShape(Circle())
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(performer.name)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(themeManager.current.foregroundColor)
-                    .lineLimit(1)
-                    .blur(radius: blurTitles ? 5 : 0)
-                HStack(spacing: 4) {
-                    if let age = performer.age { Text("\(age)") }
-                    if let country = performer.country, !country.isEmpty { Text(country.countryFlag) }
-                }
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            }
-            .padding(.trailing, 4)
-        }
-        .padding(6)
-        .background(themeManager.current.surfaceColor, in: Capsule())
-        .task(id: performer.id) {
-            guard let url = performer.imageURL(apiKey: apiKey) else { return }
-            image = try? await imageCache.image(for: url)
-        }
-    }
-}
-
-// MARK: - Chip section
-
-struct ChipSection: View {
-    let title: String
-    let systemImage: String
-    let chips: () -> [String]
-    @Environment(ThemeManager.self) private var themeManager
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label(title, systemImage: systemImage)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-
-            GlassEffectContainer(spacing: 6) {
-                FlowLayout(spacing: 6) {
-                    ForEach(chips(), id: \.self) { chip in
-                        Text(chip)
-                            .font(.caption)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .glassEffect(.regular, in: Capsule())
-                    }
-                }
-            }
-        }
-    }
-}
-
-// MARK: - Ranked, truncating tag chips
-
-/// Tag chips ordered by the user's tag history + Stash popularity, truncated to the most relevant
-/// with an expand toggle so long tag lists stay compact.
-struct TagChipsView: View {
-    let tags: [Tag]
-    private let limit = 8
-    @State private var expanded = false
-    @Environment(AppRouter.self) private var router
-
-    var body: some View {
-        let ranked = TagRankingStore.shared.ranked(tags)
-        let shown = expanded ? ranked : Array(ranked.prefix(limit))
-
-        VStack(alignment: .leading, spacing: 8) {
-            Label("Tags", systemImage: "tag")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-
-            GlassEffectContainer(spacing: 6) {
-                FlowLayout(spacing: 6) {
-                    ForEach(shown) { tag in
-                        Button { router.openScenes(tag: tag) } label: {
-                            Text(tag.name)
-                                .font(.caption)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .glassEffect(.regular, in: Capsule())
+        if let performer = performers.first {
+            NavigationLink(value: performer) {
+                ZStack(alignment: .bottomLeading) {
+                    Rectangle().fill(themeManager.current.surfaceColor)
+                        .overlay {
+                            if let image {
+                                Image(uiImage: image).resizable().scaledToFill()
+                                    .blur(radius: blurThumbnails ? 26 : 0)
+                            } else {
+                                Image(systemName: "person.fill")
+                                    .font(.largeTitle)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
-                        .buttonStyle(.plain)
-                    }
-                    if ranked.count > limit {
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.2)) { expanded.toggle() }
-                        } label: {
-                            Text(expanded ? "Show less" : "+\(ranked.count - limit)")
-                                .font(.caption.weight(.medium))
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .glassEffect(.regular, in: Capsule())
+                        .clipped()
+
+                    LinearGradient(
+                        colors: [.clear, .black.opacity(0.75)],
+                        startPoint: .center, endPoint: .bottom
+                    )
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(performer.name)
+                            .font(.subheadline.weight(.bold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .blur(radius: blurTitles ? 5 : 0)
+                        HStack(spacing: 5) {
+                            if let age = performer.age { Text("\(age)") }
+                            if let country = performer.country, !country.isEmpty { Text(country.countryFlag) }
                         }
-                        .buttonStyle(.plain)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.white.opacity(0.85))
+                    }
+                    .padding(10)
+
+                    if performers.count > 1 {
+                        Text("+\(performers.count - 1)")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(.black.opacity(0.55), in: Capsule())
+                            .padding(8)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                     }
                 }
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
+            .buttonStyle(.plain)
+            .task(id: performer.id) {
+                guard let url = performer.imageURL(apiKey: apiKey) else { return }
+                image = try? await imageCache.image(for: url)
+            }
+        } else {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(themeManager.current.surfaceColor)
+                .overlay {
+                    Image(systemName: "person.fill").font(.largeTitle).foregroundStyle(.secondary)
+                }
         }
     }
 }

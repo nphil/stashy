@@ -10,6 +10,7 @@ struct Performer: Codable, Identifiable, Sendable, Hashable {
     let birthdate: String?
     let gender: String?
     let urls: [String]?
+    let tags: [Tag]?
 
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
     static func == (lhs: Performer, rhs: Performer) -> Bool { lhs.id == rhs.id }

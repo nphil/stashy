@@ -68,12 +68,12 @@ struct StashClient: Sendable {
       files { duration video_codec width height basename size bit_rate frame_rate }
       paths { screenshot preview sprite vtt }
       studio { id name }
-      performers { id name image_path rating100 scene_count country birthdate gender urls }
+      performers { id name image_path rating100 scene_count country birthdate gender urls tags { id name } }
       tags { id name }
       sceneStreams { url mime_type label }
     """
 
-    private static let performerFields = "id name image_path rating100 scene_count country birthdate gender urls"
+    private static let performerFields = "id name image_path rating100 scene_count country birthdate gender urls tags { id name }"
 
     /// Unified scene query: full-text search, sort + direction, optional tag and performer filters.
     func findScenes(_ q: SceneQuery, page: Int = 1, perPage: Int = 25) async throws -> FindScenesResult {

@@ -53,9 +53,11 @@ struct PerformerDetailView: View {
     @Environment(\.imageCache) private var imageCache
     @State private var viewModel = PerformerScenesViewModel()
     @State private var portrait: UIImage?
-    @State private var showAllLinks = false
     @State private var previewPresenter = ScenePreviewPresenter()
     @State private var openedScene: StashScene?
+    @State private var showImageViewer = false
+    @AppStorage("blurThumbnails") private var blurThumbnails = false
+    @AppStorage("blurTitles") private var blurTitles = false
 
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
@@ -116,6 +118,11 @@ struct PerformerDetailView: View {
         .navigationDestination(item: $openedScene) { scene in
             SceneDetailView(scene: scene)
         }
+        .fullScreenCover(isPresented: $showImageViewer) {
+            if let portrait {
+                FullScreenImageViewer(image: portrait)
+            }
+        }
         .task {
             guard viewModel.query.performerID == nil else { return }
             viewModel.query.performerID = performer.id // triggers the initial load via onChange
@@ -130,75 +137,69 @@ struct PerformerDetailView: View {
         }
     }
 
+    // Portrait enlarged ~1.5x (was 120×160) and tappable to open the Photos-style fullscreen viewer.
+    private let portraitWidth: CGFloat = 180
+    private let portraitHeight: CGFloat = 240
+
     private var header: some View {
-        HStack(alignment: .top, spacing: 16) {
-            Group {
-                if let portrait {
-                    Image(uiImage: portrait).resizable().scaledToFill()
-                } else {
-                    Rectangle().fill(themeManager.current.surfaceColor)
-                        .overlay { Image(systemName: "person.fill").font(.largeTitle).foregroundStyle(.secondary) }
-                }
-            }
-            .frame(width: 120, height: 160)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        VStack(alignment: .leading, spacing: 10) {
+            Text(performer.name)
+                .font(.title2.weight(.bold))
+                .foregroundStyle(themeManager.current.foregroundColor)
+                .blur(radius: blurTitles ? 6 : 0)
+                .padding(.horizontal, 12)
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text(performer.name)
-                    .font(.title2.weight(.bold))
-                    .foregroundStyle(themeManager.current.foregroundColor)
-
-                statsRow
-
-                if let links = socialLinks, !links.isEmpty {
-                    let shown = showAllLinks ? links : Array(links.prefix(4))
-                    FlowLayout(spacing: 8) {
-                        ForEach(shown, id: \.url) { link in
-                            Link(destination: link.url) {
-                                Label(link.label, systemImage: link.symbol)
-                                    .font(.caption.weight(.medium))
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 5)
-                                    .glassEffect(.regular.tint(themeManager.current.accentColor), in: Capsule())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        if links.count > 4 {
-                            Button {
-                                withAnimation(.easeInOut(duration: 0.2)) { showAllLinks.toggle() }
-                            } label: {
-                                Text(showAllLinks ? "Show less" : "+\(links.count - 4) more")
-                                    .font(.caption.weight(.medium))
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 5)
-                                    .glassEffect(.regular, in: Capsule())
-                            }
-                            .buttonStyle(.plain)
+            HStack(alignment: .top, spacing: 12) {
+                Button { if portrait != nil { showImageViewer = true } } label: {
+                    Group {
+                        if let portrait {
+                            Image(uiImage: portrait).resizable().scaledToFill()
+                                .blur(radius: blurThumbnails ? 26 : 0)
+                        } else {
+                            Rectangle().fill(themeManager.current.surfaceColor)
+                                .overlay { Image(systemName: "person.fill").font(.largeTitle).foregroundStyle(.secondary) }
                         }
                     }
+                    .frame(width: portraitWidth, height: portraitHeight)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 }
+                .buttonStyle(.plain)
+
+                StatCard(items: statItems)
+                    .frame(height: portraitHeight)
             }
-            Spacer(minLength: 0)
+            .padding(.horizontal, 12)
+
+            if let links = socialLinks, !links.isEmpty {
+                SocialsCard(links: links)
+                    .frame(height: 130)
+                    .padding(.horizontal, 12)
+            }
+
+            if let tags = performer.tags, !tags.isEmpty {
+                TagsCard(tags: tags)
+                    .frame(height: 150)
+                    .padding(.horizontal, 12)
+            }
         }
-        .padding(.horizontal, 12)
     }
 
-    private var statsRow: some View {
-        let items: [(String, String)] = {
-            var out: [(String, String)] = []
-            if let c = performer.scene_count { out.append(("film.stack", "\(c)")) }
-            if let stars = performer.ratingStars { out.append(("star.fill", String(format: "%.1f", stars))) }
-            if let country = performer.country, !country.isEmpty { out.append(("globe", country.countryFlag)) }
-            if let age = performer.age { out.append(("calendar", "\(age)")) }
-            return out
-        }()
-        return HStack(spacing: 14) {
-            ForEach(items, id: \.0) { item in
-                Label(item.1, systemImage: item.0)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+    private var statItems: [(symbol: String, label: String, value: String)] {
+        var out: [(String, String, String)] = []
+        if let c = performer.scene_count { out.append(("film.stack", "Scenes", "\(c)")) }
+        if let stars = performer.ratingStars { out.append(("star.fill", "Rating", String(format: "%.1f", stars))) }
+        if let age = performer.age { out.append(("calendar", "Age", "\(age)")) }
+        if let country = performer.country, !country.isEmpty {
+            out.append(("globe", "Country", "\(country.countryFlag) \(country)"))
         }
+        if let gender = performer.gender, !gender.isEmpty {
+            out.append(("person.fill", "Gender", gender.capitalized))
+        }
+        if let birthdate = performer.birthdate, !birthdate.isEmpty {
+            out.append(("gift", "Born", birthdate))
+        }
+        return out.map { (symbol: $0.0, label: $0.1, value: $0.2) }
     }
 
     private var socialLinks: [SocialLink]? {
