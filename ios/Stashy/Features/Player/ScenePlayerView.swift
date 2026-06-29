@@ -184,6 +184,7 @@ struct ScenePlayerView: View {
         .onAppear { UIDevice.current.beginGeneratingDeviceOrientationNotifications() }
         .onDisappear {
             OrientationController.lock(.portrait)
+            resetZoom()
             if !isFullscreen { model.pause() }
         }
     }

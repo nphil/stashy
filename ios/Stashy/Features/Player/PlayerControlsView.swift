@@ -13,8 +13,8 @@ struct PlayerControlsView: View {
     @State private var isScrubbing = false
     @State private var scrubTime: TimeInterval = 0
     @State private var hideTask: Task<Void, Never>?
-    @State private var dragSeekActive = false
     @State private var dragAnchorTime: TimeInterval = 0
+    private let scrubHaptic = UIImpactFeedbackGenerator(style: .medium)
 
     var body: some View {
         GeometryReader { geo in
@@ -22,7 +22,7 @@ struct PlayerControlsView: View {
                 Color.black.opacity(showControls ? 0.2 : 0.001)
                     .contentShape(Rectangle())
                     .onTapGesture { toggleControls() }
-                    .gesture(seekDragGesture(width: geo.size.width))
+                    .gesture(playerGesture(width: geo.size.width))
 
                 if showControls {
                     VStack {
@@ -58,62 +58,53 @@ struct PlayerControlsView: View {
                     }
                 }
             }
-            .overlay(alignment: .bottomTrailing) {
-                // While zoomed, show a compact (60%) scrub preview in the corner so it doesn't
-                // cover the zoomed area.
-                if isScrubbing, zoomScale > 1, let img = sprites.thumbnail(at: scrubTime) {
-                    Image(uiImage: img)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: 96, height: 54)
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(.white.opacity(0.7), lineWidth: 1))
-                        .padding(.trailing, 16)
-                        .padding(.bottom, 80)
-                }
-            }
             .animation(.easeInOut(duration: 0.2), value: showControls)
             .onAppear { scheduleHide() }
             .onDisappear { hideTask?.cancel() }
         }
     }
 
-    /// Drag anywhere to seek (horizontal) or swipe down to exit fullscreen — both reachable
-    /// one-handed. A horizontal drag maps proportionally to the timeline (full width ≈ whole clip);
-    /// the scrubber bar (with its sprite preview) reflects the position and the seek commits on
-    /// release.
-    private func seekDragGesture(width: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 12)
+    /// Press-and-hold then drag to scrub (so it never clashes with panning a zoomed video); a quick
+    /// swipe down exits fullscreen (or resets zoom first if zoomed in). Scrubbing maps the horizontal
+    /// drag proportionally to the timeline and shows the 100% sprite preview on the bar.
+    private func playerGesture(width: CGFloat) -> some Gesture {
+        let scrub = LongPressGesture(minimumDuration: 0.4)
+            .sequenced(before: DragGesture(minimumDistance: 0))
             .onChanged { value in
-                if !dragSeekActive {
-                    // Commit to scrubbing only once the drag is clearly horizontal.
-                    guard abs(value.translation.width) > abs(value.translation.height) else { return }
-                    dragSeekActive = true
-                    dragAnchorTime = model.currentTime
+                guard case .second(true, let drag) = value else { return }
+                if !isScrubbing {
                     isScrubbing = true
+                    dragAnchorTime = model.currentTime
                     showControls = true
                     hideTask?.cancel()
+                    scrubHaptic.impactOccurred()
                 }
-                let span = max(model.duration, 1)
-                let delta = Double(value.translation.width / max(width, 1)) * span
-                scrubTime = max(0, min(model.duration, dragAnchorTime + delta))
+                if let drag {
+                    let span = max(model.duration, 1)
+                    let delta = Double(drag.translation.width / max(width, 1)) * span
+                    scrubTime = max(0, min(model.duration, dragAnchorTime + delta))
+                }
             }
-            .onEnded { value in
-                if dragSeekActive {
+            .onEnded { _ in
+                if isScrubbing {
                     model.seek(to: scrubTime)
                     isScrubbing = false
-                    dragSeekActive = false
                     scheduleHide()
-                } else if value.translation.height > 60,
-                          abs(value.translation.height) > abs(value.translation.width) {
-                    // Swipe down: reset zoom first if zoomed in, otherwise exit fullscreen.
-                    if zoomScale > 1 {
-                        withAnimation(.easeOut(duration: 0.2)) { zoomScale = 1 }
-                    } else if isFullscreen {
-                        isFullscreen = false
-                    }
                 }
             }
+
+        let swipeDown = DragGesture(minimumDistance: 24)
+            .onEnded { value in
+                guard value.translation.height > 60,
+                      abs(value.translation.height) > abs(value.translation.width) else { return }
+                if zoomScale > 1 {
+                    withAnimation(.easeOut(duration: 0.2)) { zoomScale = 1 }
+                } else if isFullscreen {
+                    isFullscreen = false
+                }
+            }
+
+        return ExclusiveGesture(scrub, swipeDown)
     }
 
     private var controlBar: some View {
@@ -122,7 +113,7 @@ struct PlayerControlsView: View {
                 duration: model.duration,
                 currentTime: model.currentTime,
                 sprites: sprites,
-                showSpritePreview: zoomScale <= 1, // when zoomed, the corner preview is used instead
+                showSpritePreview: true, // always show the 100% sprite preview, even when zoomed
                 isScrubbing: $isScrubbing,
                 scrubTime: $scrubTime,
                 onSeek: { model.seek(to: $0); scheduleHide() }
