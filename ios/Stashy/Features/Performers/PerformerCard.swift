@@ -8,6 +8,7 @@ struct PerformerCard: View {
     var width: CGFloat? = nil
     @Environment(\.imageCache) private var imageCache
     @Environment(ThemeManager.self) private var themeManager
+    @AppStorage("blurThumbnails") private var blurThumbnails = false
     @State private var image: UIImage?
 
     var body: some View {
@@ -20,6 +21,7 @@ struct PerformerCard: View {
                         Image(uiImage: image)
                             .resizable()
                             .scaledToFill()
+                            .blur(radius: blurThumbnails ? 28 : 0)
                     } else {
                         Image(systemName: "person.fill")
                             .font(.largeTitle)

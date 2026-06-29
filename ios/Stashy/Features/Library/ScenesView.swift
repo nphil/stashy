@@ -173,6 +173,7 @@ struct SceneCard: View {
     let apiKey: String
     @Environment(\.imageCache) private var imageCache
     @Environment(ThemeManager.self) private var themeManager
+    @AppStorage("blurThumbnails") private var blurThumbnails = false
     @State private var thumbnail: UIImage?
 
     var body: some View {
@@ -186,6 +187,7 @@ struct SceneCard: View {
                         Image(uiImage: img)
                             .resizable()
                             .scaledToFill()
+                            .blur(radius: blurThumbnails ? 28 : 0)
                     } else {
                         Image(systemName: "film")
                             .font(.title2)

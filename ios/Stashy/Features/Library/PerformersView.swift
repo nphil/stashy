@@ -107,6 +107,7 @@ struct PerformerRow: View {
     let performer: Performer
     let apiKey: String
     @Environment(\.imageCache) private var imageCache
+    @AppStorage("blurThumbnails") private var blurThumbnails = false
     @State private var avatar: UIImage?
 
     var body: some View {
@@ -116,6 +117,7 @@ struct PerformerRow: View {
                     Image(uiImage: img)
                         .resizable()
                         .scaledToFill()
+                        .blur(radius: blurThumbnails ? 18 : 0)
                 } else {
                     Image(systemName: "person.circle.fill")
                         .resizable()

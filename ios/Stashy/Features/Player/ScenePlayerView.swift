@@ -60,7 +60,8 @@ struct KSPlayerSurface: UIViewRepresentable {
 
     func makeUIView(context: Context) -> UIView {
         let container = UIView()
-        container.backgroundColor = .black
+        // Clear so the blurred poster behind shows through any letterbox bars.
+        container.backgroundColor = .clear
         attach(to: container)
         return container
     }
@@ -71,6 +72,7 @@ struct KSPlayerSurface: UIViewRepresentable {
 
     private func attach(to container: UIView) {
         guard let playerView = model.layer.player.view else { return }
+        playerView.backgroundColor = .clear
         if playerView.superview !== container {
             playerView.removeFromSuperview()
             playerView.frame = container.bounds
@@ -95,6 +97,7 @@ struct ScenePlayerView: View {
     @State private var zoomScale: CGFloat = 1
     @State private var baseZoom: CGFloat = 1
     @State private var zoomAnchor: UnitPoint = .center
+    @State private var poster: UIImage?
 
     init(scene: StashScene, apiKey: String, url: URL, isFullscreen: Binding<Bool>, onBack: (() -> Void)? = nil) {
         self.scene = scene
@@ -106,6 +109,19 @@ struct ScenePlayerView: View {
 
     var body: some View {
         ZStack {
+            // Blurred poster fills the frame so portrait/odd-ratio videos sit on a seamless
+            // backdrop instead of black bars (GPU blur, cheap — it's a single still image).
+            Group {
+                if let poster {
+                    Image(uiImage: poster).resizable().scaledToFill().blur(radius: 30)
+                } else {
+                    Color.black
+                }
+            }
+            .ignoresSafeArea(edges: isFullscreen ? .all : [])
+            .clipped()
+            .allowsHitTesting(false)
+
             KSPlayerSurface(model: model, isReady: model.isReady)
                 .scaleEffect(isFullscreen ? zoomScale : 1, anchor: zoomAnchor)
                 .ignoresSafeArea(edges: isFullscreen ? .all : [])
@@ -132,6 +148,10 @@ struct ScenePlayerView: View {
             guard let vtt = scene.vttURL(apiKey: apiKey),
                   let sprite = scene.spriteURL(apiKey: apiKey) else { return }
             await sprites.load(vttURL: vtt, spriteURL: sprite, imageCache: imageCache)
+        }
+        .task(id: scene.id) {
+            guard let url = scene.thumbnailURL(apiKey: apiKey) else { return }
+            poster = try? await imageCache.image(for: url)
         }
         // Rotate to landscape → fullscreen; back to portrait → inline. A manual exit while still
         // landscape suppresses auto re-entry until the device returns to portrait.
