@@ -158,9 +158,12 @@ jobs:
           zip -qr Stashy.ipa Payload/
           IPA_BYTES=$(wc -c < Stashy.ipa | tr -d ' ')
           echo "IPA size: $IPA_BYTES bytes ($(du -sh Stashy.ipa | cut -f1))"
-          # Backstop: a healthy build is ~14MB (FFmpeg frameworks). Anything tiny is a broken shell.
-          if [ "$IPA_BYTES" -lt 3000000 ]; then
-            echo "❌ IPA is only $IPA_BYTES bytes — far below the expected ~14MB; refusing to publish."
+          # Backstop for the broken-shell case (those were ~60KB with no binary). FFmpeg links
+          # statically and dead-strips to what's actually called, so the IPA grows with usage
+          # (~2MB today, more as the transcode pipeline lands). The executable-present check above is
+          # the primary gate; this floor just catches gross truncation.
+          if [ "$IPA_BYTES" -lt 1000000 ]; then
+            echo "❌ IPA is only $IPA_BYTES bytes — looks like a broken shell; refusing to publish."
             exit 1
           fi
 
