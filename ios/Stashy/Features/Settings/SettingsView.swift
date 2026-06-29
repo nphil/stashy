@@ -17,6 +17,7 @@ struct SettingsView: View {
     @AppStorage("animatedPreviews") private var animatedPreviews = true
     @AppStorage("appLockEnabled") private var appLockEnabled = false
     @AppStorage("blurThumbnails") private var blurThumbnails = false
+    @AppStorage("blurTitles") private var blurTitles = false
 
     private let swatchColumns = [GridItem(.adaptive(minimum: 64), spacing: 12)]
 
@@ -142,6 +143,7 @@ struct SettingsView: View {
                     Toggle("Require Face ID", isOn: $appLockEnabled)
                         .disabled(!AppLock.isAvailable)
                     Toggle("Blur thumbnails", isOn: $blurThumbnails)
+                    Toggle("Blur titles", isOn: $blurTitles)
                 } header: {
                     Text("Privacy")
                 } footer: {

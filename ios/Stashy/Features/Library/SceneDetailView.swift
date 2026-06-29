@@ -5,6 +5,7 @@ struct SceneDetailView: View {
     @Environment(AppState.self) private var appState
     @Environment(ThemeManager.self) private var themeManager
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("blurTitles") private var blurTitles = false
     @State private var isFullscreen = false
 
     // Inline player fills the width at 16:9 and sits at the very top (below the status bar).
@@ -63,6 +64,7 @@ struct SceneDetailView: View {
                     .font(.headline)
                     .foregroundStyle(themeManager.current.foregroundColor)
                     .lineLimit(1)
+                    .blur(radius: blurTitles ? 6 : 0)
                 HStack(spacing: 6) {
                     if let studio = scene.studio { Text(studio.name).lineLimit(1) }
                     if let date = scene.date { Text("· \(date)").lineLimit(1) }
@@ -164,6 +166,7 @@ struct CompactPerformerChip: View {
     @Environment(\.imageCache) private var imageCache
     @Environment(ThemeManager.self) private var themeManager
     @AppStorage("blurThumbnails") private var blurThumbnails = false
+    @AppStorage("blurTitles") private var blurTitles = false
     @State private var image: UIImage?
 
     var body: some View {
@@ -184,6 +187,7 @@ struct CompactPerformerChip: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(themeManager.current.foregroundColor)
                     .lineLimit(1)
+                    .blur(radius: blurTitles ? 5 : 0)
                 HStack(spacing: 4) {
                     if let age = performer.age { Text("\(age)") }
                     if let country = performer.country, !country.isEmpty { Text(country.countryFlag) }
@@ -239,6 +243,7 @@ struct TagChipsView: View {
     let tags: [Tag]
     private let limit = 8
     @State private var expanded = false
+    @Environment(AppRouter.self) private var router
 
     var body: some View {
         let ranked = TagRankingStore.shared.ranked(tags)
@@ -252,11 +257,14 @@ struct TagChipsView: View {
             GlassEffectContainer(spacing: 6) {
                 FlowLayout(spacing: 6) {
                     ForEach(shown) { tag in
-                        Text(tag.name)
-                            .font(.caption)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .glassEffect(.regular, in: Capsule())
+                        Button { router.openScenes(tag: tag) } label: {
+                            Text(tag.name)
+                                .font(.caption)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .glassEffect(.regular, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
                     }
                     if ranked.count > limit {
                         Button {

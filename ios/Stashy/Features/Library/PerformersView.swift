@@ -69,7 +69,7 @@ struct PerformersView: View {
                     if filterExpanded {
                         PerformerFilterPanel(query: $viewModel.query)
                             .padding(.top, 4)
-                            .transition(.move(edge: .top).combined(with: .opacity))
+                            .transition(.scale(scale: 0.05, anchor: .topTrailing).combined(with: .opacity))
                     }
                 }
                 .navigationTitle("Performers")

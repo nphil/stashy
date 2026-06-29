@@ -6,12 +6,14 @@ struct StashyApp: App {
     @State private var themeManager = ThemeManager()
     @State private var appState = AppState()
     @State private var imageCache = ImageCache()
+    @State private var router = AppRouter()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environment(themeManager)
                 .environment(appState)
+                .environment(router)
                 .environment(\.imageCache, imageCache)
                 .preferredColorScheme(themeManager.current.preferredColorScheme)
                 .tint(themeManager.current.accentColor)

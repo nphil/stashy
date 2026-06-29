@@ -9,6 +9,7 @@ struct PerformerCard: View {
     @Environment(\.imageCache) private var imageCache
     @Environment(ThemeManager.self) private var themeManager
     @AppStorage("blurThumbnails") private var blurThumbnails = false
+    @AppStorage("blurTitles") private var blurTitles = false
     @State private var image: UIImage?
 
     var body: some View {
@@ -34,6 +35,7 @@ struct PerformerCard: View {
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(themeManager.current.foregroundColor)
                 .lineLimit(1)
+                .blur(radius: blurTitles ? 5 : 0)
 
             if let count = performer.scene_count {
                 Text("\(count) scene\(count == 1 ? "" : "s")")

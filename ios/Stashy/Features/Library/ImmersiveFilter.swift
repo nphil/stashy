@@ -10,14 +10,12 @@ struct FilterFunnelButton: View {
         Button {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { expanded.toggle() }
         } label: {
+            // No background — just themed lines, kept legible over content with a soft shadow.
             Image(systemName: "line.3.horizontal.decrease")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(isActive ? Color.white : themeManager.current.foregroundColor)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(isActive ? themeManager.current.accentColor : themeManager.current.foregroundColor)
+                .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
                 .frame(width: 34, height: 34)
-                .glassEffect(
-                    isActive ? .regular.tint(themeManager.current.accentColor) : .regular,
-                    in: Circle()
-                )
         }
     }
 }

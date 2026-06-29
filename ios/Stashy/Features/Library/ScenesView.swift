@@ -53,6 +53,7 @@ struct ScenesView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.imageCache) private var imageCache
     @Environment(ThemeManager.self) private var themeManager
+    @Environment(AppRouter.self) private var router
     @State private var viewModel = ScenesViewModel()
     @State private var path = NavigationPath()
     @State private var previewPresenter = ScenePreviewPresenter()
@@ -74,7 +75,7 @@ struct ScenesView: View {
                     if filterExpanded {
                         SceneFilterPanel(query: $viewModel.query)
                             .padding(.top, 4)
-                            .transition(.move(edge: .top).combined(with: .opacity))
+                            .transition(.scale(scale: 0.05, anchor: .topTrailing).combined(with: .opacity))
                     }
                 }
                 .navigationTitle("Scenes")
@@ -93,6 +94,13 @@ struct ScenesView: View {
         .onChange(of: viewModel.query) { _, _ in
             guard let client = appState.client else { return }
             Task { await viewModel.loadFirstPage(client: client) }
+        }
+        // A tag tapped elsewhere filters scenes to just that tag (pops to the grid).
+        .onChange(of: router.sceneTagFilter) { _, tag in
+            guard let tag else { return }
+            path = NavigationPath()
+            viewModel.query = SceneQuery(tags: [tag])
+            router.sceneTagFilter = nil
         }
         .task {
             guard let client = appState.client else { return }
@@ -187,6 +195,7 @@ struct SceneCard: View {
     @Environment(\.imageCache) private var imageCache
     @Environment(ThemeManager.self) private var themeManager
     @AppStorage("blurThumbnails") private var blurThumbnails = false
+    @AppStorage("blurTitles") private var blurTitles = false
     @State private var thumbnail: UIImage?
 
     var body: some View {
@@ -231,6 +240,7 @@ struct SceneCard: View {
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.7))
                 .lineLimit(2)
+                .blur(radius: blurTitles ? 5 : 0)
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
