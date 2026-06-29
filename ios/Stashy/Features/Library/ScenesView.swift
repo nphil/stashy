@@ -55,6 +55,7 @@ struct ScenesView: View {
     @Environment(ThemeManager.self) private var themeManager
     @State private var viewModel = ScenesViewModel()
     @State private var path = NavigationPath()
+    @State private var previewPresenter = ScenePreviewPresenter()
 
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
@@ -74,6 +75,8 @@ struct ScenesView: View {
                 SceneDetailView(scene: scene)
             }
         }
+        .environment(\.scenePreviewPresenter, previewPresenter)
+        .overlay { ScenePreviewOverlay(presenter: previewPresenter, path: $path) }
         .onChange(of: viewModel.query) { _, _ in
             guard let client = appState.client else { return }
             Task { await viewModel.loadFirstPage(client: client) }

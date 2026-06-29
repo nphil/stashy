@@ -18,8 +18,6 @@ final class ScenePlayerModel: KSPlayerLayerDelegate {
         // mutable static that Swift 6 strict concurrency rejects.
         layer = KSPlayerLayer(url: url, isAutoPlay: true, options: KSOptions())
         layer.delegate = self
-        // Fill the player frame (crop) so there are never letterbox black bars.
-        layer.player.contentMode = .scaleAspectFill
     }
 
     func play() { layer.play(); isPlaying = true }
