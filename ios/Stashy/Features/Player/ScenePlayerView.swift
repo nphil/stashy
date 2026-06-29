@@ -35,7 +35,11 @@ final class ScenePlayerModel {
     /// Create the engine and begin playback. Idempotent — safe to call on every `onAppear`.
     func start() {
         guard engine == nil else { return }
-        let engine = route.engine == .avPlayer ? AVPlaybackEngine(url: route.url) : KSPlaybackEngine(url: route.url)
+        // Annotate the type: a bare ternary of two different concrete engine types won't infer the
+        // protocol, so the contextual type must be given explicitly.
+        let engine: PlaybackEngine = route.engine == .avPlayer
+            ? AVPlaybackEngine(url: route.url)
+            : KSPlaybackEngine(url: route.url)
         engine.onTime = { [weak self] current, duration in
             guard let self else { return }
             self.currentTime = current

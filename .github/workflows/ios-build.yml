@@ -127,6 +127,21 @@ jobs:
           fi
           echo "✅ Found: $APP_PATH"
 
+          # The build step swallows xcodebuild's exit code (it always "fails" on the framework
+          # validation), so a *real* compile/link failure can leave behind a skeleton .app with no
+          # executable and no frameworks. Verify completeness here, or we'd publish a tiny broken IPA.
+          EXE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_PATH/Info.plist" 2>/dev/null || echo Stashy)
+          if [ ! -s "$APP_PATH/$EXE" ]; then
+            echo "❌ App executable '$EXE' missing/empty — the build failed (compile/link error)."
+            exit 1
+          fi
+          FW_COUNT=$(ls -d "$APP_PATH"/Frameworks/*.framework 2>/dev/null | wc -l | tr -d ' ')
+          if [ "${FW_COUNT:-0}" -lt 1 ]; then
+            echo "❌ No embedded frameworks — incomplete build (KSPlayer/FFmpeg frameworks expected)."
+            exit 1
+          fi
+          echo "✅ Executable present + $FW_COUNT embedded frameworks."
+
           # Fix underscored CFBundleIdentifiers in the embedded frameworks (the validation the
           # build tripped on). Done on the finished .app so no package re-extraction reverts it.
           find "$APP_PATH/Frameworks" -name "Info.plist" 2>/dev/null | while read -r plist; do
@@ -142,7 +157,13 @@ jobs:
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
           zip -qr Stashy.ipa Payload/
-          echo "IPA size: $(du -sh Stashy.ipa | cut -f1)"
+          IPA_BYTES=$(wc -c < Stashy.ipa | tr -d ' ')
+          echo "IPA size: $IPA_BYTES bytes ($(du -sh Stashy.ipa | cut -f1))"
+          # Backstop: a healthy build is ~14MB (FFmpeg frameworks). Anything tiny is a broken shell.
+          if [ "$IPA_BYTES" -lt 3000000 ]; then
+            echo "❌ IPA is only $IPA_BYTES bytes — far below the expected ~14MB; refusing to publish."
+            exit 1
+          fi
 
       - name: Commit version bump, update apps.json, tag, and publish release
         env:
