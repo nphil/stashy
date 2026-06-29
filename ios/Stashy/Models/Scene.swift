@@ -23,6 +23,8 @@ struct SceneFile: Codable, Sendable, Hashable {
     let height: Int?
     let basename: String?
     let size: Int?
+    let bit_rate: Int?
+    let frame_rate: Double?
 }
 
 struct ScenePaths: Codable, Sendable {
@@ -78,6 +80,21 @@ extension StashScene {
 
     var codecLabel: String? {
         files.first?.video_codec?.uppercased()
+    }
+
+    var bitrateLabel: String? {
+        guard let br = files.first?.bit_rate, br > 0 else { return nil }
+        return String(format: "%.1f Mbps", Double(br) / 1_000_000)
+    }
+
+    var frameRateLabel: String? {
+        guard let fr = files.first?.frame_rate, fr > 0 else { return nil }
+        return String(format: "%.0f fps", fr)
+    }
+
+    var fileSizeLabel: String? {
+        guard let s = files.first?.size, s > 0 else { return nil }
+        return ByteCountFormatter.string(fromByteCount: Int64(s), countStyle: .file)
     }
 
     func formattedDuration() -> String? {

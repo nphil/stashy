@@ -17,12 +17,10 @@ struct SceneDetailView: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            // Metadata scrolls behind the inline player (reserve space with a clear spacer).
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    Color.clear.frame(height: inlineHeight)
-                    metadata
-                }
+            // Fixed (no-scroll) layout: player up top, compact metadata fills the rest.
+            VStack(spacing: 0) {
+                Color.clear.frame(height: inlineHeight)
+                metadata
             }
             .opacity(isFullscreen ? 0 : 1)
 
@@ -58,97 +56,150 @@ struct SceneDetailView: View {
     }
 
     private var metadata: some View {
-        VStack(alignment: .leading, spacing: 20) {
-                    // Title + studio
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(scene.title ?? "Untitled")
-                            .font(.title3.weight(.semibold))
-                            .foregroundStyle(.primary)
+        VStack(alignment: .leading, spacing: 12) {
+            // Title + studio + date — deliberately understated.
+            VStack(alignment: .leading, spacing: 2) {
+                Text(scene.title ?? "Untitled")
+                    .font(.headline)
+                    .foregroundStyle(themeManager.current.foregroundColor)
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    if let studio = scene.studio { Text(studio.name).lineLimit(1) }
+                    if let date = scene.date { Text("· \(date)").lineLimit(1) }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
 
-                        if let studio = scene.studio {
-                            Label(studio.name, systemImage: "building.2")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    // Date + duration
-                    HStack(spacing: 16) {
-                        if let date = scene.date {
-                            Label(date, systemImage: "calendar")
-                        }
-                        if let dur = scene.formattedDuration() {
-                            Label(dur, systemImage: "clock")
-                        }
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                    // File(s)
-                    if !scene.files.isEmpty {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Label(scene.files.count > 1 ? "Files" : "File", systemImage: "doc")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-
-                            ForEach(Array(scene.files.enumerated()), id: \.offset) { _, file in
-                                if let name = file.basename {
-                                    Text(name)
-                                        .font(.footnote)
-                                        .foregroundStyle(.primary)
-                                        .lineLimit(2)
-                                        .textSelection(.enabled)
-                                }
+            // Performers: who, age, country.
+            if !scene.performers.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(scene.performers) { performer in
+                            NavigationLink(value: performer) {
+                                CompactPerformerChip(performer: performer, apiKey: apiKey)
                             }
-
-                            HStack(spacing: 12) {
-                                if let res = scene.resolutionLabel {
-                                    Label(res, systemImage: "rectangle.compress.vertical")
-                                }
-                                if let codec = scene.codecLabel {
-                                    Label(codec, systemImage: "film")
-                                }
-                                if let size = scene.files.first?.size {
-                                    Label(
-                                        ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file),
-                                        systemImage: "internaldrive"
-                                    )
-                                }
-                            }
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .buttonStyle(.plain)
                         }
-                    }
-
-                    // Performers
-                    if !scene.performers.isEmpty {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Label("Performers", systemImage: "person.2")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(alignment: .top, spacing: 12) {
-                                    ForEach(scene.performers) { performer in
-                                        NavigationLink(value: performer) {
-                                            PerformerCard(performer: performer, apiKey: apiKey, width: 104)
-                                        }
-                                        .buttonStyle(.plain)
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Tags (ranked + truncated)
-                    if !scene.tags.isEmpty {
-                        TagChipsView(tags: scene.tags)
                     }
                 }
-                .padding(16)
+            }
+
+            // Social links (merged across performers), truncated.
+            if let links = socialLinks {
+                FlowLayout(spacing: 6) {
+                    ForEach(links.prefix(4), id: \.url) { link in
+                        Link(destination: link.url) {
+                            Label(link.label, systemImage: link.symbol)
+                                .font(.caption2.weight(.medium))
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 4)
+                                .glassEffect(.regular.tint(themeManager.current.accentColor), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            // Tags (ranked + truncated).
+            if !scene.tags.isEmpty {
+                TagChipsView(tags: scene.tags)
+            }
+
+            Spacer(minLength: 0)
+
+            techBox
         }
+        .padding(.horizontal, 14)
+        .padding(.top, 10)
+        .padding(.bottom, 12)
+    }
+
+    private var socialLinks: [SocialLink]? {
+        let raw = scene.performers.flatMap { $0.urls ?? [] }
+        let links = raw.compactMap { SocialLink(raw: $0) }
+        guard !links.isEmpty else { return nil }
+        var seen = Set<URL>()
+        return links.filter { seen.insert($0.url).inserted }.sorted { $0.priority < $1.priority }
+    }
+
+    private var techItems: [(label: String, symbol: String)] {
+        var out: [(String, String)] = []
+        if let r = scene.resolutionLabel { out.append((r, "rectangle.compress.vertical")) }
+        if let c = scene.codecLabel { out.append((c, "film")) }
+        if let b = scene.bitrateLabel { out.append((b, "speedometer")) }
+        if let f = scene.frameRateLabel { out.append((f, "timelapse")) }
+        if let d = scene.formattedDuration() { out.append((d, "clock")) }
+        if let s = scene.fileSizeLabel { out.append((s, "internaldrive")) }
+        return out
+    }
+
+    @ViewBuilder private var techBox: some View {
+        let items = techItems
+        if !items.isEmpty {
+            FlowLayout(spacing: 10) {
+                ForEach(items, id: \.label) { item in
+                    HStack(spacing: 3) {
+                        Image(systemName: item.symbol).font(.system(size: 9))
+                        Text(item.label)
+                    }
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(themeManager.current.surfaceColor, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+    }
 
     private var apiKey: String { appState.client?.apiKey ?? "" }
+}
+
+/// Compact performer chip for the scene screen: small portrait + name + age · country.
+struct CompactPerformerChip: View {
+    let performer: Performer
+    let apiKey: String
+    @Environment(\.imageCache) private var imageCache
+    @Environment(ThemeManager.self) private var themeManager
+    @AppStorage("blurThumbnails") private var blurThumbnails = false
+    @State private var image: UIImage?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Group {
+                if let image {
+                    Image(uiImage: image).resizable().scaledToFill()
+                        .blur(radius: blurThumbnails ? 14 : 0)
+                } else {
+                    Image(systemName: "person.fill").foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 38, height: 38)
+            .clipShape(Circle())
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(performer.name)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(themeManager.current.foregroundColor)
+                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    if let age = performer.age { Text("\(age)") }
+                    if let country = performer.country, !country.isEmpty { Text(country.countryFlag) }
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
+            .padding(.trailing, 4)
+        }
+        .padding(6)
+        .background(themeManager.current.surfaceColor, in: Capsule())
+        .task(id: performer.id) {
+            guard let url = performer.imageURL(apiKey: apiKey) else { return }
+            image = try? await imageCache.image(for: url)
+        }
+    }
 }
 
 // MARK: - Chip section
