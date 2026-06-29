@@ -104,9 +104,11 @@ struct PlayerControlsView: View {
 
             HStack(spacing: 14) {
                 Text(Self.timeString(isScrubbing ? scrubTime : model.currentTime))
-                // Debug Stats toggle, sitting next to the elapsed timer.
-                Button { showStats.toggle() } label: {
-                    Image(systemName: showStats ? "chart.bar.doc.horizontal.fill" : "chart.bar.doc.horizontal")
+                // Debug Stats toggle — fullscreen only (no clutter in the inline app view).
+                if isFullscreen {
+                    Button { showStats.toggle() } label: {
+                        Image(systemName: showStats ? "chart.bar.doc.horizontal.fill" : "chart.bar.doc.horizontal")
+                    }
                 }
                 Spacer()
                 Text(Self.timeString(model.duration))

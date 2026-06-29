@@ -35,6 +35,8 @@ final class AVPlaybackEngine: PlaybackEngine {
     var onTime: ((TimeInterval, TimeInterval) -> Void)?
     var onReady: ((Bool) -> Void)?
     var onPlaying: ((Bool) -> Void)?
+    var onPresentationSize: ((CGSize) -> Void)?
+    private var lastPresentation: CGSize = .zero
 
     var renderView: UIView? { hostView }
     var liveBlurView: UIView? { blurBackdrop }
@@ -71,6 +73,11 @@ final class AVPlaybackEngine: PlaybackEngine {
                 guard let self else { return }
                 let duration = self.item.duration.seconds
                 self.onTime?(time.seconds, duration.isFinite ? duration : 0)
+                let presentation = self.item.presentationSize
+                if presentation.width > 0, presentation != self.lastPresentation {
+                    self.lastPresentation = presentation
+                    self.onPresentationSize?(presentation)
+                }
             }
         }
 

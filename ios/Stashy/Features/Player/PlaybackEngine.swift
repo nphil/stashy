@@ -17,6 +17,9 @@ protocol PlaybackEngine: AnyObject {
     var onTime: ((TimeInterval, TimeInterval) -> Void)? { get set }
     var onReady: ((Bool) -> Void)? { get set }
     var onPlaying: ((Bool) -> Void)? { get set }
+    /// Actual decoded video size (after pixel-aspect/rotation), once known — for correct layout when
+    /// the server's file dimensions are missing or wrong.
+    var onPresentationSize: ((CGSize) -> Void)? { get set }
 
     func play()
     func pause()

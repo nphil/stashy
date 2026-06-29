@@ -11,6 +11,9 @@ final class ScenePlayerModel {
     var duration: TimeInterval = 0
     var isPlaying = false
     var isReady = false
+    /// The actual decoded video aspect (w/h), once the player reports a presentation size. Drives
+    /// layout/orientation when the server's file metadata is missing or wrong.
+    var videoAspect: CGFloat?
 
     @ObservationIgnored private var engine: PlaybackEngine?
     @ObservationIgnored private let route: PlaybackRoute
@@ -56,6 +59,11 @@ final class ScenePlayerModel {
         engine.onPlaying = { [weak self] playing in
             guard let self, self.isPlaying != playing else { return }
             self.isPlaying = playing
+        }
+        engine.onPresentationSize = { [weak self] size in
+            guard let self, size.width > 0, size.height > 0 else { return }
+            let aspect = size.width / size.height
+            if self.videoAspect != aspect { self.videoAspect = aspect }
         }
         self.engine = engine
         isPlaying = true
@@ -148,8 +156,13 @@ struct ScenePlayerView: View {
         _model = State(initialValue: ScenePlayerModel(route: route))
     }
 
-    /// The video's display aspect (from file metadata, available immediately).
-    private var aspect: CGFloat { scene.videoAspect ?? 16.0 / 9.0 }
+    /// The video's display aspect. Prefer the *actual* decoded size reported by the player (correct
+    /// for files whose server metadata is missing/wrong, e.g. some AVI/MPEG4), then file metadata,
+    /// then a 16:9 default.
+    private var aspect: CGFloat { model.videoAspect ?? scene.videoAspect ?? 16.0 / 9.0 }
+
+    /// True when the video is taller than wide — from the actual decoded size when known, else metadata.
+    private var isPortraitVideo: Bool { (model.videoAspect ?? scene.videoAspect).map { $0 < 1 } ?? false }
 
     var body: some View {
         GeometryReader { geo in
@@ -225,15 +238,17 @@ struct ScenePlayerView: View {
                     scrubTime: $scrubTime,
                     videoRect: videoRect,
                     safeArea: safeArea,
-                    spritePreviewTopLeading: isFullscreen && scene.isPortraitVideo,
+                    spritePreviewTopLeading: isFullscreen && isPortraitVideo,
                     scheduleHide: { scheduleHide() },
                     onBack: onBack
                 )
                 .frame(width: avail.width, height: avail.height)
 
-                if showStats {
-                    // Anchored top-leading just below the back chevron, kept within the video rect.
-                    StatsOverlayView(scene: scene, model: model, probeURL: scene.directFileURL(apiKey: apiKey))
+                if showStats && isFullscreen {
+                    // Fullscreen-only debug overlay, anchored top-leading just below the back chevron.
+                    StatsOverlayView(scene: scene, model: model,
+                                     probeURL: scene.directFileURL(apiKey: apiKey),
+                                     isLandscape: avail.width > avail.height)
                         .padding(.leading, max(videoRect.minX, safeArea.leading) + 12)
                         .padding(.top, max(videoRect.minY, safeArea.top) + 52)
                         .frame(width: avail.width, height: avail.height, alignment: .topLeading)
@@ -254,7 +269,7 @@ struct ScenePlayerView: View {
         // Portrait videos never auto-rotate into a landscape fullscreen — they go fullscreen in
         // portrait via the button instead.
         .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
-            guard !scene.isPortraitVideo else { return }
+            guard !isPortraitVideo else { return }
             let orientation = UIDevice.current.orientation
             if orientation.isLandscape {
                 if !suppressAutoFullscreen { isFullscreen = true }
@@ -266,7 +281,7 @@ struct ScenePlayerView: View {
         .onChange(of: isFullscreen) { _, now in
             if now {
                 // Portrait videos go fullscreen in portrait; everything else uses landscape.
-                OrientationController.lock(scene.isPortraitVideo ? .portrait : [.landscapeLeft, .landscapeRight])
+                OrientationController.lock(isPortraitVideo ? .portrait : [.landscapeLeft, .landscapeRight])
             } else {
                 // Force back to portrait even if the phone is still held in landscape. Zoom is reset
                 // automatically by the surface once zoom is disabled (zoomEnabled = isFullscreen).

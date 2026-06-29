@@ -8,6 +8,8 @@ struct StatsOverlayView: View {
     let model: ScenePlayerModel
     /// The direct file URL to demux-probe with FFmpeg (debug; runs once when the overlay opens).
     var probeURL: URL?
+    /// Landscape fullscreen → a wider box (more fits per row); portrait → a taller box.
+    var isLandscape = false
     @State private var demux = "probing…"
 
     var body: some View {
@@ -55,9 +57,9 @@ struct StatsOverlayView: View {
             }
             .padding(12)
         }
-        .frame(width: 264)
-        .frame(maxHeight: 300)
-        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .frame(width: isLandscape ? 520 : 280)
+        .frame(maxHeight: isLandscape ? 320 : 480)
+        .background(.black.opacity(0.38), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(.white.opacity(0.12), lineWidth: 1)

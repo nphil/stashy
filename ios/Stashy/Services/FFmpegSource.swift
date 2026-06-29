@@ -35,7 +35,22 @@ final class FFmpegSource: @unchecked Sendable {
     }
 
     /// Open + read stream info, returning a short human-readable summary (or an error string).
+    /// Raced against an 8s timeout so a slow/awkward demux (e.g. AVI, which seeks for its index and
+    /// can need many round-trips) never leaves the overlay stuck on "probing…".
     func probeSummary() async -> String {
+        await withTaskGroup(of: String.self) { group in
+            group.addTask { await self.runProbeDetached() }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(8))
+                return "probe timed out (slow IO / awkward demux)"
+            }
+            let result = await group.next() ?? "—"
+            group.cancelAll()
+            return result
+        }
+    }
+
+    private func runProbeDetached() async -> String {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
                 continuation.resume(returning: self.runProbe())
