@@ -76,7 +76,7 @@ struct ScenesView: View {
             }
         }
         .environment(\.scenePreviewPresenter, previewPresenter)
-        .overlay { ScenePreviewOverlay(presenter: previewPresenter, path: $path) }
+        .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: { path.append($0) }) }
         .onChange(of: viewModel.query) { _, _ in
             guard let client = appState.client else { return }
             Task { await viewModel.loadFirstPage(client: client) }
@@ -124,7 +124,7 @@ struct ScenesView: View {
                         SceneGridCell(
                             scene: scene,
                             apiKey: appState.client?.apiKey ?? "",
-                            path: $path
+                            onOpen: { path.append($0) }
                         ) {
                             guard let client = appState.client else { return }
                             Task {

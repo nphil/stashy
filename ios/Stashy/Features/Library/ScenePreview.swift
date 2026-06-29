@@ -74,7 +74,7 @@ struct LongPressTrigger: UIGestureRecognizerRepresentable {
 struct SceneGridCell: View {
     let scene: StashScene
     let apiKey: String
-    @Binding var path: NavigationPath
+    var onOpen: (StashScene) -> Void
     var onAppear: () -> Void
 
     @Environment(\.scenePreviewPresenter) private var presenter
@@ -93,7 +93,8 @@ struct SceneGridCell: View {
                 }
             )
             .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .onTapGesture { path.append(scene) }
+            // Don't navigate if a long-press already opened the preview (avoids tap+preview both firing).
+            .onTapGesture { if presenter?.active == nil { onOpen(scene) } }
             .gesture(
                 LongPressTrigger {
                     guard animatedPreviews else { return }
@@ -112,11 +113,11 @@ struct SceneGridCell: View {
 
 struct ScenePreviewOverlay: View {
     let presenter: ScenePreviewPresenter
-    @Binding var path: NavigationPath
+    var onOpen: (StashScene) -> Void
 
     var body: some View {
         if let active = presenter.active {
-            ScenePreviewContainer(active: active, presenter: presenter, path: $path)
+            ScenePreviewContainer(active: active, presenter: presenter, onOpen: onOpen)
         }
     }
 }
@@ -128,7 +129,7 @@ private enum PreviewDrag {
 private struct ScenePreviewContainer: View {
     let active: ScenePreviewPresenter.Active
     let presenter: ScenePreviewPresenter
-    @Binding var path: NavigationPath
+    var onOpen: (StashScene) -> Void
     @Environment(\.previewCache) private var previewCache
 
     @State private var model: PreviewScrubModel?
@@ -272,7 +273,7 @@ private struct ScenePreviewContainer: View {
     private func openScene() {
         let scene = active.scene
         presenter.end()
-        path.append(scene)
+        onOpen(scene)
     }
 
     private func dismiss() {

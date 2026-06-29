@@ -58,6 +58,28 @@ actor ImageCache {
         return image
     }
 
+    /// Full-resolution fetch (no downsampling) for images whose exact pixels matter — e.g. sprite
+    /// sheets, where WebVTT crop coordinates are in the original pixel space.
+    func originalImage(for url: URL) async throws -> UIImage {
+        let key = cacheKey(url, 0) // 0 == "original"
+        let nsKey = key as NSString
+        if let hit = memoryCache.object(forKey: nsKey) { return hit }
+
+        let file = directory.appendingPathComponent(key + ".img")
+        if let data = try? Data(contentsOf: file), let image = UIImage(data: data) {
+            memoryCache.setObject(image, forKey: nsKey, cost: data.count)
+            touch(file)
+            return image
+        }
+
+        let (data, _) = try await session.data(from: url)
+        guard let image = UIImage(data: data) else { throw ImageCacheError.invalidData }
+        try? data.write(to: file, options: .atomic)
+        memoryCache.setObject(image, forKey: nsKey, cost: data.count)
+        enforceLimit()
+        return image
+    }
+
     func prefetch(urls: [URL], maxPixel: CGFloat = 600) {
         for url in urls {
             let key = cacheKey(url, maxPixel)

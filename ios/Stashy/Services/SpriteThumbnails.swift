@@ -18,7 +18,8 @@ final class SpriteThumbnails {
 
     func load(vttURL: URL, spriteURL: URL, imageCache: ImageCache) async {
         let parsed = await Self.fetchCues(vttURL)
-        let image = try? await imageCache.image(for: spriteURL)
+        // Full-res: VTT crop rects are in the sprite's original pixel space, so it must not be downsampled.
+        let image = try? await imageCache.originalImage(for: spriteURL)
         sprite = image
         cues = parsed
         isReady = sprite != nil && !cues.isEmpty

@@ -54,6 +54,8 @@ struct PerformerDetailView: View {
     @State private var viewModel = PerformerScenesViewModel()
     @State private var portrait: UIImage?
     @State private var showAllLinks = false
+    @State private var previewPresenter = ScenePreviewPresenter()
+    @State private var openedScene: StashScene?
 
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
@@ -74,11 +76,11 @@ struct PerformerDetailView: View {
                 if !viewModel.scenes.isEmpty {
                     LazyVGrid(columns: columns, spacing: 10) {
                         ForEach(viewModel.scenes) { scene in
-                            NavigationLink(value: scene) {
-                                SceneCard(scene: scene, apiKey: apiKey)
-                            }
-                            .buttonStyle(.plain)
-                            .onAppear {
+                            SceneGridCell(
+                                scene: scene,
+                                apiKey: apiKey,
+                                onOpen: { openedScene = $0 }
+                            ) {
                                 guard let client = appState.client else { return }
                                 Task {
                                     await viewModel.loadNextPageIfNeeded(
@@ -107,9 +109,11 @@ struct PerformerDetailView: View {
             .padding(.vertical, 12)
         }
         .background(themeManager.current.backgroundColor.ignoresSafeArea())
+        .environment(\.scenePreviewPresenter, previewPresenter)
+        .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: { openedScene = $0 }) }
         .navigationTitle(performer.name)
         .navigationBarTitleDisplayMode(.inline)
-        .navigationDestination(for: StashScene.self) { scene in
+        .navigationDestination(item: $openedScene) { scene in
             SceneDetailView(scene: scene)
         }
         .task {

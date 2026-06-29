@@ -26,11 +26,15 @@ struct PlayerControlsView: View {
                 if showControls {
                     VStack {
                         Spacer()
-                        Button { model.togglePlayPause(); scheduleHide() } label: {
-                            Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
-                                .font(.system(size: 34, weight: .bold))
-                                .foregroundStyle(.white)
-                                .shadow(radius: 4)
+                        // Only show the play/pause control once the video is ready (during
+                        // buffering only the spinner shows, never a play button).
+                        if model.isReady {
+                            Button { model.togglePlayPause(); scheduleHide() } label: {
+                                Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
+                                    .font(.system(size: 34, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .shadow(radius: 4)
+                            }
                         }
                         Spacer()
                         controlBar
