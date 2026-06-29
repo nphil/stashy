@@ -135,12 +135,11 @@ jobs:
             echo "❌ App executable '$EXE' missing/empty — the build failed (compile/link error)."
             exit 1
           fi
+          # Frameworks count is informational only: FFmpeg may link statically (no embedded dynamic
+          # frameworks), so an empty Frameworks dir is valid. The IPA-size backstop below is the real
+          # completeness gate for the broken-shell case.
           FW_COUNT=$(ls -d "$APP_PATH"/Frameworks/*.framework 2>/dev/null | wc -l | tr -d ' ')
-          if [ "${FW_COUNT:-0}" -lt 1 ]; then
-            echo "❌ No embedded frameworks — incomplete build (KSPlayer/FFmpeg frameworks expected)."
-            exit 1
-          fi
-          echo "✅ Executable present + $FW_COUNT embedded frameworks."
+          echo "✅ Executable present (embedded frameworks: ${FW_COUNT:-0})."
 
           # Fix underscored CFBundleIdentifiers in the embedded frameworks (the validation the
           # build tripped on). Done on the finished .app so no package re-extraction reverts it.

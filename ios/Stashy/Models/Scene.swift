@@ -74,30 +74,14 @@ extension StashScene {
                                  streamType: "HLS (transcoded)", reason: "TEST: AVPlayer via Stash HLS")
         }
 
-        // No HLS stream offered → fall back to direct-play routing.
+        // No HLS stream offered → play the direct file on AVPlayer for now. The on-device FFmpeg
+        // remux/transcode pipeline (which will handle exotic containers/codecs and unlock direct play
+        // without server transcode) is the next phase; until then non-HLS exotics may not render.
         let direct = sceneStreams.first { !$0.isHLS && !$0.isDASH }
         let chosen = direct ?? sceneStreams.first
         guard let urlString = chosen?.url, let url = appendingAPIKey(apiKey, to: urlString) else { return nil }
-
-        let container = fileContainer
-        let codec = (files.first?.video_codec ?? "").lowercased()
-        let okContainer = ["mp4", "m4v", "mov"].contains(container)
-        let okCodec = ["h264", "avc", "avc1", "hevc", "h265", "hvc1"].contains(codec)
-
-        if okContainer && okCodec {
-            return PlaybackRoute(url: url, engine: .avPlayer, streamType: "Direct",
-                                 reason: "H.264/HEVC in MP4/MOV — AVPlayer direct")
-        }
-
-        let reason: String
-        if codec.isEmpty || container.isEmpty {
-            reason = "No codec/container metadata — using KSPlayer"
-        } else if !okCodec {
-            reason = "Codec \(codec.uppercased()) not AVPlayer-compatible"
-        } else {
-            reason = "Container .\(container) not AVPlayer-compatible"
-        }
-        return PlaybackRoute(url: url, engine: .ksPlayer, streamType: "Direct", reason: reason)
+        return PlaybackRoute(url: url, engine: .avPlayer, streamType: "Direct",
+                             reason: "Direct (AVPlayer); local FFmpeg pipeline pending")
     }
 
     /// Lowercased container extension from the primary file's basename (e.g. "mp4", "mkv").

@@ -20,7 +20,12 @@ final class ScenePlayerModel {
     /// A live blurred backdrop, present only on the AVPlayer path; nil → use a static blur.
     var liveBlurView: UIView? { engine?.liveBlurView }
 
-    var backendName: String { route.engine == .avPlayer ? "AVPlayer" : "KSPlayer (FFmpeg)" }
+    var backendName: String {
+        switch route.engine {
+        case .avPlayer: "AVPlayer"
+        case .localFFmpeg: "FFmpeg (local)"
+        }
+    }
     var streamType: String { route.streamType }
     var routingReason: String { route.reason }
 
@@ -35,11 +40,9 @@ final class ScenePlayerModel {
     /// Create the engine and begin playback. Idempotent — safe to call on every `onAppear`.
     func start() {
         guard engine == nil else { return }
-        // Annotate the type: a bare ternary of two different concrete engine types won't infer the
-        // protocol, so the contextual type must be given explicitly.
-        let engine: PlaybackEngine = route.engine == .avPlayer
-            ? AVPlaybackEngine(url: route.url)
-            : KSPlaybackEngine(url: route.url)
+        // Phase 0: every route plays on AVPlayer (HLS, or direct). The on-device FFmpeg engine that
+        // will serve `.localFFmpeg` routes is wired up in the next phase.
+        let engine: PlaybackEngine = AVPlaybackEngine(url: route.url)
         engine.onTime = { [weak self] current, duration in
             guard let self else { return }
             self.currentTime = current
@@ -81,6 +84,12 @@ final class ScenePlayerModel {
             StatLine(label: "Decode", value: engine?.decodeDescription ?? "—"),
             StatLine(label: "Stream", value: streamType),
             StatLine(label: "AVPlayer use", value: routingReason),
+        ]))
+
+        // Proof the self-built FFmpeg links + is callable (foundation for the local transcode pipeline).
+        sections.append(StatSection(title: "Engine", lines: [
+            StatLine(label: "FFmpeg", value: FFmpegProbe.versionInfo),
+            StatLine(label: "VT h264 enc", value: FFmpegProbe.hasVideoToolboxH264 ? "yes" : "no"),
         ]))
 
         var media: [StatLine] = []

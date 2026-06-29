@@ -3,7 +3,8 @@ import Foundation
 /// Which backend is driving playback.
 enum EngineKind {
     case avPlayer
-    case ksPlayer
+    /// On-device FFmpeg remux/transcode feeding AVPlayer (wired up in a later phase).
+    case localFFmpeg
 }
 
 /// The resolved playback decision for a scene: which URL to play, on which engine, and *why*.
