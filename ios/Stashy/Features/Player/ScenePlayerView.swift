@@ -1,53 +1,53 @@
 import SwiftUI
-import KSPlayer
 
-/// Drives a single `KSPlayerLayer` (which internally picks AVPlayer/VideoToolbox hardware
-/// or its FFmpeg software decoder) and exposes observable playback state so we can render a
-/// fully custom controls overlay — required for the Stash sprite-preview scrubber.
+/// Observable facade over a `PlaybackEngine` (native AVPlayer for HLS, KSPlayer for the non-HLS
+/// fallback). The views bind only to this — the backend is swapped underneath. State pushed from the
+/// engine is written *only when it actually changes*, so a per-frame time tick doesn't invalidate the
+/// whole view tree (which previously forced a UIKit layout pass every frame and starved playback).
 @Observable
 @MainActor
-final class ScenePlayerModel: KSPlayerLayerDelegate {
-    let layer: KSPlayerLayer
+final class ScenePlayerModel {
     var currentTime: TimeInterval = 0
     var duration: TimeInterval = 0
     var isPlaying = false
     var isReady = false
 
-    init(url: URL) {
-        // Pass isAutoPlay explicitly to avoid touching KSOptions.isAutoPlay, a non-isolated
-        // mutable static that Swift 6 strict concurrency rejects.
-        layer = KSPlayerLayer(url: url, isAutoPlay: true, options: KSOptions())
-        layer.delegate = self
+    @ObservationIgnored private let engine: PlaybackEngine
+
+    /// The sharp-video render surface (re-parented into the zoom container).
+    var renderView: UIView? { engine.renderView }
+    /// A live blurred backdrop, present only on the AVPlayer path; nil → use a static blur.
+    var liveBlurView: UIView? { engine.liveBlurView }
+
+    init(url: URL, preferAVPlayer: Bool) {
+        engine = preferAVPlayer ? AVPlaybackEngine(url: url) : KSPlaybackEngine(url: url)
+
+        engine.onTime = { [weak self] current, duration in
+            guard let self else { return }
+            self.currentTime = current
+            if self.duration != duration { self.duration = duration }
+            if !self.isReady { self.isReady = true }
+        }
+        engine.onReady = { [weak self] ready in
+            guard let self, self.isReady != ready else { return }
+            self.isReady = ready
+        }
+        engine.onPlaying = { [weak self] playing in
+            guard let self, self.isPlaying != playing else { return }
+            self.isPlaying = playing
+        }
+        isPlaying = true
     }
 
-    func play() { layer.play(); isPlaying = true }
-    func pause() { layer.pause(); isPlaying = false }
+    func play() { engine.play() }
+    func pause() { engine.pause() }
     func togglePlayPause() { isPlaying ? pause() : play() }
 
     func seek(to time: TimeInterval) {
         let clamped = max(0, min(time, duration > 0 ? duration : time))
         currentTime = clamped
-        layer.seek(time: clamped, autoPlay: isPlaying) { _ in }
+        engine.seek(to: clamped)
     }
-
-    // MARK: - KSPlayerLayerDelegate
-
-    func player(layer: KSPlayerLayer, state: KSPlayerState) {
-        isReady = layer.player.isReadyToPlay
-        isPlaying = layer.player.isPlaying
-    }
-
-    func player(layer: KSPlayerLayer, currentTime: TimeInterval, totalTime: TimeInterval) {
-        self.currentTime = currentTime
-        self.duration = totalTime
-        isReady = true
-    }
-
-    func player(layer: KSPlayerLayer, finish error: Error?) {
-        isPlaying = false
-    }
-
-    func player(layer: KSPlayerLayer, bufferedCount: Int, consumeTime: TimeInterval) {}
 }
 
 /// Scene player with custom controls and sprite scrubbing. Fullscreen is driven by a binding
@@ -72,13 +72,13 @@ struct ScenePlayerView: View {
     @State private var scrubTime: TimeInterval = 0
     @State private var hideTask: Task<Void, Never>?
 
-    init(scene: StashScene, apiKey: String, url: URL, contentTopInset: CGFloat = 0, isFullscreen: Binding<Bool>, onBack: (() -> Void)? = nil) {
+    init(scene: StashScene, apiKey: String, url: URL, preferAVPlayer: Bool, contentTopInset: CGFloat = 0, isFullscreen: Binding<Bool>, onBack: (() -> Void)? = nil) {
         self.scene = scene
         self.apiKey = apiKey
         self.contentTopInset = contentTopInset
         _isFullscreen = isFullscreen
         self.onBack = onBack
-        _model = State(initialValue: ScenePlayerModel(url: url))
+        _model = State(initialValue: ScenePlayerModel(url: url, preferAVPlayer: preferAVPlayer))
     }
 
     /// The video's display aspect (from file metadata, available immediately).
@@ -96,15 +96,17 @@ struct ScenePlayerView: View {
             let surfaceSize = isFullscreen ? avail : Self.fitSize(aspect: aspect, in: videoArea)
 
             ZStack(alignment: .bottom) {
-                // Background: a slowly-evolving blurred backdrop drawn from the scene's sprite tile at
-                // the current playhead (real frame content, so it matches and blends with the gaps and
-                // the status-bar strip) — no second decode. Plain black in fullscreen, where letterbox
-                // bars are fine because the video zooms.
+                // Background blur that fills the status-bar strip and any letterbox gaps. On the AVPlayer
+                // path it's a live, frame-matched GPU blur of what's playing; on the KSPlayer path (no
+                // frame access) it's a static blurred poster. Plain black in fullscreen, where letterbox
+                // bars are fine because the video zooms (and the live blur pauses itself off-screen).
                 Group {
                     if isFullscreen {
                         Color.black
+                    } else if let blurView = model.liveBlurView {
+                        PlayerBackdropHost(view: blurView)
                     } else {
-                        AmbientBlurBackdrop(sprites: sprites, time: model.currentTime, fallback: poster)
+                        StaticBlurBackdrop(image: poster)
                     }
                 }
                 .frame(width: avail.width, height: avail.height)

@@ -105,7 +105,14 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
         if !zoomEnabled {
             coordinator.resetZoom()
         }
-        scroll.setNeedsLayout()
+        // Only force a relayout when zoom is toggled (inline↔fullscreen). Bounds changes (rotation,
+        // fullscreen resize) already trigger ZoomScrollView.layoutSubviews on their own, so we must
+        // not call setNeedsLayout unconditionally here — updateUIView can run often, and a forced
+        // layout pass every time is what previously starved playback.
+        if coordinator.lastZoomEnabled != zoomEnabled {
+            coordinator.lastZoomEnabled = zoomEnabled
+            scroll.setNeedsLayout()
+        }
     }
 
     @MainActor
@@ -113,6 +120,8 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
         var parent: ZoomablePlayerSurface
         let container = UIView()
         weak var scrollView: ZoomScrollView?
+        /// Tracks the last zoom-enabled state so updateUIView only forces a relayout on the toggle.
+        var lastZoomEnabled: Bool?
         private(set) var isScrubbing = false
         private let haptic = UIImpactFeedbackGenerator(style: .medium)
         private var scrubStartX: CGFloat = 0
@@ -120,9 +129,9 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
 
         init(_ parent: ZoomablePlayerSurface) { self.parent = parent }
 
-        /// Re-parent the KSPlayer view into the zoomable container exactly once (it may appear late).
+        /// Re-parent the engine's render view into the zoomable container exactly once (it may appear late).
         func attachPlayerView() {
-            guard let playerView = parent.model.layer.player.view else { return }
+            guard let playerView = parent.model.renderView else { return }
             playerView.backgroundColor = .clear
             if playerView.superview !== container {
                 playerView.removeFromSuperview()

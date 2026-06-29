@@ -46,11 +46,18 @@ struct Tag: Codable, Identifiable, Sendable, Equatable, Hashable {
 }
 
 extension StashScene {
+    /// The stream to play plus whether it's HLS. HLS (`application/x-mpegURL`) is Apple-native, so it
+    /// plays on AVPlayer (which exposes live frames for the blurred backdrop); the non-HLS fallback is a
+    /// direct file with a possibly-exotic codec, which routes to KSPlayer's FFmpeg decoder instead.
+    func preferredStream(apiKey: String) -> (url: URL, isHLS: Bool)? {
+        let hls = sceneStreams.first { $0.mime_type == "application/x-mpegURL" }
+        let chosen = hls ?? sceneStreams.first
+        guard let urlString = chosen?.url, let url = appendingAPIKey(apiKey, to: urlString) else { return nil }
+        return (url, chosen?.mime_type == "application/x-mpegURL")
+    }
+
     func preferredStreamURL(apiKey: String) -> URL? {
-        let stream = sceneStreams.first { $0.mime_type == "application/x-mpegURL" }
-            ?? sceneStreams.first
-        guard let urlString = stream?.url else { return nil }
-        return appendingAPIKey(apiKey, to: urlString)
+        preferredStream(apiKey: apiKey)?.url
     }
 
     func thumbnailURL(apiKey: String) -> URL? {

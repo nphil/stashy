@@ -9,9 +9,9 @@ struct SceneDetailView: View {
     @AppStorage("blurTitles") private var blurTitles = false
     @State private var isFullscreen = false
 
-    private var streamURL: URL? {
+    private var stream: (url: URL, isHLS: Bool)? {
         guard let client = appState.client else { return nil }
-        return scene.preferredStreamURL(apiKey: client.apiKey)
+        return scene.preferredStream(apiKey: client.apiKey)
     }
 
     var body: some View {
@@ -33,11 +33,12 @@ struct SceneDetailView: View {
                 // Single player instance — resized in place for fullscreen (no re-parenting), which
                 // keeps the render surface alive across the rotation that previously blanked it.
                 Group {
-                    if let streamURL {
+                    if let stream {
                         ScenePlayerView(
                             scene: scene,
                             apiKey: apiKey,
-                            url: streamURL,
+                            url: stream.url,
+                            preferAVPlayer: stream.isHLS,
                             contentTopInset: topInset,
                             isFullscreen: $isFullscreen,
                             onBack: { dismiss() }
