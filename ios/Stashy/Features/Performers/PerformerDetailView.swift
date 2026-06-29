@@ -52,6 +52,7 @@ struct PerformerDetailView: View {
     @Environment(\.imageCache) private var imageCache
     @State private var viewModel = PerformerScenesViewModel()
     @State private var portrait: UIImage?
+    @State private var showAllLinks = false
 
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
@@ -134,14 +135,27 @@ struct PerformerDetailView: View {
                 statsRow
 
                 if let links = socialLinks, !links.isEmpty {
+                    let shown = showAllLinks ? links : Array(links.prefix(4))
                     FlowLayout(spacing: 8) {
-                        ForEach(links, id: \.url) { link in
+                        ForEach(shown, id: \.url) { link in
                             Link(destination: link.url) {
                                 Label(link.label, systemImage: link.symbol)
                                     .font(.caption.weight(.medium))
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 5)
                                     .glassEffect(.regular.tint(themeManager.current.accentColor), in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        if links.count > 4 {
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) { showAllLinks.toggle() }
+                            } label: {
+                                Text(showAllLinks ? "Show less" : "+\(links.count - 4) more")
+                                    .font(.caption.weight(.medium))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .glassEffect(.regular, in: Capsule())
                             }
                             .buttonStyle(.plain)
                         }
@@ -173,7 +187,11 @@ struct PerformerDetailView: View {
 
     private var socialLinks: [SocialLink]? {
         guard let urls = performer.urls else { return nil }
+        // Stable sort by priority so Reddit / OnlyFans surface first.
         return urls.compactMap { SocialLink(raw: $0) }
+            .enumerated()
+            .sorted { ($0.element.priority, $0.offset) < ($1.element.priority, $1.offset) }
+            .map(\.element)
     }
 }
 
@@ -183,25 +201,27 @@ struct SocialLink {
     let url: URL
     let label: String
     let symbol: String
+    /// Lower sorts first. Reddit and OnlyFans are prioritised.
+    let priority: Int
 
     init?(raw: String) {
         guard let url = URL(string: raw), let host = url.host()?.lowercased() else { return nil }
         self.url = url
         switch true {
-        case host.contains("twitter"), host.contains("x.com"):
-            label = "Twitter"; symbol = "bird"
-        case host.contains("instagram"):
-            label = "Instagram"; symbol = "camera"
-        case host.contains("onlyfans"):
-            label = "OnlyFans"; symbol = "heart"
-        case host.contains("youtube"):
-            label = "YouTube"; symbol = "play.rectangle"
-        case host.contains("tiktok"):
-            label = "TikTok"; symbol = "music.note"
         case host.contains("reddit"):
-            label = "Reddit"; symbol = "bubble.left"
+            label = "Reddit"; symbol = "bubble.left.and.bubble.right.fill"; priority = 0
+        case host.contains("onlyfans"):
+            label = "OnlyFans"; symbol = "heart.fill"; priority = 1
+        case host.contains("twitter"), host.contains("x.com"):
+            label = "Twitter"; symbol = "bird"; priority = 2
+        case host.contains("instagram"):
+            label = "Instagram"; symbol = "camera"; priority = 2
+        case host.contains("youtube"):
+            label = "YouTube"; symbol = "play.rectangle"; priority = 2
+        case host.contains("tiktok"):
+            label = "TikTok"; symbol = "music.note"; priority = 2
         default:
-            label = host.replacingOccurrences(of: "www.", with: ""); symbol = "link"
+            label = host.replacingOccurrences(of: "www.", with: ""); symbol = "link"; priority = 3
         }
     }
 }

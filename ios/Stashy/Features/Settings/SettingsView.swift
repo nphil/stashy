@@ -132,7 +132,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Scenes")
                 } footer: {
-                    Text("Play scene preview clips on the cards when the grid is at rest. Turn off to show static thumbnails only.")
+                    Text("Show an animated preview when you press and hold a scene card. Turn off for thumbnails only.")
                 }
 
                 // Cache section
