@@ -18,6 +18,8 @@ final class ScenePlayerModel: KSPlayerLayerDelegate {
         // mutable static that Swift 6 strict concurrency rejects.
         layer = KSPlayerLayer(url: url, isAutoPlay: true, options: KSOptions())
         layer.delegate = self
+        // Fill the player frame (crop) so there are never letterbox black bars.
+        layer.player.contentMode = .scaleAspectFill
     }
 
     func play() { layer.play(); isPlaying = true }
@@ -87,15 +89,17 @@ struct ScenePlayerView: View {
     let scene: StashScene
     let apiKey: String
     @Binding var isFullscreen: Bool
+    var onBack: (() -> Void)?
     @Environment(\.imageCache) private var imageCache
     @State private var model: ScenePlayerModel
     @State private var sprites = SpriteThumbnails()
     @State private var suppressAutoFullscreen = false
 
-    init(scene: StashScene, apiKey: String, url: URL, isFullscreen: Binding<Bool>) {
+    init(scene: StashScene, apiKey: String, url: URL, isFullscreen: Binding<Bool>, onBack: (() -> Void)? = nil) {
         self.scene = scene
         self.apiKey = apiKey
         _isFullscreen = isFullscreen
+        self.onBack = onBack
         _model = State(initialValue: ScenePlayerModel(url: url))
     }
 
@@ -103,7 +107,15 @@ struct ScenePlayerView: View {
         ZStack {
             KSPlayerSurface(model: model, isReady: model.isReady)
                 .ignoresSafeArea(edges: isFullscreen ? .all : [])
-            PlayerControlsView(model: model, sprites: sprites, isFullscreen: $isFullscreen)
+
+            // Smooth loading indicator while the file spins up (e.g. NAS) before the first frame.
+            if !model.isReady {
+                ProgressView()
+                    .controlSize(.large)
+                    .tint(.white)
+            }
+
+            PlayerControlsView(model: model, sprites: sprites, isFullscreen: $isFullscreen, onBack: onBack)
         }
         .task {
             guard let vtt = scene.vttURL(apiKey: apiKey),
@@ -122,11 +134,21 @@ struct ScenePlayerView: View {
             }
         }
         .onChange(of: isFullscreen) { _, now in
-            if !now, UIDevice.current.orientation.isLandscape {
-                suppressAutoFullscreen = true
+            if now {
+                // Fullscreen is the only landscape surface in the app.
+                OrientationController.lock([.landscapeLeft, .landscapeRight])
+            } else {
+                // Force back to portrait even if the phone is still held in landscape.
+                OrientationController.lock(.portrait)
+                if UIDevice.current.orientation.isLandscape {
+                    suppressAutoFullscreen = true
+                }
             }
         }
         .onAppear { UIDevice.current.beginGeneratingDeviceOrientationNotifications() }
-        .onDisappear { if !isFullscreen { model.pause() } }
+        .onDisappear {
+            OrientationController.lock(.portrait)
+            if !isFullscreen { model.pause() }
+        }
     }
 }

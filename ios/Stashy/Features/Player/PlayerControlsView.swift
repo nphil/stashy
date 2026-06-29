@@ -6,6 +6,7 @@ struct PlayerControlsView: View {
     let model: ScenePlayerModel
     let sprites: SpriteThumbnails
     @Binding var isFullscreen: Bool
+    var onBack: (() -> Void)? = nil
 
     @State private var showControls = true
     @State private var isScrubbing = false
@@ -35,6 +36,21 @@ struct PlayerControlsView: View {
                         controlBar
                     }
                     .transition(.opacity)
+
+                    if let onBack {
+                        Button(action: onBack) {
+                            Image(systemName: "chevron.left")
+                                .font(.headline.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .padding(10)
+                                .background(.black.opacity(0.4), in: Circle())
+                                .shadow(radius: 4)
+                        }
+                        .padding(.leading, 12)
+                        .padding(.top, 8)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .transition(.opacity)
+                    }
                 }
             }
             .animation(.easeInOut(duration: 0.2), value: showControls)

@@ -4,9 +4,11 @@ struct SceneDetailView: View {
     let scene: StashScene
     @Environment(AppState.self) private var appState
     @Environment(ThemeManager.self) private var themeManager
+    @Environment(\.dismiss) private var dismiss
     @State private var isFullscreen = false
 
-    private let inlineHeight: CGFloat = 240
+    // Inline player fills the width at 16:9 and sits at the very top (below the status bar).
+    private var inlineHeight: CGFloat { UIScreen.main.bounds.width * 9 / 16 }
 
     private var streamURL: URL? {
         guard let client = appState.client else { return nil }
@@ -28,7 +30,13 @@ struct SceneDetailView: View {
             // keeps the render surface alive across the rotation that previously blanked it.
             Group {
                 if let streamURL {
-                    ScenePlayerView(scene: scene, apiKey: apiKey, url: streamURL, isFullscreen: $isFullscreen)
+                    ScenePlayerView(
+                        scene: scene,
+                        apiKey: apiKey,
+                        url: streamURL,
+                        isFullscreen: $isFullscreen,
+                        onBack: { dismiss() }
+                    )
                 } else {
                     Rectangle()
                         .fill(.black)
@@ -39,10 +47,11 @@ struct SceneDetailView: View {
             .background(.black)
         }
         .background(themeManager.current.backgroundColor.ignoresSafeArea())
-        .navigationTitle(scene.title ?? "Untitled")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar(isFullscreen ? .hidden : .visible, for: .navigationBar, .tabBar)
+        .toolbar(.hidden, for: .navigationBar)
+        .toolbar(isFullscreen ? .hidden : .visible, for: .tabBar)
+        .navigationBarBackButtonHidden(true)
         .statusBarHidden(isFullscreen)
+        .background(EnableSwipeBack()) // keep edge-swipe back even with the nav bar hidden
         .navigationDestination(for: Performer.self) { performer in
             PerformerDetailView(performer: performer)
         }

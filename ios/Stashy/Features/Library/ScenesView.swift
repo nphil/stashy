@@ -189,33 +189,30 @@ struct SceneCard: View {
                 }
                 .overlay {
                     LinearGradient(
-                        colors: [.clear, .black.opacity(0.75)],
+                        colors: [.clear, .black.opacity(0.7)],
                         startPoint: .center,
                         endPoint: .bottom
                     )
                 }
+                .overlay(alignment: .topTrailing) {
+                    if let dur = scene.formattedDuration() {
+                        Text(dur)
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(.black.opacity(0.55), in: Capsule())
+                            .padding(6)
+                    }
+                }
                 .clipped()
 
-            VStack(alignment: .leading, spacing: 2) {
-                if let studio = scene.studio {
-                    Text(studio.name)
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.7))
-                        .lineLimit(1)
-                }
-                Text(scene.title ?? "Untitled")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-
-                if let dur = scene.formattedDuration() {
-                    Text(dur)
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.6))
-                }
-            }
-            .padding(8)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            Text(scene.title ?? "Untitled")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.7))
+                .lineLimit(2)
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
