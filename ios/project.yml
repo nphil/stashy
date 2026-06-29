@@ -39,6 +39,7 @@ targets:
         UIRequiresFullScreen: false
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
+        NSFaceIDUsageDescription: Unlock Stashy with Face ID.
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft

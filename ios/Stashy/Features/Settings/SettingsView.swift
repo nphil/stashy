@@ -15,6 +15,7 @@ struct SettingsView: View {
     @State private var cacheSize = 0
     @State private var isClearingCache = false
     @AppStorage("animatedPreviews") private var animatedPreviews = true
+    @AppStorage("appLockEnabled") private var appLockEnabled = false
 
     private let swatchColumns = [GridItem(.adaptive(minimum: 64), spacing: 12)]
 
@@ -133,6 +134,18 @@ struct SettingsView: View {
                     Text("Scenes")
                 } footer: {
                     Text("Show an animated preview when you press and hold a scene card. Turn off for thumbnails only.")
+                }
+
+                // Privacy section
+                Section {
+                    Toggle("Require Face ID", isOn: $appLockEnabled)
+                        .disabled(!AppLock.isAvailable)
+                } header: {
+                    Text("Privacy")
+                } footer: {
+                    Text(AppLock.isAvailable
+                         ? "Require Face ID, Touch ID, or your passcode to open Stashy."
+                         : "Set up Face ID, Touch ID, or a passcode in iOS Settings to enable this.")
                 }
 
                 // Cache section

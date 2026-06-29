@@ -14,6 +14,7 @@ struct StashyApp: App {
                 .environment(\.imageCache, imageCache)
                 .preferredColorScheme(themeManager.current.preferredColorScheme)
                 .tint(themeManager.current.accentColor)
+                .appLock()
         }
     }
 }
