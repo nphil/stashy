@@ -140,11 +140,9 @@ struct SceneDetailView: View {
                         }
                     }
 
-                    // Tags
+                    // Tags (ranked + truncated)
                     if !scene.tags.isEmpty {
-                        ChipSection(title: "Tags", systemImage: "tag") {
-                            scene.tags.map(\.name)
-                        }
+                        TagChipsView(tags: scene.tags)
                     }
                 }
                 .padding(16)
@@ -175,6 +173,51 @@ struct ChipSection: View {
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
                             .glassEffect(.regular, in: Capsule())
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Ranked, truncating tag chips
+
+/// Tag chips ordered by the user's tag history + Stash popularity, truncated to the most relevant
+/// with an expand toggle so long tag lists stay compact.
+struct TagChipsView: View {
+    let tags: [Tag]
+    private let limit = 8
+    @State private var expanded = false
+
+    var body: some View {
+        let ranked = TagRankingStore.shared.ranked(tags)
+        let shown = expanded ? ranked : Array(ranked.prefix(limit))
+
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Tags", systemImage: "tag")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            GlassEffectContainer(spacing: 6) {
+                FlowLayout(spacing: 6) {
+                    ForEach(shown) { tag in
+                        Text(tag.name)
+                            .font(.caption)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .glassEffect(.regular, in: Capsule())
+                    }
+                    if ranked.count > limit {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) { expanded.toggle() }
+                        } label: {
+                            Text(expanded ? "Show less" : "+\(ranked.count - limit)")
+                                .font(.caption.weight(.medium))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .glassEffect(.regular, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
             }

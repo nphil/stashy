@@ -127,7 +127,12 @@ struct TagPickerSheet: View {
                     Button("Done") { dismiss() }
                 }
             }
-            .task { await runSearch("") }
+            .task {
+                if let client = appState.client {
+                    await TagRankingStore.shared.refreshIfNeeded(client: client)
+                }
+                await runSearch("")
+            }
             .onChange(of: searchText) { _, q in
                 searchTask?.cancel()
                 searchTask = Task {
@@ -140,12 +145,20 @@ struct TagPickerSheet: View {
     }
 
     private func runSearch(_ q: String) async {
+        // Empty query → show cached popular/most-used tags instead of querying every time.
+        if q.trimmingCharacters(in: .whitespaces).isEmpty {
+            let popular = TagRankingStore.shared.popularTags
+            if !popular.isEmpty { results = popular; return }
+        }
         guard let client = appState.client else { return }
         results = (try? await client.findTags(query: q)) ?? []
     }
 
     private func add(_ tag: Tag) {
-        if !selected.contains(tag) { selected.append(tag) }
+        if !selected.contains(tag) {
+            selected.append(tag)
+            TagRankingStore.shared.recordSelection([tag])
+        }
     }
 
     private func remove(_ tag: Tag) {

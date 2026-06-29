@@ -82,7 +82,9 @@ struct ScenesView: View {
             Task { await viewModel.loadFirstPage(client: client) }
         }
         .task {
-            guard viewModel.scenes.isEmpty, let client = appState.client else { return }
+            guard let client = appState.client else { return }
+            Task { await TagRankingStore.shared.refreshIfNeeded(client: client) }
+            guard viewModel.scenes.isEmpty else { return }
             await viewModel.loadFirstPage(client: client)
         }
     }

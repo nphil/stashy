@@ -121,14 +121,15 @@ struct StashClient: Sendable {
         return response.findPerformers
     }
 
-    /// Live tag lookup for the tag filter / search (name-sorted, capped).
-    func findTags(query q: String, limit: Int = 20) async throws -> [Tag] {
+    /// Tag lookup for the tag filter / search. Defaults to name-sorted; pass sort "scenes_count"
+    /// (desc) for popularity.
+    func findTags(query q: String, limit: Int = 20, sort: String = "name", direction: String = "ASC") async throws -> [Tag] {
         let gql = """
         query FindTags($filter: FindFilterType) {
           findTags(filter: $filter) { tags { id name } }
         }
         """
-        let vars = FilterVariables(filter: FindFilter(q: q.isEmpty ? nil : q, page: 1, per_page: limit, sort: "name", direction: "ASC"))
+        let vars = FilterVariables(filter: FindFilter(q: q.isEmpty ? nil : q, page: 1, per_page: limit, sort: sort, direction: direction))
         let response: FindTagsResponse = try await query(gql, variables: vars)
         return response.findTags.tags
     }
