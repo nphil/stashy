@@ -2,37 +2,30 @@ import SwiftUI
 import AVFoundation
 import UIKit
 
-/// A second, low-resolution AVPlayer on the same stream used purely as a moving, blurred backdrop
-/// behind the inline player. It's kept loosely in sync with the main player so the blur matches what's
-/// playing, and scaled to fill (cropping) so its edges blend with the sharp video sitting on top.
+/// A moving, blurred backdrop behind the inline player. It loops the scene's cached low-res preview
+/// clip (already downloaded, tiny) rather than decoding a second copy of the full stream — so it
+/// gives a video-of-the-same-scene blur with negligible cost and zero contention with playback.
 @Observable
 @MainActor
 final class BlurVideoModel {
-    let player: AVPlayer
+    let player = AVQueuePlayer()
+    private var looper: AVPlayerLooper?
 
-    init(url: URL) {
-        let item = AVPlayerItem(url: url)
-        // The backdrop is heavily blurred, so a tiny variant is plenty — keeps the extra decode cheap.
-        item.preferredMaximumResolution = CGSize(width: 256, height: 256)
-        item.preferredPeakBitRate = 600_000
-        player = AVPlayer(playerItem: item)
+    init() {
         player.isMuted = true
+        player.automaticallyWaitsToMinimizeStalling = false
         player.actionAtItemEnd = .none
+    }
+
+    /// Load the local preview clip and loop it. No-op if already loaded.
+    func load(_ localURL: URL) {
+        guard looper == nil else { return }
+        let item = AVPlayerItem(url: localURL)
+        looper = AVPlayerLooper(player: player, templateItem: item)
     }
 
     func play() { player.play() }
     func pause() { player.pause() }
-
-    /// Follow the main player: only seek when drift is noticeable (a blurred jump is imperceptible),
-    /// and mirror its play/pause state.
-    func sync(to time: TimeInterval, playing: Bool) {
-        let current = player.currentTime().seconds
-        if time.isFinite, abs(current - time) > 1.5 {
-            player.seek(to: CMTime(seconds: time, preferredTimescale: 600),
-                        toleranceBefore: .positiveInfinity, toleranceAfter: .positiveInfinity)
-        }
-        if playing { player.play() } else { player.pause() }
-    }
 }
 
 /// Hosts the blur player's `AVPlayerLayer` (fill) under a `UIVisualEffectView`, which reliably blurs

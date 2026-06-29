@@ -1,6 +1,35 @@
 import SwiftUI
 import UIKit
 
+/// Scroll view that keeps its zoomable content matched to the viewport in `layoutSubviews` — which
+/// UIKit calls *after* the bounds change. Doing this here (instead of from the representable's
+/// `updateUIView`, which runs *before* SwiftUI's new frame is applied) is what makes the surface
+/// resize correctly across the inline↔fullscreen transition and rotation, with no stale-bounds gaps.
+final class ZoomScrollView: UIScrollView {
+    weak var contentView: UIView?
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard let contentView else { return }
+        let size = bounds.size
+        if zoomScale <= minimumZoomScale {
+            // At rest: the content (and the player view inside it) exactly fills the viewport.
+            if contentView.bounds.size != size {
+                contentView.frame = CGRect(origin: .zero, size: size)
+                contentSize = size
+                contentView.subviews.first?.frame = CGRect(origin: .zero, size: size)
+            }
+            if contentInset != .zero { contentInset = .zero }
+        } else {
+            // Centre the zoomed content when a dimension is smaller than the viewport.
+            let x = max((size.width - contentSize.width) / 2, 0)
+            let y = max((size.height - contentSize.height) / 2, 0)
+            let inset = UIEdgeInsets(top: y, left: x, bottom: 0, right: 0)
+            if contentInset != inset { contentInset = inset }
+        }
+    }
+}
+
 /// Hosts the KSPlayer render surface inside a `UIScrollView` so the fullscreen video gets
 /// Apple Photos-style zooming: pinch to any focal point, free inertial panning with bounce,
 /// double-tap to zoom into the tapped point (and back), and a quick swipe-down to dismiss.
@@ -23,9 +52,9 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
-    func makeUIView(context: Context) -> UIScrollView {
+    func makeUIView(context: Context) -> ZoomScrollView {
         let coordinator = context.coordinator
-        let scroll = UIScrollView()
+        let scroll = ZoomScrollView()
         scroll.delegate = coordinator
         scroll.minimumZoomScale = 1
         scroll.maximumZoomScale = zoomEnabled ? 4 : 1
@@ -39,6 +68,7 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
         scroll.isScrollEnabled = zoomEnabled
 
         coordinator.container.backgroundColor = .clear
+        scroll.contentView = coordinator.container
         scroll.addSubview(coordinator.container)
 
         let doubleTap = UITapGestureRecognizer(target: coordinator, action: #selector(Coordinator.handleDoubleTap(_:)))
@@ -60,29 +90,29 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
 
         coordinator.scrollView = scroll
         coordinator.attachPlayerView()
-        coordinator.layoutContainer()
         return scroll
     }
 
-    func updateUIView(_ scroll: UIScrollView, context: Context) {
+    func updateUIView(_ scroll: ZoomScrollView, context: Context) {
         let coordinator = context.coordinator
         coordinator.parent = self
         coordinator.attachPlayerView()
         scroll.maximumZoomScale = zoomEnabled ? 4 : 1
         if !coordinator.isScrubbing { scroll.isScrollEnabled = zoomEnabled }
         // Fully reset zoom/pan whenever zooming is disabled (e.g. leaving fullscreen) so the video
-        // never returns to the inline player still zoomed or offset.
+        // never returns to the inline player still zoomed or offset. The actual re-sizing happens in
+        // ZoomScrollView.layoutSubviews once UIKit applies the new bounds.
         if !zoomEnabled {
             coordinator.resetZoom()
         }
-        coordinator.layoutContainer()
+        scroll.setNeedsLayout()
     }
 
     @MainActor
     final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
         var parent: ZoomablePlayerSurface
         let container = UIView()
-        weak var scrollView: UIScrollView?
+        weak var scrollView: ZoomScrollView?
         private(set) var isScrubbing = false
         private let haptic = UIImpactFeedbackGenerator(style: .medium)
         private var scrubStartX: CGFloat = 0
@@ -102,21 +132,11 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
             playerView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         }
 
-        /// At rest (zoom == 1) the container fills the scroll view; UIScrollView scales it from there.
-        func layoutContainer() {
-            guard let scroll = scrollView else { return }
-            if scroll.zoomScale == 1 {
-                container.frame = CGRect(origin: .zero, size: scroll.bounds.size)
-                scroll.contentSize = scroll.bounds.size
-                parent.model.layer.player.view?.frame = container.bounds
-            }
-        }
-
-        /// Reset zoom, pan offset, and centring insets — used when zooming is disabled.
+        /// Reset zoom and pan offset — used when zooming is disabled. Re-centring/sizing is handled
+        /// by `ZoomScrollView.layoutSubviews`, triggered by the zoom-scale change.
         func resetZoom() {
             guard let scroll = scrollView else { return }
             if scroll.zoomScale != 1 { scroll.setZoomScale(1, animated: false) }
-            scroll.contentInset = .zero
             scroll.contentOffset = .zero
         }
 
@@ -125,12 +145,7 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
         func viewForZooming(in scrollView: UIScrollView) -> UIView? { container }
 
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
-            // Keep the content centred while it's smaller than the viewport (Photos behaviour).
-            let bounds = scrollView.bounds.size
-            let content = scrollView.contentSize
-            let insetX = max((bounds.width - content.width) / 2, 0)
-            let insetY = max((bounds.height - content.height) / 2, 0)
-            scrollView.contentInset = UIEdgeInsets(top: insetY, left: insetX, bottom: 0, right: 0)
+            // Centring happens in ZoomScrollView.layoutSubviews; just publish the scale.
             parent.zoomScale = scrollView.zoomScale
         }
 

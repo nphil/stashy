@@ -62,8 +62,9 @@ struct ScenePlayerView: View {
     @Binding var isFullscreen: Bool
     var onBack: (() -> Void)?
     @Environment(\.imageCache) private var imageCache
+    @Environment(\.previewCache) private var previewCache
     @State private var model: ScenePlayerModel
-    @State private var blurModel: BlurVideoModel
+    @State private var blurModel = BlurVideoModel()
     @State private var sprites = SpriteThumbnails()
     @State private var suppressAutoFullscreen = false
     @State private var zoomScale: CGFloat = 1
@@ -80,7 +81,6 @@ struct ScenePlayerView: View {
         _isFullscreen = isFullscreen
         self.onBack = onBack
         _model = State(initialValue: ScenePlayerModel(url: url))
-        _blurModel = State(initialValue: BlurVideoModel(url: url))
     }
 
     /// The video's display aspect (from file metadata, available immediately).
@@ -170,6 +170,13 @@ struct ScenePlayerView: View {
             guard let url = scene.thumbnailURL(apiKey: apiKey) else { return }
             poster = try? await imageCache.image(for: url)
         }
+        // Load the cached preview clip for the moving blurred backdrop (inline only).
+        .task(id: scene.id) {
+            guard let preview = scene.previewURL(apiKey: apiKey),
+                  let local = await previewCache.localURL(for: preview) else { return }
+            blurModel.load(local)
+            if !isFullscreen { blurModel.play() }
+        }
         // Landscape videos: rotating to landscape enters fullscreen (and back to portrait exits).
         // Portrait videos never auto-rotate into a landscape fullscreen — they go fullscreen in
         // portrait via the button instead.
@@ -195,15 +202,8 @@ struct ScenePlayerView: View {
                 if UIDevice.current.orientation.isLandscape {
                     suppressAutoFullscreen = true
                 }
-                blurModel.sync(to: model.currentTime, playing: model.isPlaying)
+                blurModel.play()
             }
-        }
-        // Keep the blurred backdrop loosely matched to the main player (inline only).
-        .onChange(of: model.currentTime) { _, t in
-            if !isFullscreen { blurModel.sync(to: t, playing: model.isPlaying) }
-        }
-        .onChange(of: model.isPlaying) { _, playing in
-            if !isFullscreen { playing ? blurModel.play() : blurModel.pause() }
         }
         .onAppear {
             UIDevice.current.beginGeneratingDeviceOrientationNotifications()
