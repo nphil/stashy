@@ -4,36 +4,37 @@ import SwiftUI
 @MainActor
 final class PerformerScenesViewModel {
     var scenes: [StashScene] = []
+    var query = SceneQuery()
     var isLoading = false
     var errorMessage: String?
     private var hasMore = true
     private var currentPage = 1
     let pageSize = 24
 
-    func loadFirstPage(performerID: String, client: StashClient) async {
+    func loadFirstPage(client: StashClient) async {
         guard !isLoading else { return }
         isLoading = true
         errorMessage = nil
         currentPage = 1
         scenes = []
         hasMore = true
-        await fetchPage(performerID: performerID, client: client)
+        await fetchPage(client: client)
         isLoading = false
     }
 
-    func loadNextPageIfNeeded(triggerID: String, performerID: String, client: StashClient) async {
+    func loadNextPageIfNeeded(triggerID: String, client: StashClient) async {
         guard hasMore, !isLoading,
               scenes.suffix(pageSize / 2).contains(where: { $0.id == triggerID })
         else { return }
         isLoading = true
         currentPage += 1
-        await fetchPage(performerID: performerID, client: client)
+        await fetchPage(client: client)
         isLoading = false
     }
 
-    private func fetchPage(performerID: String, client: StashClient) async {
+    private func fetchPage(client: StashClient) async {
         do {
-            let result = try await client.findScenes(performerID: performerID, page: currentPage, perPage: pageSize)
+            let result = try await client.findScenes(query, page: currentPage, perPage: pageSize)
             let existing = Set(scenes.map(\.id))
             let newScenes = result.scenes.filter { !existing.contains($0.id) }
             scenes.append(contentsOf: newScenes)
@@ -63,12 +64,14 @@ struct PerformerDetailView: View {
             VStack(alignment: .leading, spacing: 16) {
                 header
 
-                if !viewModel.scenes.isEmpty {
-                    Text("Scenes")
-                        .font(.headline)
-                        .foregroundStyle(themeManager.current.foregroundColor)
-                        .padding(.horizontal, 12)
+                Text("Scenes")
+                    .font(.headline)
+                    .foregroundStyle(themeManager.current.foregroundColor)
+                    .padding(.horizontal, 12)
 
+                SceneFilterBar(query: $viewModel.query)
+
+                if !viewModel.scenes.isEmpty {
                     LazyVGrid(columns: columns, spacing: 10) {
                         ForEach(viewModel.scenes) { scene in
                             NavigationLink(value: scene) {
@@ -80,7 +83,6 @@ struct PerformerDetailView: View {
                                 Task {
                                     await viewModel.loadNextPageIfNeeded(
                                         triggerID: scene.id,
-                                        performerID: performer.id,
                                         client: client
                                     )
                                 }
@@ -90,6 +92,12 @@ struct PerformerDetailView: View {
                     .padding(.horizontal, 12)
                 } else if viewModel.isLoading {
                     ProgressView().frame(maxWidth: .infinity).padding()
+                } else {
+                    Text("No scenes match these filters.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding()
                 }
 
                 if viewModel.isLoading && !viewModel.scenes.isEmpty {
@@ -105,8 +113,12 @@ struct PerformerDetailView: View {
             SceneDetailView(scene: scene)
         }
         .task {
-            guard viewModel.scenes.isEmpty, let client = appState.client else { return }
-            await viewModel.loadFirstPage(performerID: performer.id, client: client)
+            guard viewModel.query.performerID == nil else { return }
+            viewModel.query.performerID = performer.id // triggers the initial load via onChange
+        }
+        .onChange(of: viewModel.query) { _, _ in
+            guard let client = appState.client else { return }
+            Task { await viewModel.loadFirstPage(client: client) }
         }
         .task(id: performer.id) {
             guard let url = performer.imageURL(apiKey: apiKey) else { return }

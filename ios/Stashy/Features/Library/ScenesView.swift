@@ -5,6 +5,7 @@ import AVFoundation
 @MainActor
 final class ScenesViewModel {
     var scenes: [StashScene] = []
+    var query = SceneQuery()
     var isLoading = false
     var errorMessage: String?
     private var hasMore = true
@@ -34,7 +35,7 @@ final class ScenesViewModel {
 
     private func fetchPage(client: StashClient) async {
         do {
-            let result = try await client.findScenes(page: currentPage, perPage: pageSize)
+            let result = try await client.findScenes(query, page: currentPage, perPage: pageSize)
             // Dedupe: paginated pages can overlap and return scenes already in the list.
             // Duplicate ids confuse ForEach identity, mis-routing taps to the wrong card.
             let existing = Set(scenes.map(\.id))
@@ -59,61 +60,11 @@ struct ScenesView: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            Group {
-                if viewModel.scenes.isEmpty && viewModel.isLoading {
-                    ProgressView("Loading scenes…")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if viewModel.scenes.isEmpty && !viewModel.isLoading {
-                    if let err = viewModel.errorMessage {
-                        ContentUnavailableView {
-                            Label("Couldn't Load Scenes", systemImage: "exclamationmark.triangle")
-                        } description: {
-                            Text(err)
-                        } actions: {
-                            Button("Retry") {
-                                guard let client = appState.client else { return }
-                                Task { await viewModel.loadFirstPage(client: client) }
-                            }
-                        }
-                    } else {
-                        ContentUnavailableView(
-                            "No Scenes",
-                            systemImage: "film.stack",
-                            description: Text("Your Stash library is empty.")
-                        )
-                    }
-                } else {
-                    ScrollView {
-                        LazyVGrid(columns: columns, spacing: 10) {
-                            ForEach(viewModel.scenes) { scene in
-                                SceneGridCell(
-                                    scene: scene,
-                                    apiKey: appState.client?.apiKey ?? "",
-                                    path: $path
-                                ) {
-                                    guard let client = appState.client else { return }
-                                    Task {
-                                        await viewModel.loadNextPageIfNeeded(
-                                            triggerID: scene.id,
-                                            client: client
-                                        )
-                                    }
-                                    prefetchThumbnails(around: scene)
-                                }
-                            }
-                        }
-                        .padding(12)
+            VStack(spacing: 0) {
+                SceneFilterBar(query: $viewModel.query)
+                    .padding(.vertical, 8)
 
-                        if viewModel.isLoading {
-                            ProgressView()
-                                .padding()
-                        }
-                    }
-                    .refreshable {
-                        guard let client = appState.client else { return }
-                        await viewModel.loadFirstPage(client: client)
-                    }
-                }
+                content
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(themeManager.current.backgroundColor.ignoresSafeArea())
@@ -123,9 +74,77 @@ struct ScenesView: View {
                 SceneDetailView(scene: scene)
             }
         }
+        .onChange(of: viewModel.query) { _, _ in
+            guard let client = appState.client else { return }
+            Task { await viewModel.loadFirstPage(client: client) }
+        }
         .task {
             guard viewModel.scenes.isEmpty, let client = appState.client else { return }
             await viewModel.loadFirstPage(client: client)
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if viewModel.scenes.isEmpty && viewModel.isLoading {
+            ProgressView("Loading scenes…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if viewModel.scenes.isEmpty && !viewModel.isLoading {
+            if let err = viewModel.errorMessage {
+                ContentUnavailableView {
+                    Label("Couldn't Load Scenes", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(err)
+                } actions: {
+                    Button("Retry") {
+                        guard let client = appState.client else { return }
+                        Task { await viewModel.loadFirstPage(client: client) }
+                    }
+                }
+            } else if !viewModel.query.tags.isEmpty {
+                ContentUnavailableView(
+                    "No Matches",
+                    systemImage: "tag.slash",
+                    description: Text("No scenes match the selected tags.")
+                )
+            } else {
+                ContentUnavailableView(
+                    "No Scenes",
+                    systemImage: "film.stack",
+                    description: Text("Your Stash library is empty.")
+                )
+            }
+        } else {
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 10) {
+                    ForEach(viewModel.scenes) { scene in
+                        SceneGridCell(
+                            scene: scene,
+                            apiKey: appState.client?.apiKey ?? "",
+                            path: $path
+                        ) {
+                            guard let client = appState.client else { return }
+                            Task {
+                                await viewModel.loadNextPageIfNeeded(
+                                    triggerID: scene.id,
+                                    client: client
+                                )
+                            }
+                            prefetchThumbnails(around: scene)
+                        }
+                    }
+                }
+                .padding(12)
+
+                if viewModel.isLoading {
+                    ProgressView()
+                        .padding()
+                }
+            }
+            .refreshable {
+                guard let client = appState.client else { return }
+                await viewModel.loadFirstPage(client: client)
+            }
         }
     }
 

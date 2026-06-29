@@ -75,32 +75,33 @@ struct StashClient: Sendable {
 
     private static let performerFields = "id name image_path rating100 scene_count country birthdate gender urls"
 
-    func findScenes(page: Int = 1, perPage: Int = 25, query q: String = "") async throws -> FindScenesResult {
+    /// Unified scene query: full-text search, sort + direction, optional tag and performer filters.
+    func findScenes(_ q: SceneQuery, page: Int = 1, perPage: Int = 25) async throws -> FindScenesResult {
         let gql = """
-        query FindScenes($filter: FindFilterType) {
-          findScenes(filter: $filter) {
-            count
-            scenes { \(Self.sceneFields) }
-          }
-        }
-        """
-        let vars = FindScenesVariables(filter: FindFilter(q: q.isEmpty ? nil : q, page: page, per_page: perPage))
-        let response: FindScenesResponse = try await query(gql, variables: vars)
-        return response.findScenes
-    }
-
-    func findScenes(performerID: String, page: Int = 1, perPage: Int = 25) async throws -> FindScenesResult {
-        let gql = """
-        query FindScenesByPerformer($filter: FindFilterType, $scene_filter: SceneFilterType) {
+        query FindScenes($filter: FindFilterType, $scene_filter: SceneFilterType) {
           findScenes(filter: $filter, scene_filter: $scene_filter) {
             count
             scenes { \(Self.sceneFields) }
           }
         }
         """
-        let vars = FindScenesByPerformerVariables(
-            filter: FindFilter(page: page, per_page: perPage, sort: "date"),
-            scene_filter: SceneFilter(performers: MultiCriterion(value: [performerID], modifier: "INCLUDES"))
+        var sceneFilter: SceneFilter?
+        if !q.tagIDs.isEmpty || q.performerID != nil {
+            sceneFilter = SceneFilter(
+                performers: q.performerID.map { MultiCriterion(value: [$0], modifier: "INCLUDES") },
+                tags: q.tagIDs.isEmpty ? nil
+                    : HierarchicalMultiCriterion(value: q.tagIDs, modifier: "INCLUDES_ALL", depth: 0)
+            )
+        }
+        let vars = FindScenesVariables(
+            filter: FindFilter(
+                q: q.search.isEmpty ? nil : q.search,
+                page: page,
+                per_page: perPage,
+                sort: q.sort.apiKey,
+                direction: q.direction.rawValue
+            ),
+            scene_filter: sceneFilter
         )
         let response: FindScenesResponse = try await query(gql, variables: vars)
         return response.findScenes
@@ -115,10 +116,77 @@ struct StashClient: Sendable {
           }
         }
         """
-        let vars = FindPerformersVariables(filter: FindFilter(q: q.isEmpty ? nil : q, page: page, per_page: perPage))
+        let vars = FilterVariables(filter: FindFilter(q: q.isEmpty ? nil : q, page: page, per_page: perPage, sort: "name", direction: "ASC"))
         let response: FindPerformersResponse = try await query(gql, variables: vars)
         return response.findPerformers
     }
+
+    /// Live tag lookup for the tag filter / search (name-sorted, capped).
+    func findTags(query q: String, limit: Int = 20) async throws -> [Tag] {
+        let gql = """
+        query FindTags($filter: FindFilterType) {
+          findTags(filter: $filter) { tags { id name } }
+        }
+        """
+        let vars = FilterVariables(filter: FindFilter(q: q.isEmpty ? nil : q, page: 1, per_page: limit, sort: "name", direction: "ASC"))
+        let response: FindTagsResponse = try await query(gql, variables: vars)
+        return response.findTags.tags
+    }
+}
+
+// MARK: - Scene query model
+
+enum SceneSort: String, CaseIterable, Sendable, Identifiable, Hashable {
+    case date, createdAt, title, duration, size
+
+    var id: String { rawValue }
+
+    /// Stash sort column name.
+    var apiKey: String {
+        switch self {
+        case .date: return "date"
+        case .createdAt: return "created_at"
+        case .title: return "title"
+        case .duration: return "duration"
+        case .size: return "filesize"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .date: return "Date"
+        case .createdAt: return "Date Added"
+        case .title: return "Title"
+        case .duration: return "Duration"
+        case .size: return "File Size"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .date: return "calendar"
+        case .createdAt: return "clock"
+        case .title: return "textformat"
+        case .duration: return "timer"
+        case .size: return "internaldrive"
+        }
+    }
+}
+
+enum SortDirection: String, Sendable, Hashable {
+    case asc = "ASC"
+    case desc = "DESC"
+    var toggled: SortDirection { self == .asc ? .desc : .asc }
+}
+
+struct SceneQuery: Sendable, Equatable {
+    var search: String = ""
+    var sort: SceneSort = .date
+    var direction: SortDirection = .desc
+    var tags: [Tag] = []
+    var performerID: String? = nil
+
+    var tagIDs: [String] { tags.map(\.id) }
 }
 
 // MARK: - Request / response types
@@ -144,29 +212,37 @@ struct FindFilter: Encodable, Sendable {
     let page: Int
     let per_page: Int
     let sort: String?
+    let direction: String?
 
-    init(q: String? = nil, page: Int = 1, per_page: Int = 25, sort: String? = nil) {
+    init(q: String? = nil, page: Int = 1, per_page: Int = 25, sort: String? = nil, direction: String? = nil) {
         self.q = q
         self.page = page
         self.per_page = per_page
         self.sort = sort
+        self.direction = direction
     }
 }
 
-private struct FindScenesVariables: Encodable, Sendable { let filter: FindFilter }
-private struct FindPerformersVariables: Encodable, Sendable { let filter: FindFilter }
-private struct FindScenesByPerformerVariables: Encodable, Sendable {
+private struct FilterVariables: Encodable, Sendable { let filter: FindFilter }
+private struct FindScenesVariables: Encodable, Sendable {
     let filter: FindFilter
-    let scene_filter: SceneFilter
+    let scene_filter: SceneFilter?
 }
 
 struct SceneFilter: Encodable, Sendable {
-    let performers: MultiCriterion?
+    var performers: MultiCriterion? = nil
+    var tags: HierarchicalMultiCriterion? = nil
 }
 
 struct MultiCriterion: Encodable, Sendable {
     let value: [String]
     let modifier: String
+}
+
+struct HierarchicalMultiCriterion: Encodable, Sendable {
+    let value: [String]
+    let modifier: String
+    let depth: Int
 }
 
 struct StatsResponse: Decodable, Sendable { let stats: StatsData }
@@ -188,6 +264,9 @@ struct FindPerformersResult: Decodable, Sendable {
     let count: Int
     let performers: [Performer]
 }
+
+struct FindTagsResponse: Decodable, Sendable { let findTags: FindTagsResult }
+struct FindTagsResult: Decodable, Sendable { let tags: [Tag] }
 
 enum StashError: LocalizedError {
     case httpError(Int)

@@ -38,7 +38,7 @@ struct SceneStreamEndpoint: Codable, Sendable {
     let label: String?
 }
 
-struct Tag: Codable, Identifiable, Sendable {
+struct Tag: Codable, Identifiable, Sendable, Equatable, Hashable {
     let id: String
     let name: String
 }

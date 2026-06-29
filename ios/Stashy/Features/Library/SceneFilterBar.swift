@@ -1,0 +1,154 @@
+import SwiftUI
+
+/// Horizontal row of filter/sort chips for a scene list. Sorting uses a native `Menu` with inline
+/// `Picker`s (standard checkmarks); tag filtering opens a searchable picker sheet.
+struct SceneFilterBar: View {
+    @Binding var query: SceneQuery
+    var showTagFilter = true
+
+    @Environment(ThemeManager.self) private var themeManager
+    @State private var showTagPicker = false
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                sortMenu
+                if showTagFilter { tagChip }
+                if !query.tags.isEmpty {
+                    Button {
+                        query.tags = []
+                    } label: {
+                        chip(icon: "xmark", text: "Clear", active: false)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+        }
+        .sheet(isPresented: $showTagPicker) {
+            TagPickerSheet(selected: $query.tags)
+        }
+    }
+
+    private var sortMenu: some View {
+        Menu {
+            Picker("Sort by", selection: $query.sort) {
+                ForEach(SceneSort.allCases) { sort in
+                    Label(sort.label, systemImage: sort.symbol).tag(sort)
+                }
+            }
+            Picker("Order", selection: $query.direction) {
+                Label("Ascending", systemImage: "arrow.up").tag(SortDirection.asc)
+                Label("Descending", systemImage: "arrow.down").tag(SortDirection.desc)
+            }
+        } label: {
+            chip(
+                icon: query.sort.symbol,
+                text: query.sort.label,
+                trailing: query.direction == .asc ? "arrow.up" : "arrow.down",
+                active: false
+            )
+        }
+    }
+
+    private var tagChip: some View {
+        Button {
+            showTagPicker = true
+        } label: {
+            chip(
+                icon: "tag",
+                text: query.tags.isEmpty ? "Tags" : "\(query.tags.count) Tag\(query.tags.count == 1 ? "" : "s")",
+                active: !query.tags.isEmpty
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func chip(icon: String, text: String, trailing: String? = nil, active: Bool) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon).font(.caption)
+            Text(text)
+            if let trailing {
+                Image(systemName: trailing).font(.caption2)
+            }
+        }
+        .font(.subheadline.weight(.medium))
+        .foregroundStyle(active ? Color.white : themeManager.current.foregroundColor)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(active ? themeManager.current.accentColor : themeManager.current.surfaceColor, in: Capsule())
+    }
+}
+
+/// Searchable, multi-select tag picker backed by live `findTags` lookups from Stash.
+struct TagPickerSheet: View {
+    @Binding var selected: [Tag]
+    @Environment(AppState.self) private var appState
+    @Environment(\.dismiss) private var dismiss
+    @State private var searchText = ""
+    @State private var results: [Tag] = []
+    @State private var searchTask: Task<Void, Never>?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if !selected.isEmpty {
+                    Section("Selected") {
+                        ForEach(selected) { tag in
+                            Button { remove(tag) } label: {
+                                HStack {
+                                    Text(tag.name).foregroundStyle(.primary)
+                                    Spacer()
+                                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.tint)
+                                }
+                            }
+                        }
+                    }
+                }
+                Section(searchText.isEmpty ? "Tags" : "Results") {
+                    ForEach(results.filter { !selected.contains($0) }) { tag in
+                        Button { add(tag) } label: {
+                            Text(tag.name).foregroundStyle(.primary)
+                        }
+                    }
+                    if results.isEmpty {
+                        Text("No tags found").foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .searchable(text: $searchText, prompt: "Search tags")
+            .navigationTitle("Filter by Tags")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    if !selected.isEmpty { Button("Clear") { selected = [] } }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .task { await runSearch("") }
+            .onChange(of: searchText) { _, q in
+                searchTask?.cancel()
+                searchTask = Task {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    guard !Task.isCancelled else { return }
+                    await runSearch(q)
+                }
+            }
+        }
+    }
+
+    private func runSearch(_ q: String) async {
+        guard let client = appState.client else { return }
+        results = (try? await client.findTags(query: q)) ?? []
+    }
+
+    private func add(_ tag: Tag) {
+        if !selected.contains(tag) { selected.append(tag) }
+    }
+
+    private func remove(_ tag: Tag) {
+        selected.removeAll { $0 == tag }
+    }
+}
