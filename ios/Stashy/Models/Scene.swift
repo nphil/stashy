@@ -91,6 +91,15 @@ extension StashScene {
         return "\(h)p"
     }
 
+    /// Simplified display aspect ratio, e.g. "16:9" or "9:16".
+    var aspectRatioLabel: String? {
+        guard let w = files.first?.width, let h = files.first?.height, w > 0, h > 0 else { return nil }
+        func gcd(_ a: Int, _ b: Int) -> Int { b == 0 ? a : gcd(b, a % b) }
+        let g = gcd(w, h)
+        guard g > 0 else { return nil }
+        return "\(w / g):\(h / g)"
+    }
+
     var codecLabel: String? {
         files.first?.video_codec?.uppercased()
     }

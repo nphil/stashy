@@ -153,8 +153,7 @@ struct PerformerDetailView: View {
                             Image(uiImage: portrait).resizable().scaledToFill()
                                 .blur(radius: blurThumbnails ? 26 : 0)
                         } else {
-                            Rectangle().fill(themeManager.current.surfaceColor)
-                                .overlay { Image(systemName: "person.fill").font(.largeTitle).foregroundStyle(.secondary) }
+                            PerformerPlaceholder()
                         }
                     }
                     .frame(width: portraitWidth, height: portraitHeight)

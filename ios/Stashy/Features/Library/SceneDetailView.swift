@@ -17,10 +17,10 @@ struct SceneDetailView: View {
     var body: some View {
         GeometryReader { geo in
             let topInset = geo.safeAreaInsets.top
-            // Inline player box is a constant 35% of the usable height (excludes the status bar),
-            // regardless of the video's aspect ratio. The player also extends up behind the status
-            // bar, where the blurred backdrop fills the Dynamic Island area.
-            let boxHeight = geo.size.height * 0.35
+            // Inline player box is sized for 16:9 (full width), so a 16:9 video fills it exactly with
+            // no top/bottom blur. Other aspect ratios fit inside this box (blur fills the gaps). The
+            // player also extends up behind the status bar, where the blurred backdrop blends in.
+            let boxHeight = geo.size.width * 9 / 16
 
             ZStack(alignment: .top) {
                 // Fixed (no-scroll) layout: player up top, compact metadata fills the rest.
@@ -118,6 +118,7 @@ struct SceneDetailView: View {
     private var techItems: [(label: String, symbol: String)] {
         var out: [(String, String)] = []
         if let r = scene.resolutionLabel { out.append((r, "rectangle.compress.vertical")) }
+        if let ar = scene.aspectRatioLabel { out.append((ar, "aspectratio")) }
         if let c = scene.codecLabel { out.append((c, "film")) }
         if let b = scene.bitrateLabel { out.append((b, "speedometer")) }
         if let f = scene.frameRateLabel { out.append((f, "timelapse")) }
@@ -172,9 +173,7 @@ struct ScenePerformerCard: View {
                                 Image(uiImage: image).resizable().scaledToFill()
                                     .blur(radius: blurThumbnails ? 26 : 0)
                             } else {
-                                Image(systemName: "person.fill")
-                                    .font(.largeTitle)
-                                    .foregroundStyle(.secondary)
+                                PerformerPlaceholder()
                             }
                         }
                         .clipped()
@@ -219,11 +218,8 @@ struct ScenePerformerCard: View {
                 image = try? await imageCache.image(for: url)
             }
         } else {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(themeManager.current.surfaceColor)
-                .overlay {
-                    Image(systemName: "person.fill").font(.largeTitle).foregroundStyle(.secondary)
-                }
+            PerformerPlaceholder()
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
     }
 }

@@ -87,15 +87,18 @@ struct ScenePlayerView: View {
     var body: some View {
         GeometryReader { geo in
             let avail = geo.size
-            // Inline reserves the top strip for the status bar; the sharp video fits the area below.
+            // Inline: reserve the top strip for the status bar and bottom-align the sharp video so its
+            // bottom sits flush with the box (never blurred) — the blur fills the top / sides as needed.
+            // Fullscreen: the surface fills the whole screen so zoom is immersive (uses the entire
+            // display, including behind the Dynamic Island) instead of being trapped in a fit box.
             let inset = isFullscreen ? 0 : contentTopInset
             let videoArea = CGSize(width: avail.width, height: max(avail.height - inset, 1))
-            let fit = Self.fitSize(aspect: aspect, in: videoArea)
+            let surfaceSize = isFullscreen ? avail : Self.fitSize(aspect: aspect, in: videoArea)
 
-            ZStack {
-                // Background: blurred poster inline (fills the letterbox gaps and the status-bar
-                // strip so portrait/odd-ratio videos blend seamlessly); plain black in fullscreen,
-                // where letterbox bars are fine because the video can be zoomed.
+            ZStack(alignment: .bottom) {
+                // Background: blurred poster inline (fills the gaps and the status-bar strip so
+                // portrait/odd-ratio videos blend seamlessly); plain black in fullscreen, where
+                // letterbox bars are fine because the video can be zoomed.
                 Group {
                     if !isFullscreen, let poster {
                         Image(uiImage: poster).resizable().scaledToFill().blur(radius: 32)
@@ -111,6 +114,7 @@ struct ScenePlayerView: View {
                 Color.clear
                     .contentShape(Rectangle())
                     .onTapGesture { toggleControls() }
+                    .frame(width: avail.width, height: avail.height)
 
                 ZoomablePlayerSurface(
                     model: model,
@@ -124,13 +128,13 @@ struct ScenePlayerView: View {
                     onScrubEnd: { scheduleHide() },
                     onSwipeDownDismiss: { if isFullscreen { isFullscreen = false } }
                 )
-                .frame(width: fit.width, height: fit.height)
-                .offset(y: inset / 2) // center within the area below the status bar (inline)
+                .frame(width: surfaceSize.width, height: surfaceSize.height)
 
                 if !model.isReady {
                     ProgressView()
                         .controlSize(.large)
                         .tint(.white)
+                        .frame(width: avail.width, height: avail.height)
                 }
 
                 PlayerControlsView(
@@ -144,6 +148,7 @@ struct ScenePlayerView: View {
                     scheduleHide: { scheduleHide() },
                     onBack: onBack
                 )
+                .frame(width: avail.width, height: avail.height)
             }
             .frame(width: avail.width, height: avail.height)
         }

@@ -24,9 +24,7 @@ struct PerformerCard: View {
                             .scaledToFill()
                             .blur(radius: blurThumbnails ? 28 : 0)
                     } else {
-                        Image(systemName: "person.fill")
-                            .font(.largeTitle)
-                            .foregroundStyle(themeManager.current.foregroundColor.opacity(0.25))
+                        PerformerPlaceholder()
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
