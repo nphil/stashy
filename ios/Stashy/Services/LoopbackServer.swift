@@ -13,10 +13,27 @@ final class LoopbackServer: @unchecked Sendable {
     private var listener: NWListener?
     private let fileURL: URL
     private let contentType: String
+    /// Bytes safely readable from the file right now. Defaults to the on-disk size (static file); for a
+    /// progressively-remuxed file this returns the producer's verified write position.
+    private let availableBytes: @Sendable () -> Int64
+    /// Best-known total content length (the source size estimate for a remux, exact once finished).
+    private let totalBytes: @Sendable () -> Int64
+    /// Whether production is finished (so a range past `availableBytes` is a true EOF, not "wait").
+    private let isComplete: @Sendable () -> Bool
 
-    init(fileURL: URL, contentType: String = "video/mp4") {
+    init(fileURL: URL,
+         contentType: String = "video/mp4",
+         availableBytes: (@Sendable () -> Int64)? = nil,
+         totalBytes: (@Sendable () -> Int64)? = nil,
+         isComplete: (@Sendable () -> Bool)? = nil) {
         self.fileURL = fileURL
         self.contentType = contentType
+        let onDiskSize: @Sendable () -> Int64 = {
+            ((try? FileManager.default.attributesOfItem(atPath: fileURL.path))?[.size] as? NSNumber)?.int64Value ?? 0
+        }
+        self.availableBytes = availableBytes ?? onDiskSize
+        self.totalBytes = totalBytes ?? onDiskSize
+        self.isComplete = isComplete ?? { true }
     }
 
     /// Start listening; returns the URL a client should request. Blocks briefly until the OS assigns a port.
@@ -78,8 +95,7 @@ final class LoopbackServer: @unchecked Sendable {
         let lines = header.components(separatedBy: "\r\n")
         let requestLine = lines.first ?? ""
         let method = requestLine.split(separator: " ").first.map { String($0).uppercased() } ?? "GET"
-        let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
-        let total = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+        var total = max(totalBytes(), availableBytes())   // never claim less than what's already on disk
 
         // Parse "Range: bytes=start-end" (end optional).
         var start: Int64 = 0
@@ -98,10 +114,21 @@ final class LoopbackServer: @unchecked Sendable {
         start = max(0, start)
         end = min(end, total - 1)
 
-        guard total > 0, start <= end else {
+        // A Range request may be ahead of what the remux has produced — wait for it (the remux runs
+        // ahead at copy speed), until it's available, production finishes, or we time out.
+        let deadline = Date().addingTimeInterval(30)
+        while partial, end >= availableBytes(), !isComplete(), Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        // Once complete the real size is authoritative; clamp to what's actually readable.
+        let readable = availableBytes()
+        if isComplete() { total = readable; end = min(end, readable - 1) }
+
+        guard readable > 0, start <= end, start < readable else {
             send(box, Data("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8))
             return
         }
+        end = min(end, readable - 1)
 
         let length = end - start + 1
         var head = partial ? "HTTP/1.1 206 Partial Content\r\n" : "HTTP/1.1 200 OK\r\n"

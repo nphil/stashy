@@ -18,6 +18,12 @@ final class ScenePlayerModel {
 
     @ObservationIgnored private var engine: PlaybackEngine?
     @ObservationIgnored private let route: PlaybackRoute
+    /// Owns the on-device remux + loopback server for a `.localFFmpeg` route (nil otherwise).
+    @ObservationIgnored private var remuxStream: LocalRemuxStream?
+    /// Set once if the local pipeline fails and we switch to the HLS fallback (so we never loop).
+    @ObservationIgnored private var didFallback = false
+    /// Overrides the displayed stream label after a fallback.
+    var activeStreamType: String?
 
     /// The sharp-video render surface (re-parented into the zoom container).
     var renderView: UIView? { engine?.renderView }
@@ -25,12 +31,13 @@ final class ScenePlayerModel {
     var liveBlurView: UIView? { engine?.liveBlurView }
 
     var backendName: String {
+        if didFallback { return "AVPlayer (HLS fallback)" }
         switch route.engine {
-        case .avPlayer: "AVPlayer"
-        case .localFFmpeg: "FFmpeg (local)"
+        case .avPlayer: return "AVPlayer"
+        case .localFFmpeg: return "FFmpeg remux → AVPlayer"
         }
     }
-    var streamType: String { route.streamType }
+    var streamType: String { activeStreamType ?? route.streamType }
     var routingReason: String { route.reason }
 
     /// Side-effect-free on purpose. SwiftUI evaluates `State(initialValue:)` on *every* view init, so
@@ -44,9 +51,30 @@ final class ScenePlayerModel {
     /// Create the engine and begin playback. Idempotent — safe to call on every `onAppear`.
     func start() {
         guard engine == nil else { return }
-        // Phase 0: every route plays on AVPlayer (HLS, or direct). The on-device FFmpeg engine that
-        // will serve `.localFFmpeg` routes is wired up in the next phase.
-        let engine: PlaybackEngine = AVPlaybackEngine(url: route.url)
+        let url: URL
+        switch route.engine {
+        case .avPlayer:
+            url = route.url
+        case .localFFmpeg:
+            // Remux the source on-device and play it over the loopback server. If the server can't even
+            // start, fall back to HLS immediately; a later *playback* failure falls back via `onFailed`.
+            do {
+                let stream = LocalRemuxStream(source: route.url)
+                url = try stream.start()
+                remuxStream = stream
+            } catch {
+                didFallback = true
+                activeStreamType = "HLS (fallback)"
+                url = route.fallbackURL ?? route.url
+            }
+        }
+        engine = makeEngine(url: url)
+        isPlaying = true
+    }
+
+    /// Build an AVPlayer engine for `url` and wire its callbacks into this facade.
+    private func makeEngine(url: URL) -> PlaybackEngine {
+        let engine: PlaybackEngine = AVPlaybackEngine(url: url)
         engine.onTime = { [weak self] current, duration in
             guard let self else { return }
             self.currentTime = current
@@ -66,12 +94,32 @@ final class ScenePlayerModel {
             let aspect = size.width / size.height
             if self.videoAspect != aspect { self.videoAspect = aspect }
         }
-        self.engine = engine
+        engine.onFailed = { [weak self] _ in self?.fallbackToHLS() }
+        return engine
+    }
+
+    /// The local remux/loopback path failed to play — switch to the Stash HLS stream, once. Resetting
+    /// `isReady` makes the zoom surface re-attach the new engine's render view.
+    private func fallbackToHLS() {
+        guard !didFallback, let fallback = route.fallbackURL else { return }
+        didFallback = true
+        activeStreamType = "HLS (fallback)"
+        engine?.pause()
+        remuxStream?.stop()
+        remuxStream = nil
+        isReady = false
+        videoAspect = nil
+        engine = makeEngine(url: fallback)
         isPlaying = true
     }
 
-    /// Stop playback when leaving the scene so audio can't continue in the background.
-    func stop() { engine?.pause() }
+    /// Stop playback when leaving the scene (so audio can't continue in the background) and tear down
+    /// the on-device remux + loopback server.
+    func stop() {
+        engine?.pause()
+        remuxStream?.stop()
+        remuxStream = nil
+    }
 
     func play() { engine?.play() }
     func pause() { engine?.pause() }

@@ -52,6 +52,18 @@ final class FFmpegRemuxer: @unchecked Sendable {
     /// `fileprivate` so the top-level interrupt trampoline (not in the type's scope) can read it.
     fileprivate var deadline: CFAbsoluteTime = 0
 
+    // Thread-safe production progress for the loopback server, which reads these from its own thread.
+    private let progressLock = NSLock()
+    private var finishedFlag = false
+    /// Bytes safely written to the output so far.
+    var producedBytes: Int { progressLock.withLock { bytesWritten } }
+    /// True once the remux has stopped (EOF, error, or abort) — the server then stops waiting for more.
+    var isFinished: Bool { progressLock.withLock { finishedFlag } }
+    /// Final-size estimate: the source byte size (output ≈ input for a no-re-encode remux).
+    var sourceByteSize: Int64 { max(size, 0) }
+    /// Abort an in-flight remux promptly (e.g. when playback stops) via the interrupt deadline.
+    func abort() { deadline = 1 }
+
     private final class Box: @unchecked Sendable {
         var data: Data?
         var total: Int64?
@@ -92,6 +104,7 @@ final class FFmpegRemuxer: @unchecked Sendable {
     }
 
     private func runRemux() -> String {
+        defer { progressLock.withLock { finishedFlag = true } }   // registered first → runs last (after file close)
         deadline = CFAbsoluteTimeGetCurrent() + max(outerTimeout - 3, 3)   // abort in-flight IO before the outer race
         // Stream to the temp file when one was requested (progressive playback); else accumulate in memory.
         if let fileURL {
@@ -294,7 +307,7 @@ final class FFmpegRemuxer: @unchecked Sendable {
         } else {
             produced.append(buffer, count: Int(count))
         }
-        bytesWritten += Int(count)
+        progressLock.withLock { bytesWritten += Int(count) }
         return count
     }
 

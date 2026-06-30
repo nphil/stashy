@@ -55,6 +55,18 @@ Honest constraints / pushback:
   upscaling mainly pays off for remote/cellular viewing.
 - Apple has no "upscale with my vectors" API; MetalFX = generic, Core ML = run our own model.
 
+### Instant-start preview preloader (Stash plugin + app)
+Make every video *feel* like it loads instantly. A Stash plugin pre-generates, for every file, a short
+(~3 s) opening clip encoded for maximum streaming compatibility + decent quality (e.g. H.264/AAC
+faststart MP4), stored on fast storage. On playback the app starts that tiny preview **immediately**,
+then silently swaps to the real file (seeking to the matching position) once it's ready — so the user
+never sees a spinner.
+- App side: play preview → preload/remux the real stream in the background → seamless hand-off
+  (crossfade or frame-matched switch at ~3 s). Pairs naturally with the loopback remux feed.
+- Plugin side: batch-generate previews (CUDA/CPU), keep them tiny, index them so the app can fetch the
+  preview URL per scene.
+- Open questions: exact-frame switch vs. small overlap; audio continuity; storage/cleanup policy.
+
 ### XR glasses support (Viture Pro XR et al.)
 Develop the capability to play video on XR/AR glasses — including VR/180°/360° and big-virtual-screen
 viewing — with a clean handoff (no duplicated video mirrored on the phone screen).

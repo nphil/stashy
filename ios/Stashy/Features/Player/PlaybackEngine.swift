@@ -18,6 +18,9 @@ protocol PlaybackEngine: AnyObject {
     var onTime: ((TimeInterval, TimeInterval) -> Void)? { get set }
     var onReady: ((Bool) -> Void)? { get set }
     var onPlaying: ((Bool) -> Void)? { get set }
+    /// Fired once if the underlying item fails to load/play (e.g. a bad local stream) so the facade can
+    /// fall back to an alternative source.
+    var onFailed: ((Error?) -> Void)? { get set }
     /// Actual decoded video size (after pixel-aspect/rotation), once known — for correct layout when
     /// the server's file dimensions are missing or wrong.
     var onPresentationSize: ((CGSize) -> Void)? { get set }

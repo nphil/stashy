@@ -36,6 +36,8 @@ final class AVPlaybackEngine: PlaybackEngine {
     var onReady: ((Bool) -> Void)?
     var onPlaying: ((Bool) -> Void)?
     var onPresentationSize: ((CGSize) -> Void)?
+    var onFailed: ((Error?) -> Void)?
+    private var didFail = false
     private var lastPresentation: CGSize = .zero
 
     var renderView: UIView? { hostView }
@@ -83,7 +85,15 @@ final class AVPlaybackEngine: PlaybackEngine {
 
         statusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             let ready = item.status == .readyToPlay
-            Task { @MainActor in self?.onReady?(ready) }
+            let failed = item.status == .failed
+            Task { @MainActor in
+                guard let self else { return }
+                self.onReady?(ready)
+                if failed, !self.didFail {
+                    self.didFail = true
+                    self.onFailed?(nil)
+                }
+            }
         }
         timeControlObservation = player.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] player, _ in
             let playing = player.timeControlStatus == .playing

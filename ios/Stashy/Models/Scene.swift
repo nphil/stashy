@@ -92,19 +92,22 @@ extension StashScene {
                                  reason: "Direct play (\(codec ?? "?") in \(container))")
         }
 
-        // Fallback (until the on-device path lands): Stash HLS. Record whether the file would only need
-        // a remux (cheap — incl. the hvc1 retag HEVC requires) or a full transcode (expensive).
-        if let hls = sceneStreams.first(where: { $0.isHLS }), let url = appendingAPIKey(apiKey, to: hls.url) {
-            let why: String
-            if isRemuxCodec {
-                why = "HEVC needs hvc1 remux (AVPlayer renders hev1 black)"
-            } else if isDirectCodec {
-                why = "container .\(container) needs remux"
-            } else {
-                why = "codec \(codec ?? "?") needs transcode"
-            }
-            return PlaybackRoute(url: url, engine: .avPlayer, streamType: "HLS (transcoded)",
-                                 reason: "Fallback: \(why); on-device path pending")
+        let hlsURL = sceneStreams.first(where: { $0.isHLS }).flatMap { appendingAPIKey(apiKey, to: $0.url) }
+
+        // Remux class: a codec AVPlayer can decode once repackaged (HEVC anywhere → hvc1 retag, or
+        // H.264 in a foreign container) → on-device loopback remux, with HLS as the auto-fallback.
+        if isRemuxCodec || (isDirectCodec && !containerOK), let source = directFileURL(apiKey: apiKey) {
+            let why = isRemuxCodec
+                ? "HEVC → hvc1 remux (local, no server)"
+                : "container .\(container) → remux (local, no server)"
+            return PlaybackRoute(url: source, engine: .localFFmpeg, streamType: "Local remux",
+                                 reason: why, fallbackURL: hlsURL)
+        }
+
+        // Transcode class (codec AVPlayer can't decode): Stash HLS for now (on-device transcode later).
+        if let hlsURL {
+            return PlaybackRoute(url: hlsURL, engine: .avPlayer, streamType: "HLS (transcoded)",
+                                 reason: "Fallback: codec \(codec ?? "?") needs transcode; on-device path pending")
         }
 
         // No HLS offered → last-resort direct file (may not render for exotic codecs/containers).

@@ -17,6 +17,9 @@ struct PlaybackRoute {
     let streamType: String
     /// Why this engine was chosen (esp. why not AVPlayer).
     let reason: String
+    /// A safe alternative URL (the Stash HLS stream) to retry on if the primary engine fails — used by
+    /// the `.localFFmpeg` path so a remux/loopback problem auto-recovers to server transcode.
+    var fallbackURL: URL? = nil
 }
 
 // MARK: - Stats model
