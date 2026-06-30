@@ -32,7 +32,7 @@ final class ZoomScrollView: UIScrollView {
     }
 }
 
-/// Hosts the KSPlayer render surface inside a `UIScrollView` so the fullscreen video gets
+/// Hosts the video render surface inside a `UIScrollView` so the fullscreen video gets
 /// Apple Photos-style zooming: pinch to any focal point, free inertial panning with bounce,
 /// double-tap to zoom into the tapped point (and back), and a quick swipe-down to dismiss.
 ///

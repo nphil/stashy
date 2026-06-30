@@ -98,10 +98,10 @@ jobs:
         run: |
           cd ios
           set -o pipefail
-          # xcodebuild assembles the full .app (incl. embedded frameworks) and only then runs
-          # a final "Validate" step that rejects KSPlayer's FFmpeg frameworks for underscored
-          # CFBundleIdentifiers. That validation is the only failure and the .app is already
-          # complete, so don't abort on it — we patch the embedded frameworks in Package step.
+          # xcodebuild's final "Validate" step can reject embedded dynamic frameworks for underscored
+          # CFBundleIdentifiers. Our FFmpeg links statically (no embedded frameworks), so this normally
+          # no longer fires — but we keep tolerating a non-zero exit here as a safety net; the .app is
+          # already complete by then, and the executable + IPA-size gates in Package catch real failures.
           xcodebuild build \
             -project      "$PROJECT" \
             -scheme       "$SCHEME" \

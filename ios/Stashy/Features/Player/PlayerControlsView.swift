@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Custom playback controls over the KSPlayer surface: play/pause, time, fullscreen,
+/// Custom playback controls over the video surface: play/pause, time, fullscreen,
 /// and a scrubber that shows Stash sprite-sheet thumbnails while dragging.
 struct PlayerControlsView: View {
     let model: ScenePlayerModel

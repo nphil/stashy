@@ -1,9 +1,10 @@
 import SwiftUI
 
-/// Observable facade over a `PlaybackEngine` (native AVPlayer for HLS, KSPlayer for the non-HLS
-/// fallback). The views bind only to this — the backend is swapped underneath. State pushed from the
-/// engine is written *only when it actually changes*, so a per-frame time tick doesn't invalidate the
-/// whole view tree (which previously forced a UIKit layout pass every frame and starved playback).
+/// Observable facade over a `PlaybackEngine`. Today that's `AVPlaybackEngine` (native AVPlayer); the
+/// on-device FFmpeg remux/transcode engine that will serve `.localFFmpeg` routes plugs in behind the
+/// same protocol. The views bind only to this — the backend is swapped underneath. State pushed from
+/// the engine is written *only when it actually changes*, so a per-frame time tick doesn't invalidate
+/// the whole view tree (which previously forced a UIKit layout pass every frame and starved playback).
 @Observable
 @MainActor
 final class ScenePlayerModel {
@@ -20,7 +21,7 @@ final class ScenePlayerModel {
 
     /// The sharp-video render surface (re-parented into the zoom container).
     var renderView: UIView? { engine?.renderView }
-    /// A live blurred backdrop, present only on the AVPlayer path; nil → use a static blur.
+    /// A live, frame-matched blurred backdrop vended by the engine.
     var liveBlurView: UIView? { engine?.liveBlurView }
 
     var backendName: String {
@@ -140,7 +141,10 @@ struct ScenePlayerView: View {
     @State private var sprites = SpriteThumbnails()
     @State private var suppressAutoFullscreen = false
     @State private var zoomScale: CGFloat = 1
-    @State private var poster: UIImage?
+    /// Live window geometry, used for fullscreen layout so it's identical regardless of the screen that
+    /// presented the player (a plain stack vs a `.searchable` list report different ambient geometry).
+    @State private var windowBounds: CGRect = .zero
+    @State private var windowSafeArea = EdgeInsets()
     @State private var showControls = true
     @State private var showStats = false
     @State private var isScrubbing = false
@@ -166,12 +170,19 @@ struct ScenePlayerView: View {
 
     var body: some View {
         GeometryReader { geo in
-            let avail = geo.size
+            // Fullscreen geometry comes from the actual window (live across rotation), so the player
+            // lays out identically no matter what presented it — a plain stack and a `.searchable` list
+            // hand a pushed view different ambient size/safe-area, which previously mis-sized the
+            // fullscreen surface (zoomed past the screen, controls clipped) only on the search path.
+            // Inline keeps the geometry of its fitted box.
+            let fullscreenWindow = isFullscreen && windowBounds.width > 0 && windowBounds.height > 0
+            let avail = fullscreenWindow ? windowBounds.size : geo.size
+            let safe = fullscreenWindow ? windowSafeArea : safeArea
             // Inline: reserve the top strip for the status bar and bottom-align the sharp video so its
             // bottom sits flush with the box (never blurred) — the blur fills the top / sides as needed.
             // Fullscreen: the surface fills the whole screen so zoom is immersive (uses the entire
             // display, including behind the Dynamic Island) instead of being trapped in a fit box.
-            let inset = isFullscreen ? 0 : safeArea.top
+            let inset = isFullscreen ? 0 : safe.top
             let videoArea = CGSize(width: avail.width, height: max(avail.height - inset, 1))
             let surfaceSize = isFullscreen ? avail : Self.fitSize(aspect: aspect, in: videoArea)
             // The rectangle the sharp video actually occupies (bottom-aligned, horizontally centred),
@@ -184,9 +195,8 @@ struct ScenePlayerView: View {
             )
 
             ZStack(alignment: .bottom) {
-                // Background blur that fills the status-bar strip and any letterbox gaps. On the AVPlayer
-                // path it's a live, frame-matched GPU blur of what's playing; on the KSPlayer path (no
-                // frame access) it's a static blurred poster. Plain black in fullscreen, where letterbox
+                // Background blur that fills the status-bar strip and any letterbox gaps inline: a live,
+                // frame-matched GPU blur of what's playing. Plain black in fullscreen, where letterbox
                 // bars are fine because the video zooms (and the live blur pauses itself off-screen).
                 Group {
                     if isFullscreen {
@@ -194,7 +204,7 @@ struct ScenePlayerView: View {
                     } else if let blurView = model.liveBlurView {
                         PlayerBackdropHost(view: blurView)
                     } else {
-                        StaticBlurBackdrop(image: poster)
+                        Color.black
                     }
                 }
                 .frame(width: avail.width, height: avail.height)
@@ -237,7 +247,7 @@ struct ScenePlayerView: View {
                     isScrubbing: $isScrubbing,
                     scrubTime: $scrubTime,
                     videoRect: videoRect,
-                    safeArea: safeArea,
+                    safeArea: safe,
                     spritePreviewTopLeading: isFullscreen && isPortraitVideo,
                     scheduleHide: { scheduleHide() },
                     onBack: onBack
@@ -249,21 +259,19 @@ struct ScenePlayerView: View {
                     StatsOverlayView(scene: scene, model: model,
                                      probeURL: scene.directFileURL(apiKey: apiKey),
                                      isLandscape: avail.width > avail.height)
-                        .padding(.leading, max(videoRect.minX, safeArea.leading) + 12)
-                        .padding(.top, max(videoRect.minY, safeArea.top) + 52)
+                        .padding(.leading, max(videoRect.minX, safe.leading) + 12)
+                        .padding(.top, max(videoRect.minY, safe.top) + 52)
                         .frame(width: avail.width, height: avail.height, alignment: .topLeading)
                 }
             }
             .frame(width: avail.width, height: avail.height)
         }
+        // Live window geometry for fullscreen layout (independent of the presenting screen's context).
+        .background(WindowMetricsReader(bounds: $windowBounds, safeArea: $windowSafeArea))
         .task {
             guard let vtt = scene.vttURL(apiKey: apiKey),
                   let sprite = scene.spriteURL(apiKey: apiKey) else { return }
             await sprites.load(vttURL: vtt, spriteURL: sprite, imageCache: imageCache)
-        }
-        .task(id: scene.id) {
-            guard let url = scene.thumbnailURL(apiKey: apiKey) else { return }
-            poster = try? await imageCache.image(for: url)
         }
         // Landscape videos: rotating to landscape enters fullscreen (and back to portrait exits).
         // Portrait videos never auto-rotate into a landscape fullscreen — they go fullscreen in

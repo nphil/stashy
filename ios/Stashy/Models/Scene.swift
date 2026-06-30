@@ -62,8 +62,8 @@ extension SceneStreamEndpoint {
 extension StashScene {
     /// Resolve which stream to play, on which backend, and *why*. We direct-play (no server transcode):
     /// AVPlayer for files it can decode natively (H.264/HEVC in MP4/MOV) — which unlocks the live blur —
-    /// and KSPlayer/FFmpeg for everything else (exotic containers/codecs), preserving codec support.
-    /// `reason` records the exact AVPlayer-incompatibility so the Stats overlay can show it.
+    /// and the on-device FFmpeg remux/transcode engine for everything else (exotic containers/codecs),
+    /// preserving codec support. `reason` records the exact AVPlayer-incompatibility for the Stats overlay.
     func playbackRoute(apiKey: String) -> PlaybackRoute? {
         // TEST (temporary): route the AVPlayer path through Stash's HLS (transcoded) stream. AVPlayer
         // plays HLS reliably, so this confirms whether the black-video direct-stream files are an
