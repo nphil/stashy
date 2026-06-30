@@ -86,22 +86,20 @@ final class ScenePlayerModel {
             buildFallback(reason: "HLS (Apple can't decode this pixel format)")
             return
         }
-        // Open the source once (off-main): read its keyframe grid for seekable HLS *and* its pixel format
-        // for the decode decision. The player shows its spinner meanwhile.
+        // Probe the pixel format (off-main) for the decode decision, then play via the linear continuous
+        // remux. The on-demand *segmented* HLS path (buildHLS) gave great seeking but choppy playback
+        // across multiple files — independent per-segment muxing introduces frame-timing/audio-priming
+        // discontinuities. The linear continuous remux played smoothly, so it's the default again; fast
+        // seeking will be re-added on top of it (seek-by-reinit) rather than via per-segment muxing.
         Task { [weak self] in
             guard let self else { return }
-            let producer = HLSSegmentProducer(url: self.route.url)
-            let prepared = await Task.detached { producer.prepare() }.value
-            let needsTranscode = ScenePlayerModel.needsTranscode(pixFmt: producer.pixFmt)
-            if !producer.pixFmt.isEmpty { AppleDecodeCache.shared.setDecision(needsTranscode, forKey: key) }
+            let info = await FFmpegSource(url: self.route.url).probeVideoInfo()
+            let needsTranscode = info.map { ScenePlayerModel.needsTranscode(pixFmt: $0.pixFmt) } ?? false
+            if info != nil { AppleDecodeCache.shared.setDecision(needsTranscode, forKey: key) }
             if needsTranscode {
-                producer.teardown()
                 self.buildFallback(reason: "HLS (Apple can't decode this pixel format)")
-            } else if prepared {
-                self.buildHLS(producer: producer)        // seekable VOD HLS (mp4/mov)
             } else {
-                producer.teardown()
-                self.buildLinear()                       // unsupported container → linear remux
+                self.buildLinear()
             }
         }
     }
