@@ -46,17 +46,6 @@ final class FMP4Index: @unchecked Sendable {
         }
     }
 
-    /// How far (seconds, within this stream's zero-based timeline) production has reached — the start time
-    /// of the last parsed fragment. Used to decide whether a seek lands in the produced region (fast
-    /// in-stream seek) or needs a remux restart.
-    func producedSeconds() -> Double {
-        lock.withLock {
-            scan()
-            guard timescale > 0, let last = fragTimes.last else { return 0 }
-            return Double(last) / Double(timescale)
-        }
-    }
-
     func debugSummary() -> String {
         lock.withLock {
             "init=\(initLength)B · frags=\(fragOffsets.count) · ts=\(timescale) · vtrack=\(videoTrackID)"

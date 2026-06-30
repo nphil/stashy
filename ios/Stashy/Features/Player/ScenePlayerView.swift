@@ -110,24 +110,8 @@ final class ScenePlayerModel {
         }
     }
 
-    /// Seekable on-demand HLS from a prepared producer (mp4/mov). Best path: AVPlayer gets a VOD playlist
-    /// it can seek anywhere in, and each segment is remuxed on demand.
-    private func buildHLS(producer: HLSSegmentProducer) {
-        guard !stopped else { producer.teardown(); return }
-        do {
-            let stream = LocalHLSStream(producer: producer)
-            let url = try stream.start()
-            activeStreamType = "On-device HLS (seekable)"
-            if duration <= 0 { duration = producer.totalDuration }
-            adopt(makeEngine(url: url), stream: stream)
-            if engine != nil { armWatchdog() }
-        } catch {
-            producer.teardown()
-            buildFallback(reason: "HLS (fallback)")
-        }
-    }
-
-    /// Linear growing-file remux (containers without a usable keyframe table, e.g. some MKVs). Forward-only.
+    /// Linear continuous remux → byte-range HLS over the loopback. Plays smoothly (one continuous mux);
+    /// far seeks restart it at the target (seek-by-reinit). The default for the remux class.
     private func buildLinear() {
         guard !stopped else { return }
         do {

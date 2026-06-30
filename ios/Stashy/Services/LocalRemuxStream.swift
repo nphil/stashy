@@ -1,5 +1,17 @@
 import Foundation
 
+/// A local on-device stream feeding AVPlayer over the loopback server. Currently the only conformer is
+/// `LocalRemuxStream` (linear continuous remux → byte-range HLS). Kept as a protocol so the facade can
+/// hold `any LocalPlaybackStream` and an alternative delivery can slot in later.
+@MainActor
+protocol LocalPlaybackStream: AnyObject {
+    /// Begin serving; returns the loopback URL AVPlayer should open. Throws only if the server can't bind.
+    func start() throws -> URL
+    func stop()
+    /// Diagnostics for the Stats overlay.
+    func diagnostics() -> [String]
+}
+
 /// The on-device remux → AVPlayer feed. Remuxes the source to a *fragmented MP4* temp file in the
 /// background, indexes that growing file into an **HLS byte-range playlist** (`FMP4Index`), and serves
 /// both the playlist and the file's byte ranges over a loopback HTTP server. AVPlayer opens the loopback
@@ -59,6 +71,4 @@ final class LocalRemuxStream: LocalPlaybackStream {
          index.debugSummary()]
             + server.recentRequests()
     }
-
-    func producedSeconds() -> Double { index.producedSeconds() }
 }
