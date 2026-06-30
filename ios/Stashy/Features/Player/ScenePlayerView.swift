@@ -27,6 +27,11 @@ final class ScenePlayerModel {
     @ObservationIgnored private var stopped = false
     /// Overrides the displayed stream label after a fallback / transcode decision.
     var activeStreamType: String?
+    /// Last engine failure reason (AVPlayer error / watchdog), surfaced in Stats for diagnosis.
+    var lastError: String?
+    /// Fires a fallback if the local path produces no frames in time (covers stalls AVPlayer never
+    /// reports as a hard failure).
+    @ObservationIgnored private var watchdog: Task<Void, Never>?
 
     /// The sharp-video render surface (re-parented into the zoom container).
     var renderView: UIView? { engine?.renderView }
@@ -91,11 +96,12 @@ final class ScenePlayerModel {
             return
         }
         // Remux on-device + play over the loopback server. If the server can't even start, go to HLS
-        // now; a later playback failure still falls back via `onFailed`.
+        // now; a later playback failure falls back via `onFailed`, and a silent stall via the watchdog.
         do {
             let stream = LocalRemuxStream(source: route.url)
             let url = try stream.start()
             adopt(makeEngine(url: url), stream: stream)
+            if engine != nil { armWatchdog() }
         } catch {
             didFallback = true
             activeStreamType = "HLS (fallback)"
@@ -129,6 +135,7 @@ final class ScenePlayerModel {
         engine.onTime = { [weak self] current, duration in
             guard let self else { return }
             self.currentTime = current
+            if current > 0 { self.watchdog?.cancel() }   // real frames are flowing — disarm the stall watchdog
             if self.duration != duration { self.duration = duration }
             if !self.isReady { self.isReady = true }
         }
@@ -145,21 +152,35 @@ final class ScenePlayerModel {
             let aspect = size.width / size.height
             if self.videoAspect != aspect { self.videoAspect = aspect }
         }
-        engine.onFailed = { [weak self] _ in self?.fallbackToHLS() }
+        engine.onFailed = { [weak self] error in self?.fallbackToHLS(error: error) }
         return engine
     }
 
-    /// The local remux/loopback path failed to play — switch to the Stash HLS stream, once. Resetting
-    /// `isReady` makes the zoom surface re-attach the new engine's render view.
-    private func fallbackToHLS() {
+    /// Fall back if the local path produces no frames within 8s — catches stalls AVPlayer never reports
+    /// as a hard `.failed` (e.g. a seek/range request the growing-file server can't satisfy yet).
+    private func armWatchdog() {
+        watchdog?.cancel()
+        watchdog = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(8))
+            guard let self, !Task.isCancelled, !self.stopped, !self.didFallback, self.currentTime == 0 else { return }
+            self.fallbackToHLS(error: "local playback produced no frames in 8s")
+        }
+    }
+
+    /// The local remux/loopback path failed (or stalled) — switch to the Stash HLS stream, once.
+    /// Resetting `isReady` makes the zoom surface re-attach the new engine's render view.
+    private func fallbackToHLS(error: String? = nil) {
         guard !didFallback, let fallback = route.fallbackURL else { return }
         didFallback = true
+        watchdog?.cancel()
+        if let error { lastError = error }
         activeStreamType = "HLS (fallback)"
         engine?.teardown()
         remuxStream?.stop()
         remuxStream = nil
         isReady = false
         videoAspect = nil
+        currentTime = 0
         engine = makeEngine(url: fallback)
         isPlaying = true
     }
@@ -170,6 +191,7 @@ final class ScenePlayerModel {
     func stop() {
         stopped = true
         startInProgress = false
+        watchdog?.cancel()
         engine?.teardown()
         engine = nil
         remuxStream?.stop()
@@ -191,12 +213,14 @@ final class ScenePlayerModel {
     func snapshotStats(scene: StashScene) -> PlaybackStats {
         var sections: [StatSection] = []
 
-        sections.append(StatSection(title: "Playback", lines: [
+        var playback = [
             StatLine(label: "Backend", value: backendName),
             StatLine(label: "Decode", value: engine?.decodeDescription ?? "—"),
             StatLine(label: "Stream", value: streamType),
             StatLine(label: "Routing", value: routingReason),
-        ]))
+        ]
+        if let lastError { playback.append(StatLine(label: "Error", value: lastError)) }
+        sections.append(StatSection(title: "Playback", lines: playback))
 
         // Proof the self-built FFmpeg links + is callable (foundation for the local transcode pipeline).
         sections.append(StatSection(title: "Engine", lines: [

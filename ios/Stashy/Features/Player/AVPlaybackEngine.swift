@@ -36,7 +36,7 @@ final class AVPlaybackEngine: PlaybackEngine {
     var onReady: ((Bool) -> Void)?
     var onPlaying: ((Bool) -> Void)?
     var onPresentationSize: ((CGSize) -> Void)?
-    var onFailed: ((Error?) -> Void)?
+    var onFailed: ((String?) -> Void)?
     private var didFail = false
     private var lastPresentation: CGSize = .zero
 
@@ -86,12 +86,13 @@ final class AVPlaybackEngine: PlaybackEngine {
         statusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             let ready = item.status == .readyToPlay
             let failed = item.status == .failed
+            let errorText = item.error?.localizedDescription
             Task { @MainActor in
                 guard let self else { return }
                 self.onReady?(ready)
                 if failed, !self.didFail {
                     self.didFail = true
-                    self.onFailed?(nil)
+                    self.onFailed?(errorText)
                 }
             }
         }
