@@ -85,29 +85,33 @@ extension StashScene {
     func playbackRoute(apiKey: String) -> PlaybackRoute? {
         let codec = files.first?.video_codec?.lowercased()
         let container = fileContainer
-        let isDirectCodec = codec.map { c in Self.directPlayCodecs.contains { c.contains($0) } } ?? false
-        let isAV1 = codec.map { c in Self.av1Codecs.contains { c.contains($0) } } ?? false
-        // HEVC always remuxes on-device; AV1 only when this device has a hardware AV1 decoder (else it
-        // must be transcoded by Stash). The on-device pixel-format probe still sends 4:2:2/4:4:4/12-bit
-        // — which Apple can't decode for either codec — to HLS.
-        let isRemuxCodec = (codec.map { c in Self.remuxableCodecs.contains { c.contains($0) } } ?? false)
-            || (isAV1 && DeviceCapabilities.av1HardwareDecode)
         let containerOK = Self.directPlayContainers.contains(container)
-
-        // Fast path: H.264 in a native container — AVPlayer plays it as-is (instant seeks, no server).
-        if isDirectCodec, containerOK, let url = directFileURL(apiKey: apiKey) {
-            return PlaybackRoute(url: url, engine: .avPlayer, streamType: "Direct",
-                                 reason: "Direct play (\(codec ?? "?") in \(container))")
-        }
-
         let hlsURL = sceneStreams.first(where: { $0.isHLS }).flatMap { appendingAPIKey(apiKey, to: $0.url) }
 
-        // Remux class: a codec AVPlayer can decode once repackaged (HEVC anywhere → hvc1 retag, or
-        // H.264 in a foreign container) → on-device remux streamed over the loopback, with HLS fallback.
-        // The pixel-format probe (in the facade) sends Apple-undecodable 4:2:2/4:4:4 straight to HLS.
-        if isRemuxCodec || (isDirectCodec && !containerOK), let source = directFileURL(apiKey: apiKey) {
-            let why = isRemuxCodec
-                ? "\(codec ?? "?") → on-device remux"
+        let isH264 = codec.map { c in Self.directPlayCodecs.contains { c.contains($0) } } ?? false
+        let isAV1 = codec.map { c in Self.av1Codecs.contains { c.contains($0) } } ?? false
+        let isHEVC = codec.map { c in Self.remuxableCodecs.contains { c.contains($0) } } ?? false
+        // AVPlayer decodes AV1 natively only with a hardware AV1 decoder (A17 Pro+). When present, AV1
+        // behaves like H.264: direct-play from a native container, remux only for a foreign one. (HEVC is
+        // different — even in MP4 the common hev1 tag renders black, so it always needs an hvc1 remux.)
+        let av1Native = isAV1 && DeviceCapabilities.av1HardwareDecode
+        let isDirectClass = isH264 || av1Native
+
+        // Fast path: H.264 / native-AV1 in a native container — AVPlayer plays the file as-is (instant
+        // seeks, no server). AV1 carries an HLS fallback in case its pixel format (4:2:2/4:4:4/12-bit)
+        // isn't hardware-decodable; H.264 is always 4:2:0 so it needs none.
+        if isDirectClass, containerOK, let url = directFileURL(apiKey: apiKey) {
+            return PlaybackRoute(url: url, engine: .avPlayer, streamType: "Direct",
+                                 reason: "Direct play (\(codec ?? "?") in \(container))",
+                                 fallbackURL: av1Native ? hlsURL : nil)
+        }
+
+        // Remux class: HEVC (any container → hvc1 retag), or a natively-decodable codec in a foreign
+        // container (MKV/WebM) → on-device remux over the loopback, with HLS fallback. The pixel-format
+        // probe (in the facade) sends Apple-undecodable 4:2:2/4:4:4 straight to HLS.
+        if isHEVC || (isDirectClass && !containerOK), let source = directFileURL(apiKey: apiKey) {
+            let why = isHEVC
+                ? "\(codec ?? "?") → hvc1 remux (local)"
                 : "container .\(container) → remux (local)"
             return PlaybackRoute(url: source, engine: .localFFmpeg, streamType: "Local remux",
                                  reason: why, fallbackURL: hlsURL, duration: files.first?.duration ?? 0)
