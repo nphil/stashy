@@ -31,6 +31,7 @@ final class AVPlaybackEngine: PlaybackEngine {
     private var timeObserver: Any?
     private var statusObservation: NSKeyValueObservation?
     private var timeControlObservation: NSKeyValueObservation?
+    private var stallObserver: NSObjectProtocol?
 
     var onTime: ((TimeInterval, TimeInterval) -> Void)?
     var onReady: ((Bool) -> Void)?
@@ -61,10 +62,20 @@ final class AVPlaybackEngine: PlaybackEngine {
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
         ])
         item.add(videoOutput)
+        // Cap how far ahead AVPlayer buffers. The on-device HLS loopback answers instantly, so AVPlayer
+        // otherwise treats bandwidth as infinite and prefetches the *entire* VOD — driving the segment
+        // producer to remux hundreds of segments back-to-back, which pegs the CPU and starves 4K decode
+        // (the stutter/lag). 30s keeps a healthy buffer while leaving the producer near the playhead.
+        item.preferredForwardBufferDuration = 30
         player = AVPlayer(playerItem: item)
         player.automaticallyWaitsToMinimizeStalling = true
         hostView.player = player
         blurBackdrop.configure(output: videoOutput)
+
+        stallObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemPlaybackStalled, object: item, queue: .main) { _ in
+            RemoteLog.shared.log("⏸ AVPlayer playback STALLED")
+        }
 
         // ~10 Hz so the scrubber/time label rebuild a handful of times a second, not per frame.
         timeObserver = player.addPeriodicTimeObserver(
@@ -116,6 +127,7 @@ final class AVPlaybackEngine: PlaybackEngine {
         }
         statusObservation?.invalidate(); statusObservation = nil
         timeControlObservation?.invalidate(); timeControlObservation = nil
+        if let stallObserver { NotificationCenter.default.removeObserver(stallObserver); self.stallObserver = nil }
         player.pause()
     }
 

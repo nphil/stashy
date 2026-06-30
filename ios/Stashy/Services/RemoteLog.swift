@@ -22,6 +22,10 @@ final class RemoteLog: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private var memTimer: DispatchSourceTimer?
     private let start = Date()
+    /// Rolling tail of recent lines, mirrored to disk so a *hard* crash's final moment (which the periodic
+    /// network flush can't catch) is recovered and re-sent on the next launch.
+    private var tail: [String] = []
+    private let tailFile = FileManager.default.temporaryDirectory.appendingPathComponent("stashy-crashtail.txt")
 
     private init() {
         let cfg = URLSessionConfiguration.ephemeral
@@ -33,8 +37,13 @@ final class RemoteLog: @unchecked Sendable {
         queue.async {
             guard !self.enabled else { return }
             self.enabled = true
+            // Recover + re-send the previous session's tail (captures a hard crash the live flush missed).
+            if let prev = try? String(contentsOf: self.tailFile, encoding: .utf8), !prev.isEmpty {
+                self.post("=== PREVIOUS SESSION TAIL (recovered) ===\n" + prev, wait: nil)
+                try? FileManager.default.removeItem(at: self.tailFile)
+            }
             let t = DispatchSource.makeTimerSource(queue: self.queue)
-            t.schedule(deadline: .now() + 1.5, repeating: 1.5)
+            t.schedule(deadline: .now() + 0.8, repeating: 0.8)
             t.setEventHandler { [weak self] in self?.flushLocked() }
             t.resume()
             self.timer = t
@@ -55,10 +64,16 @@ final class RemoteLog: @unchecked Sendable {
         queue.async {
             self.buffer.append(line)
             if self.buffer.count > 400 { self.buffer.removeFirst(self.buffer.count - 400) }
+            self.tail.append(line)
+            if self.tail.count > 60 { self.tail.removeFirst(self.tail.count - 60) }
         }
     }
 
     private func flushLocked() {
+        // Persist the rolling tail to disk so a hard crash's final ~0.8s is recovered next launch.
+        if !tail.isEmpty {
+            try? tail.joined(separator: "\n").write(to: tailFile, atomically: true, encoding: .utf8)
+        }
         guard !buffer.isEmpty else { return }
         let body = buffer.joined(separator: "\n")
         buffer.removeAll()
