@@ -94,16 +94,21 @@ extension StashScene {
 
         let hlsURL = sceneStreams.first(where: { $0.isHLS }).flatMap { appendingAPIKey(apiKey, to: $0.url) }
 
-        // Everything AVPlayer can't direct-play → Stash HLS (reliable today). The on-device single-file
-        // progressive remux is shelved: AVPlayer can't consume a growing/unknown-length file (it
-        // re-requests the whole file from byte 0 and never starts). The on-device path will return as an
-        // HLS-segmenting pipeline — see docs/ROADMAP.md. The remux/loopback code is kept for that work.
+        // Remux class: a codec AVPlayer can decode once repackaged (HEVC anywhere → hvc1 retag, or
+        // H.264 in a foreign container) → on-device remux streamed over the loopback, with HLS fallback.
+        // The pixel-format probe (in the facade) sends Apple-undecodable 4:2:2/4:4:4 straight to HLS.
+        if isRemuxCodec || (isDirectCodec && !containerOK), let source = directFileURL(apiKey: apiKey) {
+            let why = isRemuxCodec
+                ? "HEVC → hvc1 remux (local)"
+                : "container .\(container) → remux (local)"
+            return PlaybackRoute(url: source, engine: .localFFmpeg, streamType: "Local remux",
+                                 reason: why, fallbackURL: hlsURL)
+        }
+
+        // Transcode class (codec AVPlayer can't decode): Stash HLS for now.
         if let hlsURL {
-            let why: String
-            if isRemuxCodec { why = "HEVC → HLS (on-device remux shelved)" }
-            else if isDirectCodec { why = "container .\(container) → HLS" }
-            else { why = "codec \(codec ?? "?") → HLS (transcode)" }
-            return PlaybackRoute(url: hlsURL, engine: .avPlayer, streamType: "HLS (transcoded)", reason: why)
+            return PlaybackRoute(url: hlsURL, engine: .avPlayer, streamType: "HLS (transcoded)",
+                                 reason: "codec \(codec ?? "?") → HLS (transcode)")
         }
 
         // No HLS offered → last-resort direct file (may not render for exotic codecs/containers).

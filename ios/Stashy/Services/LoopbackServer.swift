@@ -92,63 +92,71 @@ final class LoopbackServer: @unchecked Sendable {
     }
 
     private func respond(_ box: Conn, header: String) {
-        let t0 = Date()
         let lines = header.components(separatedBy: "\r\n")
         let requestLine = lines.first ?? ""
         let method = requestLine.split(separator: " ").first.map { String($0).uppercased() } ?? "GET"
-        // Parse "Range: bytes=start-end" (end optional).
+
+        // Parse only the START of any Range header; we stream from there to EOF (the file is still
+        // growing, so we use chunked transfer with no Content-Length and don't advertise range support).
         var start: Int64 = 0
-        var requestedEnd: Int64?
-        var partial = false
         if let rangeLine = lines.first(where: { $0.lowercased().hasPrefix("range:") }),
-           let eq = rangeLine.firstIndex(of: "=") {
-            let spec = rangeLine[rangeLine.index(after: eq)...].trimmingCharacters(in: .whitespaces)
-            let bounds = spec.split(separator: "-", omittingEmptySubsequences: false)
-            if let first = bounds.first, let s = Int64(first.trimmingCharacters(in: .whitespaces)) {
-                start = max(0, s)
-                partial = true
-                if bounds.count > 1, let e = Int64(bounds[1].trimmingCharacters(in: .whitespaces)) { requestedEnd = e }
-            }
+           let eq = rangeLine.firstIndex(of: "="),
+           let s = Int64(rangeLine[rangeLine.index(after: eq)...]
+            .trimmingCharacters(in: .whitespaces)
+            .split(separator: "-", omittingEmptySubsequences: false).first?
+            .trimmingCharacters(in: .whitespaces) ?? "") {
+            start = max(0, s)
         }
+        note("RX \(method) from \(start)")
 
-        let reqEnd = requestedEnd.map { String($0) } ?? "end"
-        note("RX \(method) \(start)-\(reqEnd)")   // log on receipt so a stuck request is visible
-
-        // Wait only until the START byte is produced (and a size estimate is known) — NEVER for the end
-        // of the range. AVPlayer asks for the whole file (0-<size-1>) as one progressive range; we must
-        // answer immediately with whatever's produced so far as a partial, then it requests the next
-        // chunk. Waiting for the requested end (the whole 3.9 GB) was the stall.
-        let deadline = Date().addingTimeInterval(4)
-        while !isComplete(), totalBytes() <= 0 || availableBytes() <= start, Date() < deadline {
+        // Wait until the start byte has been produced.
+        let deadline = Date().addingTimeInterval(6)
+        while !isComplete(), availableBytes() <= start, Date() < deadline {
             Thread.sleep(forTimeInterval: 0.02)
         }
-        let readable = availableBytes()
-        var total = max(totalBytes(), readable)
-        if isComplete() { total = readable }
-        let waited = Int(Date().timeIntervalSince(t0) * 1000)
-
-        guard readable > 0, start < readable else {
-            note("\(method) \(start)-\(reqEnd) →416 avail=\(readable) \(waited)ms")
-            send(box, Data("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8))
+        guard availableBytes() > start else {
+            note("→404 no data at \(start)")
+            send(box, Data("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8))
             return
         }
-        // Serve from start up to whatever's produced (capped to the requested end) — a valid partial.
-        let end = min(requestedEnd ?? (total - 1), total - 1, readable - 1)
 
-        let length = end - start + 1
-        var head = partial ? "HTTP/1.1 206 Partial Content\r\n" : "HTTP/1.1 200 OK\r\n"
-        if partial { head += "Content-Range: bytes \(start)-\(end)/\(total)\r\n" }
-        head += "Content-Type: \(contentType)\r\n"
-        head += "Accept-Ranges: bytes\r\n"
-        head += "Content-Length: \(length)\r\n"
-        head += "Connection: close\r\n\r\n"
+        // Progressive chunked stream over one open connection: AVPlayer reads it as a progressive
+        // download and starts as soon as it has the moov + first fragments, while we keep feeding bytes
+        // as the remux produces them. (Closing after a partial made AVPlayer re-request from 0 forever.)
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: \(contentType)\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+        note("→200 chunked from \(start)")
+        box.c.send(content: Data(head.utf8), completion: .contentProcessed { [weak self] error in
+            guard let self, error == nil else { box.c.cancel(); return }
+            if method == "HEAD" {
+                box.c.send(content: Data("0\r\n\r\n".utf8), contentContext: .finalMessage, isComplete: true,
+                           completion: .contentProcessed { _ in box.c.cancel() })
+            } else {
+                self.streamChunk(box, offset: start)
+            }
+        })
+    }
 
-        var payload = Data(head.utf8)
-        if method != "HEAD", let chunk = readFile(offset: start, length: Int(length)) {
-            payload.append(chunk)
+    /// Send one ~256 KB HTTP chunk from `offset`, then chain the next via the send completion as the
+    /// remux produces more — until production finishes, then send the terminating chunk and close. Runs
+    /// off the send-completion callbacks (no thread held for the whole stream).
+    private func streamChunk(_ box: Conn, offset: Int64) {
+        let avail = availableBytes()
+        if offset < avail {
+            let len = Int(min(avail - offset, 256 * 1024))
+            guard let data = readFile(offset: offset, length: len), !data.isEmpty else { box.c.cancel(); return }
+            var packet = Data((String(data.count, radix: 16) + "\r\n").utf8)
+            packet.append(data)
+            packet.append(Data("\r\n".utf8))
+            box.c.send(content: packet, completion: .contentProcessed { [weak self] error in
+                guard let self, error == nil else { box.c.cancel(); return }
+                self.streamChunk(box, offset: offset + Int64(data.count))
+            })
+        } else if isComplete() {
+            box.c.send(content: Data("0\r\n\r\n".utf8), contentContext: .finalMessage, isComplete: true,
+                       completion: .contentProcessed { _ in box.c.cancel() })
+        } else {
+            queue.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.streamChunk(box, offset: offset) }
         }
-        note("\(method) \(start)-\(reqEnd) →\(partial ? 206 : 200) \(length)B/\(total) \(waited)ms")
-        send(box, payload)
     }
 
     // MARK: - Request log (diagnostics)
