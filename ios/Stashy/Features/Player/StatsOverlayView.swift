@@ -71,8 +71,8 @@ struct StatsOverlayView: View {
             }
             .padding(12)
         }
-        .frame(width: isLandscape ? 520 : 280)
-        .frame(maxHeight: isLandscape ? 320 : 480)
+        .frame(width: isLandscape ? 360 : 280)
+        .frame(maxHeight: isLandscape ? 230 : 420)
         .background(.black.opacity(0.38), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)

@@ -45,12 +45,13 @@ struct PlayerControlsView: View {
                         .transition(.opacity)
                     }
 
-                    // Bottom bar anchored to the video's bottom edge. In fullscreen it's also lifted /
-                    // inset clear of the home indicator and side notch; inline, the device bottom inset
-                    // belongs to the tab bar far below the video box, so it must not be applied.
+                    // Bottom bar. Fullscreen: pin directly to the screen's safe-area bottom — anchoring to
+                    // the video rect can push it off-screen if the rect is briefly mis-sized (e.g. a video
+                    // whose true aspect arrives late, as some MPEG4/AVI files do). Inline: follow the bottom
+                    // edge of the fitted video box (the device bottom inset there belongs to the tab bar).
                     controlBar
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                        .padding(.bottom, max(proxy.size.height - videoRect.maxY, 0) + (isFullscreen ? safeArea.bottom : 0))
+                        .padding(.bottom, isFullscreen ? safeArea.bottom : max(proxy.size.height - videoRect.maxY, 0))
                         .padding(.leading, isFullscreen ? safeArea.leading : 0)
                         .padding(.trailing, isFullscreen ? safeArea.trailing : 0)
                         .transition(.opacity)

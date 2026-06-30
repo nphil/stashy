@@ -13,12 +13,14 @@ final class ZoomScrollView: UIScrollView {
         guard let contentView else { return }
         let size = bounds.size
         if zoomScale <= minimumZoomScale {
-            // At rest: the content (and the player view inside it) exactly fills the viewport.
-            if contentView.bounds.size != size {
-                contentView.frame = CGRect(origin: .zero, size: size)
-                contentSize = size
-                contentView.subviews.first?.frame = CGRect(origin: .zero, size: size)
-            }
+            // At rest: the content (and the player view inside it) exactly fills the viewport. Re-pin on
+            // every pass — not just when the content size changed — so a stale frame left over from the
+            // portrait→landscape rotation (which would leave the video taller than the viewport, clipping
+            // the bottom controls and the part you can't pan to) always snaps back to the current bounds.
+            let target = CGRect(origin: .zero, size: size)
+            if contentView.frame != target { contentView.frame = target }
+            if contentSize != size { contentSize = size }
+            if let inner = contentView.subviews.first, inner.frame != target { inner.frame = target }
             if contentInset != .zero { contentInset = .zero }
         } else {
             // Centre the zoomed content when a dimension is smaller than the viewport.
