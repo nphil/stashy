@@ -59,29 +59,45 @@ extension SceneStreamEndpoint {
     }
 }
 
-extension StashScene {
-    /// Resolve which stream to play, on which backend, and *why*. We direct-play (no server transcode):
-    /// AVPlayer for files it can decode natively (H.264/HEVC in MP4/MOV) — which unlocks the live blur —
-    /// and the on-device FFmpeg remux/transcode engine for everything else (exotic containers/codecs),
-    /// preserving codec support. `reason` records the exact AVPlayer-incompatibility for the Stats overlay.
+    /// Codecs AVPlayer decodes natively in hardware (matched loosely against Stash's `video_codec`).
+    static let directPlayCodecs = ["h264", "avc", "hevc", "h265", "hvc"]
+    /// Containers AVPlayer opens directly.
+    static let directPlayContainers = ["mp4", "m4v", "mov", "qt"]
+
+    /// Resolve which stream to play, on which engine, and *why*. The goal is to **direct-play** (native
+    /// hardware decode + instant seeks, no server load) whenever AVPlayer can handle the file, and to
+    /// fall back only when it can't:
+    ///   • H.264/HEVC in mp4/mov  → Direct play (the fast path).
+    ///   • right codec, wrong container (MKV/TS/…) → needs **remux** (on-device, next phase).
+    ///   • codec AVPlayer can't decode (MPEG4-ASP, VC1, VP9/AV1 on older HW) → needs **transcode**.
+    /// Until the on-device remux/transcode engine is wired up, the latter two fall back to Stash's HLS
+    /// (server transcode). `reason` records the decision for the Stats overlay.
     func playbackRoute(apiKey: String) -> PlaybackRoute? {
-        // TEST (temporary): route the AVPlayer path through Stash's HLS (transcoded) stream. AVPlayer
-        // plays HLS reliably, so this confirms whether the black-video direct-stream files are an
-        // AVPlayer input-probing issue (to be fixed by the local FFmpeg remux) rather than AVPlayer
-        // being unable to render the content. Revert to direct-play once the FFmpeg pipeline lands.
-        if let hls = sceneStreams.first(where: { $0.isHLS }), let url = appendingAPIKey(apiKey, to: hls.url) {
-            return PlaybackRoute(url: url, engine: .avPlayer,
-                                 streamType: "HLS (transcoded)", reason: "TEST: AVPlayer via Stash HLS")
+        let codec = files.first?.video_codec?.lowercased()
+        let container = fileContainer
+        let codecOK = codec.map { c in Self.directPlayCodecs.contains { c.contains($0) } } ?? false
+        let containerOK = Self.directPlayContainers.contains(container)
+
+        // Fast path: AVPlayer can decode + demux this as-is.
+        if codecOK, containerOK, let url = directFileURL(apiKey: apiKey) {
+            return PlaybackRoute(url: url, engine: .avPlayer, streamType: "Direct",
+                                 reason: "Direct play (\(codec ?? "?") in \(container))")
         }
 
-        // No HLS stream offered → play the direct file on AVPlayer for now. The on-device FFmpeg
-        // remux/transcode pipeline (which will handle exotic containers/codecs and unlock direct play
-        // without server transcode) is the next phase; until then non-HLS exotics may not render.
-        let direct = sceneStreams.first { !$0.isHLS && !$0.isDASH }
-        let chosen = direct ?? sceneStreams.first
-        guard let urlString = chosen?.url, let url = appendingAPIKey(apiKey, to: urlString) else { return nil }
+        // Fallback (until the on-device path lands): Stash HLS. Record whether the file *would* only
+        // need a remux (cheap) or a full transcode (expensive) so it's clear what to build it on.
+        if let hls = sceneStreams.first(where: { $0.isHLS }), let url = appendingAPIKey(apiKey, to: hls.url) {
+            let why = codecOK
+                ? "container .\(container) needs remux"
+                : "codec \(codec ?? "?") needs transcode"
+            return PlaybackRoute(url: url, engine: .avPlayer, streamType: "HLS (transcoded)",
+                                 reason: "Fallback: \(why); on-device path pending")
+        }
+
+        // No HLS offered → last-resort direct file (may not render for exotic codecs/containers).
+        guard let url = directFileURL(apiKey: apiKey) else { return nil }
         return PlaybackRoute(url: url, engine: .avPlayer, streamType: "Direct",
-                             reason: "Direct (AVPlayer); local FFmpeg pipeline pending")
+                             reason: "Last resort: no HLS; on-device path pending")
     }
 
     /// The direct (non-HLS/DASH) file stream URL — the actual media file the FFmpeg pipeline reads,

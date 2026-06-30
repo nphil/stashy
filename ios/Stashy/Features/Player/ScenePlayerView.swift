@@ -92,7 +92,7 @@ final class ScenePlayerModel {
             StatLine(label: "Backend", value: backendName),
             StatLine(label: "Decode", value: engine?.decodeDescription ?? "—"),
             StatLine(label: "Stream", value: streamType),
-            StatLine(label: "AVPlayer use", value: routingReason),
+            StatLine(label: "Routing", value: routingReason),
         ]))
 
         // Proof the self-built FFmpeg links + is callable (foundation for the local transcode pipeline).
