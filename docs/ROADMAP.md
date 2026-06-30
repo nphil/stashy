@@ -51,6 +51,15 @@ Honest constraints / pushback:
   upscaling mainly pays off for remote/cellular viewing.
 - Apple has no "upscale with my vectors" API; MetalFX = generic, Core ML = run our own model.
 
+### XR glasses support (Viture Pro XR et al.)
+Develop the capability to play video on XR/AR glasses — including VR/180°/360° and big-virtual-screen
+viewing — with a clean handoff (no duplicated video mirrored on the phone screen).
+- Known constraint: iOS restricts head-tracking IMU access from the glasses, which limits true
+  head-locked virtual-display behavior vs. what the Steam Deck / decky-XRGaming achieves. Plan around
+  what iOS *does* allow (external-display / AirPlay-style output, flat big-screen, side-by-side for
+  VR videos) and revisit IMU as the platform evolves.
+- Revisit alongside / after core playback; the Android app (later) may be the better home for full
+  head-tracked virtual displays.
+
 ### Other
-- XR glasses (Viture Pro XR) VR video playback — deprioritized (iOS blocks IMU access).
 - Android app — later.

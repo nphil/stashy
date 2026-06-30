@@ -112,7 +112,9 @@ final class FFmpegSource: @unchecked Sendable {
                 let name = String(cString: avcodec_get_name(par.pointee.codec_id))
                 let type = par.pointee.codec_type
                 if type == AVMEDIA_TYPE_VIDEO {
-                    lines.append("video: \(name) \(par.pointee.width)×\(par.pointee.height)")
+                    // Show the sample-entry fourcc (hvc1 vs hev1, avc1, …): hev1-tagged HEVC plays
+                    // black in AVPlayer and is why HEVC routes to remux (which retags it hvc1).
+                    lines.append("video: \(name) [\(Self.fourcc(par.pointee.codec_tag))] \(par.pointee.width)×\(par.pointee.height)")
                 } else if type == AVMEDIA_TYPE_AUDIO {
                     lines.append("audio: \(name) \(par.pointee.ch_layout.nb_channels)ch")
                 } else if type == AVMEDIA_TYPE_SUBTITLE {
@@ -202,6 +204,14 @@ final class FFmpegSource: @unchecked Sendable {
         var buffer = [CChar](repeating: 0, count: 128)
         av_strerror(code, &buffer, 128)
         return String(cString: buffer)
+    }
+
+    /// Render a codec_tag (little-endian fourcc) as a 4-char string, e.g. "hvc1"/"hev1"/"avc1".
+    private static func fourcc(_ tag: UInt32) -> String {
+        guard tag != 0 else { return "—" }
+        let bytes = [tag, tag >> 8, tag >> 16, tag >> 24].map { UInt8($0 & 0xff) }
+        let chars = bytes.map { (0x20...0x7e).contains($0) ? Character(UnicodeScalar($0)) : "?" }
+        return String(chars)
     }
 }
 

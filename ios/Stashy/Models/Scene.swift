@@ -60,37 +60,49 @@ extension SceneStreamEndpoint {
 }
 
 extension StashScene {
-    /// Codecs AVPlayer decodes natively in hardware (matched loosely against Stash's `video_codec`).
-    static let directPlayCodecs = ["h264", "avc", "hevc", "h265", "hvc"]
+    /// Codecs AVPlayer reliably direct-plays from a progressive MP4 (matched loosely vs Stash's
+    /// `video_codec`). H.264 only: HEVC also decodes in hardware, but AVPlayer renders the very common
+    /// `hev1`-tagged HEVC streams *black* (parameter sets in-band) — those need a remux to `hvc1`
+    /// first, so HEVC is handled on the remux path instead.
+    static let directPlayCodecs = ["h264", "avc"]
+    /// Codecs AVPlayer can decode once repackaged into a clean (hvc1-tagged) fragmented MP4.
+    static let remuxableCodecs = ["hevc", "h265", "hvc"]
     /// Containers AVPlayer opens directly.
     static let directPlayContainers = ["mp4", "m4v", "mov", "qt"]
 
     /// Resolve which stream to play, on which engine, and *why*. The goal is to **direct-play** (native
     /// hardware decode + instant seeks, no server load) whenever AVPlayer can handle the file, and to
     /// fall back only when it can't:
-    ///   • H.264/HEVC in mp4/mov  → Direct play (the fast path).
-    ///   • right codec, wrong container (MKV/TS/…) → needs **remux** (on-device, next phase).
+    ///   • H.264 in mp4/mov  → Direct play (the fast path).
+    ///   • HEVC (any container), or H.264 in a foreign container (MKV/TS/…) → needs **remux**
+    ///     (on-device, next phase) — for HEVC the remux also retags hev1→hvc1.
     ///   • codec AVPlayer can't decode (MPEG4-ASP, VC1, VP9/AV1 on older HW) → needs **transcode**.
     /// Until the on-device remux/transcode engine is wired up, the latter two fall back to Stash's HLS
     /// (server transcode). `reason` records the decision for the Stats overlay.
     func playbackRoute(apiKey: String) -> PlaybackRoute? {
         let codec = files.first?.video_codec?.lowercased()
         let container = fileContainer
-        let codecOK = codec.map { c in Self.directPlayCodecs.contains { c.contains($0) } } ?? false
+        let isDirectCodec = codec.map { c in Self.directPlayCodecs.contains { c.contains($0) } } ?? false
+        let isRemuxCodec = codec.map { c in Self.remuxableCodecs.contains { c.contains($0) } } ?? false
         let containerOK = Self.directPlayContainers.contains(container)
 
-        // Fast path: AVPlayer can decode + demux this as-is.
-        if codecOK, containerOK, let url = directFileURL(apiKey: apiKey) {
+        // Fast path: H.264 in a native container — AVPlayer plays it as-is (instant seeks, no server).
+        if isDirectCodec, containerOK, let url = directFileURL(apiKey: apiKey) {
             return PlaybackRoute(url: url, engine: .avPlayer, streamType: "Direct",
                                  reason: "Direct play (\(codec ?? "?") in \(container))")
         }
 
-        // Fallback (until the on-device path lands): Stash HLS. Record whether the file *would* only
-        // need a remux (cheap) or a full transcode (expensive) so it's clear what to build it on.
+        // Fallback (until the on-device path lands): Stash HLS. Record whether the file would only need
+        // a remux (cheap — incl. the hvc1 retag HEVC requires) or a full transcode (expensive).
         if let hls = sceneStreams.first(where: { $0.isHLS }), let url = appendingAPIKey(apiKey, to: hls.url) {
-            let why = codecOK
-                ? "container .\(container) needs remux"
-                : "codec \(codec ?? "?") needs transcode"
+            let why: String
+            if isRemuxCodec {
+                why = "HEVC needs hvc1 remux (AVPlayer renders hev1 black)"
+            } else if isDirectCodec {
+                why = "container .\(container) needs remux"
+            } else {
+                why = "codec \(codec ?? "?") needs transcode"
+            }
             return PlaybackRoute(url: url, engine: .avPlayer, streamType: "HLS (transcoded)",
                                  reason: "Fallback: \(why); on-device path pending")
         }
