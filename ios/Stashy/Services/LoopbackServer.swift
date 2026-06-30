@@ -92,6 +92,7 @@ final class LoopbackServer: @unchecked Sendable {
     }
 
     private func respond(_ box: Conn, header: String) {
+        let t0 = Date()
         let lines = header.components(separatedBy: "\r\n")
         let requestLine = lines.first ?? ""
         let method = requestLine.split(separator: " ").first.map { String($0).uppercased() } ?? "GET"
@@ -129,7 +130,11 @@ final class LoopbackServer: @unchecked Sendable {
         if isComplete() { total = readable }
         end = min(end, readable - 1)
 
+        let reqEnd = requestedEnd.map { String($0) } ?? "end"
+        let waited = Int(Date().timeIntervalSince(t0) * 1000)
+
         guard readable > 0, start < readable, start <= end else {
+            note("\(method) \(start)-\(reqEnd) →416 avail=\(readable) \(waited)ms")
             send(box, Data("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8))
             return
         }
@@ -146,8 +151,25 @@ final class LoopbackServer: @unchecked Sendable {
         if method != "HEAD", let chunk = readFile(offset: start, length: Int(length)) {
             payload.append(chunk)
         }
+        note("\(method) \(start)-\(reqEnd) →\(partial ? 206 : 200) \(length)B/\(total) \(waited)ms")
         send(box, payload)
     }
+
+    // MARK: - Request log (diagnostics)
+
+    private let logLock = NSLock()
+    private var requestLog: [String] = []
+
+    private func note(_ line: String) {
+        logLock.withLock {
+            requestLog.append(line)
+            if requestLog.count > 16 { requestLog.removeFirst(requestLog.count - 16) }
+        }
+    }
+
+    /// A compact log of the most recent AVPlayer requests (range → status, bytes, wait time) — reveals
+    /// e.g. a tail/moov seek that the growing file can't satisfy and stalls on.
+    func recentRequests() -> [String] { logLock.withLock { requestLog } }
 
     private func readFile(offset: Int64, length: Int) -> Data? {
         guard let fh = try? FileHandle(forReadingFrom: fileURL) else { return nil }

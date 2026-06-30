@@ -29,6 +29,8 @@ final class ScenePlayerModel {
     var activeStreamType: String?
     /// Last engine failure reason (AVPlayer error / watchdog), surfaced in Stats for diagnosis.
     var lastError: String?
+    /// Loopback server request log captured at the moment of fallback, for diagnosing remux stalls.
+    var loopbackLog: [String] = []
     /// Fires a fallback if the local path produces no frames in time (covers stalls AVPlayer never
     /// reports as a hard failure).
     @ObservationIgnored private var watchdog: Task<Void, Never>?
@@ -175,6 +177,7 @@ final class ScenePlayerModel {
         watchdog?.cancel()
         if let error { lastError = error }
         activeStreamType = "HLS (fallback)"
+        loopbackLog = remuxStream?.diagnostics() ?? loopbackLog   // capture before tearing the server down
         engine?.teardown()
         remuxStream?.stop()
         remuxStream = nil
@@ -239,6 +242,13 @@ final class ScenePlayerModel {
         if !media.isEmpty { sections.append(StatSection(title: "Media", lines: media)) }
 
         sections.append(StatSection(title: "Network", lines: engine?.liveStats() ?? []))
+
+        // Loopback request log captured at fallback — diagnoses what AVPlayer asked the remux server for.
+        if !loopbackLog.isEmpty {
+            sections.append(StatSection(title: "Loopback", lines: loopbackLog.map {
+                StatLine(label: "·", value: $0)
+            }))
+        }
 
         // Reserved home for future Stash-transcoder details (only when actually transcoding).
         if streamType.localizedCaseInsensitiveContains("transcod") || streamType.localizedCaseInsensitiveContains("hls") {

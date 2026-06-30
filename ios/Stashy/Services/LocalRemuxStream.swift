@@ -42,4 +42,11 @@ final class LocalRemuxStream {
         server.stop()
         try? FileManager.default.removeItem(at: tempURL)
     }
+
+    /// Snapshot of remux progress + the server's recent requests, for the Stats overlay when diagnosing
+    /// a stall/fallback.
+    func diagnostics() -> [String] {
+        ["produced \(remuxer.producedBytes)B · src \(remuxer.sourceByteSize)B · done=\(remuxer.isFinished)"]
+            + server.recentRequests()
+    }
 }
