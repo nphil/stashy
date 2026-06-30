@@ -59,6 +59,7 @@ extension SceneStreamEndpoint {
     }
 }
 
+extension StashScene {
     /// Codecs AVPlayer decodes natively in hardware (matched loosely against Stash's `video_codec`).
     static let directPlayCodecs = ["h264", "avc", "hevc", "h265", "hvc"]
     /// Containers AVPlayer opens directly.
