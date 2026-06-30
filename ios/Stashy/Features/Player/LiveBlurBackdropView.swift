@@ -47,7 +47,9 @@ final class LiveBlurBackdropView: UIView, MTKViewDelegate {
         let proxy = DisplayLinkProxy(target: self)
         let link = CADisplayLink(target: proxy, selector: #selector(DisplayLinkProxy.tick))
         proxy.link = link
-        link.preferredFramesPerSecond = 20        // the backdrop doesn't need full framerate
+        link.preferredFramesPerSecond = 12        // the backdrop doesn't need full framerate; lower fps
+                                                  // cuts the per-frame full-res pixel-buffer copy cost
+                                                  // (heavy at 4K) that competes with decode
         link.add(to: .main, forMode: .common)
         link.isPaused = (window == nil)
         displayLink = link

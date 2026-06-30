@@ -37,6 +37,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private let lock = NSLock()   // serializes seeks/reads on the shared demuxer
     private var initData: Data?
 
+    // Byte-bounded LRU cache of produced segments, so scrubbing back and forth replays already-made
+    // segments instead of re-remuxing them (a fresh seek+remux per scrub pegged the CPU and made
+    // playback choppy). ~96 MB ceiling keeps total memory comfortably under the jetsam limit.
+    private var segCache: [Int: Data] = [:]
+    private var segCacheOrder: [Int] = []
+    private var segCacheBytes = 0
+    private let segCacheLimit = 96 << 20
+
     private(set) var segments: [Segment] = []
     private(set) var totalDuration: Double = 0
     private(set) var pixFmt: String = ""
@@ -128,12 +136,28 @@ final class HLSSegmentProducer: @unchecked Sendable {
     func segment(_ index: Int) -> Data? {
         lock.withLock {
             guard index >= 0, index < segments.count else { return nil }
+            if let cached = segCache[index] {
+                note("seg \(index) cache hit \(cached.count)B")
+                return cached
+            }
             let seg = segments[index]
             let end = (index + 1 < segments.count) ? segments[index + 1].start : max(totalDuration, seg.start + seg.duration)
             let t0 = CFAbsoluteTimeGetCurrent()
             let d = build(start: seg.start, end: end, headerOnly: false)
             note("seg \(index) @\(Int(seg.start))s → \(d?.count ?? 0)B in \(Int((CFAbsoluteTimeGetCurrent() - t0) * 1000))ms")
+            if let d { cacheSegment(index, d) }
             return d
+        }
+    }
+
+    /// Insert into the byte-bounded LRU, evicting the oldest until under the ceiling.
+    private func cacheSegment(_ index: Int, _ data: Data) {
+        segCache[index] = data
+        segCacheOrder.append(index)
+        segCacheBytes += data.count
+        while segCacheBytes > segCacheLimit, segCacheOrder.count > 1 {
+            let oldest = segCacheOrder.removeFirst()
+            if let removed = segCache.removeValue(forKey: oldest) { segCacheBytes -= removed.count }
         }
     }
 
@@ -237,6 +261,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private func teardownLocked() {
         if input != nil { avformat_close_input(&input) }
         freeInputAVIO()
+        segCache.removeAll(); segCacheOrder.removeAll(); segCacheBytes = 0
+        initData = nil
     }
 
     private func freeInputAVIO() {

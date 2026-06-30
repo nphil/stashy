@@ -66,7 +66,7 @@ final class AVPlaybackEngine: PlaybackEngine {
         // otherwise treats bandwidth as infinite and prefetches the *entire* VOD — driving the segment
         // producer to remux hundreds of segments back-to-back, which pegs the CPU and starves 4K decode
         // (the stutter/lag). 30s keeps a healthy buffer while leaving the producer near the playhead.
-        item.preferredForwardBufferDuration = 30
+        item.preferredForwardBufferDuration = 15
         player = AVPlayer(playerItem: item)
         player.automaticallyWaitsToMinimizeStalling = true
         hostView.player = player
