@@ -11,16 +11,16 @@ struct StatsOverlayView: View {
     /// Landscape fullscreen → a wider box (more fits per row); portrait → a taller box.
     var isLandscape = false
     @State private var demux = "probing…"
-    @State private var remux = "remuxing…"
+    @State private var loopback = "testing…"
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
             panel(model.snapshotStats(scene: scene))
         }
         .task(id: probeURL) {
-            guard let probeURL else { demux = "no direct stream"; remux = "no direct stream"; return }
+            guard let probeURL else { demux = "no direct stream"; loopback = "no direct stream"; return }
             demux = await FFmpegSource(url: probeURL).probeSummary()
-            remux = await FFmpegRemuxer(url: probeURL).remuxSummary()
+            loopback = await LoopbackProbe(url: probeURL).run()
         }
     }
 
@@ -57,13 +57,14 @@ struct StatsOverlayView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
-                // FFmpeg remux probe: rewrites the direct file to fragmented MP4 in memory (no re-encode),
-                // proving the write-side AVIO + MP4 muxing that the AVPlayer feed will be built on.
+                // Loopback self-test: remux the direct file to a temp MP4, serve it over the local HTTP
+                // server, fetch the opening bytes back, and confirm it's a valid MP4 — proving the whole
+                // remux→file→server→client chain the AVPlayer feed will use.
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("FFMPEG REMUX")
+                    Text("LOOPBACK SERVE")
                         .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(.white.opacity(0.55))
-                    Text(remux)
+                    Text(loopback)
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
                         .foregroundStyle(.white)
                         .frame(maxWidth: .infinity, alignment: .leading)

@@ -28,9 +28,17 @@ final class FFmpegRemuxer: @unchecked Sendable {
     private var size: Int64 = -1
     private let ioBufferSize = 1 << 16          // 64 KB AVIO buffers (in + out)
 
-    // Output (write) state.
+    // Output (write) state. When `fileURL` is set the muxed bytes stream progressively to that file
+    // (for loopback playback); otherwise they accumulate in `produced` (the in-memory probe).
+    // `produceCap` bounds how many bytes are written before stopping (use Int.max for a full remux).
+    private let fileURL: URL?
+    private let produceCap: Int
+    private let outerTimeout: Double
     private var produced = Data()
-    private let produceCap = 1 << 22            // stop the probe after ~4 MB muxed
+    private var fileHandle: FileHandle?
+    /// Bytes muxed so far (file or memory). Read after completion in this phase; made observable for the
+    /// growing-file server in the next phase.
+    private(set) var bytesWritten = 0
 
     // Macros the Swift importer doesn't surface (identical to FFmpegSource).
     private let averrorEOF: Int32 = -541478725
@@ -49,8 +57,11 @@ final class FFmpegRemuxer: @unchecked Sendable {
         var total: Int64?
     }
 
-    init(url: URL) {
+    init(url: URL, fileURL: URL? = nil, cap: Int = 1 << 22, timeout: Double = 14) {
         self.url = url
+        self.fileURL = fileURL
+        self.produceCap = cap
+        self.outerTimeout = timeout
         let cfg = URLSessionConfiguration.ephemeral
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
         session = URLSession(configuration: cfg)
@@ -63,7 +74,7 @@ final class FFmpegRemuxer: @unchecked Sendable {
         await withTaskGroup(of: String.self) { group in
             group.addTask { await self.runRemuxDetached() }
             group.addTask {
-                try? await Task.sleep(for: .seconds(14))
+                try? await Task.sleep(for: .seconds(self.outerTimeout))
                 return "remux timed out (slow IO / awkward demux)"
             }
             let result = await group.next() ?? "—"
@@ -81,7 +92,14 @@ final class FFmpegRemuxer: @unchecked Sendable {
     }
 
     private func runRemux() -> String {
-        deadline = CFAbsoluteTimeGetCurrent() + 11   // abort the remux after 11s of wall-clock IO
+        deadline = CFAbsoluteTimeGetCurrent() + max(outerTimeout - 3, 3)   // abort in-flight IO before the outer race
+        // Stream to the temp file when one was requested (progressive playback); else accumulate in memory.
+        if let fileURL {
+            FileManager.default.createFile(atPath: fileURL.path, contents: nil)
+            fileHandle = try? FileHandle(forWritingTo: fileURL)
+            if fileHandle == nil { return "temp file open failed" }
+        }
+        defer { try? fileHandle?.close() }
         // --- Input: open the source through a custom read/seek AVIO ---
         guard let inBuffer = av_malloc(ioBufferSize) else { return "in alloc failed" }
         let opaque = Unmanaged.passUnretained(self).toOpaque()
@@ -171,7 +189,7 @@ final class FFmpegRemuxer: @unchecked Sendable {
             cleanupInput(&input, readAVIO)
             return "write_header failed (\(errString(headerResult)))\ncopied: \(copied.joined(separator: ", "))"
         }
-        let headerBytes = produced.count
+        let headerBytes = bytesWritten
 
         // --- Mux packets until the cap or EOF ---
         var packetCount = 0
@@ -179,7 +197,7 @@ final class FFmpegRemuxer: @unchecked Sendable {
         var interrupted = false
         var writeError: Int32 = 0
         let pkt = av_packet_alloc()
-        while produced.count < produceCap {
+        while bytesWritten < produceCap {
             let r = av_read_frame(input, pkt)
             if r < 0 { reachedEOF = (r == averrorEOF); interrupted = (r == averrorExit); break }
             let inIdx = Int(pkt!.pointee.stream_index)
@@ -208,7 +226,7 @@ final class FFmpegRemuxer: @unchecked Sendable {
         return """
         mp4 · \(copied.count) streams · \(status)
         copied: \(copied.joined(separator: ", "))
-        header: \(headerBytes) B · produced: \(produced.count) B · packets: \(packetCount)
+        header: \(headerBytes) B · produced: \(bytesWritten) B · packets: \(packetCount)
         """
     }
 
@@ -271,7 +289,12 @@ final class FFmpegRemuxer: @unchecked Sendable {
 
     fileprivate func write(from buffer: UnsafePointer<UInt8>?, size count: Int32) -> Int32 {
         guard let buffer, count > 0 else { return 0 }
-        produced.append(buffer, count: Int(count))
+        if let fileHandle {
+            try? fileHandle.write(contentsOf: Data(bytes: buffer, count: Int(count)))
+        } else {
+            produced.append(buffer, count: Int(count))
+        }
+        bytesWritten += Int(count)
         return count
     }
 
