@@ -118,9 +118,19 @@ final class FFmpegSource: @unchecked Sendable {
                 let name = String(cString: avcodec_get_name(par.pointee.codec_id))
                 let type = par.pointee.codec_type
                 if type == AVMEDIA_TYPE_VIDEO {
-                    // Show the sample-entry fourcc (hvc1 vs hev1, avc1, …): hev1-tagged HEVC plays
-                    // black in AVPlayer and is why HEVC routes to remux (which retags it hvc1).
-                    lines.append("video: \(name) [\(Self.fourcc(par.pointee.codec_tag))] \(par.pointee.width)×\(par.pointee.height)")
+                    // Show fourcc (hvc1/hev1/avc1), profile, and pixel format. Apple's HEVC decoder
+                    // (Safari + iOS) only handles Main/Main 10 4:2:0; a 4:2:2/4:4:4 (Rext) pixel format
+                    // here explains "plays in Chrome, fails on Apple" — a *decode* limit a remux can't
+                    // fix, so those files need transcode, not remux.
+                    var pixFmt = "?"
+                    if let n = av_get_pix_fmt_name(AVPixelFormat(rawValue: par.pointee.format)) {
+                        pixFmt = String(cString: n)
+                    }
+                    var profile = ""
+                    if let p = avcodec_profile_name(par.pointee.codec_id, par.pointee.profile) {
+                        profile = " " + String(cString: p)
+                    }
+                    lines.append("video: \(name) [\(Self.fourcc(par.pointee.codec_tag))]\(profile) \(pixFmt) \(par.pointee.width)×\(par.pointee.height)")
                 } else if type == AVMEDIA_TYPE_AUDIO {
                     lines.append("audio: \(name) \(par.pointee.ch_layout.nb_channels)ch")
                 } else if type == AVMEDIA_TYPE_SUBTITLE {
