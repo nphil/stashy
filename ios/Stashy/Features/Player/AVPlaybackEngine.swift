@@ -32,6 +32,7 @@ final class AVPlaybackEngine: PlaybackEngine {
     private var statusObservation: NSKeyValueObservation?
     private var timeControlObservation: NSKeyValueObservation?
     private var stallObserver: NSObjectProtocol?
+    private var lastStatLog: CFTimeInterval = 0
 
     var onTime: ((TimeInterval, TimeInterval) -> Void)?
     var onReady: ((Bool) -> Void)?
@@ -90,6 +91,27 @@ final class AVPlaybackEngine: PlaybackEngine {
                 if presentation.width > 0, presentation != self.lastPresentation {
                     self.lastPresentation = presentation
                     self.onPresentationSize?(presentation)
+                }
+                // Throttled decode telemetry (~every 2s): distinguishes dropped frames (decode/GPU
+                // bottleneck) from stalls (buffer) from healthy playback, when diagnosing choppiness.
+                let now = CACurrentMediaTime()
+                if now - self.lastStatLog >= 2 {
+                    self.lastStatLog = now
+                    let ev = self.item.accessLog()?.events.last
+                    let nowT = self.player.currentTime().seconds
+                    let ahead = self.item.loadedTimeRanges.compactMap { range -> Double? in
+                        let r = range.timeRangeValue
+                        let s = r.start.seconds, e = (r.start + r.duration).seconds
+                        return (nowT >= s && nowT <= e) ? e - nowT : nil
+                    }.max() ?? 0
+                    let w = Int(presentation.width), h = Int(presentation.height)
+                    RemoteLog.shared.log(String(format: "av t=%.0f rate=%.0f keepUp=%@ empty=%@ buf=%.1fs dropped=%d stalls=%d %dx%d",
+                        nowT.isFinite ? nowT : -1, self.player.rate,
+                        self.item.isPlaybackLikelyToKeepUp ? "Y" : "N",
+                        self.item.isPlaybackBufferEmpty ? "Y" : "N",
+                        ahead,
+                        ev?.numberOfDroppedVideoFrames ?? -1,
+                        ev?.numberOfStalls ?? -1, w, h))
                 }
             }
         }
