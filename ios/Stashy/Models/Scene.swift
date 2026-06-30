@@ -65,8 +65,11 @@ extension StashScene {
     /// `hev1`-tagged HEVC streams *black* (parameter sets in-band) — those need a remux to `hvc1`
     /// first, so HEVC is handled on the remux path instead.
     static let directPlayCodecs = ["h264", "avc"]
-    /// Codecs AVPlayer can decode once repackaged into a clean (hvc1-tagged) fragmented MP4.
+    /// Codecs AVPlayer can decode once repackaged into a clean (hvc1-tagged) fragmented MP4. AV1 is added
+    /// at runtime when the device has a hardware AV1 decoder (see `isRemuxClass`).
     static let remuxableCodecs = ["hevc", "h265", "hvc"]
+    /// AV1 codec spellings (Stash `video_codec` / FFmpeg names / fourcc).
+    static let av1Codecs = ["av1", "av01"]
     /// Containers AVPlayer opens directly.
     static let directPlayContainers = ["mp4", "m4v", "mov", "qt"]
 
@@ -83,7 +86,12 @@ extension StashScene {
         let codec = files.first?.video_codec?.lowercased()
         let container = fileContainer
         let isDirectCodec = codec.map { c in Self.directPlayCodecs.contains { c.contains($0) } } ?? false
-        let isRemuxCodec = codec.map { c in Self.remuxableCodecs.contains { c.contains($0) } } ?? false
+        let isAV1 = codec.map { c in Self.av1Codecs.contains { c.contains($0) } } ?? false
+        // HEVC always remuxes on-device; AV1 only when this device has a hardware AV1 decoder (else it
+        // must be transcoded by Stash). The on-device pixel-format probe still sends 4:2:2/4:4:4/12-bit
+        // — which Apple can't decode for either codec — to HLS.
+        let isRemuxCodec = (codec.map { c in Self.remuxableCodecs.contains { c.contains($0) } } ?? false)
+            || (isAV1 && DeviceCapabilities.av1HardwareDecode)
         let containerOK = Self.directPlayContainers.contains(container)
 
         // Fast path: H.264 in a native container — AVPlayer plays it as-is (instant seeks, no server).
@@ -99,7 +107,7 @@ extension StashScene {
         // The pixel-format probe (in the facade) sends Apple-undecodable 4:2:2/4:4:4 straight to HLS.
         if isRemuxCodec || (isDirectCodec && !containerOK), let source = directFileURL(apiKey: apiKey) {
             let why = isRemuxCodec
-                ? "HEVC → hvc1 remux (local)"
+                ? "\(codec ?? "?") → on-device remux"
                 : "container .\(container) → remux (local)"
             return PlaybackRoute(url: source, engine: .localFFmpeg, streamType: "Local remux",
                                  reason: why, fallbackURL: hlsURL, duration: files.first?.duration ?? 0)
