@@ -70,6 +70,7 @@ final class ScenePlayerModel {
         guard engine == nil, !startInProgress else { return }
         startInProgress = true
         stopped = false
+        RemoteLog.shared.log("▶︎ start: \(route.streamType) · \(route.reason) · engine=\(route.engine)")
         switch route.engine {
         case .avPlayer:
             adopt(makeEngine(url: route.url), stream: nil)
@@ -211,6 +212,7 @@ final class ScenePlayerModel {
         guard !didFallback, let fallback = route.fallbackURL else { return }
         didFallback = true
         watchdog?.cancel()
+        RemoteLog.shared.log("⤵︎ fallback to Stash HLS: \(error ?? "—")")
         if let error { lastError = error }
         activeStreamType = "HLS (fallback)"
         loopbackLog = localStream?.diagnostics() ?? loopbackLog   // capture before tearing the server down

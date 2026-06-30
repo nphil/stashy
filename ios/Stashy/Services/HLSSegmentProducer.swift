@@ -76,7 +76,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     private func prepareLocked(targetSegment: Double) -> Bool {
         // Parse the source moov's keyframe table first — if it has none, don't bother opening FFmpeg.
-        guard let grid = buildKeyframeGrid(targetSegment: targetSegment) else { return false }
+        guard let grid = buildKeyframeGrid(targetSegment: targetSegment) else {
+            RemoteLog.shared.log("prod unsupported: no keyframe grid (→ linear remux)")
+            return false
+        }
         segments = grid.segments
         totalDuration = grid.duration
 
@@ -107,6 +110,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             break
         }
         guard videoIndex >= 0 else { teardownLocked(); return false }
+        RemoteLog.shared.log("prod ready: \(segments.count) segs · \(Int(totalDuration))s · \(videoCodec) \(pixFmt)")
         return true
     }
 
@@ -221,6 +225,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
     }
 
     private func note(_ line: String) {
+        RemoteLog.shared.log("prod \(line)")
         log.append(line)
         if log.count > 8 { log.removeFirst(log.count - 8) }
     }

@@ -116,22 +116,38 @@ final class LoopbackServer: @unchecked Sendable {
 
     // MARK: - Segmented HLS (full-body, on-demand)
 
+    /// Serial queue for the (blocking, ~1 s) on-demand segment production. Dispatching here frees the
+    /// listener's concurrent queue immediately so a burst of AVPlayer prefetch requests can't spawn a
+    /// thread per blocked connection (which slowed to a crawl and then crashed), and bounds production —
+    /// and the large segment Data it holds — to one at a time.
+    private let produceQueue = DispatchQueue(label: "stashy.loopback.produce")
+
     private func serveData(_ box: Conn, method: String, path: String,
                            handler: @escaping @Sendable (_ path: String) -> (String, Data)?) {
-        // Strip any query string; AVPlayer may append one when resolving relative segment URLs.
-        let clean = String(path.split(separator: "?").first ?? Substring(path))
-        guard let (contentType, body) = handler(clean) else {
-            note("→404 \(clean)")
-            send(box, Data("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8))
-            return
+        produceQueue.async { [weak self] in
+            guard let self else { box.c.cancel(); return }
+            // Strip any query string; AVPlayer may append one when resolving relative segment URLs.
+            let clean = String(path.split(separator: "?").first ?? Substring(path))
+            guard let (contentType, body) = handler(clean) else {
+                self.note("→404 \(clean)")
+                self.send(box, Data("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8))
+                return
+            }
+            self.note("\(clean) →200 \(body.count)B")
+            var head = "HTTP/1.1 200 OK\r\n"
+            head += "Content-Type: \(contentType)\r\n"
+            head += "Content-Length: \(body.count)\r\n"
+            head += "Cache-Control: no-cache\r\n"
+            head += "Connection: close\r\n\r\n"
+            // Send the header and body as two parts (no concatenation) so a multi-MB 4K segment isn't
+            // copied into a second buffer just to ship it.
+            let payload = method == "HEAD" ? Data() : body
+            box.c.send(content: Data(head.utf8), completion: .contentProcessed { error in
+                guard error == nil else { box.c.cancel(); return }
+                box.c.send(content: payload, contentContext: .finalMessage, isComplete: true,
+                           completion: .contentProcessed { _ in box.c.cancel() })
+            })
         }
-        note("\(clean) →200 \(body.count)B")
-        var head = "HTTP/1.1 200 OK\r\n"
-        head += "Content-Type: \(contentType)\r\n"
-        head += "Content-Length: \(body.count)\r\n"
-        head += "Cache-Control: no-cache\r\n"
-        head += "Connection: close\r\n\r\n"
-        send(box, Data(head.utf8) + (method == "HEAD" ? Data() : body))
     }
 
     // MARK: - Playlist
@@ -226,6 +242,7 @@ final class LoopbackServer: @unchecked Sendable {
     private var requestLog: [String] = []
 
     private func note(_ line: String) {
+        RemoteLog.shared.log("srv \(line)")
         logLock.withLock {
             requestLog.append(line)
             if requestLog.count > 16 { requestLog.removeFirst(requestLog.count - 16) }
