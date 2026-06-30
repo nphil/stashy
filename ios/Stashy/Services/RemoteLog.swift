@@ -48,10 +48,12 @@ final class RemoteLog: @unchecked Sendable {
                 self.post("=== PREVIOUS SESSION TAIL (recovered) ===\n" + prev, wait: nil)
                 try? FileManager.default.removeItem(at: self.tailFile)
             }
-            // Flush every 3s (not 0.8s): ntfy.sh free rate-limits per device IP, and frequent posts get
-            // dropped (429), blacking out the stream. One batched post per 3s stays well under the limit.
+            // Flush every 6s: ntfy.sh free rate-limits per device IP (~1 request / 5s sustained), so a
+            // faster cadence gets posts dropped (429) and blacks out the stream. One batched post per 6s
+            // stays under the limit. (Transport is ntfy because it's the only HTTPS/443 endpoint readable
+            // back from the agent sandbox — MQTT brokers' wss ports and kvdb.io weren't reachable/usable.)
             let t = DispatchSource.makeTimerSource(queue: self.queue)
-            t.schedule(deadline: .now() + 3, repeating: 3)
+            t.schedule(deadline: .now() + 6, repeating: 6)
             t.setEventHandler { [weak self] in self?.flushLocked() }
             t.resume()
             self.timer = t

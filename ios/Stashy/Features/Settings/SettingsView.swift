@@ -18,6 +18,7 @@ struct SettingsView: View {
     @AppStorage("appLockEnabled") private var appLockEnabled = false
     @AppStorage("blurThumbnails") private var blurThumbnails = false
     @AppStorage("blurTitles") private var blurTitles = false
+    @State private var debugLogging = RemoteLog.isLoggingEnabled
 
     private let swatchColumns = [GridItem(.adaptive(minimum: 64), spacing: 12)]
 
@@ -164,6 +165,19 @@ struct SettingsView: View {
                     Text("Cache")
                 } footer: {
                     Text("Preview clips and images are cached on this device for smooth, instant playback. Clearing frees the space; it rebuilds automatically as you browse.")
+                }
+
+                // Developer / diagnostics section
+                Section {
+                    Toggle("Stream debug logs", isOn: $debugLogging)
+                        .onChange(of: debugLogging) { _, on in
+                            RemoteLog.isLoggingEnabled = on
+                            if on { RemoteLog.shared.enable() } else { RemoteLog.shared.disable() }
+                        }
+                } header: {
+                    Text("Diagnostics")
+                } footer: {
+                    Text("Streams playback diagnostics to a public ntfy topic (\(RemoteLog.topic)) for troubleshooting. Off by default; broadcasts to a public channel while on, so leave it off for normal use. (Telemetry is temporary and will be removed.)")
                 }
 
                 // About section

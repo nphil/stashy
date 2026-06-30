@@ -242,7 +242,8 @@ final class LoopbackServer: @unchecked Sendable {
     private var requestLog: [String] = []
 
     private func note(_ line: String) {
-        RemoteLog.shared.log("srv \(line)")
+        // Kept local (shown in the Stats overlay's recent-requests list). Not streamed to RemoteLog —
+        // per-byte-range requests are too frequent and would blow past the ntfy rate limit.
         logLock.withLock {
             requestLog.append(line)
             if requestLog.count > 16 { requestLog.removeFirst(requestLog.count - 16) }
