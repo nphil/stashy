@@ -6,7 +6,30 @@ scrubbing**, **direct-play first**, on-device FFmpeg as the fallback, minimal se
 ## Playback pipeline
 
 **Current shipping state:** Direct play for H.264-in-mp4/mov (native HW decode, instant seeks); HEVC /
-foreign-container H.264 → **on-device HLS remux** (see below); everything Apple can't decode → Stash HLS.
+foreign-container H.264 → **on-device linear remux over loopback HLS** (smooth playback, confirmed
+on-device); everything Apple can't decode → Stash HLS.
+
+### What works now (v1.0.71) ✅
+- **Linear continuous remux → byte-range HLS over loopback** plays HEVC (incl. hev1→hvc1) smoothly
+  on-device. Fast start (~2s), flat memory, no crashes. This is the default for the remux class.
+- **4 MB read-ahead** on the source AVIO (one HTTP request per slab, not per 64 KB) — essential; without
+  it a 4K file produced far too slowly.
+- **Forward-buffer cap (15s)** stops AVPlayer from prefetching the whole VOD over the instant loopback.
+
+### Shelved: on-demand *segmented* HLS (choppy)
+The "gold standard" — keyframe-accurate VOD segments produced on demand (`HLSSegmentProducer`,
+`LocalHLSStream`) — gave **excellent seeking** (seek anywhere ~1-2s) but **choppy playback across every
+file** (4K and 1080p). Root cause: each segment is muxed by an *independent* FFmpeg output context, which
+introduces frame-timing / AAC-priming discontinuities at every segment boundary that AVPlayer renders
+unevenly (and eventually stalls). Code is kept, disabled (`buildHLS` is no longer called). To revive it,
+segments must come from **one continuous muxer** (like ffmpeg's `hls` muxer) rather than per-segment muxing.
+
+### Next: fast seeking on the linear path (seek-by-reinit)
+Linear remux is forward-only, so a far-forward seek waits for it to reach that point. Fix without
+reintroducing segment choppiness: on a seek past the produced point, **restart the linear remux
+input-seeked (`av_seek_frame`) near the target keyframe** and rebuild the loopback stream from there
+(playback stays one continuous mux = smooth). Track a time offset so the scrubber shows absolute time.
+This is the immediate next lever for responsive scrubbing.
 
 1. **Routing brain — capability detection** ✅
    - **Direct play** — H.264 in mp4/mov/m4v → AVPlayer plays the file URL directly.
