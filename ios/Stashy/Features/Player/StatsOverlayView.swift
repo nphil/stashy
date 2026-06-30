@@ -12,6 +12,7 @@ struct StatsOverlayView: View {
     var isLandscape = false
     @State private var demux = "probing…"
     @State private var loopback = "testing…"
+    @State private var debugLogging = RemoteLog.isLoggingEnabled
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
@@ -68,6 +69,18 @@ struct StatsOverlayView: View {
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
                         .foregroundStyle(.white)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                // Debug log streaming to ntfy (off by default — broadcasts to a public topic).
+                Toggle(isOn: $debugLogging) {
+                    Text("DEBUG LOG → ntfy/\(RemoteLog.topic)")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.55))
+                }
+                .tint(.white.opacity(0.6))
+                .onChange(of: debugLogging) { _, on in
+                    RemoteLog.isLoggingEnabled = on
+                    if on { RemoteLog.shared.enable() } else { RemoteLog.shared.disable() }
                 }
             }
             .padding(12)

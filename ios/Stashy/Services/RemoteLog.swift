@@ -14,6 +14,12 @@ final class RemoteLog: @unchecked Sendable {
     static let shared = RemoteLog()
 
     static let topic = "stashy-dbg-n7x2k9q"
+    private static let settingKey = "stashy.debugLogging"
+    /// Whether debug log streaming is enabled (off by default — it broadcasts to a public ntfy topic).
+    static var isLoggingEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: settingKey) }
+        set { UserDefaults.standard.set(newValue, forKey: settingKey) }
+    }
     private let endpoint = URL(string: "https://ntfy.sh/\(topic)")!
     private let session: URLSession
     private let queue = DispatchQueue(label: "stashy.remotelog")
@@ -61,9 +67,19 @@ final class RemoteLog: @unchecked Sendable {
         installExceptionHandler()
     }
 
+    func disable() {
+        queue.async {
+            self.timer?.cancel(); self.timer = nil
+            self.memTimer?.cancel(); self.memTimer = nil
+            self.buffer.removeAll()
+            self.enabled = false
+        }
+    }
+
     func log(_ message: String) {
         let line = String(format: "%7.2f  %@", Date().timeIntervalSince(start), message)
         queue.async {
+            guard self.enabled else { return }
             self.buffer.append(line)
             if self.buffer.count > 400 { self.buffer.removeFirst(self.buffer.count - 400) }
             self.tail.append(line)
