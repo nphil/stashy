@@ -158,5 +158,12 @@ viewing — with a clean handoff (no duplicated video mirrored on the phone scre
 - **Multi-threaded downloader that adds directly to the Stash library** — parallel downloads that hand
   finished files to Stash for import. Big effort; sequence carefully.
 
+## Tech debt / cleanup (do before more features)
+- **See `docs/OPTIMIZATION_PLAN_2026-06-30.md`** — full prioritized plan: remove the dead segmented-HLS
+  code (~750 lines), **bound the remux to the playhead** (biggest perf win — today it downloads the whole
+  file regardless of watch time), slim the scene-list query, ImageCache LRU counter, seek/AV1 bug pass.
+- **⚠️ REMOVE ALL TELEMETRY before any wider release.** Debug logging (`RemoteLog` → ntfy) is OFF by
+  default and isolated; deletion checklist is in §5 of the optimization plan. Reminder per Nitin.
+
 ## Other
 - Android app — later.
