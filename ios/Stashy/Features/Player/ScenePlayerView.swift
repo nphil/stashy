@@ -100,7 +100,7 @@ final class ScenePlayerModel {
         // Remux on-device + play over the loopback server. If the server can't even start, go to HLS
         // now; a later playback failure falls back via `onFailed`, and a silent stall via the watchdog.
         do {
-            let stream = LocalRemuxStream(source: route.url)
+            let stream = LocalRemuxStream(source: route.url, duration: route.duration)
             let url = try stream.start()
             adopt(makeEngine(url: url), stream: stream)
             if engine != nil { armWatchdog() }
@@ -158,14 +158,15 @@ final class ScenePlayerModel {
         return engine
     }
 
-    /// Fall back if the local path produces no frames within 8s — catches stalls AVPlayer never reports
-    /// as a hard `.failed` (e.g. a seek/range request the growing-file server can't satisfy yet).
+    /// Fall back if the local path produces no frames within 20s — catches stalls AVPlayer never reports
+    /// as a hard `.failed`. Generous because the local-HLS first segment is a whole GOP that must be
+    /// remuxed before playback can start (longest on a 4K long-GOP file).
     private func armWatchdog() {
         watchdog?.cancel()
         watchdog = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(8))
+            try? await Task.sleep(for: .seconds(20))
             guard let self, !Task.isCancelled, !self.stopped, !self.didFallback, self.currentTime == 0 else { return }
-            self.fallbackToHLS(error: "local playback produced no frames in 8s")
+            self.fallbackToHLS(error: "local playback produced no frames in 20s")
         }
     }
 

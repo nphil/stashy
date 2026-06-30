@@ -5,28 +5,30 @@ scrubbing**, **direct-play first**, on-device FFmpeg as the fallback, minimal se
 
 ## Playback pipeline
 
-**Current shipping state:** Direct play for H.264-in-mp4/mov (native HW decode, instant seeks);
-**everything else → Stash HLS** (reliable). The on-device single-file remux is **shelved** (see below).
+**Current shipping state:** Direct play for H.264-in-mp4/mov (native HW decode, instant seeks); HEVC /
+foreign-container H.264 → **on-device HLS remux** (see below); everything Apple can't decode → Stash HLS.
 
 1. **Routing brain — capability detection** ✅
    - **Direct play** — H.264 in mp4/mov/m4v → AVPlayer plays the file URL directly.
    - **HLS** — everything else (HEVC, H.264-in-MKV, MPEG4-ASP/VC1/VP9/AV1, 4:2:2/4:4:4 HEVC that Apple
      can't decode at all) → Stash server transcode. Works today.
 
-2. **On-device local playback — SHELVED, needs a rearchitecture.** The single fragmented-MP4 served
-   progressively over a loopback HTTP server does **not** work with AVPlayer: for a growing /
-   unknown-final-length file, AVPlayer re-requests the whole file from byte 0 over and over (it expects
-   a continuous stream with a known Content-Length or HLS) and never starts. Confirmed on-device across
-   many iterations. The remux/probe/loopback code (`FFmpegRemuxer`, `FFmpegSource`, `LoopbackServer`,
-   `LocalRemuxStream`) is kept as the foundation for the correct approach:
-   - **On-device HLS pipeline** — segment the remux into fMP4 segments + a growing `.m3u8` served over
-     the loopback; AVPlayer consumes this natively (it's exactly what Stash HLS does). Handles
-     growing/unknown length + seeking. This is the real path to local playback. *(Biggest lever.)*
-   - Also needs **better source I/O** than one URLSession range request per 64 KB read (a single
-     streaming pull / larger read-ahead) — the per-read round-trips made the remux produce far too
-     slowly for large files.
-   - **On-device transcode** (MPEG4-ASP/VC1/VP9, AV1 on non-HW-AV1 devices, 4:2:2/4:4:4 HEVC) rides on
-     the same delivery, decode via FFmpeg/dav1d → `h264/hevc_videotoolbox`.
+2. **On-device local playback — on-device HLS, IMPLEMENTED (under on-device verification).** The earlier
+   single fragmented-MP4 served *progressively* over loopback does **not** work with AVPlayer: for a
+   growing/unknown-length file it re-requests from byte 0 forever, or errors ("operation stopped") on a
+   chunked stream — AVPlayer won't progressive-play an open-ended MP4. Confirmed across many iterations.
+   The fix delivers the same remux as **HLS** instead, which is the model AVPlayer is built for:
+   - **`FMP4Index`** walks the growing fragmented MP4 (init = ftyp+moov, then one moof+mdat per keyframe)
+     and emits an **HLS byte-range media playlist** (EVENT type, `EXT-X-MAP` + `EXT-X-BYTERANGE`). A
+     fragment is listed only once the next appears, so every advertised range is fully produced. The
+     remuxer now uses `frag_keyframe` *only* (no frag_duration) so every moof starts on a keyframe = a
+     valid independently-decodable segment; `codec_tag=0` puts hvc1 param sets in the init segment.
+   - **Source I/O fixed**: a 4 MB read-ahead cache in the remux read callback replaces one URLSession
+     range request per 64 KB read (which made a 4K file produce only ~400 KB before the player gave up).
+   - Still **forward-only** for now: a far-forward seek waits for the remux to reach that point. Seekable
+     remux (re-init FFmpeg from an input seek near the target) is the next lever — see Scrubbing below.
+   - **On-device transcode** (MPEG4-ASP/VC1/VP9, AV1 on non-HW-AV1 devices, 4:2:2/4:4:4 HEVC) will ride
+     on the same HLS delivery, decode via FFmpeg/dav1d → `h264/hevc_videotoolbox`.
 
 3. **Quality / gear selector** — Auto / Direct / On-device / Server transcode + resolution; also the
    manual escape hatch.

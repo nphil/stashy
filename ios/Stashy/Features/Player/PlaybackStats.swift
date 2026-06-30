@@ -20,6 +20,9 @@ struct PlaybackRoute {
     /// A safe alternative URL (the Stash HLS stream) to retry on if the primary engine fails — used by
     /// the `.localFFmpeg` path so a remux/loopback problem auto-recovers to server transcode.
     var fallbackURL: URL? = nil
+    /// Media duration (seconds) from Stash metadata — lets the local-HLS index compute the final
+    /// segment's EXTINF without decoding the whole file. 0 when unknown.
+    var duration: Double = 0
 }
 
 // MARK: - Stats model

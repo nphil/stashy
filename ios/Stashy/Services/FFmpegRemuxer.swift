@@ -26,7 +26,15 @@ final class FFmpegRemuxer: @unchecked Sendable {
     // Input (read) state — same range-request approach proven in FFmpegSource.
     private var offset: Int64 = 0
     private var size: Int64 = -1
-    private let ioBufferSize = 1 << 16          // 64 KB AVIO buffers (in + out)
+    private let ioBufferSize = 1 << 18          // 256 KB AVIO buffers (in + out)
+
+    // Read-ahead cache: FFmpeg reads the input in small (≤ ioBufferSize) chunks, but one HTTP range
+    // request per chunk meant thousands of round-trips for a large file — far too slow to keep AVPlayer
+    // fed (a 4K file produced only ~400 KB before the player gave up). Each cache miss pulls a big slab in
+    // one request and serves the many sequential reads that follow from memory.
+    private var cacheStart: Int64 = -1
+    private var cache = Data()
+    private let readAhead = 1 << 22             // 4 MB per upstream fetch
 
     // Output (write) state. When `fileURL` is set the muxed bytes stream progressively to that file
     // (for loopback playback); otherwise they accumulate in `produced` (the in-memory probe).
@@ -199,13 +207,14 @@ final class FFmpegRemuxer: @unchecked Sendable {
         }
 
         // --- Write header with fragmented-MP4 flags ---
-        // frag_keyframe alone only flushes a fragment at the next *keyframe*; on a long-GOP file the muxer
-        // buffers the whole first GOP before emitting any media, so AVPlayer gets the header and nothing
-        // to decode (→ "unknown error"). frag_duration also flushes every 0.5s of media, so the first
-        // playable fragment appears within ~1s regardless of GOP length.
+        // frag_keyframe flushes a fragment at every video keyframe, so each top-level `moof` begins at a
+        // keyframe and is an independently-decodable unit — exactly what an HLS byte-range segment must be
+        // (`FMP4Index` turns these fragments into the playlist). We deliberately do *not* set frag_duration
+        // here: cutting fragments mid-GOP by time would produce segments that don't start on a keyframe,
+        // which AVPlayer can't decode as HLS segments. empty_moov writes the init segment (with hvc1
+        // parameter sets) up front so AVPlayer's EXT-X-MAP fetch has everything it needs.
         var options: OpaquePointer?
         av_dict_set(&options, "movflags", "frag_keyframe+empty_moov+default_base_moof", 0)
-        av_dict_set(&options, "frag_duration", "500000", 0)   // microseconds → 0.5s fragments
         let headerResult = avformat_write_header(outputCtx, &options)
         av_dict_free(&options)
         if headerResult < 0 {
@@ -278,9 +287,25 @@ final class FFmpegRemuxer: @unchecked Sendable {
     fileprivate func read(into buffer: UnsafeMutablePointer<UInt8>?, size count: Int32) -> Int32 {
         guard let buffer, count > 0 else { return 0 }
         let want = Int(count)
+
+        // Serve from the read-ahead cache when the offset falls inside it (the common sequential case).
+        if cacheStart >= 0, offset >= cacheStart, offset < cacheStart + Int64(cache.count) {
+            let from = Int(offset - cacheStart)
+            let n = min(want, cache.count - from)
+            cache.withUnsafeBytes { raw in
+                buffer.update(from: raw.baseAddress!.advanced(by: from).assumingMemoryBound(to: UInt8.self), count: n)
+            }
+            offset += Int64(n)
+            return Int32(n)
+        }
+
+        // Miss: pull a big slab starting at `offset` in one request; subsequent reads hit the cache.
+        var end = offset + Int64(max(want, readAhead)) - 1
+        if size >= 0 { end = min(end, size - 1) }
+        guard end >= offset else { return averrorEOF }
         var request = URLRequest(url: url)
-        request.timeoutInterval = 5   // so a single wedged read returns and lets FFmpeg poll the interrupt
-        request.setValue("bytes=\(offset)-\(offset + Int64(want) - 1)", forHTTPHeaderField: "Range")
+        request.timeoutInterval = 8   // so a single wedged read returns and lets FFmpeg poll the interrupt
+        request.setValue("bytes=\(offset)-\(end)", forHTTPHeaderField: "Range")
 
         let box = Box()
         let semaphore = DispatchSemaphore(value: 0)
@@ -294,6 +319,8 @@ final class FFmpegRemuxer: @unchecked Sendable {
 
         if let total = box.total { size = total }
         guard let data = box.data, !data.isEmpty else { return averrorEOF }
+        cache = data
+        cacheStart = offset
         let n = min(data.count, want)
         data.copyBytes(to: buffer, count: n)
         offset += Int64(n)

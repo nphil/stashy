@@ -102,7 +102,7 @@ extension StashScene {
                 ? "HEVC → hvc1 remux (local)"
                 : "container .\(container) → remux (local)"
             return PlaybackRoute(url: source, engine: .localFFmpeg, streamType: "Local remux",
-                                 reason: why, fallbackURL: hlsURL)
+                                 reason: why, fallbackURL: hlsURL, duration: files.first?.duration ?? 0)
         }
 
         // Transcode class (codec AVPlayer can't decode): Stash HLS for now.
