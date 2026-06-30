@@ -42,14 +42,16 @@ final class RemoteLog: @unchecked Sendable {
                 self.post("=== PREVIOUS SESSION TAIL (recovered) ===\n" + prev, wait: nil)
                 try? FileManager.default.removeItem(at: self.tailFile)
             }
+            // Flush every 3s (not 0.8s): ntfy.sh free rate-limits per device IP, and frequent posts get
+            // dropped (429), blacking out the stream. One batched post per 3s stays well under the limit.
             let t = DispatchSource.makeTimerSource(queue: self.queue)
-            t.schedule(deadline: .now() + 0.8, repeating: 0.8)
+            t.schedule(deadline: .now() + 3, repeating: 3)
             t.setEventHandler { [weak self] in self?.flushLocked() }
             t.resume()
             self.timer = t
 
             let m = DispatchSource.makeTimerSource(queue: self.queue)
-            m.schedule(deadline: .now() + 2, repeating: 2)
+            m.schedule(deadline: .now() + 5, repeating: 5)
             m.setEventHandler { RemoteLog.shared.log("mem \(Int(RemoteLog.memoryMB()))MB") }
             m.resume()
             self.memTimer = m
@@ -70,14 +72,28 @@ final class RemoteLog: @unchecked Sendable {
     }
 
     private func flushLocked() {
-        // Persist the rolling tail to disk so a hard crash's final ~0.8s is recovered next launch.
+        // Persist the rolling tail to disk so a hard crash's final moment is recovered next launch.
         if !tail.isEmpty {
             try? tail.joined(separator: "\n").write(to: tailFile, atomically: true, encoding: .utf8)
         }
         guard !buffer.isEmpty else { return }
         let body = buffer.joined(separator: "\n")
         buffer.removeAll()
-        post(body, wait: nil)
+        // Resilient post: if the request fails (e.g. a rate-limit 429), re-queue the batch so it's
+        // retried on the next flush instead of being lost.
+        var req = URLRequest(url: endpoint)
+        req.httpMethod = "POST"
+        req.httpBody = Data(body.utf8)
+        req.setValue("text/plain", forHTTPHeaderField: "Content-Type")
+        session.dataTask(with: req) { [weak self] _, response, error in
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard error != nil || !(200..<300).contains(code) else { return }
+            self?.queue.async {
+                guard let self else { return }
+                self.buffer.insert(body, at: 0)
+                if self.buffer.count > 400 { self.buffer.removeLast(self.buffer.count - 400) }
+            }
+        }.resume()
     }
 
     /// Best-effort synchronous flush — for the memory-warning / uncaught-exception paths, where the
