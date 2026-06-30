@@ -199,8 +199,13 @@ final class FFmpegRemuxer: @unchecked Sendable {
         }
 
         // --- Write header with fragmented-MP4 flags ---
+        // frag_keyframe alone only flushes a fragment at the next *keyframe*; on a long-GOP file the muxer
+        // buffers the whole first GOP before emitting any media, so AVPlayer gets the header and nothing
+        // to decode (→ "unknown error"). frag_duration also flushes every 0.5s of media, so the first
+        // playable fragment appears within ~1s regardless of GOP length.
         var options: OpaquePointer?
         av_dict_set(&options, "movflags", "frag_keyframe+empty_moov+default_base_moof", 0)
+        av_dict_set(&options, "frag_duration", "500000", 0)   // microseconds → 0.5s fragments
         let headerResult = avformat_write_header(outputCtx, &options)
         av_dict_free(&options)
         if headerResult < 0 {
