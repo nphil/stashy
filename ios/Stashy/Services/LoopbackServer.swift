@@ -111,7 +111,10 @@ final class LoopbackServer: @unchecked Sendable {
             }
         }
 
-        let deadline = Date().addingTimeInterval(30)
+        let reqEndIn = requestedEnd.map { String($0) } ?? "end"
+        note("RX \(method) \(start)-\(reqEndIn)")   // log on receipt so a request stuck waiting is visible
+
+        let deadline = Date().addingTimeInterval(4)
         // Phase 1: don't answer until we know a size estimate AND have produced the start byte. Otherwise
         // AVPlayer's first request races ahead of the just-started remux and gets a spurious 416 — which
         // fails the item and (systematically) drops every file to the HLS fallback.
