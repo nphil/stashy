@@ -32,6 +32,11 @@ protocol PlaybackEngine: AnyObject {
     /// actor while the backend is still alive, since a nonisolated deinit can't touch its members.
     func teardown()
 
+    /// The furthest time (seconds) the player can currently seek to — the end of its seekable ranges.
+    /// For a growing local-HLS stream this is what AVPlayer actually honors (it can lag the remux's
+    /// produced position), so the facade uses it to decide between an in-stream seek and a remux restart.
+    var seekableEnd: TimeInterval { get }
+
     /// Short description of the decode path for the Stats overlay (e.g. "Hardware (VideoToolbox)").
     var decodeDescription: String { get }
     /// Backend-specific live diagnostics (buffer, throughput, dropped frames, …) for the Stats overlay.

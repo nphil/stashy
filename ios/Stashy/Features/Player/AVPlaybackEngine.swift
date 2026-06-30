@@ -168,6 +168,16 @@ final class AVPlaybackEngine: PlaybackEngine {
 
     // MARK: - Stats
 
+    var seekableEnd: TimeInterval {
+        var maxEnd = 0.0
+        for value in item.seekableTimeRanges {
+            let r = value.timeRangeValue
+            let end = (r.start + r.duration).seconds
+            if end.isFinite, end > maxEnd { maxEnd = end }
+        }
+        return maxEnd
+    }
+
     // AVPlayer plays only VideoToolbox-decodable formats (H.264/HEVC), so decode is always hardware.
     var decodeDescription: String { "Hardware (VideoToolbox)" }
 

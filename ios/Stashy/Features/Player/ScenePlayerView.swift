@@ -258,12 +258,16 @@ final class ScenePlayerModel {
             engine?.seek(to: clamped)
             return
         }
-        // Local linear remux: an in-stream seek only works within what's been produced from this stream's
-        // start. A target before the stream start, or beyond the produced frontier, needs a remux restart
-        // near the target keyframe (seek-by-reinit) — fast (~one startup) and stays smooth (continuous mux).
+        // Local linear remux: an in-stream seek only works within what AVPlayer can actually reach right
+        // now (its seekable range — which, for a growing EVENT playlist, lags the remux's produced
+        // position because AVPlayer re-fetches the playlist only periodically). A target beyond that, or
+        // before this stream's start, restarts the remux near the target keyframe (seek-by-reinit) — fast
+        // (~one startup) and stays smooth (continuous mux).
         let local = clamped - timeOffset
-        let produced = localStream?.producedSeconds() ?? 0
-        if local >= 0, local <= produced + 1.0 {
+        let seekEnd = engine?.seekableEnd ?? 0
+        let inStream = local >= 0 && local <= seekEnd + 1.0
+        RemoteLog.shared.log("seek →\(Int(clamped))s local=\(Int(local)) seekEnd=\(Int(seekEnd)) \(inStream ? "in-stream" : "REINIT")")
+        if inStream {
             currentTime = clamped
             engine?.seek(to: local)
         } else {
