@@ -10,6 +10,9 @@ protocol LocalPlaybackStream: AnyObject {
     func stop()
     /// Diagnostics for the Stats overlay.
     func diagnostics() -> [String]
+    /// How far (seconds, in this stream's own zero-based timeline) playable content has been produced —
+    /// used to decide whether a seek lands in the produced region or needs a remux restart.
+    func producedSeconds() -> Double
 }
 
 /// On-demand, **seekable** local HLS: a full VOD playlist (every segment + the total duration known up
@@ -56,6 +59,8 @@ final class LocalHLSStream: LocalPlaybackStream {
     }
 
     func diagnostics() -> [String] { producer.diagnostics() + server.recentRequests() }
+
+    func producedSeconds() -> Double { producer.totalDuration }   // fully seekable on demand
 
     // MARK: - VOD playlist (all segments known up front → seek anywhere instantly)
 

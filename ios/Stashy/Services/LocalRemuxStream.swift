@@ -13,16 +13,17 @@ final class LocalRemuxStream: LocalPlaybackStream {
     private let tempURL: URL
     private var localURL: URL?
 
-    init(source: URL, duration: Double) {
+    init(source: URL, duration: Double, startTime: Double = 0) {
         tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("stashy-stream-\(UUID().uuidString).mp4")
-        let r = FFmpegRemuxer(url: source, fileURL: tempURL, cap: .max, timeout: 3600)
+        let r = FFmpegRemuxer(url: source, fileURL: tempURL, cap: .max, timeout: 3600, startTime: startTime)
         remuxer = r
+        // This stream is zero-based from `startTime`, so its own timeline runs for the remaining duration.
         let idx = FMP4Index(
             fileURL: tempURL,
             available: { Int64(r.producedBytes) },
             isComplete: { r.isFinished },
-            totalDuration: duration
+            totalDuration: max(0, duration - startTime)
         )
         index = idx
         server = LoopbackServer(
@@ -58,4 +59,6 @@ final class LocalRemuxStream: LocalPlaybackStream {
          index.debugSummary()]
             + server.recentRequests()
     }
+
+    func producedSeconds() -> Double { index.producedSeconds() }
 }

@@ -22,6 +22,12 @@ final class ScenePlayerModel {
     @ObservationIgnored private var localStream: (any LocalPlaybackStream)?
     /// Set once if the local pipeline fails and we switch to the HLS fallback (so we never loop).
     @ObservationIgnored private var didFallback = false
+    /// Absolute time (seconds) the current local stream starts at. The linear remux is zero-based from a
+    /// seek point, so the player's local time + this offset = the real scrub position. 0 until a far seek.
+    @ObservationIgnored private var timeOffset: TimeInterval = 0
+    /// True while a local zero-based remux drives playback (so time is offset and duration stays the full
+    /// metadata value). False for direct play / HLS (incl. after a fallback), where engine time is absolute.
+    private var usesAbsoluteTime: Bool { route.engine == .localFFmpeg && !didFallback }
     /// Guards re-entrant starts, and discards an engine built after the scene was already left.
     @ObservationIgnored private var startInProgress = false
     @ObservationIgnored private var stopped = false
@@ -168,11 +174,11 @@ final class ScenePlayerModel {
         let engine: PlaybackEngine = AVPlaybackEngine(url: url)
         engine.onTime = { [weak self] current, duration in
             guard let self else { return }
-            self.currentTime = current
+            // Local zero-based remux: report absolute time (offset + local) and keep the full metadata
+            // duration. Direct/HLS: engine time is already absolute and its duration is authoritative.
+            self.currentTime = self.usesAbsoluteTime ? self.timeOffset + current : current
             if current > 0 { self.watchdog?.cancel() }   // real frames are flowing — disarm the stall watchdog
-            // Accept the engine's duration only when it's actually known (> 0). A growing local-HLS EVENT
-            // stream reports an indefinite (→ 0) duration; keep the metadata-seeded value so scrubbing works.
-            if duration > 0, self.duration != duration { self.duration = duration }
+            if !self.usesAbsoluteTime, duration > 0, self.duration != duration { self.duration = duration }
             if !self.isReady { self.isReady = true }
         }
         engine.onReady = { [weak self] ready in
@@ -197,9 +203,11 @@ final class ScenePlayerModel {
     /// remuxed before playback can start (longest on a 4K long-GOP file).
     private func armWatchdog() {
         watchdog?.cancel()
+        let startedAt = currentTime   // for a reinit this is the seek offset, not 0
         watchdog = Task { [weak self] in
             try? await Task.sleep(for: .seconds(20))
-            guard let self, !Task.isCancelled, !self.stopped, !self.didFallback, self.currentTime == 0 else { return }
+            guard let self, !Task.isCancelled, !self.stopped, !self.didFallback,
+                  self.currentTime <= startedAt + 0.1 else { return }
             self.fallbackToHLS(error: "local playback produced no frames in 20s")
         }
     }
@@ -217,6 +225,7 @@ final class ScenePlayerModel {
         engine?.teardown()
         localStream?.stop()
         localStream = nil
+        timeOffset = 0            // the Stash HLS fallback is the full video from 0 (absolute time)
         isReady = false
         videoAspect = nil
         currentTime = 0
@@ -235,6 +244,7 @@ final class ScenePlayerModel {
         engine = nil
         localStream?.stop()
         localStream = nil
+        timeOffset = 0
     }
 
     func play() { engine?.play() }
@@ -243,8 +253,45 @@ final class ScenePlayerModel {
 
     func seek(to time: TimeInterval) {
         let clamped = max(0, min(time, duration > 0 ? duration : time))
-        currentTime = clamped
-        engine?.seek(to: clamped)
+        guard usesAbsoluteTime else {           // direct play / HLS — engine time is absolute
+            currentTime = clamped
+            engine?.seek(to: clamped)
+            return
+        }
+        // Local linear remux: an in-stream seek only works within what's been produced from this stream's
+        // start. A target before the stream start, or beyond the produced frontier, needs a remux restart
+        // near the target keyframe (seek-by-reinit) — fast (~one startup) and stays smooth (continuous mux).
+        let local = clamped - timeOffset
+        let produced = localStream?.producedSeconds() ?? 0
+        if local >= 0, local <= produced + 1.0 {
+            currentTime = clamped
+            engine?.seek(to: local)
+        } else {
+            reinitLocal(at: clamped)
+        }
+    }
+
+    /// Restart the local linear remux from `time` (zero-based) and re-point AVPlayer at the new loopback
+    /// stream — the way far seeks stay fast without the per-segment muxing that made playback choppy.
+    private func reinitLocal(at time: TimeInterval) {
+        guard !stopped else { return }
+        RemoteLog.shared.log("↻ reinit local @\(Int(time))s")
+        watchdog?.cancel()
+        engine?.teardown()
+        localStream?.stop()
+        localStream = nil
+        timeOffset = time
+        currentTime = time
+        isReady = false
+        videoAspect = nil
+        do {
+            let stream = LocalRemuxStream(source: route.url, duration: route.duration, startTime: time)
+            let url = try stream.start()
+            adopt(makeEngine(url: url), stream: stream)
+            if engine != nil { armWatchdog() }
+        } catch {
+            buildFallback(reason: "HLS (fallback)")
+        }
     }
 
     /// Assemble a diagnostics snapshot for the Stats overlay: routing/backend facts + static media

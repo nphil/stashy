@@ -54,6 +54,7 @@ final class FFmpegRemuxer: @unchecked Sendable {
     private let avseekSize: Int32 = 0x10000
     private let avseekForce: Int32 = 0x20000
     private let avfmtFlagCustomIO: Int32 = 0x0080
+    private let avNoPTS: Int64 = Int64.min          // AV_NOPTS_VALUE
 
     /// Wall-clock deadline after which the interrupt callback aborts in-flight FFmpeg IO, so a
     /// pathological demux (e.g. AVI's end-of-file index over per-read range requests) can't hang.
@@ -77,11 +78,18 @@ final class FFmpegRemuxer: @unchecked Sendable {
         var total: Int64?
     }
 
-    init(url: URL, fileURL: URL? = nil, cap: Int = 1 << 22, timeout: Double = 14) {
+    /// Seconds to input-seek to before remuxing (0 = from the start). Used for seek-by-reinit: a far
+    /// seek restarts the remux near the target keyframe instead of waiting for forward-only production to
+    /// reach it. Output timestamps are zero-based from the seek point, so the served stream begins at 0
+    /// and the player layers the absolute offset back on top.
+    private let startTime: Double
+
+    init(url: URL, fileURL: URL? = nil, cap: Int = 1 << 22, timeout: Double = 14, startTime: Double = 0) {
         self.url = url
         self.fileURL = fileURL
         self.produceCap = cap
         self.outerTimeout = timeout
+        self.startTime = startTime
         let cfg = URLSessionConfiguration.ephemeral
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
         session = URLSession(configuration: cfg)
@@ -183,6 +191,7 @@ final class FFmpegRemuxer: @unchecked Sendable {
         var streamMapping = [Int](repeating: -1, count: nbStreams)
         var copied: [String] = []
         var outIndex = 0
+        var videoInputIndex = -1
         for i in 0..<nbStreams {
             guard let inStream = input!.pointee.streams[i], let inPar = inStream.pointee.codecpar else { continue }
             let type = inPar.pointee.codec_type
@@ -193,6 +202,7 @@ final class FFmpegRemuxer: @unchecked Sendable {
             // Without this, HEVC-in-MKV → MP4 typically fails with "tag not found".
             outStream.pointee.codecpar.pointee.codec_tag = 0
             streamMapping[i] = outIndex
+            if type == AVMEDIA_TYPE_VIDEO, videoInputIndex < 0 { videoInputIndex = i }
             outIndex += 1
             let name = String(cString: avcodec_get_name(inPar.pointee.codec_id))
             copied.append(type == AVMEDIA_TYPE_VIDEO
@@ -224,11 +234,21 @@ final class FFmpegRemuxer: @unchecked Sendable {
         }
         let headerBytes = bytesWritten
 
+        // --- Seek-by-reinit: jump the input to the requested start before muxing ---
+        // av_seek_frame(BACKWARD) lands on the keyframe at/just-before startTime; packet timestamps are
+        // then zero-based (shift subtracted below) so the served stream begins at 0.
+        if startTime > 0, videoInputIndex >= 0, let vst = input!.pointee.streams[videoInputIndex] {
+            let tb = vst.pointee.time_base
+            let target = tb.num > 0 ? Int64(startTime * Double(tb.den) / Double(tb.num)) : 0
+            av_seek_frame(input, Int32(videoInputIndex), target, 1 /* AVSEEK_FLAG_BACKWARD */)
+        }
+
         // --- Mux packets until the cap or EOF ---
         var packetCount = 0
         var reachedEOF = false
         var interrupted = false
         var writeError: Int32 = 0
+        var tsShiftSeconds = -1.0   // set from the first muxed packet; subtracted to zero-base output
         let pkt = av_packet_alloc()
         while bytesWritten < produceCap {
             let r = av_read_frame(input, pkt)
@@ -238,6 +258,18 @@ final class FFmpegRemuxer: @unchecked Sendable {
             if outIdx < 0 { av_packet_unref(pkt); continue }
             let inStream = input!.pointee.streams[inIdx]!
             let outStream = outputCtx.pointee.streams[outIdx]!
+            // Zero-base timestamps from the seek point (only when we seeked).
+            if startTime > 0 {
+                let tb = inStream.pointee.time_base
+                let q = tb.den > 0 ? Double(tb.num) / Double(tb.den) : 0
+                let raw = pkt!.pointee.dts != avNoPTS ? pkt!.pointee.dts : pkt!.pointee.pts
+                if tsShiftSeconds < 0, raw != avNoPTS { tsShiftSeconds = Double(raw) * q }
+                let shift = q > 0 ? Int64(tsShiftSeconds / q) : 0
+                if pkt!.pointee.pts != avNoPTS { pkt!.pointee.pts -= shift }
+                if pkt!.pointee.dts != avNoPTS { pkt!.pointee.dts -= shift }
+                // Drop any pre-roll packet that lands before the seek point (negative after shifting).
+                if pkt!.pointee.dts != avNoPTS, pkt!.pointee.dts < 0 { av_packet_unref(pkt); continue }
+            }
             av_packet_rescale_ts(pkt, inStream.pointee.time_base, outStream.pointee.time_base)
             pkt!.pointee.stream_index = Int32(outIdx)
             pkt!.pointee.pos = -1
