@@ -22,7 +22,10 @@ final class ScenePlayerModel {
     @ObservationIgnored private var remuxStream: LocalRemuxStream?
     /// Set once if the local pipeline fails and we switch to the HLS fallback (so we never loop).
     @ObservationIgnored private var didFallback = false
-    /// Overrides the displayed stream label after a fallback.
+    /// Guards re-entrant starts, and discards an engine built after the scene was already left.
+    @ObservationIgnored private var startInProgress = false
+    @ObservationIgnored private var stopped = false
+    /// Overrides the displayed stream label after a fallback / transcode decision.
     var activeStreamType: String?
 
     /// The sharp-video render surface (re-parented into the zoom container).
@@ -48,28 +51,76 @@ final class ScenePlayerModel {
         self.route = route
     }
 
-    /// Create the engine and begin playback. Idempotent — safe to call on every `onAppear`.
+    /// Begin playback. Idempotent — safe to call on every `onAppear`. For `.localFFmpeg` routes this
+    /// first decides (cached) whether Apple can decode the pixel format, so HEVC the device can't decode
+    /// (4:2:2/4:4:4) skips the doomed remux and goes straight to HLS instead of stalling on it.
     func start() {
-        guard engine == nil else { return }
-        let url: URL
+        guard engine == nil, !startInProgress else { return }
+        startInProgress = true
+        stopped = false
         switch route.engine {
         case .avPlayer:
-            url = route.url
+            adopt(makeEngine(url: route.url), stream: nil)
         case .localFFmpeg:
-            // Remux the source on-device and play it over the loopback server. If the server can't even
-            // start, fall back to HLS immediately; a later *playback* failure falls back via `onFailed`.
-            do {
-                let stream = LocalRemuxStream(source: route.url)
-                url = try stream.start()
-                remuxStream = stream
-            } catch {
-                didFallback = true
-                activeStreamType = "HLS (fallback)"
-                url = route.fallbackURL ?? route.url
-            }
+            beginLocalFFmpeg()
         }
-        engine = makeEngine(url: url)
+    }
+
+    private func beginLocalFFmpeg() {
+        let key = route.url.path
+        if let needsTranscode = AppleDecodeCache.shared.decision(forKey: key) {
+            buildLocal(needsTranscode: needsTranscode)
+            return
+        }
+        // Probe the pixel format once (cached forever after). The player shows its spinner meanwhile;
+        // for a format Apple can't decode this is far quicker than letting the remux fail then fall back.
+        Task { [weak self] in
+            guard let self else { return }
+            let info = await FFmpegSource(url: self.route.url).probeVideoInfo()
+            let needsTranscode = info.map { ScenePlayerModel.needsTranscode(pixFmt: $0.pixFmt) } ?? false
+            AppleDecodeCache.shared.setDecision(needsTranscode, forKey: key)
+            self.buildLocal(needsTranscode: needsTranscode)
+        }
+    }
+
+    private func buildLocal(needsTranscode: Bool) {
+        if needsTranscode, let hls = route.fallbackURL {
+            didFallback = true
+            activeStreamType = "HLS (Apple can't decode this pixel format)"
+            adopt(makeEngine(url: hls), stream: nil)
+            return
+        }
+        // Remux on-device + play over the loopback server. If the server can't even start, go to HLS
+        // now; a later playback failure still falls back via `onFailed`.
+        do {
+            let stream = LocalRemuxStream(source: route.url)
+            let url = try stream.start()
+            adopt(makeEngine(url: url), stream: stream)
+        } catch {
+            didFallback = true
+            activeStreamType = "HLS (fallback)"
+            adopt(makeEngine(url: route.fallbackURL ?? route.url), stream: nil)
+        }
+    }
+
+    /// Commit a freshly-built engine + remux stream — unless the scene was left while we were starting
+    /// (then discard them so no stray player or loopback server survives).
+    private func adopt(_ engine: PlaybackEngine, stream: LocalRemuxStream?) {
+        startInProgress = false
+        guard !stopped else {
+            engine.teardown()
+            stream?.stop()
+            return
+        }
+        self.engine = engine
+        self.remuxStream = stream
         isPlaying = true
+    }
+
+    /// Apple's H.264/HEVC decoders handle only 4:2:0 (8/10-bit); 4:2:2, 4:4:4 and 12-bit need transcode.
+    static func needsTranscode(pixFmt: String) -> Bool {
+        let f = pixFmt.lowercased()
+        return f.contains("422") || f.contains("444") || f.contains("12le") || f.contains("12be") || f.contains("gbr")
     }
 
     /// Build an AVPlayer engine for `url` and wire its callbacks into this facade.
@@ -117,6 +168,8 @@ final class ScenePlayerModel {
     /// can't crash on dealloc), and stop the on-device remux + loopback server. Niling the engine lets
     /// `start()` rebuild cleanly if the scene is reopened.
     func stop() {
+        stopped = true
+        startInProgress = false
         engine?.teardown()
         engine = nil
         remuxStream?.stop()

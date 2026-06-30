@@ -3,6 +3,15 @@ import Libavformat
 import Libavcodec
 import Libavutil
 
+/// First video stream's identity, used for routing (remux vs transcode).
+struct FFmpegVideoInfo: Sendable {
+    let codec: String
+    let pixFmt: String
+    let profile: String
+    let width: Int
+    let height: Int
+}
+
 /// Opens a remote media URL through libavformat using a custom `AVIOContext` that pulls bytes on demand
 /// via URLSession range requests — our FFmpeg build enables only the `file`+`pipe` protocols, so remote
 /// input has to be fed manually. Phase 1 / step 1: a read-only *probe* that reports the container and
@@ -64,6 +73,79 @@ final class FFmpegSource: @unchecked Sendable {
             group.cancelAll()
             return result
         }
+    }
+
+    /// Quickly read the first video stream's codec + pixel format + profile, for routing decisions
+    /// (remux vs transcode). Tries `open_input` alone first — for MP4/MKV the pixel format is already in
+    /// the moov/CodecPrivate — and only falls back to `find_stream_info` if it isn't. Returns nil on
+    /// failure/timeout (caller treats unknown as "attempt remux", i.e. no regression).
+    func probeVideoInfo() async -> FFmpegVideoInfo? {
+        await withTaskGroup(of: FFmpegVideoInfo?.self) { group in
+            group.addTask {
+                await withCheckedContinuation { continuation in
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        continuation.resume(returning: self.runVideoInfo())
+                    }
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(8))
+                return nil
+            }
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result ?? nil
+        }
+    }
+
+    private func runVideoInfo() -> FFmpegVideoInfo? {
+        deadline = CFAbsoluteTimeGetCurrent() + 6
+        guard let avioBuffer = av_malloc(bufferSize) else { return nil }
+        let opaque = Unmanaged.passUnretained(self).toOpaque()
+        guard let avio = avio_alloc_context(
+            avioBuffer.assumingMemoryBound(to: UInt8.self), Int32(bufferSize), 0, opaque,
+            ffmpegRead, nil, ffmpegSeek
+        ) else {
+            av_free(avioBuffer)
+            return nil
+        }
+        var fmt = avformat_alloc_context()
+        if let context = fmt {
+            context.pointee.pb = avio
+            context.pointee.flags |= avfmtFlagCustomIO
+            context.pointee.interrupt_callback.callback = ffmpegInterrupt
+            context.pointee.interrupt_callback.opaque = opaque
+        }
+        if avformat_open_input(&fmt, nil, nil, nil) < 0 {
+            freeAVIO(avio)
+            return nil
+        }
+
+        var info = firstVideoInfo(fmt)
+        if info == nil || (info?.pixFmt.isEmpty ?? true) {
+            _ = avformat_find_stream_info(fmt, nil)   // only pay for this if the moov didn't have it
+            info = firstVideoInfo(fmt)
+        }
+
+        avformat_close_input(&fmt)
+        freeAVIO(avio)
+        return info
+    }
+
+    private func firstVideoInfo(_ fmt: UnsafeMutablePointer<AVFormatContext>?) -> FFmpegVideoInfo? {
+        guard let f = fmt else { return nil }
+        for i in 0..<Int(f.pointee.nb_streams) {
+            guard let stream = f.pointee.streams[i], let par = stream.pointee.codecpar,
+                  par.pointee.codec_type == AVMEDIA_TYPE_VIDEO else { continue }
+            let codec = String(cString: avcodec_get_name(par.pointee.codec_id))
+            var pix = ""
+            if let n = av_get_pix_fmt_name(AVPixelFormat(rawValue: par.pointee.format)) { pix = String(cString: n) }
+            var profile = ""
+            if let p = avcodec_profile_name(par.pointee.codec_id, par.pointee.profile) { profile = String(cString: p) }
+            return FFmpegVideoInfo(codec: codec, pixFmt: pix, profile: profile,
+                                   width: Int(par.pointee.width), height: Int(par.pointee.height))
+        }
+        return nil
     }
 
     private func runProbeDetached() async -> String {
