@@ -30,6 +30,10 @@ scrubbing**, **direct-play first**, on-device FFmpeg as the fallback, minimal se
 ## Deferred ideas (revisit once core features + bug-fixing are solid)
 
 ### AI upscaling — "high quality from low bandwidth"
+**Core goal:** usable video quality on **very low-quality / low-reliability networks** (poor cellular,
+remote access, congested links) — get a watchable, good-looking stream when bandwidth is too low for
+the real bitrate, by reconstructing quality on-device instead of shipping more bytes.
+
 Concept is real & published: **content-aware (overfitted) neural super-resolution** — train a *small*
 SR model per video on the server (CUDA/CPU), ship the low-res stream + the tiny model, reconstruct
 high quality on-device (refs: NAS / NEMO / LiveNAS). The compact "data" = **per-video model weights**
@@ -61,5 +65,37 @@ viewing — with a clean handoff (no duplicated video mirrored on the phone scre
 - Revisit alongside / after core playback; the Android app (later) may be the better home for full
   head-tracked virtual displays.
 
-### Other
+## Downloads & offline
+
+- **Download videos for offline viewing**, with a choice of source:
+  - **Original file** (as-is from Stash).
+  - **Stash-transcoded version** (ask the server for a smaller/compatible encode).
+  - **On-device transcode on the fly** (reuse the FFmpeg engine to produce a smaller/compatible file
+    locally).
+- **Downloaded Videos management screen** — list/manage offline videos (size, source, delete, play
+  offline, re-download at different quality).
+
+## Library & UX redesign
+
+- **Rework the filter/sort chips UI** (the current chip row needs a cleaner interaction model).
+- **Integrate search into the main library UI** via a **pull-down** (scroll-to-reveal search field)
+  instead of a separate Search tab/menu.
+- **Filter by favorites.**
+
+## Stash feature parity
+
+- **Favorites** — add/remove **performers, tags, and scenes** to favorites (and surface/filter by them).
+- **Rate scenes** (star rating).
+- **O-counter** ("ejaculation counter") support — increment/track per scene, like Stash.
+- **Stash markers** support — view/seek to (and ideally create) scene markers.
+- **Metadata search / auto-fill** — integrate Stash's scene & performer scraping/identify so missing
+  metadata can be searched and filled from the app.
+
+## Integrations (large lifts)
+
+- **Site integrations** — simpcity.cr, empornium, and possibly others (browse/grab content).
+- **Multi-threaded downloader that adds directly to the Stash library** — parallel downloads that hand
+  finished files to Stash for import. Big effort; sequence carefully.
+
+## Other
 - Android app — later.
