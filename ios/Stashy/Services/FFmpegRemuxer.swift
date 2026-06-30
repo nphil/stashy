@@ -34,9 +34,14 @@ final class FFmpegRemuxer: @unchecked Sendable {
 
     // Macros the Swift importer doesn't surface (identical to FFmpegSource).
     private let averrorEOF: Int32 = -541478725
+    private let averrorExit: Int32 = -1414092869   // -MKTAG('E','X','I','T') — interrupt callback fired
     private let avseekSize: Int32 = 0x10000
     private let avseekForce: Int32 = 0x20000
     private let avfmtFlagCustomIO: Int32 = 0x0080
+
+    /// Wall-clock deadline after which the interrupt callback aborts in-flight FFmpeg IO, so a
+    /// pathological demux (e.g. AVI's end-of-file index over per-read range requests) can't hang.
+    private var deadline: CFAbsoluteTime = 0
 
     private final class Box: @unchecked Sendable {
         var data: Data?
@@ -50,13 +55,14 @@ final class FFmpegRemuxer: @unchecked Sendable {
         session = URLSession(configuration: cfg)
     }
 
-    /// Run the remux and return a short human-readable summary (or an error string). Raced against a
-    /// timeout so a slow network / awkward demux never leaves the overlay stuck.
+    /// Run the remux and return a short human-readable summary (or an error string). The interrupt
+    /// callback (set in `runRemux`) bounds the work at `deadline`, guaranteeing the detached task
+    /// returns; the outer race is just a backstop if FFmpeg ever ignored the interrupt.
     func remuxSummary() async -> String {
         await withTaskGroup(of: String.self) { group in
             group.addTask { await self.runRemuxDetached() }
             group.addTask {
-                try? await Task.sleep(for: .seconds(12))
+                try? await Task.sleep(for: .seconds(14))
                 return "remux timed out (slow IO / awkward demux)"
             }
             let result = await group.next() ?? "—"
@@ -74,6 +80,7 @@ final class FFmpegRemuxer: @unchecked Sendable {
     }
 
     private func runRemux() -> String {
+        deadline = CFAbsoluteTimeGetCurrent() + 11   // abort the remux after 11s of wall-clock IO
         // --- Input: open the source through a custom read/seek AVIO ---
         guard let inBuffer = av_malloc(ioBufferSize) else { return "in alloc failed" }
         let opaque = Unmanaged.passUnretained(self).toOpaque()
@@ -89,11 +96,15 @@ final class FFmpegRemuxer: @unchecked Sendable {
         if let input {
             input.pointee.pb = readAVIO
             input.pointee.flags |= avfmtFlagCustomIO
+            input.pointee.interrupt_callback.callback = remuxInterrupt
+            input.pointee.interrupt_callback.opaque = opaque
         }
         let openResult = avformat_open_input(&input, nil, nil, nil)
         if openResult < 0 {
             freeAVIO(readAVIO)
-            return "open failed (\(errString(openResult)))"
+            return openResult == averrorExit
+                ? "remux timed out (slow IO — container index needs many round-trips)"
+                : "open failed (\(errString(openResult)))"
         }
         _ = avformat_find_stream_info(input, nil)
 
@@ -164,11 +175,12 @@ final class FFmpegRemuxer: @unchecked Sendable {
         // --- Mux packets until the cap or EOF ---
         var packetCount = 0
         var reachedEOF = false
+        var interrupted = false
         var writeError: Int32 = 0
         let pkt = av_packet_alloc()
         while produced.count < produceCap {
             let r = av_read_frame(input, pkt)
-            if r < 0 { reachedEOF = true; break }
+            if r < 0 { reachedEOF = (r == averrorEOF); interrupted = (r == averrorExit); break }
             let inIdx = Int(pkt!.pointee.stream_index)
             let outIdx = (inIdx < streamMapping.count) ? streamMapping[inIdx] : -1
             if outIdx < 0 { av_packet_unref(pkt); continue }
@@ -191,7 +203,7 @@ final class FFmpegRemuxer: @unchecked Sendable {
         if writeError < 0 {
             return "write_frame failed (\(errString(writeError)))\ncopied: \(copied.joined(separator: ", "))"
         }
-        let status = reachedEOF ? "EOF" : "capped"
+        let status = interrupted ? "timed out (partial)" : reachedEOF ? "EOF" : "capped"
         return """
         mp4 · \(copied.count) streams · \(status)
         copied: \(copied.joined(separator: ", "))
@@ -224,6 +236,7 @@ final class FFmpegRemuxer: @unchecked Sendable {
         guard let buffer, count > 0 else { return 0 }
         let want = Int(count)
         var request = URLRequest(url: url)
+        request.timeoutInterval = 5   // so a single wedged read returns and lets FFmpeg poll the interrupt
         request.setValue("bytes=\(offset)-\(offset + Int64(want) - 1)", forHTTPHeaderField: "Range")
 
         let box = Box()
@@ -264,6 +277,7 @@ final class FFmpegRemuxer: @unchecked Sendable {
     private func ensureSize() -> Int64 {
         if size >= 0 { return size }
         var request = URLRequest(url: url)
+        request.timeoutInterval = 5
         request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
         let box = Box()
         let semaphore = DispatchSemaphore(value: 0)
@@ -309,4 +323,11 @@ private func remuxSeek(_ opaque: UnsafeMutableRawPointer?, _ offset: Int64, _ wh
 private func remuxWrite(_ opaque: UnsafeMutableRawPointer?, _ buffer: UnsafePointer<UInt8>?, _ size: Int32) -> Int32 {
     guard let opaque else { return -1 }
     return Unmanaged<FFmpegRemuxer>.fromOpaque(opaque).takeUnretainedValue().write(from: buffer, size: size)
+}
+
+// Polled by FFmpeg between IO operations; 1 aborts the in-flight open/find_stream_info/read.
+private func remuxInterrupt(_ opaque: UnsafeMutableRawPointer?) -> Int32 {
+    guard let opaque else { return 0 }
+    let remuxer = Unmanaged<FFmpegRemuxer>.fromOpaque(opaque).takeUnretainedValue()
+    return CFAbsoluteTimeGetCurrent() > remuxer.deadline ? 1 : 0
 }
