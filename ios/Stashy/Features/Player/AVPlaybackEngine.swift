@@ -103,12 +103,18 @@ final class AVPlaybackEngine: PlaybackEngine {
         player.play()
     }
 
-    deinit {
-        // Removing the periodic time observer is mandatory: AVPlayer traps ("deallocated while a
-        // periodic time observer was registered") if it's released with one still attached — a crash
-        // that accumulates as scenes are opened/closed. KVO observations invalidate themselves on
-        // dealloc, but the time observer must be removed explicitly.
-        if let timeObserver { player.removeTimeObserver(timeObserver) }
+    /// Deterministic teardown, called from the facade when leaving the scene. Removing the periodic time
+    /// observer is mandatory — AVPlayer traps ("deallocated while a periodic time observer was
+    /// registered") if released with one still attached, a crash that accumulates as scenes are opened
+    /// and closed. (A nonisolated `deinit` can't touch these MainActor/non-Sendable members under strict
+    /// concurrency, so cleanup happens here instead.)
+    func teardown() {
+        if let timeObserver {
+            player.removeTimeObserver(timeObserver)
+            self.timeObserver = nil
+        }
+        statusObservation?.invalidate(); statusObservation = nil
+        timeControlObservation?.invalidate(); timeControlObservation = nil
         player.pause()
     }
 

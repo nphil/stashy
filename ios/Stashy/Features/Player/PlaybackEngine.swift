@@ -28,6 +28,9 @@ protocol PlaybackEngine: AnyObject {
     func play()
     func pause()
     func seek(to time: TimeInterval)
+    /// Deterministic cleanup before release (remove observers, stop playback) — must run on the main
+    /// actor while the backend is still alive, since a nonisolated deinit can't touch its members.
+    func teardown()
 
     /// Short description of the decode path for the Stats overlay (e.g. "Hardware (VideoToolbox)").
     var decodeDescription: String { get }

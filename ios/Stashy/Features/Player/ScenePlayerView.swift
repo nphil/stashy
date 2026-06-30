@@ -104,7 +104,7 @@ final class ScenePlayerModel {
         guard !didFallback, let fallback = route.fallbackURL else { return }
         didFallback = true
         activeStreamType = "HLS (fallback)"
-        engine?.pause()
+        engine?.teardown()
         remuxStream?.stop()
         remuxStream = nil
         isReady = false
@@ -113,10 +113,12 @@ final class ScenePlayerModel {
         isPlaying = true
     }
 
-    /// Stop playback when leaving the scene (so audio can't continue in the background) and tear down
-    /// the on-device remux + loopback server.
+    /// Tear down on leaving the scene: stop playback, remove the engine's observers (so the AVPlayer
+    /// can't crash on dealloc), and stop the on-device remux + loopback server. Niling the engine lets
+    /// `start()` rebuild cleanly if the scene is reopened.
     func stop() {
-        engine?.pause()
+        engine?.teardown()
+        engine = nil
         remuxStream?.stop()
         remuxStream = nil
     }
