@@ -18,8 +18,8 @@ final class ScenePlayerModel {
 
     @ObservationIgnored private var engine: PlaybackEngine?
     @ObservationIgnored private let route: PlaybackRoute
-    /// Owns the on-device remux + loopback server for a `.localFFmpeg` route (nil otherwise).
-    @ObservationIgnored private var remuxStream: LocalRemuxStream?
+    /// Owns the on-device local stream (seekable HLS or linear remux) for a `.localFFmpeg` route.
+    @ObservationIgnored private var localStream: (any LocalPlaybackStream)?
     /// Set once if the local pipeline fails and we switch to the HLS fallback (so we never loop).
     @ObservationIgnored private var didFallback = false
     /// Guards re-entrant starts, and discards an engine built after the scene was already left.
@@ -80,45 +80,73 @@ final class ScenePlayerModel {
 
     private func beginLocalFFmpeg() {
         let key = route.url.path
-        if let needsTranscode = AppleDecodeCache.shared.decision(forKey: key) {
-            buildLocal(needsTranscode: needsTranscode)
+        // Known-undecodable pixel format (cached): straight to HLS, skip opening the file entirely.
+        if AppleDecodeCache.shared.decision(forKey: key) == true {
+            buildFallback(reason: "HLS (Apple can't decode this pixel format)")
             return
         }
-        // Probe the pixel format once (cached forever after). The player shows its spinner meanwhile;
-        // for a format Apple can't decode this is far quicker than letting the remux fail then fall back.
+        // Open the source once (off-main): read its keyframe grid for seekable HLS *and* its pixel format
+        // for the decode decision. The player shows its spinner meanwhile.
         Task { [weak self] in
             guard let self else { return }
-            let info = await FFmpegSource(url: self.route.url).probeVideoInfo()
-            let needsTranscode = info.map { ScenePlayerModel.needsTranscode(pixFmt: $0.pixFmt) } ?? false
-            AppleDecodeCache.shared.setDecision(needsTranscode, forKey: key)
-            self.buildLocal(needsTranscode: needsTranscode)
+            let producer = HLSSegmentProducer(url: self.route.url)
+            let prepared = await Task.detached { producer.prepare() }.value
+            let needsTranscode = ScenePlayerModel.needsTranscode(pixFmt: producer.pixFmt)
+            if !producer.pixFmt.isEmpty { AppleDecodeCache.shared.setDecision(needsTranscode, forKey: key) }
+            if needsTranscode {
+                producer.teardown()
+                self.buildFallback(reason: "HLS (Apple can't decode this pixel format)")
+            } else if prepared {
+                self.buildHLS(producer: producer)        // seekable VOD HLS (mp4/mov)
+            } else {
+                producer.teardown()
+                self.buildLinear()                       // unsupported container → linear remux
+            }
         }
     }
 
-    private func buildLocal(needsTranscode: Bool) {
-        if needsTranscode, let hls = route.fallbackURL {
-            didFallback = true
-            activeStreamType = "HLS (Apple can't decode this pixel format)"
-            adopt(makeEngine(url: hls), stream: nil)
-            return
-        }
-        // Remux on-device + play over the loopback server. If the server can't even start, go to HLS
-        // now; a later playback failure falls back via `onFailed`, and a silent stall via the watchdog.
+    /// Seekable on-demand HLS from a prepared producer (mp4/mov). Best path: AVPlayer gets a VOD playlist
+    /// it can seek anywhere in, and each segment is remuxed on demand.
+    private func buildHLS(producer: HLSSegmentProducer) {
+        guard !stopped else { producer.teardown(); return }
         do {
-            let stream = LocalRemuxStream(source: route.url, duration: route.duration)
+            let stream = LocalHLSStream(producer: producer)
             let url = try stream.start()
+            activeStreamType = "On-device HLS (seekable)"
+            if duration <= 0 { duration = producer.totalDuration }
             adopt(makeEngine(url: url), stream: stream)
             if engine != nil { armWatchdog() }
         } catch {
-            didFallback = true
-            activeStreamType = "HLS (fallback)"
-            adopt(makeEngine(url: route.fallbackURL ?? route.url), stream: nil)
+            producer.teardown()
+            buildFallback(reason: "HLS (fallback)")
         }
+    }
+
+    /// Linear growing-file remux (containers without a usable keyframe table, e.g. some MKVs). Forward-only.
+    private func buildLinear() {
+        guard !stopped else { return }
+        do {
+            let stream = LocalRemuxStream(source: route.url, duration: route.duration)
+            let url = try stream.start()
+            activeStreamType = "On-device remux (linear)"
+            adopt(makeEngine(url: url), stream: stream)
+            if engine != nil { armWatchdog() }
+        } catch {
+            buildFallback(reason: "HLS (fallback)")
+        }
+    }
+
+    /// Give up on the local path and play the Stash HLS (server transcode) fallback.
+    private func buildFallback(reason: String) {
+        guard !stopped else { return }
+        didFallback = true
+        activeStreamType = reason
+        adopt(makeEngine(url: route.fallbackURL ?? route.url), stream: nil)
     }
 
     /// Commit a freshly-built engine + remux stream — unless the scene was left while we were starting
     /// (then discard them so no stray player or loopback server survives).
-    private func adopt(_ engine: PlaybackEngine, stream: LocalRemuxStream?) {
+    private func adopt(_ engine: PlaybackEngine, stream: (any LocalPlaybackStream)?) {
         startInProgress = false
         guard !stopped else {
             engine.teardown()
@@ -126,7 +154,7 @@ final class ScenePlayerModel {
             return
         }
         self.engine = engine
-        self.remuxStream = stream
+        self.localStream = stream
         isPlaying = true
     }
 
@@ -185,10 +213,10 @@ final class ScenePlayerModel {
         watchdog?.cancel()
         if let error { lastError = error }
         activeStreamType = "HLS (fallback)"
-        loopbackLog = remuxStream?.diagnostics() ?? loopbackLog   // capture before tearing the server down
+        loopbackLog = localStream?.diagnostics() ?? loopbackLog   // capture before tearing the server down
         engine?.teardown()
-        remuxStream?.stop()
-        remuxStream = nil
+        localStream?.stop()
+        localStream = nil
         isReady = false
         videoAspect = nil
         currentTime = 0
@@ -205,8 +233,8 @@ final class ScenePlayerModel {
         watchdog?.cancel()
         engine?.teardown()
         engine = nil
-        remuxStream?.stop()
-        remuxStream = nil
+        localStream?.stop()
+        localStream = nil
     }
 
     func play() { engine?.play() }
@@ -253,7 +281,7 @@ final class ScenePlayerModel {
 
         // Live loopback/index/remux state while the local-HLS path is actually playing (so we can see
         // produced bytes climb + which byte ranges AVPlayer is fetching, esp. during scrubbing).
-        if let live = remuxStream?.diagnostics(), !live.isEmpty {
+        if let live = localStream?.diagnostics(), !live.isEmpty {
             sections.append(StatSection(title: "Loopback (live)", lines: live.map {
                 StatLine(label: "·", value: $0)
             }))
@@ -266,8 +294,10 @@ final class ScenePlayerModel {
             }))
         }
 
-        // Reserved home for future Stash-transcoder details (only when actually transcoding).
-        if streamType.localizedCaseInsensitiveContains("transcod") || streamType.localizedCaseInsensitiveContains("hls") {
+        // Stash-transcoder details — only when we're actually using the server transcode (fell back, or
+        // the route itself is server HLS), never for the on-device local-HLS path.
+        let usingServerTranscode = didFallback || (route.engine == .avPlayer && streamType.localizedCaseInsensitiveContains("hls"))
+        if usingServerTranscode {
             sections.append(StatSection(title: "Transcode", lines: [
                 StatLine(label: "Source", value: "Stash transcoder"),
             ]))

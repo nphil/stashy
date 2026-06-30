@@ -6,7 +6,7 @@ import Foundation
 /// `.m3u8` and streams it natively — discrete bounded segment requests + a growing playlist — which is
 /// the model AVPlayer actually supports (a single open-ended progressive download is not).
 @MainActor
-final class LocalRemuxStream {
+final class LocalRemuxStream: LocalPlaybackStream {
     private let remuxer: FFmpegRemuxer
     private let index: FMP4Index
     private let server: LoopbackServer

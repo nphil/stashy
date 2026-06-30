@@ -20,12 +20,17 @@ final class LoopbackServer: @unchecked Sendable {
     private let isComplete: @Sendable () -> Bool
     /// Current HLS media playlist, or nil until enough has been produced. Absent → plain file server.
     private let playlist: (@Sendable () -> String?)?
+    /// Full-body handler for the on-demand segmented-HLS path: maps a request path (`/index.m3u8`,
+    /// `/init.mp4`, `/seg/N.m4s`) to `(contentType, body)`. When set it serves *every* request (no file
+    /// or byte-range serving); the body is produced on demand (a segment remux) and may block briefly.
+    private let dataHandler: (@Sendable (_ path: String) -> (String, Data)?)?
 
     init(fileURL: URL,
          contentType: String = "video/mp4",
          availableBytes: (@Sendable () -> Int64)? = nil,
          isComplete: (@Sendable () -> Bool)? = nil,
-         playlist: (@Sendable () -> String?)? = nil) {
+         playlist: (@Sendable () -> String?)? = nil,
+         dataHandler: (@Sendable (_ path: String) -> (String, Data)?)? = nil) {
         self.fileURL = fileURL
         self.contentType = contentType
         let onDiskSize: @Sendable () -> Int64 = {
@@ -34,6 +39,7 @@ final class LoopbackServer: @unchecked Sendable {
         self.availableBytes = availableBytes ?? onDiskSize
         self.isComplete = isComplete ?? { true }
         self.playlist = playlist
+        self.dataHandler = dataHandler
     }
 
     /// Start listening; returns the URL AVPlayer should open — the playlist in HLS mode, else the file.
@@ -56,7 +62,7 @@ final class LoopbackServer: @unchecked Sendable {
             throw NSError(domain: "LoopbackServer", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "no port assigned"])
         }
-        let path = playlist != nil ? "/index.m3u8" : "/media"
+        let path = (playlist != nil || dataHandler != nil) ? "/index.m3u8" : "/media"
         return URL(string: "http://127.0.0.1:\(port)\(path)")!
     }
 
@@ -99,11 +105,33 @@ final class LoopbackServer: @unchecked Sendable {
         let method = parts.first.map { String($0).uppercased() } ?? "GET"
         let path = parts.count > 1 ? String(parts[1]) : "/"
 
-        if let playlist, path.hasSuffix(".m3u8") {
+        if let dataHandler {
+            serveData(box, method: method, path: path, handler: dataHandler)
+        } else if let playlist, path.hasSuffix(".m3u8") {
             servePlaylist(box, method: method, playlist: playlist)
         } else {
             serveMedia(box, method: method, rangeHeader: lines.first { $0.lowercased().hasPrefix("range:") })
         }
+    }
+
+    // MARK: - Segmented HLS (full-body, on-demand)
+
+    private func serveData(_ box: Conn, method: String, path: String,
+                           handler: @escaping @Sendable (_ path: String) -> (String, Data)?) {
+        // Strip any query string; AVPlayer may append one when resolving relative segment URLs.
+        let clean = String(path.split(separator: "?").first ?? Substring(path))
+        guard let (contentType, body) = handler(clean) else {
+            note("→404 \(clean)")
+            send(box, Data("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8))
+            return
+        }
+        note("\(clean) →200 \(body.count)B")
+        var head = "HTTP/1.1 200 OK\r\n"
+        head += "Content-Type: \(contentType)\r\n"
+        head += "Content-Length: \(body.count)\r\n"
+        head += "Cache-Control: no-cache\r\n"
+        head += "Connection: close\r\n\r\n"
+        send(box, Data(head.utf8) + (method == "HEAD" ? Data() : body))
     }
 
     // MARK: - Playlist
