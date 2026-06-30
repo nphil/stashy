@@ -41,7 +41,8 @@ final class FFmpegRemuxer: @unchecked Sendable {
 
     /// Wall-clock deadline after which the interrupt callback aborts in-flight FFmpeg IO, so a
     /// pathological demux (e.g. AVI's end-of-file index over per-read range requests) can't hang.
-    private var deadline: CFAbsoluteTime = 0
+    /// `fileprivate` so the top-level interrupt trampoline (not in the type's scope) can read it.
+    fileprivate var deadline: CFAbsoluteTime = 0
 
     private final class Box: @unchecked Sendable {
         var data: Data?

@@ -28,7 +28,8 @@ final class FFmpegSource: @unchecked Sendable {
     /// IO operations. This is what actually stops a pathological demux (e.g. AVI, whose end-of-file
     /// index needs hundreds of range-request round-trips) — a Task-group race can't, because the
     /// blocking C call isn't cancellable and the group would wait for it regardless.
-    private var deadline: CFAbsoluteTime = 0
+    /// `fileprivate` so the top-level interrupt trampoline (not in the type's scope) can read it.
+    fileprivate var deadline: CFAbsoluteTime = 0
 
     private final class Box: @unchecked Sendable {
         var data: Data?
