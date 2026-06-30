@@ -111,36 +111,29 @@ final class LoopbackServer: @unchecked Sendable {
             }
         }
 
-        let reqEndIn = requestedEnd.map { String($0) } ?? "end"
-        note("RX \(method) \(start)-\(reqEndIn)")   // log on receipt so a request stuck waiting is visible
+        let reqEnd = requestedEnd.map { String($0) } ?? "end"
+        note("RX \(method) \(start)-\(reqEnd)")   // log on receipt so a stuck request is visible
 
+        // Wait only until the START byte is produced (and a size estimate is known) — NEVER for the end
+        // of the range. AVPlayer asks for the whole file (0-<size-1>) as one progressive range; we must
+        // answer immediately with whatever's produced so far as a partial, then it requests the next
+        // chunk. Waiting for the requested end (the whole 3.9 GB) was the stall.
         let deadline = Date().addingTimeInterval(4)
-        // Phase 1: don't answer until we know a size estimate AND have produced the start byte. Otherwise
-        // AVPlayer's first request races ahead of the just-started remux and gets a spurious 416 — which
-        // fails the item and (systematically) drops every file to the HLS fallback.
         while !isComplete(), totalBytes() <= 0 || availableBytes() <= start, Date() < deadline {
             Thread.sleep(forTimeInterval: 0.02)
         }
-        var total = max(totalBytes(), availableBytes())
-        if isComplete() { total = availableBytes() }
-        var end = min(requestedEnd ?? (total - 1), total - 1)
-
-        // Phase 2: a ranged request may want bytes past what's produced — wait for the remux to reach them.
-        while partial, end >= availableBytes(), !isComplete(), Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.02)
-        }
         let readable = availableBytes()
+        var total = max(totalBytes(), readable)
         if isComplete() { total = readable }
-        end = min(end, readable - 1)
-
-        let reqEnd = requestedEnd.map { String($0) } ?? "end"
         let waited = Int(Date().timeIntervalSince(t0) * 1000)
 
-        guard readable > 0, start < readable, start <= end else {
+        guard readable > 0, start < readable else {
             note("\(method) \(start)-\(reqEnd) →416 avail=\(readable) \(waited)ms")
             send(box, Data("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8))
             return
         }
+        // Serve from start up to whatever's produced (capped to the requested end) — a valid partial.
+        let end = min(requestedEnd ?? (total - 1), total - 1, readable - 1)
 
         let length = end - start + 1
         var head = partial ? "HTTP/1.1 206 Partial Content\r\n" : "HTTP/1.1 200 OK\r\n"
@@ -186,7 +179,11 @@ final class LoopbackServer: @unchecked Sendable {
     }
 
     private func send(_ box: Conn, _ data: Data) {
-        box.c.send(content: data, completion: .contentProcessed { _ in box.c.cancel() })
+        // isComplete + .finalMessage marks the whole response as one complete message so the framework
+        // flushes all of it before we cancel — otherwise cancel() truncates a large body (fine for the
+        // 2-byte probe, broke the multi-MB chunk → AVPlayer retried from 0).
+        box.c.send(content: data, contentContext: .finalMessage, isComplete: true,
+                   completion: .contentProcessed { _ in box.c.cancel() })
     }
 }
 
