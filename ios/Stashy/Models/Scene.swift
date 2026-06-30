@@ -94,20 +94,16 @@ extension StashScene {
 
         let hlsURL = sceneStreams.first(where: { $0.isHLS }).flatMap { appendingAPIKey(apiKey, to: $0.url) }
 
-        // Remux class: a codec AVPlayer can decode once repackaged (HEVC anywhere → hvc1 retag, or
-        // H.264 in a foreign container) → on-device loopback remux, with HLS as the auto-fallback.
-        if isRemuxCodec || (isDirectCodec && !containerOK), let source = directFileURL(apiKey: apiKey) {
-            let why = isRemuxCodec
-                ? "HEVC → hvc1 remux (local, no server)"
-                : "container .\(container) → remux (local, no server)"
-            return PlaybackRoute(url: source, engine: .localFFmpeg, streamType: "Local remux",
-                                 reason: why, fallbackURL: hlsURL)
-        }
-
-        // Transcode class (codec AVPlayer can't decode): Stash HLS for now (on-device transcode later).
+        // Everything AVPlayer can't direct-play → Stash HLS (reliable today). The on-device single-file
+        // progressive remux is shelved: AVPlayer can't consume a growing/unknown-length file (it
+        // re-requests the whole file from byte 0 and never starts). The on-device path will return as an
+        // HLS-segmenting pipeline — see docs/ROADMAP.md. The remux/loopback code is kept for that work.
         if let hlsURL {
-            return PlaybackRoute(url: hlsURL, engine: .avPlayer, streamType: "HLS (transcoded)",
-                                 reason: "Fallback: codec \(codec ?? "?") needs transcode; on-device path pending")
+            let why: String
+            if isRemuxCodec { why = "HEVC → HLS (on-device remux shelved)" }
+            else if isDirectCodec { why = "container .\(container) → HLS" }
+            else { why = "codec \(codec ?? "?") → HLS (transcode)" }
+            return PlaybackRoute(url: hlsURL, engine: .avPlayer, streamType: "HLS (transcoded)", reason: why)
         }
 
         // No HLS offered → last-resort direct file (may not render for exotic codecs/containers).

@@ -3,29 +3,42 @@
 Working notes so intent survives across sessions. Core tenets: **fast, responsive playback +
 scrubbing**, **direct-play first**, on-device FFmpeg as the fallback, minimal server load.
 
-## Playback pipeline (active work)
+## Playback pipeline
 
-1. **Routing brain — capability detection** ✅ *(in progress)*
-   Classify each file and pick the cheapest correct path:
-   - **Direct play** — H.264/HEVC in mp4/mov/m4v → AVPlayer plays the file URL (native HW decode,
-     instant seeks). *This is the fast path; maximize it.*
-   - **Remux** — H.264/HEVC in a wrong container (MKV/TS/etc.) → repackage to fragmented MP4, no
-     re-encode → AVPlayer.
-   - **Transcode** — codec AVPlayer can't decode (MPEG4-ASP, VC1, VP9/AV1 on older devices) →
-     FFmpeg decode → `h264_videotoolbox`. Last resort.
-   - HLS (Stash server transcode) is the temporary fallback until remux/transcode land.
+**Current shipping state:** Direct play for H.264-in-mp4/mov (native HW decode, instant seeks);
+**everything else → Stash HLS** (reliable). The on-device single-file remux is **shelved** (see below).
 
-2. **Remux → AVPlayer via `AVAssetResourceLoaderDelegate`** (no loopback server). Probe already
-   proved the muxing works on-device. Scrubbing needs keyframe-aware re-feed from the source.
+1. **Routing brain — capability detection** ✅
+   - **Direct play** — H.264 in mp4/mov/m4v → AVPlayer plays the file URL directly.
+   - **HLS** — everything else (HEVC, H.264-in-MKV, MPEG4-ASP/VC1/VP9/AV1, 4:2:2/4:4:4 HEVC that Apple
+     can't decode at all) → Stash server transcode. Works today.
 
-3. **On-device transcode path** (the exotic set, incl. MPEG4-in-AVI — AVPlayer can't decode
-   MPEG4-ASP even repackaged). Needs better I/O than per-read range requests for end-indexed
-   containers (AVI): a streaming pull / larger read-ahead.
+2. **On-device local playback — SHELVED, needs a rearchitecture.** The single fragmented-MP4 served
+   progressively over a loopback HTTP server does **not** work with AVPlayer: for a growing /
+   unknown-final-length file, AVPlayer re-requests the whole file from byte 0 over and over (it expects
+   a continuous stream with a known Content-Length or HLS) and never starts. Confirmed on-device across
+   many iterations. The remux/probe/loopback code (`FFmpegRemuxer`, `FFmpegSource`, `LoopbackServer`,
+   `LocalRemuxStream`) is kept as the foundation for the correct approach:
+   - **On-device HLS pipeline** — segment the remux into fMP4 segments + a growing `.m3u8` served over
+     the loopback; AVPlayer consumes this natively (it's exactly what Stash HLS does). Handles
+     growing/unknown length + seeking. This is the real path to local playback. *(Biggest lever.)*
+   - Also needs **better source I/O** than one URLSession range request per 64 KB read (a single
+     streaming pull / larger read-ahead) — the per-read round-trips made the remux produce far too
+     slowly for large files.
+   - **On-device transcode** (MPEG4-ASP/VC1/VP9, AV1 on non-HW-AV1 devices, 4:2:2/4:4:4 HEVC) rides on
+     the same delivery, decode via FFmpeg/dav1d → `h264/hevc_videotoolbox`.
 
-4. **Quality / gear selector** — Auto / Direct / On-device FFmpeg / (later) Server transcode +
-   resolution. Also the manual escape hatch if a file mis-direct-plays.
+3. **Quality / gear selector** — Auto / Direct / On-device / Server transcode + resolution; also the
+   manual escape hatch.
 
-5. **Server-side transcoding** (later) — for poor-network / weak-client cases. Bones kept for it.
+4. **Server-side transcoding controls** — quality/resolution options for the HLS path.
+
+### Notes / facts established
+- Apple's HEVC decoder (Safari + iOS, same stack) only handles 4:2:0 (Main/Main 10); **4:2:2 / 4:4:4
+  (Rext) HEVC cannot play on Apple at all** — must transcode. (Chrome bundles its own decoder, hence
+  "plays in Chrome, not Safari/iOS".)
+- HEVC `hev1` (in-band parameter sets) renders black in AVPlayer; `hvc1` is required — a remux retag,
+  but only useful once on-device delivery works.
 
 ## Scrubbing & seeking (responsiveness)
 
