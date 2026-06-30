@@ -56,6 +56,11 @@ final class ScenePlayerModel {
     /// The engine is created exactly once in `start()`, from `.onAppear`.
     init(route: PlaybackRoute) {
         self.route = route
+        // Seed the scrubber's duration from Stash metadata. The local-HLS path is a growing EVENT
+        // playlist (no ENDLIST until the remux finishes), so AVPlayer reports an *indefinite* duration
+        // while playing — without this the scrubber would have nothing to map a swipe onto and seeking
+        // would appear dead. Direct play / Stash VOD HLS overwrite this with the engine's real value.
+        self.duration = max(0, route.duration)
     }
 
     /// Begin playback. Idempotent — safe to call on every `onAppear`. For `.localFFmpeg` routes this
@@ -138,7 +143,9 @@ final class ScenePlayerModel {
             guard let self else { return }
             self.currentTime = current
             if current > 0 { self.watchdog?.cancel() }   // real frames are flowing — disarm the stall watchdog
-            if self.duration != duration { self.duration = duration }
+            // Accept the engine's duration only when it's actually known (> 0). A growing local-HLS EVENT
+            // stream reports an indefinite (→ 0) duration; keep the metadata-seeded value so scrubbing works.
+            if duration > 0, self.duration != duration { self.duration = duration }
             if !self.isReady { self.isReady = true }
         }
         engine.onReady = { [weak self] ready in
@@ -243,6 +250,14 @@ final class ScenePlayerModel {
         if !media.isEmpty { sections.append(StatSection(title: "Media", lines: media)) }
 
         sections.append(StatSection(title: "Network", lines: engine?.liveStats() ?? []))
+
+        // Live loopback/index/remux state while the local-HLS path is actually playing (so we can see
+        // produced bytes climb + which byte ranges AVPlayer is fetching, esp. during scrubbing).
+        if let live = remuxStream?.diagnostics(), !live.isEmpty {
+            sections.append(StatSection(title: "Loopback (live)", lines: live.map {
+                StatLine(label: "·", value: $0)
+            }))
+        }
 
         // Loopback request log captured at fallback — diagnoses what AVPlayer asked the remux server for.
         if !loopbackLog.isEmpty {

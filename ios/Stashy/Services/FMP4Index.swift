@@ -110,14 +110,14 @@ final class FMP4Index: @unchecked Sendable {
             for c in childBoxes(d, from: trak.start, to: trak.end) {
                 switch c.type {
                 case "tkhd":
-                    let v = d[d.startIndex + c.start]
+                    let v = byte(d, c.start)
                     trackID = be32(d, c.start + (v == 1 ? 20 : 12))
                 case "mdia":
                     for m in childBoxes(d, from: c.start, to: c.end) {
                         switch m.type {
                         case "hdlr": handler = fourcc(d, m.start + 8)
                         case "mdhd":
-                            let v = d[d.startIndex + m.start]
+                            let v = byte(d, m.start)
                             ts = be32(d, m.start + (v == 1 ? 20 : 12))
                         default: break
                         }
@@ -138,7 +138,7 @@ final class FMP4Index: @unchecked Sendable {
                 switch c.type {
                 case "tfhd": tid = be32(d, c.start + 4)               // after version/flags(4)
                 case "tfdt":
-                    let v = d[d.startIndex + c.start]
+                    let v = byte(d, c.start)
                     bmdt = v == 1 ? be64(d, c.start + 4) : UInt64(be32(d, c.start + 4))
                 default: break
                 }
@@ -221,9 +221,18 @@ final class FMP4Index: @unchecked Sendable {
     }
 
     // MARK: - Big-endian readers (0-based offsets into a freshly-read Data)
+    //
+    // All bounds-checked: this parses a *live-growing* file, so a malformed/edge box must degrade to a
+    // benign zero/empty value rather than trap (a crash here would take the whole app down).
+
+    private func byte(_ d: Data, _ i: Int) -> UInt8 {
+        let b = d.startIndex + i
+        return (i >= 0 && b < d.endIndex) ? d[b] : 0
+    }
 
     private func be32(_ d: Data, _ i: Int) -> UInt32 {
         let b = d.startIndex + i
+        guard i >= 0, b + 4 <= d.endIndex else { return 0 }
         return UInt32(d[b]) << 24 | UInt32(d[b + 1]) << 16 | UInt32(d[b + 2]) << 8 | UInt32(d[b + 3])
     }
 
@@ -233,6 +242,7 @@ final class FMP4Index: @unchecked Sendable {
 
     private func fourcc(_ d: Data, _ i: Int) -> String {
         let b = d.startIndex + i
+        guard i >= 0, b + 4 <= d.endIndex else { return "" }
         return String(decoding: d[b..<b + 4], as: UTF8.self)
     }
 }
