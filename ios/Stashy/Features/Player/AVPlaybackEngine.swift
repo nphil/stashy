@@ -103,6 +103,15 @@ final class AVPlaybackEngine: PlaybackEngine {
         player.play()
     }
 
+    deinit {
+        // Removing the periodic time observer is mandatory: AVPlayer traps ("deallocated while a
+        // periodic time observer was registered") if it's released with one still attached — a crash
+        // that accumulates as scenes are opened/closed. KVO observations invalidate themselves on
+        // dealloc, but the time observer must be removed explicitly.
+        if let timeObserver { player.removeTimeObserver(timeObserver) }
+        player.pause()
+    }
+
     func play() { player.play() }
     func pause() { player.pause() }
 

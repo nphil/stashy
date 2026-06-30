@@ -43,6 +43,12 @@ final class FFmpegSource: @unchecked Sendable {
         session = URLSession(configuration: cfg)
     }
 
+    deinit {
+        // A custom URLSession retains itself + a delegate thread until invalidated — release it so probes
+        // don't leak one each.
+        session.invalidateAndCancel()
+    }
+
     /// Open + read stream info, returning a short human-readable summary (or an error string). The
     /// interrupt callback (set in `runProbe`) bounds the work at `deadline`, so the detached probe is
     /// guaranteed to return; the outer race is just a backstop that surfaces a message if FFmpeg ever

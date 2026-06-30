@@ -79,6 +79,12 @@ final class FFmpegRemuxer: @unchecked Sendable {
         session = URLSession(configuration: cfg)
     }
 
+    deinit {
+        // A custom URLSession retains itself (and a delegate thread) until invalidated — leaking one per
+        // playback/probe and eventually exhausting resources. Release it explicitly.
+        session.invalidateAndCancel()
+    }
+
     /// Run the remux and return a short human-readable summary (or an error string). The interrupt
     /// callback (set in `runRemux`) bounds the work at `deadline`, guaranteeing the detached task
     /// returns; the outer race is just a backstop if FFmpeg ever ignored the interrupt.

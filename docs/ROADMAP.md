@@ -27,6 +27,17 @@ scrubbing**, **direct-play first**, on-device FFmpeg as the fallback, minimal se
 
 5. **Server-side transcoding** (later) — for poor-network / weak-client cases. Bones kept for it.
 
+## Scrubbing & seeking (responsiveness)
+
+- **Seekable remux** — the current remux is forward-only, so a far-forward seek waits for the remux to
+  produce everything in between. Fix: on a seek past the produced point, re-init FFmpeg from an input
+  seek near the target timestamp and emit a fresh fragment, instead of waiting. This is the single
+  biggest lever for responsive scrubbing across both remux and (future) on-device transcode.
+- **Hybrid scrub preview** — show the (instant) Stash sprite tile while dragging, then refine with an
+  on-device decoded frame at the exact position when the user pauses on it. Sprites are coarse on long
+  videos (fixed tile count ÷ duration); on-device extraction is exact but has decode latency, so layer
+  it as a refinement, not a replacement.
+
 ## Deferred ideas (revisit once core features + bug-fixing are solid)
 
 ### AI upscaling — "high quality from low bandwidth"

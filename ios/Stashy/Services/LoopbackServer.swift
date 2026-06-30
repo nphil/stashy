@@ -95,40 +95,44 @@ final class LoopbackServer: @unchecked Sendable {
         let lines = header.components(separatedBy: "\r\n")
         let requestLine = lines.first ?? ""
         let method = requestLine.split(separator: " ").first.map { String($0).uppercased() } ?? "GET"
-        var total = max(totalBytes(), availableBytes())   // never claim less than what's already on disk
-
         // Parse "Range: bytes=start-end" (end optional).
         var start: Int64 = 0
-        var end: Int64 = total - 1
+        var requestedEnd: Int64?
         var partial = false
         if let rangeLine = lines.first(where: { $0.lowercased().hasPrefix("range:") }),
            let eq = rangeLine.firstIndex(of: "=") {
             let spec = rangeLine[rangeLine.index(after: eq)...].trimmingCharacters(in: .whitespaces)
             let bounds = spec.split(separator: "-", omittingEmptySubsequences: false)
             if let first = bounds.first, let s = Int64(first.trimmingCharacters(in: .whitespaces)) {
-                start = s
+                start = max(0, s)
                 partial = true
-                if bounds.count > 1, let e = Int64(bounds[1].trimmingCharacters(in: .whitespaces)) { end = e }
+                if bounds.count > 1, let e = Int64(bounds[1].trimmingCharacters(in: .whitespaces)) { requestedEnd = e }
             }
         }
-        start = max(0, start)
-        end = min(end, total - 1)
 
-        // A Range request may be ahead of what the remux has produced — wait for it (the remux runs
-        // ahead at copy speed), until it's available, production finishes, or we time out.
         let deadline = Date().addingTimeInterval(30)
+        // Phase 1: don't answer until we know a size estimate AND have produced the start byte. Otherwise
+        // AVPlayer's first request races ahead of the just-started remux and gets a spurious 416 — which
+        // fails the item and (systematically) drops every file to the HLS fallback.
+        while !isComplete(), totalBytes() <= 0 || availableBytes() <= start, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        var total = max(totalBytes(), availableBytes())
+        if isComplete() { total = availableBytes() }
+        var end = min(requestedEnd ?? (total - 1), total - 1)
+
+        // Phase 2: a ranged request may want bytes past what's produced — wait for the remux to reach them.
         while partial, end >= availableBytes(), !isComplete(), Date() < deadline {
             Thread.sleep(forTimeInterval: 0.02)
         }
-        // Once complete the real size is authoritative; clamp to what's actually readable.
         let readable = availableBytes()
-        if isComplete() { total = readable; end = min(end, readable - 1) }
+        if isComplete() { total = readable }
+        end = min(end, readable - 1)
 
-        guard readable > 0, start <= end, start < readable else {
+        guard readable > 0, start < readable, start <= end else {
             send(box, Data("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8))
             return
         }
-        end = min(end, readable - 1)
 
         let length = end - start + 1
         var head = partial ? "HTTP/1.1 206 Partial Content\r\n" : "HTTP/1.1 200 OK\r\n"
