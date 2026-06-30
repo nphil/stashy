@@ -161,6 +161,7 @@ final class ScenePlayerModel {
             // Local zero-based remux: report absolute time (offset + local) and keep the full metadata
             // duration. Direct/HLS: engine time is already absolute and its duration is authoritative.
             self.currentTime = self.usesAbsoluteTime ? self.timeOffset + current : current
+            self.localStream?.updatePlayhead(current)   // lets the remux pace production to the playhead
             if current > 0 { self.watchdog?.cancel() }   // real frames are flowing — disarm the stall watchdog
             if !self.usesAbsoluteTime, duration > 0, self.duration != duration { self.duration = duration }
             if !self.isReady { self.isReady = true }

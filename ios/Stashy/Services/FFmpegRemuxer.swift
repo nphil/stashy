@@ -70,8 +70,11 @@ final class FFmpegRemuxer: @unchecked Sendable {
     var isFinished: Bool { progressLock.withLock { finishedFlag } }
     /// Final-size estimate: the source byte size (output ≈ input for a no-re-encode remux).
     var sourceByteSize: Int64 { max(size, 0) }
-    /// Abort an in-flight remux promptly (e.g. when playback stops) via the interrupt deadline.
-    func abort() { deadline = 1 }
+    /// Abort an in-flight remux promptly (e.g. when playback stops) via the interrupt deadline + flag.
+    func abort() {
+        progressLock.withLock { abortedFlag = true }
+        deadline = 1
+    }
 
     private final class Box: @unchecked Sendable {
         var data: Data?
@@ -84,12 +87,31 @@ final class FFmpegRemuxer: @unchecked Sendable {
     /// and the player layers the absolute offset back on top.
     private let startTime: Double
 
-    init(url: URL, fileURL: URL? = nil, cap: Int = 1 << 22, timeout: Double = 14, startTime: Double = 0) {
+    /// Current local playback position (seconds, in this stream's zero-based timeline). When set, the
+    /// remux *paces* itself: it produces up to `paceLeadSeconds` ahead of the playhead, then waits — so a
+    /// partially-watched file only downloads/remuxes what's reached (+ the lead), not the whole thing.
+    /// Pacing only engages for large sources (≥ `paceThresholdBytes`); small files produce fully (no
+    /// scrub regression). nil = never pace (the verification probe).
+    private let playhead: (@Sendable () -> Double)?
+    private let paceLeadSeconds: Double = 75
+    private let paceThresholdBytes: Int64 = 200 << 20   // only pace sources larger than ~200 MB
+
+    /// Set by `abort()` so the pacing wait (and the mux loop) bail out promptly. Separate from `deadline`
+    /// because the pacing loop keeps bumping `deadline` forward to avoid a spurious no-progress timeout.
+    private var abortedFlag = false
+    private var isAborted: Bool { progressLock.withLock { abortedFlag } }
+    /// Media position (seconds) produced so far — for the "produced ahead of playhead" diagnostics line.
+    private var producedMediaSeconds = 0.0
+    var producedSeconds: Double { progressLock.withLock { producedMediaSeconds } }
+
+    init(url: URL, fileURL: URL? = nil, cap: Int = 1 << 22, timeout: Double = 14, startTime: Double = 0,
+         playhead: (@Sendable () -> Double)? = nil) {
         self.url = url
         self.fileURL = fileURL
         self.produceCap = cap
         self.outerTimeout = timeout
         self.startTime = startTime
+        self.playhead = playhead
         let cfg = URLSessionConfiguration.ephemeral
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
         session = URLSession(configuration: cfg)
@@ -249,10 +271,23 @@ final class FFmpegRemuxer: @unchecked Sendable {
         var interrupted = false
         var writeError: Int32 = 0
         var tsShiftSeconds = -1.0   // set from the first muxed packet; subtracted to zero-base output
+        var lastVideoPts = 0.0      // produced media position (seconds, this stream's timeline) for pacing
         let pkt = av_packet_alloc()
         while bytesWritten < produceCap {
+            if isAborted { interrupted = true; break }
+            // Pace: once we're `paceLeadSeconds` ahead of the playhead on a large source, wait (don't
+            // race to EOF). Keep bumping `deadline` so the no-progress interrupt doesn't fire while we're
+            // intentionally idle. Resumes when the playhead advances (or stays idle while paused).
+            if let playhead, size >= paceThresholdBytes {
+                while !isAborted, lastVideoPts - playhead() > paceLeadSeconds {
+                    deadline = CFAbsoluteTimeGetCurrent() + 20
+                    Thread.sleep(forTimeInterval: 0.2)
+                }
+                if isAborted { interrupted = true; break }
+            }
             let r = av_read_frame(input, pkt)
             if r < 0 { reachedEOF = (r == averrorEOF); interrupted = (r == averrorExit); break }
+            if playhead != nil { deadline = CFAbsoluteTimeGetCurrent() + 20 }   // progress → push the watchdog
             let inIdx = Int(pkt!.pointee.stream_index)
             let outIdx = (inIdx < streamMapping.count) ? streamMapping[inIdx] : -1
             if outIdx < 0 { av_packet_unref(pkt); continue }
@@ -269,6 +304,12 @@ final class FFmpegRemuxer: @unchecked Sendable {
                 if pkt!.pointee.dts != avNoPTS { pkt!.pointee.dts -= shift }
                 // Drop any pre-roll packet that lands before the seek point (negative after shifting).
                 if pkt!.pointee.dts != avNoPTS, pkt!.pointee.dts < 0 { av_packet_unref(pkt); continue }
+            }
+            // Track produced media position from the video stream (drives pacing + diagnostics).
+            if inIdx == videoInputIndex, pkt!.pointee.pts != avNoPTS {
+                let tb = inStream.pointee.time_base
+                if tb.den > 0 { lastVideoPts = Double(pkt!.pointee.pts) * Double(tb.num) / Double(tb.den) }
+                progressLock.withLock { producedMediaSeconds = lastVideoPts }
             }
             av_packet_rescale_ts(pkt, inStream.pointee.time_base, outStream.pointee.time_base)
             pkt!.pointee.stream_index = Int32(outIdx)

@@ -10,6 +10,19 @@ protocol LocalPlaybackStream: AnyObject {
     func stop()
     /// Diagnostics for the Stats overlay.
     func diagnostics() -> [String]
+    /// Report the current local playback position (seconds) so the remux can pace itself to the playhead.
+    func updatePlayhead(_ seconds: Double)
+}
+
+/// Thread-safe scalar shared between the main-actor model (writer) and the remux's background thread
+/// (reader) so the remuxer can read the live playhead without touching main-actor state.
+final class AtomicDouble: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = 0.0
+    var value: Double {
+        get { lock.withLock { stored } }
+        set { lock.withLock { stored = newValue } }
+    }
 }
 
 /// The on-device remux → AVPlayer feed. Remuxes the source to a *fragmented MP4* temp file in the
@@ -24,11 +37,15 @@ final class LocalRemuxStream: LocalPlaybackStream {
     private let server: LoopbackServer
     private let tempURL: URL
     private var localURL: URL?
+    /// Live local playhead, written by the model (~10 Hz) and read by the remux to pace production.
+    private let playheadBox = AtomicDouble()
 
     init(source: URL, duration: Double, startTime: Double = 0) {
         tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("stashy-stream-\(UUID().uuidString).mp4")
-        let r = FFmpegRemuxer(url: source, fileURL: tempURL, cap: .max, timeout: 3600, startTime: startTime)
+        let box = playheadBox
+        let r = FFmpegRemuxer(url: source, fileURL: tempURL, cap: .max, timeout: 3600, startTime: startTime,
+                              playhead: { box.value })
         remuxer = r
         // This stream is zero-based from `startTime`, so its own timeline runs for the remaining duration.
         let idx = FMP4Index(
@@ -66,9 +83,12 @@ final class LocalRemuxStream: LocalPlaybackStream {
 
     /// Snapshot of remux + index progress + the server's recent requests, for the Stats overlay when
     /// diagnosing a stall/fallback.
+    func updatePlayhead(_ seconds: Double) { playheadBox.value = seconds }
+
     func diagnostics() -> [String] {
-        ["produced \(remuxer.producedBytes)B · src \(remuxer.sourceByteSize)B · done=\(remuxer.isFinished)",
-         index.debugSummary()]
+        let ahead = remuxer.producedSeconds - playheadBox.value
+        return ["produced \(remuxer.producedBytes)B · \(Int(remuxer.producedSeconds))s · ahead \(Int(ahead))s · done=\(remuxer.isFinished)",
+                index.debugSummary()]
             + server.recentRequests()
     }
 }
