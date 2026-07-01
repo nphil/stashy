@@ -75,6 +75,24 @@ This is the immediate next lever for responsive scrubbing.
   on-device decoded frame at the exact position when the user pauses on it. Sprites are coarse on long
   videos (fixed tile count ÷ duration); on-device extraction is exact but has decode latency, so layer
   it as a refinement, not a replacement.
+- **Watch-heat overlay on the scrubber ("most replayed").** A YouTube-style heat curve/histogram drawn
+  *on top of* the progress bar showing where the user has spent the most time actually watching this
+  video. Stash doesn't provide this, so it's **built locally on-device**:
+  - **Data model:** bucket each video's timeline into N bins (e.g. ~200 bins, or ~1–2s each, capped).
+    Store an array of accumulated watch-seconds per bin, keyed by scene id, in a small persistent store
+    (JSON/SQLite/`Application Support`), scoped per server.
+  - **Accrual:** from the player's periodic time observer, credit elapsed *continuous playback* time to
+    the current bin — only while `isPlaying` and not scrubbing, and only for forward real-time progress
+    (ignore the jump when a seek lands, so seeking doesn't inflate a bin). This naturally makes
+    rewatched/looped regions accumulate the most.
+  - **Render:** an area/curve (smoothed with a light moving average, normalized to the max bin) layered
+    behind/over the `ScrubBar` in `PlayerControlsView`, tinted with the accent color, low opacity so it
+    doesn't fight the buffered/played fill. Optionally a subtle "peak" marker at the hottest point and a
+    "jump to most-watched" affordance.
+  - **Niceties:** decay/cap so a single obsessive session doesn't permanently dominate; a settings
+    toggle to show/hide and to clear the history; keep the store bounded (evict least-recently-watched
+    videos). Purely local + private (fits the no-server-load, on-device tenet). Could later fuse with the
+    Vision motion-analysis idea to seed a heat curve even on first watch.
 
 ## Comparative study — ideas from 1letzgo/stashy (2026-07-01)
 Studied a second, broader Stash iOS/tvOS client (README, CLAUDE.md, GraphQLClient, PaginatedLoader,
