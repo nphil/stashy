@@ -180,14 +180,17 @@ struct ScenePerformerCard: View {
     var onOpen: (Performer) -> Void
     @Environment(\.imageCache) private var imageCache
     @Environment(ThemeManager.self) private var themeManager
+    @Environment(AppState.self) private var appState
+    @Environment(LibraryEdits.self) private var edits
     @AppStorage("blurThumbnails") private var blurThumbnails = false
     @AppStorage("blurTitles") private var blurTitles = false
     @State private var image: UIImage?
 
     var body: some View {
         if let performer = performers.first {
-            Button { onOpen(performer) } label: {
-                ZStack(alignment: .bottomLeading) {
+            // Tap opens the performer; the favorite heart is overlaid as a separate hit target (not a
+            // nested button) so its tap never conflicts with the open gesture.
+            ZStack(alignment: .bottomLeading) {
                     Rectangle().fill(themeManager.current.surfaceColor)
                         .overlay {
                             if let image {
@@ -232,15 +235,20 @@ struct ScenePerformerCard: View {
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            }
-            .buttonStyle(.plain)
-            // Key on image_path, not id: the scene list provides slim performers (no image_path), and
-            // the full performer arrives later with the *same* id — keying on the path re-fires the load
-            // when the path finally appears (otherwise the portrait never loads until the view is rebuilt).
-            .task(id: performer.image_path) {
-                guard let url = performer.imageURL(apiKey: apiKey) else { return }
-                image = try? await imageCache.image(for: url, priority: true)
-            }
+                .overlay(alignment: .topLeading) {
+                    FavoriteHeart(isFavorite: edits.isFavorite(performer), size: 16) { newValue in
+                        edits.setPerformerFavorite(newValue, id: performer.id, client: appState.client)
+                    }
+                    .padding(8)
+                }
+                .onTapGesture { onOpen(performer) }
+                // Key on image_path, not id: the scene list provides slim performers (no image_path), and
+                // the full performer arrives later with the *same* id — keying on the path re-fires the load
+                // when the path finally appears (otherwise the portrait never loads until the view is rebuilt).
+                .task(id: performer.image_path) {
+                    guard let url = performer.imageURL(apiKey: apiKey) else { return }
+                    image = try? await imageCache.image(for: url, priority: true)
+                }
         } else {
             PerformerPlaceholder()
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
