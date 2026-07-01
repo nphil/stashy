@@ -266,5 +266,18 @@ latency tradeoff).
   default and isolated; deletion checklist is in §5 of the optimization plan. Reminder per Nitin. This is
   the one tech-debt item still intentionally open (kept as the live debug channel until release).
 
+## Privacy & security
+- **App-switcher / background privacy blur.** Blur (or cover) the app's content the moment it resigns
+  active — going to the App Switcher, Control Center, a call, etc. — so the multitasking snapshot iOS
+  captures never shows video/thumbnails. Implement by adding a heavy blur overlay on
+  `scenePhase != .active` (or a `UIWindow`-level cover on `willResignActive`/`didBecomeActive`),
+  **independent of the Face ID app lock**. *Note:* today the only blur-on-return is the app-lock cover,
+  which is why it looks irregular — it appears only when app lock is enabled and only on return, not in
+  the switcher snapshot. This feature makes it consistent and lock-independent. A settings toggle to
+  enable/disable it.
+- Done: **Face ID is now immediate** — the "Stashy is Locked" splash was replaced with a minimal privacy
+  blur so biometrics fire the instant the app becomes active (tap to retry if the prompt is dismissed).
+- Reminder (existing): **remove all telemetry before wider release** (see §5 of the optimization plan).
+
 ## Other
 - Android app — later.

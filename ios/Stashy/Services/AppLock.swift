@@ -49,19 +49,19 @@ private struct AppLockModifier: ViewModifier {
         }
     }
 
+    // Minimal privacy cover — a heavy blur (so content isn't visible while locked) with just a small
+    // lock glyph. No "locked" splash/headline or prominent button: Face ID is triggered automatically the
+    // moment the app becomes active, so the extra chrome only added a perceived delay. Tapping anywhere
+    // re-triggers Face ID if the previous prompt was dismissed/cancelled.
     private var lockScreen: some View {
         ZStack {
-            Rectangle().fill(.ultraThinMaterial).ignoresSafeArea()
-            VStack(spacing: 16) {
-                Image(systemName: "lock.fill")
-                    .font(.system(size: 44, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Text("Stashy is Locked")
-                    .font(.headline)
-                Button("Unlock", action: evaluate)
-                    .buttonStyle(.borderedProminent)
-            }
+            Rectangle().fill(.thickMaterial).ignoresSafeArea()
+            Image(systemName: "lock.fill")
+                .font(.system(size: 40, weight: .semibold))
+                .foregroundStyle(.secondary)
         }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: evaluate)
     }
 
     private func evaluate() {

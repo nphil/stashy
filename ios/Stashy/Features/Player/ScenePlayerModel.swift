@@ -28,6 +28,10 @@ final class ScenePlayerModel {
     /// The actual decoded video aspect (w/h), once the player reports a presentation size. Drives
     /// layout/orientation when the server's file metadata is missing or wrong.
     var videoAspect: CGFloat?
+    /// Muted state, mirrored from the engine. Starts muted unless on a private audio route; the user's
+    /// choice is preserved across a seek-by-reinit engine swap.
+    var isMuted = false
+    @ObservationIgnored private var didAdoptMute = false
 
     @ObservationIgnored private var engine: PlaybackEngine?
     @ObservationIgnored private let route: PlaybackRoute
@@ -181,6 +185,9 @@ final class ScenePlayerModel {
     /// Build an AVPlayer engine for `url` and wire its callbacks into this facade.
     private func makeEngine(url: URL) -> PlaybackEngine {
         let engine: PlaybackEngine = AVPlaybackEngine(url: url)
+        // First engine: adopt its route-based default (muted unless headphones). Later engines (a
+        // seek-by-reinit swap): carry the user's current choice so a far seek doesn't re-mute.
+        if didAdoptMute { engine.isMuted = isMuted } else { isMuted = engine.isMuted; didAdoptMute = true }
         engine.onTime = { [weak self] current, duration in
             guard let self else { return }
             let absolute = self.usesAbsoluteTime ? self.timeOffset + current : current
@@ -276,6 +283,12 @@ final class ScenePlayerModel {
     func play() { engine?.play() }
     func pause() { engine?.pause() }
     func togglePlayPause() { isPlaying ? pause() : play() }
+
+    func toggleMute() {
+        let muted = !isMuted
+        engine?.isMuted = muted
+        isMuted = muted
+    }
 
     func seek(to time: TimeInterval) {
         // Never seek to the literal end — AVPlayer then waits for a forward buffer that can't exist past

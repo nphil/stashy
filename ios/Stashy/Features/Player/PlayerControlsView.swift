@@ -106,6 +106,9 @@ struct PlayerControlsView: View {
 
             HStack(spacing: 14) {
                 Text(Self.timeString(isScrubbing ? scrubTime : model.currentTime))
+                Button { model.toggleMute() } label: {
+                    Image(systemName: model.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                }
                 // Debug Stats toggle — fullscreen only (no clutter in the inline app view).
                 if isFullscreen {
                     Button { showStats.toggle() } label: {

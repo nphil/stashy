@@ -73,6 +73,9 @@ final class AVPlaybackEngine: PlaybackEngine {
         item.preferredForwardBufferDuration = 15
         player = AVPlayer(playerItem: item)
         player.automaticallyWaitsToMinimizeStalling = true
+        // Start muted unless the user is on a private route (headphones/AirPods/Bluetooth), so sound
+        // never unexpectedly plays through the phone speaker. The mute button can override this.
+        player.isMuted = !Self.privateAudioRouteActive
         hostView.player = player
         blurBackdrop.configure(output: videoOutput)
 
@@ -180,6 +183,20 @@ final class AVPlaybackEngine: PlaybackEngine {
             return (n >= s - 0.5 && n <= e) ? e - n : nil
         }.max() ?? 0
         onLoadProgress?(min(1, max(0, ahead / 3.0)))   // ~3s buffered feels "ready to start"
+    }
+
+    var isMuted: Bool {
+        get { player.isMuted }
+        set { player.isMuted = newValue }
+    }
+
+    /// True when audio is routed somewhere private (wired headphones, AirPods / other Bluetooth, USB or
+    /// AirPlay) rather than the built-in phone speaker.
+    static var privateAudioRouteActive: Bool {
+        let privatePorts: Set<AVAudioSession.Port> = [
+            .headphones, .bluetoothA2DP, .bluetoothLE, .bluetoothHFP, .usbAudio, .airPlay, .carAudio
+        ]
+        return AVAudioSession.sharedInstance().currentRoute.outputs.contains { privatePorts.contains($0.portType) }
     }
 
     func play() { player.play() }

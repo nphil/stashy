@@ -32,6 +32,10 @@ protocol PlaybackEngine: AnyObject {
     /// the server's file dimensions are missing or wrong.
     var onPresentationSize: ((CGSize) -> Void)? { get set }
 
+    /// Muted state. Starts muted unless a private audio route (headphones / AirPods / other Bluetooth)
+    /// is connected, so audio never blasts out of the phone speaker unexpectedly.
+    var isMuted: Bool { get set }
+
     func play()
     func pause()
     func seek(to time: TimeInterval)
