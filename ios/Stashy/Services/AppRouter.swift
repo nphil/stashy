@@ -11,6 +11,7 @@ enum AppTab: Hashable {
 enum Route: Hashable {
     case scene(StashScene)
     case performer(Performer)
+    case downloads
 }
 
 /// Renders a `Route` inside a `NavigationStack`, threading the same path binding through so detail
@@ -25,6 +26,8 @@ struct RouteDestination: View {
             SceneDetailView(scene: scene, path: $path)
         case .performer(let performer):
             PerformerDetailView(performer: performer, path: $path)
+        case .downloads:
+            DownloadsView()
         }
     }
 }

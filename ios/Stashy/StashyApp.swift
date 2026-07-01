@@ -8,6 +8,7 @@ struct StashyApp: App {
     @State private var imageCache = ImageCache()
     @State private var router = AppRouter()
     @State private var libraryEdits = LibraryEdits()
+    @State private var downloadManager = DownloadManager()
 
     var body: some Scene {
         WindowGroup {
@@ -16,6 +17,7 @@ struct StashyApp: App {
                 .environment(appState)
                 .environment(router)
                 .environment(libraryEdits)
+                .environment(downloadManager)
                 .environment(\.imageCache, imageCache)
                 .preferredColorScheme(themeManager.current.preferredColorScheme)
                 .tint(themeManager.current.accentColor)

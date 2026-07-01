@@ -6,6 +6,7 @@ struct SceneDetailView: View {
     @Environment(AppState.self) private var appState
     @Environment(ThemeManager.self) private var themeManager
     @Environment(LibraryEdits.self) private var edits
+    @Environment(DownloadManager.self) private var downloads
     @Environment(\.dismiss) private var dismiss
     @AppStorage("blurTitles") private var blurTitles = false
     @State private var isFullscreen = false
@@ -128,6 +129,10 @@ struct SceneDetailView: View {
                     .fixedSize()
 
                     PopupMenu(actions: [
+                        PopupMenuAction(title: "Download Video", systemImage: "arrow.down.circle") {
+                            downloads.start(scene: fullScene ?? scene, apiKey: apiKey)
+                            path.append(.downloads)
+                        },
                         PopupMenuAction(title: "Delete Scene", systemImage: "trash", isDestructive: true) {
                             confirmDelete = true
                         }
