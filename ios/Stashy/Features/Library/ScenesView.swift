@@ -12,6 +12,7 @@ struct ScenesView: View {
     @State private var path: [Route] = []
     @State private var previewPresenter = ScenePreviewPresenter()
     @State private var filterExpanded = false
+    @State private var reloadDebounce: Task<Void, Never>?
 
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
@@ -58,8 +59,14 @@ struct ScenesView: View {
         }
         .environment(\.scenePreviewPresenter, previewPresenter)
         .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: { path.append(.scene($0)) }) }
+        // Debounced so rapid filter changes coalesce into one reload instead of an overlapping storm.
         .onChange(of: query) { _, _ in
-            Task { await reload() }
+            reloadDebounce?.cancel()
+            reloadDebounce = Task {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled else { return }
+                await reload()
+            }
         }
         .onChange(of: query.sort) { _, s in UserDefaults.standard.set(s.rawValue, forKey: "sort.scenes.field") }
         .onChange(of: query.direction) { _, dir in UserDefaults.standard.set(dir.rawValue, forKey: "sort.scenes.dir") }
@@ -76,6 +83,7 @@ struct ScenesView: View {
             guard loader.items.isEmpty else { return }
             await reload()
         }
+        .onDisappear { reloadDebounce?.cancel() }
     }
 
     @ViewBuilder

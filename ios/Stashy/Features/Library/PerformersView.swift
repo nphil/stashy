@@ -9,6 +9,7 @@ struct PerformersView: View {
     @State private var query = PerformerQuery()
     @State private var filterExpanded = false
     @State private var path: [Route] = []
+    @State private var reloadDebounce: Task<Void, Never>?
 
     private let columns = [GridItem(.adaptive(minimum: 110), spacing: 12)]
 
@@ -55,8 +56,15 @@ struct PerformersView: View {
                     RouteDestination(route: route, path: $path)
                 }
         }
+        // Debounced: rapid filter changes (e.g. tapping the favorites toggle repeatedly) coalesce into
+        // one reload instead of firing an overlapping storm of loads under the open popover.
         .onChange(of: query) { _, _ in
-            Task { await reload() }
+            reloadDebounce?.cancel()
+            reloadDebounce = Task {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled else { return }
+                await reload()
+            }
         }
         .onChange(of: query.sort) { _, s in UserDefaults.standard.set(s.rawValue, forKey: "sort.performers.field") }
         .onChange(of: query.direction) { _, dir in UserDefaults.standard.set(dir.rawValue, forKey: "sort.performers.dir") }
@@ -64,6 +72,7 @@ struct PerformersView: View {
             guard loader.items.isEmpty else { return }
             await reload()
         }
+        .onDisappear { reloadDebounce?.cancel() }
         .libraryEditErrorToast(edits)
     }
 
