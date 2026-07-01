@@ -31,12 +31,14 @@ final class AVPlaybackEngine: PlaybackEngine {
     private var timeObserver: Any?
     private var statusObservation: NSKeyValueObservation?
     private var timeControlObservation: NSKeyValueObservation?
+    private var bufferObservation: NSKeyValueObservation?
     private var stallObserver: NSObjectProtocol?
     private var lastStatLog: CFTimeInterval = 0
 
     var onTime: ((TimeInterval, TimeInterval) -> Void)?
     var onReady: ((Bool) -> Void)?
-    var onPlaying: ((Bool) -> Void)?
+    var onState: ((PlaybackPhase) -> Void)?
+    var onLoadProgress: ((Double) -> Void)?
     var onPresentationSize: ((CGSize) -> Void)?
     var onFailed: ((String?) -> Void)?
     private var didFail = false
@@ -130,8 +132,20 @@ final class AVPlaybackEngine: PlaybackEngine {
             }
         }
         timeControlObservation = player.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] player, _ in
-            let playing = player.timeControlStatus == .playing
-            Task { @MainActor in self?.onPlaying?(playing) }
+            let phase: PlaybackPhase
+            switch player.timeControlStatus {
+            case .paused: phase = .paused
+            case .waitingToPlayAtSpecifiedRate: phase = .waiting
+            case .playing: phase = .playing
+            @unknown default: phase = .paused
+            }
+            Task { @MainActor in self?.onState?(phase) }
+        }
+
+        // Buffer fill drives the loading donut. loadedTimeRanges changes as data arrives (including while
+        // waiting to play, when the periodic time observer doesn't tick), so observe it directly.
+        bufferObservation = item.observe(\.loadedTimeRanges, options: [.initial, .new]) { [weak self] _, _ in
+            Task { @MainActor in self?.pushLoadProgress() }
         }
 
         player.play()
@@ -149,8 +163,22 @@ final class AVPlaybackEngine: PlaybackEngine {
         }
         statusObservation?.invalidate(); statusObservation = nil
         timeControlObservation?.invalidate(); timeControlObservation = nil
+        bufferObservation?.invalidate(); bufferObservation = nil
         if let stallObserver { NotificationCenter.default.removeObserver(stallObserver); self.stallObserver = nil }
         player.pause()
+    }
+
+    /// Compute the start-up buffer fill (0…1) and push it for the loading donut.
+    private func pushLoadProgress() {
+        if item.isPlaybackLikelyToKeepUp { onLoadProgress?(1); return }
+        let now = player.currentTime().seconds
+        let n = now.isFinite ? now : 0
+        let ahead = item.loadedTimeRanges.compactMap { value -> Double? in
+            let r = value.timeRangeValue
+            let s = r.start.seconds, e = (r.start + r.duration).seconds
+            return (n >= s - 0.5 && n <= e) ? e - n : nil
+        }.max() ?? 0
+        onLoadProgress?(min(1, max(0, ahead / 3.0)))   // ~3s buffered feels "ready to start"
     }
 
     func play() { player.play() }

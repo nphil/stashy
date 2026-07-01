@@ -12,6 +12,15 @@ final class ScenePlayerModel {
     var duration: TimeInterval = 0
     var isPlaying = false
     var isReady = false
+    /// True while the player is waiting on data (start-up or a rebuffer) — drives the loading donut
+    /// instead of a play/pause icon that flickers as the transport state toggles.
+    var isBuffering = false
+    /// Short, human label for the current load stage (e.g. "Connecting…", "Remuxing on device…").
+    var loadingStage = "Connecting…"
+    /// Start-up buffer fill (0…1) for the donut; nil = indeterminate (pre-buffer stages).
+    var loadingProgress: Double?
+    /// Show the loading donut until the first frame is up *and* the player isn't waiting on data.
+    var isLoading: Bool { !isReady || isBuffering }
     /// The actual decoded video aspect (w/h), once the player reports a presentation size. Drives
     /// layout/orientation when the server's file metadata is missing or wrong.
     var videoAspect: CGFloat?
@@ -25,6 +34,11 @@ final class ScenePlayerModel {
     /// Absolute time (seconds) the current local stream starts at. The linear remux is zero-based from a
     /// seek point, so the player's local time + this offset = the real scrub position. 0 until a far seek.
     @ObservationIgnored private var timeOffset: TimeInterval = 0
+    /// After a seek, hold the scrubber at the requested time until the player actually lands there — so
+    /// time ticks reporting the pre-seek position don't make the thumb pop back then forward.
+    @ObservationIgnored private var seekTarget: TimeInterval?
+    /// Safety cap on the seek-hold so a player that stalls just short of the target can't freeze the thumb.
+    @ObservationIgnored private var seekHoldUntil = Date.distantPast
     /// True while a local zero-based remux drives playback (so time is offset and duration stays the full
     /// metadata value). False for direct play / HLS (incl. after a fallback), where engine time is absolute.
     private var usesAbsoluteTime: Bool { route.engine == .localFFmpeg && !didFallback }
@@ -79,6 +93,7 @@ final class ScenePlayerModel {
         RemoteLog.shared.log("▶︎ start: \(route.streamType) · \(route.reason) · engine=\(route.engine)")
         switch route.engine {
         case .avPlayer:
+            loadingStage = route.streamType.localizedCaseInsensitiveContains("hls") ? "Transcoding on server…" : "Loading…"
             adopt(makeEngine(url: route.url), stream: nil)
         case .localFFmpeg:
             beginLocalFFmpeg()
@@ -87,6 +102,7 @@ final class ScenePlayerModel {
 
     private func beginLocalFFmpeg() {
         let key = route.url.path
+        loadingStage = "Reading video…"
         // Known-undecodable pixel format (cached): straight to HLS, skip opening the file entirely.
         if AppleDecodeCache.shared.decision(forKey: key) == true {
             buildFallback(reason: "HLS (Apple can't decode this pixel format)")
@@ -115,6 +131,7 @@ final class ScenePlayerModel {
     private func buildLinear() {
         guard !stopped else { return }
         do {
+            loadingStage = "Remuxing on device…"
             let stream = LocalRemuxStream(source: route.url, duration: route.duration)
             let url = try stream.start()
             activeStreamType = "On-device remux (linear)"
@@ -129,6 +146,7 @@ final class ScenePlayerModel {
     private func buildFallback(reason: String) {
         guard !stopped else { return }
         didFallback = true
+        loadingStage = "Transcoding on server…"
         activeStreamType = reason
         adopt(makeEngine(url: route.fallbackURL ?? route.url), stream: nil)
     }
@@ -158,21 +176,33 @@ final class ScenePlayerModel {
         let engine: PlaybackEngine = AVPlaybackEngine(url: url)
         engine.onTime = { [weak self] current, duration in
             guard let self else { return }
-            // Local zero-based remux: report absolute time (offset + local) and keep the full metadata
-            // duration. Direct/HLS: engine time is already absolute and its duration is authoritative.
-            self.currentTime = self.usesAbsoluteTime ? self.timeOffset + current : current
+            let absolute = self.usesAbsoluteTime ? self.timeOffset + current : current
             self.localStream?.updatePlayhead(current)   // lets the remux pace production to the playhead
             if current > 0 { self.watchdog?.cancel() }   // real frames are flowing — disarm the stall watchdog
             if !self.usesAbsoluteTime, duration > 0, self.duration != duration { self.duration = duration }
             if !self.isReady { self.isReady = true }
+            // Hold the scrubber at a just-issued seek target until the player reaches it (no pop-back).
+            // Tolerance exceeds AVPlayer's ±1s seek tolerance; the deadline guards a stall short of target.
+            if let target = self.seekTarget {
+                if abs(absolute - target) < 1.5 || Date() > self.seekHoldUntil { self.seekTarget = nil }
+                else { return }
+            }
+            self.currentTime = absolute
         }
         engine.onReady = { [weak self] ready in
             guard let self, self.isReady != ready else { return }
             self.isReady = ready
         }
-        engine.onPlaying = { [weak self] playing in
-            guard let self, self.isPlaying != playing else { return }
-            self.isPlaying = playing
+        engine.onState = { [weak self] phase in
+            guard let self else { return }
+            let playing = phase == .playing
+            if self.isPlaying != playing { self.isPlaying = playing }
+            let buffering = phase == .waiting
+            if self.isBuffering != buffering { self.isBuffering = buffering }
+        }
+        engine.onLoadProgress = { [weak self] progress in
+            guard let self else { return }
+            if self.loadingProgress != progress { self.loadingProgress = progress }
         }
         engine.onPresentationSize = { [weak self] size in
             guard let self, size.width > 0, size.height > 0 else { return }
@@ -212,6 +242,9 @@ final class ScenePlayerModel {
         localStream = nil
         timeOffset = 0            // the Stash HLS fallback is the full video from 0 (absolute time)
         isReady = false
+        loadingStage = "Transcoding on server…"
+        loadingProgress = nil
+        seekTarget = nil
         videoAspect = nil
         currentTime = 0
         engine = makeEngine(url: fallback)
@@ -230,6 +263,7 @@ final class ScenePlayerModel {
         localStream?.stop()
         localStream = nil
         timeOffset = 0
+        seekTarget = nil
     }
 
     func play() { engine?.play() }
@@ -238,8 +272,10 @@ final class ScenePlayerModel {
 
     func seek(to time: TimeInterval) {
         let clamped = max(0, min(time, duration > 0 ? duration : time))
+        currentTime = clamped
+        seekTarget = clamped                    // hold the scrubber here until the player lands (no pop-back)
+        seekHoldUntil = Date().addingTimeInterval(4)
         guard usesAbsoluteTime else {           // direct play / HLS — engine time is absolute
-            currentTime = clamped
             engine?.seek(to: clamped)
             return
         }
@@ -253,7 +289,6 @@ final class ScenePlayerModel {
         let inStream = local >= 0 && local <= seekEnd + 1.0
         RemoteLog.shared.log("seek →\(Int(clamped))s local=\(Int(local)) seekEnd=\(Int(seekEnd)) \(inStream ? "in-stream" : "REINIT")")
         if inStream {
-            currentTime = clamped
             engine?.seek(to: local)
         } else {
             reinitLocal(at: clamped)
@@ -272,6 +307,8 @@ final class ScenePlayerModel {
         timeOffset = time
         currentTime = time
         isReady = false
+        loadingStage = "Seeking…"
+        loadingProgress = nil
         videoAspect = nil
         do {
             let stream = LocalRemuxStream(source: route.url, duration: route.duration, startTime: time)
@@ -450,11 +487,11 @@ struct ScenePlayerView: View {
                 )
                 .frame(width: surfaceSize.width, height: surfaceSize.height)
 
-                if !model.isReady {
-                    ProgressView()
-                        .controlSize(.large)
-                        .tint(.white)
+                if model.isLoading {
+                    VideoLoadingIndicator(progress: model.loadingProgress, message: model.loadingStage)
                         .frame(width: avail.width, height: avail.height)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
                 }
 
                 PlayerControlsView(
@@ -467,7 +504,7 @@ struct ScenePlayerView: View {
                     scrubTime: $scrubTime,
                     videoRect: videoRect,
                     safeArea: safe,
-                    spritePreviewTopLeading: isFullscreen && isPortraitVideo,
+                    spritePreviewTopLeading: false,   // always anchor the scrub preview above the bar
                     scheduleHide: { scheduleHide() },
                     onBack: onBack
                 )

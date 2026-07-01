@@ -32,9 +32,10 @@ struct PlayerControlsView: View {
                     .ignoresSafeArea()
 
                 if showControls {
-                    // Play/pause centred on the actual video rect (only once ready — during buffering
-                    // just the spinner shows, never a play button).
-                    if model.isReady {
+                    // Play/pause centred on the actual video rect. Hidden while loading/buffering — the
+                    // loading donut shows there instead (so the icon never flickers play↔pause on a
+                    // stuttery start).
+                    if model.isReady, !model.isLoading {
                         Button { model.togglePlayPause(); scheduleHide() } label: {
                             Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
                                 .font(.system(size: 34, weight: .bold))
@@ -135,6 +136,37 @@ struct PlayerControlsView: View {
         let total = Int(t)
         let h = total / 3600, m = total % 3600 / 60, s = total % 60
         return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
+    }
+}
+
+/// Loading indicator shown over the video while it's buffering: a gently-spinning ring whose fill arc
+/// tracks the start-up buffer (`progress`, nil = indeterminate), with a short, light caption naming the
+/// current stage (connecting / reading / remuxing / transcoding / buffering) so the wait has feedback and
+/// the slow part is obvious.
+struct VideoLoadingIndicator: View {
+    var progress: Double?
+    var message: String
+    @State private var spin = false
+
+    var body: some View {
+        VStack(spacing: 14) {
+            ZStack {
+                Circle().stroke(.white.opacity(0.16), lineWidth: 4)
+                Circle()
+                    .trim(from: 0, to: CGFloat(progress.map { max(0.05, min(1.0, $0)) } ?? 0.25))
+                    .stroke(.white.opacity(0.9), style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                    .animation(.easeInOut(duration: 0.3), value: progress)
+            }
+            .frame(width: 48, height: 48)
+            .rotationEffect(.degrees(spin ? 360 : 0))
+            .animation(.linear(duration: 1.4).repeatForever(autoreverses: false), value: spin)
+
+            Text(message)
+                .font(.system(size: 12, weight: .regular))
+                .foregroundStyle(.white.opacity(0.55))
+                .shadow(color: .black.opacity(0.5), radius: 3)
+        }
+        .onAppear { spin = true }
     }
 }
 
