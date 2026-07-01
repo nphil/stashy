@@ -19,6 +19,16 @@ actor ImageCache {
     private let session: URLSession
     /// Soft cap for the on-disk thumbnail store; LRU-evicted past this.
     private let maxBytes = 200 * 1024 * 1024
+    /// Running total of on-disk bytes, tracked incrementally so a write doesn't re-scan the whole
+    /// directory each time (that scan on every cached thumbnail added up during fast scrolling).
+    private var diskBytes = 0
+    private var diskBytesReady = false
+
+    private func ensureDiskBytesLoaded() {
+        guard !diskBytesReady else { return }
+        diskBytes = totalSize()   // one full scan on first use, then kept up to date incrementally
+        diskBytesReady = true
+    }
 
     init() {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -49,9 +59,12 @@ actor ImageCache {
             throw ImageCacheError.invalidData
         }
         if let jpeg = image.jpegData(compressionQuality: 0.7) {
-            try? jpeg.write(to: file, options: .atomic)
+            if (try? jpeg.write(to: file, options: .atomic)) != nil {
+                ensureDiskBytesLoaded()
+                diskBytes += jpeg.count
+                enforceLimit()
+            }
             memoryCache.setObject(image, forKey: nsKey, cost: jpeg.count)
-            enforceLimit()
         } else {
             memoryCache.setObject(image, forKey: nsKey)
         }
@@ -74,9 +87,12 @@ actor ImageCache {
 
         let (data, _) = try await session.data(from: url)
         guard let image = UIImage(data: data) else { throw ImageCacheError.invalidData }
-        try? data.write(to: file, options: .atomic)
+        if (try? data.write(to: file, options: .atomic)) != nil {
+            ensureDiskBytesLoaded()
+            diskBytes += data.count
+            enforceLimit()
+        }
         memoryCache.setObject(image, forKey: nsKey, cost: data.count)
-        enforceLimit()
         return image
     }
 
@@ -93,13 +109,15 @@ actor ImageCache {
     }
 
     /// Bytes used by the on-disk thumbnail store.
-    func diskUsage() -> Int { totalSize() }
+    func diskUsage() -> Int { ensureDiskBytesLoaded(); return diskBytes }
 
     func clear() {
         memoryCache.removeAllObjects()
         if let urls = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
             for url in urls { try? FileManager.default.removeItem(at: url) }
         }
+        diskBytes = 0
+        diskBytesReady = true
     }
 
     // MARK: - Helpers
@@ -116,6 +134,8 @@ actor ImageCache {
     }
 
     private func enforceLimit() {
+        ensureDiskBytesLoaded()
+        guard diskBytes > maxBytes else { return }   // fast path: no directory scan when under the cap
         let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey]
         guard let urls = try? FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: keys
@@ -124,12 +144,10 @@ actor ImageCache {
             guard let v = try? url.resourceValues(forKeys: Set(keys)) else { return nil }
             return (url, v.fileSize ?? 0, v.contentModificationDate ?? .distantPast)
         }
-        var total = entries.reduce(0) { $0 + $1.size }
-        guard total > maxBytes else { return }
         entries.sort { $0.date < $1.date } // oldest first
-        for entry in entries where total > maxBytes {
+        for entry in entries where diskBytes > maxBytes {
             try? FileManager.default.removeItem(at: entry.url)
-            total -= entry.size
+            diskBytes -= entry.size
         }
     }
 

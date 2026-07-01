@@ -3,8 +3,13 @@
 **Mandate:** optimize performance, fix bugs, and remove spaghetti/leftover code from the long
 playback-debugging session — *before* adding new features.
 
-This is a review-first plan. Nothing here has been executed yet. Items are ordered so the safest,
-highest-leverage work comes first. Each item notes **why**, **files**, **risk**, and **impact**.
+Items are ordered so the safest, highest-leverage work comes first. Each item notes **why**, **files**,
+**risk**, and **impact**.
+
+**Status (2026-07-01):** ✅ §1 (dead code) · §2.1 (remux pacing) · §2.2 (temp sweep) · §3.2 (ImageCache
+counter) · §4.1–4.4 (correctness) · §6.1 (split ScenePlayerModel) · LoopbackServer `dataHandler` removed.
+⏸ §2.3 (reinit debounce — deferred, latency tradeoff) · §5 (telemetry removal — kept until wider release).
+🔲 Remaining: §3.1 (slim list query — has a UX tradeoff) · §3.3 (blur, optional) · §6.2 (RangeReader, optional).
 
 ---
 

@@ -20,17 +20,12 @@ final class LoopbackServer: @unchecked Sendable {
     private let isComplete: @Sendable () -> Bool
     /// Current HLS media playlist, or nil until enough has been produced. Absent → plain file server.
     private let playlist: (@Sendable () -> String?)?
-    /// Full-body handler for the on-demand segmented-HLS path: maps a request path (`/index.m3u8`,
-    /// `/init.mp4`, `/seg/N.m4s`) to `(contentType, body)`. When set it serves *every* request (no file
-    /// or byte-range serving); the body is produced on demand (a segment remux) and may block briefly.
-    private let dataHandler: (@Sendable (_ path: String) -> (String, Data)?)?
 
     init(fileURL: URL,
          contentType: String = "video/mp4",
          availableBytes: (@Sendable () -> Int64)? = nil,
          isComplete: (@Sendable () -> Bool)? = nil,
-         playlist: (@Sendable () -> String?)? = nil,
-         dataHandler: (@Sendable (_ path: String) -> (String, Data)?)? = nil) {
+         playlist: (@Sendable () -> String?)? = nil) {
         self.fileURL = fileURL
         self.contentType = contentType
         let onDiskSize: @Sendable () -> Int64 = {
@@ -39,7 +34,6 @@ final class LoopbackServer: @unchecked Sendable {
         self.availableBytes = availableBytes ?? onDiskSize
         self.isComplete = isComplete ?? { true }
         self.playlist = playlist
-        self.dataHandler = dataHandler
     }
 
     /// Start listening; returns the URL AVPlayer should open — the playlist in HLS mode, else the file.
@@ -62,7 +56,7 @@ final class LoopbackServer: @unchecked Sendable {
             throw NSError(domain: "LoopbackServer", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "no port assigned"])
         }
-        let path = (playlist != nil || dataHandler != nil) ? "/index.m3u8" : "/media"
+        let path = playlist != nil ? "/index.m3u8" : "/media"
         return URL(string: "http://127.0.0.1:\(port)\(path)")!
     }
 
@@ -105,48 +99,10 @@ final class LoopbackServer: @unchecked Sendable {
         let method = parts.first.map { String($0).uppercased() } ?? "GET"
         let path = parts.count > 1 ? String(parts[1]) : "/"
 
-        if let dataHandler {
-            serveData(box, method: method, path: path, handler: dataHandler)
-        } else if let playlist, path.hasSuffix(".m3u8") {
+        if let playlist, path.hasSuffix(".m3u8") {
             servePlaylist(box, method: method, playlist: playlist)
         } else {
             serveMedia(box, method: method, rangeHeader: lines.first { $0.lowercased().hasPrefix("range:") })
-        }
-    }
-
-    // MARK: - Segmented HLS (full-body, on-demand)
-
-    /// Serial queue for the (blocking, ~1 s) on-demand segment production. Dispatching here frees the
-    /// listener's concurrent queue immediately so a burst of AVPlayer prefetch requests can't spawn a
-    /// thread per blocked connection (which slowed to a crawl and then crashed), and bounds production —
-    /// and the large segment Data it holds — to one at a time.
-    private let produceQueue = DispatchQueue(label: "stashy.loopback.produce")
-
-    private func serveData(_ box: Conn, method: String, path: String,
-                           handler: @escaping @Sendable (_ path: String) -> (String, Data)?) {
-        produceQueue.async { [weak self] in
-            guard let self else { box.c.cancel(); return }
-            // Strip any query string; AVPlayer may append one when resolving relative segment URLs.
-            let clean = String(path.split(separator: "?").first ?? Substring(path))
-            guard let (contentType, body) = handler(clean) else {
-                self.note("→404 \(clean)")
-                self.send(box, Data("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8))
-                return
-            }
-            self.note("\(clean) →200 \(body.count)B")
-            var head = "HTTP/1.1 200 OK\r\n"
-            head += "Content-Type: \(contentType)\r\n"
-            head += "Content-Length: \(body.count)\r\n"
-            head += "Cache-Control: no-cache\r\n"
-            head += "Connection: close\r\n\r\n"
-            // Send the header and body as two parts (no concatenation) so a multi-MB 4K segment isn't
-            // copied into a second buffer just to ship it.
-            let payload = method == "HEAD" ? Data() : body
-            box.c.send(content: Data(head.utf8), completion: .contentProcessed { error in
-                guard error == nil else { box.c.cancel(); return }
-                box.c.send(content: payload, contentContext: .finalMessage, isComplete: true,
-                           completion: .contentProcessed { _ in box.c.cancel() })
-            })
         }
     }
 
