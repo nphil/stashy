@@ -127,6 +127,25 @@ final class LibraryEdits {
         }
     }
 
+    /// Delete a performer *and* all their scenes (files included when `deleteFiles`). Hides everything
+    /// optimistically; on any server failure it restores and surfaces an error.
+    func deletePerformer(id: String, alsoScenes sceneIDs: [String], deleteFiles: Bool, client: StashClient?) async -> Bool {
+        deletedPerformers.insert(id)
+        for sid in sceneIDs { deletedScenes.insert(sid) }
+        guard let client else { return false }
+        do {
+            _ = try await client.deleteScenes(ids: sceneIDs, deleteFile: deleteFiles)
+            let ok = try await client.deletePerformer(id: id)
+            if !ok { throw StashError.noData }
+            return true
+        } catch {
+            deletedPerformers.remove(id)
+            for sid in sceneIDs { deletedScenes.remove(sid) }
+            lastError = "Couldn't delete performer & scenes"
+            return false
+        }
+    }
+
     /// Restore a rating dictionary entry after a failed save (explicit-nil aware).
     private func restore(_ dict: inout [String: Int?], id: String, previous: Int??) {
         if let previous { dict.updateValue(previous, forKey: id) } else { dict.removeValue(forKey: id) }

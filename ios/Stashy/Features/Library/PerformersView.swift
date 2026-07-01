@@ -12,6 +12,15 @@ struct PerformersView: View {
 
     private let columns = [GridItem(.adaptive(minimum: 110), spacing: 12)]
 
+    // Sort persists across launches; filters (search/ethnicity/tags/favorites) always start cleared.
+    init() {
+        var q = PerformerQuery()
+        let d = UserDefaults.standard
+        if let raw = d.string(forKey: "sort.performers.field"), let s = PerformerSort(rawValue: raw) { q.sort = s }
+        if let raw = d.string(forKey: "sort.performers.dir"), let dir = SortDirection(rawValue: raw) { q.direction = dir }
+        _query = State(initialValue: q)
+    }
+
     private var filterActive: Bool {
         !query.search.isEmpty || query.ethnicity != nil
             || !query.tags.isEmpty || query.favoritesOnly
@@ -55,6 +64,8 @@ struct PerformersView: View {
         .onChange(of: query) { _, _ in
             Task { await reload() }
         }
+        .onChange(of: query.sort) { _, s in UserDefaults.standard.set(s.rawValue, forKey: "sort.performers.field") }
+        .onChange(of: query.direction) { _, dir in UserDefaults.standard.set(dir.rawValue, forKey: "sort.performers.dir") }
         .task {
             guard loader.items.isEmpty else { return }
             await reload()

@@ -77,14 +77,19 @@ struct SceneDetailView: View {
             isPresented: $confirmDelete,
             titleVisibility: .visible
         ) {
-            Button("Remove from Stash", role: .destructive) {
+            Button("Delete Scene & File", role: .destructive) {
                 Task {
-                    if await edits.deleteScene(id: scene.id, client: appState.client) { dismiss() }
+                    if await edits.deleteScene(id: scene.id, deleteFile: true, client: appState.client) { dismiss() }
+                }
+            }
+            Button("Remove from Stash Only", role: .destructive) {
+                Task {
+                    if await edits.deleteScene(id: scene.id, deleteFile: false, client: appState.client) { dismiss() }
                 }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Removes the scene and its generated previews from Stash. The source video file is left in place.")
+            Text("“Delete Scene & File” permanently deletes the video file from disk — this can't be undone. “Remove from Stash Only” keeps the file and just removes the scene from your library.")
         }
     }
 

@@ -287,6 +287,16 @@ struct StashClient: Sendable {
         return response.sceneDestroy ?? false
     }
 
+    /// Remove several scenes at once (used when cascading a performer delete to their scenes).
+    @discardableResult
+    func deleteScenes(ids: [String], deleteFile: Bool) async throws -> Bool {
+        guard !ids.isEmpty else { return true }
+        let gql = "mutation ScenesDestroy($input: ScenesDestroyInput!) { scenesDestroy(input: $input) }"
+        let response: ScenesDestroyResponse = try await query(
+            gql, variables: ScenesDestroyVariables(input: ScenesDestroyInput(ids: ids, delete_file: deleteFile, delete_generated: true)))
+        return response.scenesDestroy ?? false
+    }
+
     /// Remove a performer from Stash (does not touch scene files).
     @discardableResult
     func deletePerformer(id: String) async throws -> Bool {
@@ -294,6 +304,28 @@ struct StashClient: Sendable {
         let response: PerformerDestroyResponse = try await query(
             gql, variables: PerformerDestroyVariables(input: PerformerDestroyInput(id: id)))
         return response.performerDestroy ?? false
+    }
+
+    /// Every scene id featuring a performer (paginated, minimal `{ id }` selection) — for cascade delete.
+    func sceneIDs(performerID: String) async throws -> [String] {
+        let gql = """
+        query FindSceneIDs($filter: FindFilterType, $scene_filter: SceneFilterType) {
+          findScenes(filter: $filter, scene_filter: $scene_filter) { count scenes { id } }
+        }
+        """
+        let filter = SceneFilter(performers: MultiCriterion(value: [performerID], modifier: "INCLUDES"))
+        var ids: [String] = []
+        var page = 1
+        let perPage = 200
+        while true {
+            let vars = FindScenesVariables(
+                filter: FindFilter(page: page, per_page: perPage), scene_filter: filter)
+            let response: FindSceneIDsResponse = try await query(gql, variables: vars)
+            ids.append(contentsOf: response.findScenes.scenes.map(\.id))
+            if ids.count >= response.findScenes.count || response.findScenes.scenes.isEmpty { break }
+            page += 1
+        }
+        return ids
     }
 }
 
@@ -463,9 +495,18 @@ private struct FavoriteResult: Decodable, Sendable { let id: String; let favorit
 private struct SceneDestroyInput: Encodable, Sendable { let id: String; let delete_file: Bool; let delete_generated: Bool }
 private struct SceneDestroyVariables: Encodable, Sendable { let input: SceneDestroyInput }
 private struct SceneDestroyResponse: Decodable, Sendable { let sceneDestroy: Bool? }
+private struct ScenesDestroyInput: Encodable, Sendable { let ids: [String]; let delete_file: Bool; let delete_generated: Bool }
+private struct ScenesDestroyVariables: Encodable, Sendable { let input: ScenesDestroyInput }
+private struct ScenesDestroyResponse: Decodable, Sendable { let scenesDestroy: Bool? }
 private struct PerformerDestroyInput: Encodable, Sendable { let id: String }
 private struct PerformerDestroyVariables: Encodable, Sendable { let input: PerformerDestroyInput }
 private struct PerformerDestroyResponse: Decodable, Sendable { let performerDestroy: Bool? }
+
+private struct FindSceneIDsResponse: Decodable, Sendable {
+    let findScenes: SceneIDsResult
+    struct SceneIDsResult: Decodable, Sendable { let count: Int; let scenes: [IDOnly] }
+    struct IDOnly: Decodable, Sendable { let id: String }
+}
 
 private struct SceneUpdateResponse: Decodable, Sendable { let sceneUpdate: RatingResult? }
 private struct PerformerUpdateResponse: Decodable, Sendable { let performerUpdate: PerformerUpdateResult? }

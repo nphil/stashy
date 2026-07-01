@@ -99,14 +99,23 @@ struct PerformerDetailView: View {
             isPresented: $confirmDelete,
             titleVisibility: .visible
         ) {
-            Button("Remove from Stash", role: .destructive) {
+            Button("Delete Performer Only", role: .destructive) {
                 Task {
                     if await edits.deletePerformer(id: performer.id, client: appState.client) { dismiss() }
                 }
             }
+            Button("Delete Performer & All Their Scenes", role: .destructive) {
+                Task {
+                    guard let client = appState.client else { return }
+                    let ids = (try? await client.sceneIDs(performerID: performer.id)) ?? []
+                    if await edits.deletePerformer(id: performer.id, alsoScenes: ids, deleteFiles: true, client: client) {
+                        dismiss()
+                    }
+                }
+            }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Removes \(performer.name) from Stash. Scene files are not affected.")
+            Text("“Delete Performer Only” removes just \(performer.name); their scenes stay. “Delete Performer & All Their Scenes” also permanently deletes every scene featuring them, including the video files on disk — this can't be undone.")
         }
     }
 

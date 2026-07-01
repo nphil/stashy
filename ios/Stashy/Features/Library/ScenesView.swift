@@ -15,6 +15,15 @@ struct ScenesView: View {
 
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
+    // Sort (field + direction) persists across launches; filters (tags) always start cleared.
+    init() {
+        var q = SceneQuery()
+        let d = UserDefaults.standard
+        if let raw = d.string(forKey: "sort.scenes.field"), let s = SceneSort(rawValue: raw) { q.sort = s }
+        if let raw = d.string(forKey: "sort.scenes.dir"), let dir = SortDirection(rawValue: raw) { q.direction = dir }
+        _query = State(initialValue: q)
+    }
+
     private var filterActive: Bool {
         !query.tags.isEmpty || query.sort != .date || query.direction != .desc
     }
@@ -59,6 +68,8 @@ struct ScenesView: View {
         .onChange(of: query) { _, _ in
             Task { await reload() }
         }
+        .onChange(of: query.sort) { _, s in UserDefaults.standard.set(s.rawValue, forKey: "sort.scenes.field") }
+        .onChange(of: query.direction) { _, dir in UserDefaults.standard.set(dir.rawValue, forKey: "sort.scenes.dir") }
         // A tag tapped elsewhere filters scenes to just that tag (pops to the grid).
         .onChange(of: router.sceneTagFilter) { _, tag in
             guard let tag else { return }

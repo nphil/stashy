@@ -206,8 +206,8 @@ viewing — with a clean handoff (no duplicated video mirrored on the phone scre
 - **Filter by favorites.** (Performers done — favorites-only toggle.)
 - **Filter performers by country** — a country picker in the performer filter panel (Stash
   `PerformerFilterType.country` is a `StringCriterionInput`), mirroring the existing ethnicity filter.
-- **Persist sort across launches (not filters).** Remember the chosen sort field + direction for scenes
-  and performers between app starts; filters (tags, favorites, ethnicity/country) still reset each launch.
+- **Persist sort across launches (not filters).** ✅ Done — scene/performer sort field + direction are
+  remembered between app starts (UserDefaults); filters (tags, favorites, ethnicity/country) still reset.
 
 ## Stash feature parity
 
