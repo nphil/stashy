@@ -299,7 +299,9 @@ final class FFmpegRemuxer: @unchecked Sendable {
                 let q = tb.den > 0 ? Double(tb.num) / Double(tb.den) : 0
                 let raw = pkt!.pointee.dts != avNoPTS ? pkt!.pointee.dts : pkt!.pointee.pts
                 if tsShiftSeconds < 0, raw != avNoPTS { tsShiftSeconds = Double(raw) * q }
-                let shift = q > 0 ? Int64(tsShiftSeconds / q) : 0
+                // Until a valid reference timestamp is seen, don't shift (a negative shift would push
+                // timestamps forward instead of zero-basing them).
+                let shift = (tsShiftSeconds >= 0 && q > 0) ? Int64(tsShiftSeconds / q) : 0
                 if pkt!.pointee.pts != avNoPTS { pkt!.pointee.pts -= shift }
                 if pkt!.pointee.dts != avNoPTS { pkt!.pointee.dts -= shift }
                 // Drop any pre-roll packet that lands before the seek point (negative after shifting).

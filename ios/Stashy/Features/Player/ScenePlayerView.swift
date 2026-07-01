@@ -95,6 +95,9 @@ final class ScenePlayerModel {
         case .avPlayer:
             loadingStage = route.streamType.localizedCaseInsensitiveContains("hls") ? "Transcoding on server…" : "Loading…"
             adopt(makeEngine(url: route.url), stream: nil)
+            // AV1 direct play carries an HLS fallback (its pixel format isn't pre-probed like the remux
+            // path). If a 4:2:2/4:4:4/12-bit AV1 renders no frames, fall back rather than sit on black.
+            if engine != nil, route.fallbackURL != nil { armWatchdog() }
         case .localFFmpeg:
             beginLocalFFmpeg()
         }
@@ -271,7 +274,10 @@ final class ScenePlayerModel {
     func togglePlayPause() { isPlaying ? pause() : play() }
 
     func seek(to time: TimeInterval) {
-        let clamped = max(0, min(time, duration > 0 ? duration : time))
+        // Never seek to the literal end — AVPlayer then waits for a forward buffer that can't exist past
+        // EOF and hangs on "waiting to minimize stalls". Land a hair before the end instead.
+        let ceiling = duration > 0 ? max(0, duration - 0.3) : time
+        let clamped = max(0, min(time, ceiling))
         currentTime = clamped
         seekTarget = clamped                    // hold the scrubber here until the player lands (no pop-back)
         seekHoldUntil = Date().addingTimeInterval(4)

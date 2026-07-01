@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import AVFoundation
 
 /// App delegate whose only job is to report the currently-allowed interface orientations. The whole
 /// app is portrait by default; only fullscreen video temporarily allows landscape.
@@ -12,6 +13,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     ) -> Bool {
         if RemoteLog.isLoggingEnabled { RemoteLog.shared.enable() }   // off by default; toggle in Stats
         LocalRemuxStream.sweepStaleTempFiles()   // clear remux temps left by a prior crash/force-quit
+        // Configure the audio category once (constant for the app) — the player just activates it on play.
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         return true
     }
 

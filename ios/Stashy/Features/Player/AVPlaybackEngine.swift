@@ -48,8 +48,9 @@ final class AVPlaybackEngine: PlaybackEngine {
     var liveBlurView: UIView? { blurBackdrop }
 
     init(url: URL) {
-        // Route audio through the playback category so sound isn't muted by the ringer switch.
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+        // The playback category is set once at launch (AppDelegate); just claim the session so sound
+        // plays through the ringer switch. Activating an already-active session is a cheap no-op, so a
+        // reinit creating a new engine no longer re-configures the whole category each time.
         try? AVAudioSession.sharedInstance().setActive(true)
 
         // Inject the Stash apikey as an HTTP header so HLS segment requests — which can drop the query
