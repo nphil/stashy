@@ -1,5 +1,13 @@
 # Downloads & on-device transcode — design & milestones (2026-07-01)
 
+> ⚠️ **Corrections (learned after this doc was written — see `docs/ENGINEERING_NOTES.md` §3–§4):**
+> 1. The claim below that 8 parallel range tasks work in a background session is **WRONG** — that
+>    exact design shipped the -3000 (`NSURLErrorCannotCreateFile`) regression (`ef9e591`, reverted
+>    `22f6740`). The shipped design is a dual-engine handoff: foreground 8-way parallel ⇄ background
+>    single-connection.
+> 2. M3 shipped using **AVAssetReader/AVAssetWriter (VideoToolbox), not FFmpeg** (v1.0.105–106).
+> M1 and M3 have shipped; M2 shipped as the single-connection handoff (Live Activity still open).
+
 Goal: download Stash videos to the device (fast, resilient, resumable), manage them on a clean
 Downloader screen, and optionally transcode them for iPhone-native playback. Reachable from the scene
 3-dot menu ("Download Video") and from Settings.

@@ -1,5 +1,12 @@
 # Stashy — Outstanding / To-Improve (snapshot 2026-07-01, v1.0.101)
 
+> **Shipped since this snapshot (as of v1.0.107):** M3 on-device transcode (AVFoundation, presets,
+> card UI — v1.0.105–106); background continuation via single-connection handoff (v1.0.107 — the
+> full "move the engine to a background session" M2 approach is now known to be infeasible, see
+> `docs/ENGINEERING_NOTES.md` §3); network-loss recovery ("Waiting for network…" + bounded
+> auto-retry). Still open from those areas: Live Activity / Dynamic Island, AV1 encode, download
+> source choice, re-download at different quality.
+
 A consolidated punch list pulled from the session history, cross-referenced against `ROADMAP.md` and
 `DOWNLOADS_PLAN_2026-07-01.md`. Grouped by area; each item is **not yet done** unless marked. Shipped
 items from this session are listed at the bottom for context.
