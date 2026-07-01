@@ -1,51 +1,5 @@
 import SwiftUI
 
-@Observable
-@MainActor
-final class PerformerScenesViewModel {
-    var scenes: [StashScene] = []
-    var query = SceneQuery()
-    var isLoading = false
-    var errorMessage: String?
-    private var hasMore = true
-    private var currentPage = 1
-    let pageSize = 24
-
-    func loadFirstPage(client: StashClient) async {
-        guard !isLoading else { return }
-        isLoading = true
-        errorMessage = nil
-        currentPage = 1
-        scenes = []
-        hasMore = true
-        await fetchPage(client: client)
-        isLoading = false
-    }
-
-    func loadNextPageIfNeeded(triggerID: String, client: StashClient) async {
-        guard hasMore, !isLoading,
-              scenes.suffix(pageSize / 2).contains(where: { $0.id == triggerID })
-        else { return }
-        isLoading = true
-        currentPage += 1
-        await fetchPage(client: client)
-        isLoading = false
-    }
-
-    private func fetchPage(client: StashClient) async {
-        do {
-            let result = try await client.findScenes(query, page: currentPage, perPage: pageSize)
-            let existing = Set(scenes.map(\.id))
-            let newScenes = result.scenes.filter { !existing.contains($0.id) }
-            scenes.append(contentsOf: newScenes)
-            hasMore = scenes.count < result.count && !newScenes.isEmpty
-        } catch {
-            if currentPage > 1 { currentPage -= 1 }
-            errorMessage = error.localizedDescription
-        }
-    }
-}
-
 struct PerformerDetailView: View {
     let performer: Performer
     @Binding var path: [Route]
@@ -53,7 +7,8 @@ struct PerformerDetailView: View {
     @Environment(ThemeManager.self) private var themeManager
     @Environment(LibraryEdits.self) private var edits
     @Environment(\.imageCache) private var imageCache
-    @State private var viewModel = PerformerScenesViewModel()
+    @State private var loader = PaginatedLoader<StashScene>(pageSize: 24)
+    @State private var query = SceneQuery()
     @State private var portrait: UIImage?
     @State private var previewPresenter = ScenePreviewPresenter()
     @State private var showImageViewer = false
@@ -63,6 +18,16 @@ struct PerformerDetailView: View {
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
     private var apiKey: String { appState.client?.apiKey ?? "" }
+
+    /// Reload this performer's scenes for the current filter.
+    private func reload() async {
+        guard let client = appState.client else { return }
+        let q = query
+        await loader.reload { page, perPage in
+            let result = try await client.findScenes(q, page: page, perPage: perPage)
+            return (result.scenes, result.count)
+        }
+    }
 
     var body: some View {
         ScrollView {
@@ -74,28 +39,22 @@ struct PerformerDetailView: View {
                     .foregroundStyle(themeManager.current.foregroundColor)
                     .padding(.horizontal, 12)
 
-                SceneFilterBar(query: $viewModel.query)
+                SceneFilterBar(query: $query)
 
-                if !viewModel.scenes.isEmpty {
+                if !loader.items.isEmpty {
                     LazyVGrid(columns: columns, spacing: 10) {
-                        ForEach(viewModel.scenes) { scene in
+                        ForEach(loader.items) { scene in
                             SceneGridCell(
                                 scene: scene,
                                 apiKey: apiKey,
                                 onOpen: { path.openScene($0) }
                             ) {
-                                guard let client = appState.client else { return }
-                                Task {
-                                    await viewModel.loadNextPageIfNeeded(
-                                        triggerID: scene.id,
-                                        client: client
-                                    )
-                                }
+                                Task { await loader.loadNextIfNeeded(triggerID: scene.id) }
                             }
                         }
                     }
                     .padding(.horizontal, 12)
-                } else if viewModel.isLoading {
+                } else if loader.isLoading {
                     ProgressView().frame(maxWidth: .infinity).padding()
                 } else {
                     Text("No scenes match these filters.")
@@ -105,7 +64,7 @@ struct PerformerDetailView: View {
                         .padding()
                 }
 
-                if viewModel.isLoading && !viewModel.scenes.isEmpty {
+                if loader.isLoading && !loader.items.isEmpty {
                     ProgressView().frame(maxWidth: .infinity).padding()
                 }
             }
@@ -122,12 +81,11 @@ struct PerformerDetailView: View {
             }
         }
         .task {
-            guard viewModel.query.performerID == nil else { return }
-            viewModel.query.performerID = performer.id // triggers the initial load via onChange
+            guard query.performerID == nil else { return }
+            query.performerID = performer.id // triggers the initial load via onChange
         }
-        .onChange(of: viewModel.query) { _, _ in
-            guard let client = appState.client else { return }
-            Task { await viewModel.loadFirstPage(client: client) }
+        .onChange(of: query) { _, _ in
+            Task { await reload() }
         }
         .task(id: performer.id) {
             guard let url = performer.imageURL(apiKey: apiKey) else { return }

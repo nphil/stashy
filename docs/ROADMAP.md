@@ -76,6 +76,41 @@ This is the immediate next lever for responsive scrubbing.
   videos (fixed tile count ÷ duration); on-device extraction is exact but has decode latency, so layer
   it as a refinement, not a replacement.
 
+## Comparative study — ideas from 1letzgo/stashy (2026-07-01)
+Studied a second, broader Stash iOS/tvOS client (README, CLAUDE.md, GraphQLClient, PaginatedLoader,
+VideoAnalysisManager). It leans on **server-side transcode + KSPlayer + a manual quality picker** rather
+than on-device remux — so our playback pipeline (direct-play + on-device HEVC/MKV remux over loopback
+HLS) is materially more advanced and lighter on the server. Where they're ahead is **feature breadth**.
+
+**Robustness already adopted from the study (done):**
+- **DB-lock retry** in `StashClient.query` — Stash is SQLite-backed; a concurrent write can briefly
+  return "database is locked". We now back off (500/1000/1500ms) and retry up to 3× instead of failing.
+- **Generic `PaginatedLoader<T>`** — replaced three near-identical view models (scenes, performers,
+  performer-scenes, tag-scenes) with one loader (keeps our page dedup, which their version lacks).
+
+**Feature ideas worth stealing, roughly in build order:**
+1. **Markers** (already planned) — view/seek to Stash scene markers; they ship a full `MarkersView`.
+2. **Studios & Galleries & Images browsing** — three Stash content types we don't surface yet
+   (`StudiosView`/`StudioDetailView`, `GalleriesView`, `ImagesView`). Studios is the smallest lift.
+3. **Configurable Home dashboard** — user-arranged rows (recent scenes, top performers, studios, tags)
+   as a landing surface above the tabs.
+4. **StashTok / Reels** — a vertical swipeable feed over scenes, markers, and image clips; infinite
+   scroll; auto-mute unless headphones are connected. Pairs perfectly with our fast-start playback.
+5. **"Hot or Not" swipe-to-rate** — a gamified rating tool that feeds the rating system we just built.
+6. **Universal search** across all content types; **tab show/hide/reorder** customization.
+7. **Multi-server support** — `ServerConfig` list, Keychain-per-server, switch with an app-state reset.
+   (Our `ImageCache` keys should become server-scoped when we do this.)
+8. **401 handling** — surface an expired/invalid API key to the user instead of failing silently.
+
+**Standout future idea — on-device Vision content analysis.** Their `VideoAnalysisManager` runs
+`VNGeneratePersonSegmentation` + `VNDetectHumanBodyPose` + `VNGenerateOpticalFlow` (plus an
+`MTAudioProcessingTap`) in real time to derive motion-intensity signals and classify scenes — to drive
+interactive devices without an authored funscript. **We already have the frame tap** (the
+`AVPlayerItemVideoOutput` feeding the live blur), so the same signal could power **auto-generated scene
+markers, "skip to the action" chaptering, motion-peak scrub thumbnails, and smart previews** — an
+on-device, privacy-preserving, genuinely differentiated capability. (Their device-sync category —
+TheHandy / Intiface/Buttplug / FunScript — is a separate, optional feature area we haven't scoped.)
+
 ## Deferred ideas (revisit once core features + bug-fixing are solid)
 
 ### AI upscaling — "high quality from low bandwidth"

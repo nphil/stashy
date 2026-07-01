@@ -1,60 +1,13 @@
 import SwiftUI
 import AVFoundation
 
-@Observable
-@MainActor
-final class ScenesViewModel {
-    var scenes: [StashScene] = []
-    var query = SceneQuery()
-    var isLoading = false
-    var errorMessage: String?
-    private var hasMore = true
-    private var currentPage = 1
-    let pageSize = 25
-
-    func loadFirstPage(client: StashClient) async {
-        guard !isLoading else { return }
-        isLoading = true
-        errorMessage = nil
-        currentPage = 1
-        scenes = []
-        hasMore = true
-        await fetchPage(client: client)
-        isLoading = false
-    }
-
-    func loadNextPageIfNeeded(triggerID: String, client: StashClient) async {
-        guard hasMore, !isLoading,
-              scenes.suffix(pageSize / 2).contains(where: { $0.id == triggerID })
-        else { return }
-        isLoading = true
-        currentPage += 1
-        await fetchPage(client: client)
-        isLoading = false
-    }
-
-    private func fetchPage(client: StashClient) async {
-        do {
-            let result = try await client.findScenes(query, page: currentPage, perPage: pageSize)
-            // Dedupe: paginated pages can overlap and return scenes already in the list.
-            // Duplicate ids confuse ForEach identity, mis-routing taps to the wrong card.
-            let existing = Set(scenes.map(\.id))
-            let newScenes = result.scenes.filter { !existing.contains($0.id) }
-            scenes.append(contentsOf: newScenes)
-            hasMore = scenes.count < result.count && !newScenes.isEmpty
-        } catch {
-            if currentPage > 1 { currentPage -= 1 }
-            errorMessage = error.localizedDescription
-        }
-    }
-}
-
 struct ScenesView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.imageCache) private var imageCache
     @Environment(ThemeManager.self) private var themeManager
     @Environment(AppRouter.self) private var router
-    @State private var viewModel = ScenesViewModel()
+    @State private var loader = PaginatedLoader<StashScene>(pageSize: 25)
+    @State private var query = SceneQuery()
     @State private var path: [Route] = []
     @State private var previewPresenter = ScenePreviewPresenter()
     @State private var filterExpanded = false
@@ -62,7 +15,17 @@ struct ScenesView: View {
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
     private var filterActive: Bool {
-        !viewModel.query.tags.isEmpty || viewModel.query.sort != .date || viewModel.query.direction != .desc
+        !query.tags.isEmpty || query.sort != .date || query.direction != .desc
+    }
+
+    /// Reload the first page for the current query. Called on appear and on every query change.
+    private func reload() async {
+        guard let client = appState.client else { return }
+        let q = query
+        await loader.reload { page, perPage in
+            let result = try await client.findScenes(q, page: page, perPage: perPage)
+            return (result.scenes, result.count)
+        }
     }
 
     var body: some View {
@@ -73,7 +36,7 @@ struct ScenesView: View {
                 // Filter panel floats over the immersive list.
                 .overlay(alignment: .top) {
                     if filterExpanded {
-                        SceneFilterPanel(query: $viewModel.query)
+                        SceneFilterPanel(query: $query)
                             .padding(.top, 4)
                             .transition(.scale(scale: 0.05, anchor: .topTrailing).combined(with: .opacity))
                     }
@@ -91,43 +54,39 @@ struct ScenesView: View {
         }
         .environment(\.scenePreviewPresenter, previewPresenter)
         .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: { path.append(.scene($0)) }) }
-        .onChange(of: viewModel.query) { _, _ in
-            guard let client = appState.client else { return }
-            Task { await viewModel.loadFirstPage(client: client) }
+        .onChange(of: query) { _, _ in
+            Task { await reload() }
         }
         // A tag tapped elsewhere filters scenes to just that tag (pops to the grid).
         .onChange(of: router.sceneTagFilter) { _, tag in
             guard let tag else { return }
             path = []
-            viewModel.query = SceneQuery(tags: [tag])
+            query = SceneQuery(tags: [tag])
             router.sceneTagFilter = nil
         }
         .task {
             guard let client = appState.client else { return }
             Task { await TagRankingStore.shared.refreshIfNeeded(client: client) }
-            guard viewModel.scenes.isEmpty else { return }
-            await viewModel.loadFirstPage(client: client)
+            guard loader.items.isEmpty else { return }
+            await reload()
         }
     }
 
     @ViewBuilder
     private var content: some View {
-        if viewModel.scenes.isEmpty && viewModel.isLoading {
+        if loader.items.isEmpty && loader.isLoading {
             ProgressView("Loading scenes…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if viewModel.scenes.isEmpty && !viewModel.isLoading {
-            if let err = viewModel.errorMessage {
+        } else if loader.items.isEmpty && !loader.isLoading {
+            if let err = loader.errorMessage {
                 ContentUnavailableView {
                     Label("Couldn't Load Scenes", systemImage: "exclamationmark.triangle")
                 } description: {
                     Text(err)
                 } actions: {
-                    Button("Retry") {
-                        guard let client = appState.client else { return }
-                        Task { await viewModel.loadFirstPage(client: client) }
-                    }
+                    Button("Retry") { Task { await reload() } }
                 }
-            } else if !viewModel.query.tags.isEmpty {
+            } else if !query.tags.isEmpty {
                 ContentUnavailableView(
                     "No Matches",
                     systemImage: "tag.slash",
@@ -143,44 +102,35 @@ struct ScenesView: View {
         } else {
             ScrollView {
                 LazyVGrid(columns: columns, spacing: 10) {
-                    ForEach(viewModel.scenes) { scene in
+                    ForEach(loader.items) { scene in
                         SceneGridCell(
                             scene: scene,
                             apiKey: appState.client?.apiKey ?? "",
                             onOpen: { path.append(.scene($0)) }
                         ) {
-                            guard let client = appState.client else { return }
-                            Task {
-                                await viewModel.loadNextPageIfNeeded(
-                                    triggerID: scene.id,
-                                    client: client
-                                )
-                            }
+                            Task { await loader.loadNextIfNeeded(triggerID: scene.id) }
                             prefetchThumbnails(around: scene)
                         }
                     }
                 }
                 .padding(12)
 
-                if viewModel.isLoading {
+                if loader.isLoading {
                     ProgressView()
                         .padding()
                 }
             }
-            .refreshable {
-                guard let client = appState.client else { return }
-                await viewModel.loadFirstPage(client: client)
-            }
+            .refreshable { await reload() }
         }
     }
 
     private func prefetchThumbnails(around scene: StashScene) {
-        guard let idx = viewModel.scenes.firstIndex(where: { $0.id == scene.id }),
+        guard let idx = loader.items.firstIndex(where: { $0.id == scene.id }),
               let apiKey = appState.client?.apiKey else { return }
-        let start = min(idx + 1, viewModel.scenes.count - 1)
-        let end = min(idx + viewModel.pageSize, viewModel.scenes.count)
+        let start = min(idx + 1, loader.items.count - 1)
+        let end = min(idx + loader.pageSize, loader.items.count)
         guard start < end else { return }
-        let urls = viewModel.scenes[start..<end].compactMap { $0.thumbnailURL(apiKey: apiKey) }
+        let urls = loader.items[start..<end].compactMap { $0.thumbnailURL(apiKey: apiKey) }
         Task.detached(priority: .background) {
             await imageCache.prefetch(urls: urls)
         }

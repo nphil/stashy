@@ -28,6 +28,17 @@ struct StashClient: Sendable {
         _ queryString: String,
         variables: V
     ) async throws -> T {
+        try await query(queryString, variables: variables, retry: 0)
+    }
+
+    /// Max transient retries for a locked Stash database before giving up.
+    private static let maxLockRetries = 3
+
+    private func query<T: Decodable & Sendable, V: Encodable & Sendable>(
+        _ queryString: String,
+        variables: V,
+        retry: Int
+    ) async throws -> T {
         var request = URLRequest(url: graphqlURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -45,6 +56,13 @@ struct StashClient: Sendable {
         let gqlResponse = try JSONDecoder().decode(GraphQLResponse<T>.self, from: data)
 
         if let errors = gqlResponse.errors, !errors.isEmpty {
+            // Stash is SQLite-backed; a concurrent write can briefly lock the DB. That's transient, so
+            // back off and retry rather than surfacing it as a failure (esp. mutations fired in bursts).
+            if retry < Self.maxLockRetries,
+               errors.contains(where: { $0.message.lowercased().contains("database is locked") }) {
+                try await Task.sleep(for: .milliseconds(500 * (retry + 1)))
+                return try await query(queryString, variables: variables, retry: retry + 1)
+            }
             throw StashError.graphqlError(errors.map(\.message).joined(separator: "; "))
         }
 

@@ -153,33 +153,32 @@ struct SearchSceneRow: View {
     }
 }
 
-/// Scenes filtered to a single tag (pushed from search). Reuses the paginated scenes model.
+/// Scenes filtered to a single tag (pushed from search). Reuses the generic paginated loader.
 struct TagScenesView: View {
     let tag: Tag
     @Binding var path: [Route]
     @Environment(AppState.self) private var appState
     @Environment(ThemeManager.self) private var themeManager
-    @State private var viewModel = ScenesViewModel()
+    @State private var loader = PaginatedLoader<StashScene>(pageSize: 24)
 
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
     var body: some View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 10) {
-                ForEach(viewModel.scenes) { scene in
+                ForEach(loader.items) { scene in
                     NavigationLink(value: Route.scene(scene)) {
                         SceneCard(scene: scene, apiKey: appState.client?.apiKey ?? "")
                     }
                     .buttonStyle(.plain)
                     .onAppear {
-                        guard let client = appState.client else { return }
-                        Task { await viewModel.loadNextPageIfNeeded(triggerID: scene.id, client: client) }
+                        Task { await loader.loadNextIfNeeded(triggerID: scene.id) }
                     }
                 }
             }
             .padding(12)
 
-            if viewModel.isLoading {
+            if loader.isLoading {
                 ProgressView().padding()
             }
         }
@@ -187,9 +186,12 @@ struct TagScenesView: View {
         .navigationTitle(tag.name)
         .navigationBarTitleDisplayMode(.inline)
         .task {
-            guard viewModel.scenes.isEmpty, let client = appState.client else { return }
-            viewModel.query.tags = [tag]
-            await viewModel.loadFirstPage(client: client)
+            guard loader.items.isEmpty, let client = appState.client else { return }
+            let q = SceneQuery(tags: [tag])
+            await loader.reload { page, perPage in
+                let result = try await client.findScenes(q, page: page, perPage: perPage)
+                return (result.scenes, result.count)
+            }
         }
     }
 }
