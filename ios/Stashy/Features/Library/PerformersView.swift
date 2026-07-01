@@ -42,19 +42,13 @@ struct PerformersView: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(themeManager.current.backgroundColor.ignoresSafeArea())
-                .overlay(alignment: .top) {
-                    if filterExpanded {
-                        PerformerFilterPanel(query: $query)
-                            .geometryGroup()
-                            .padding(.top, 4)
-                            .transition(PopoverReveal.transition(.topTrailing))
-                    }
-                }
                 .navigationTitle("Performers")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
-                        FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
+                        FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive) {
+                            PerformerFilterPanel(query: $query)
+                        }
                     }
                 }
                 .navigationDestination(for: Route.self) { route in

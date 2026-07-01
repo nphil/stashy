@@ -43,20 +43,13 @@ struct ScenesView: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(themeManager.current.backgroundColor.ignoresSafeArea())
-                // Filter panel floats over the immersive list.
-                .overlay(alignment: .top) {
-                    if filterExpanded {
-                        SceneFilterPanel(query: $query)
-                            .geometryGroup()
-                            .padding(.top, 4)
-                            .transition(PopoverReveal.transition(.topTrailing))
-                    }
-                }
                 .navigationTitle("Scenes")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
-                        FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
+                        FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive) {
+                            SceneFilterPanel(query: $query)
+                        }
                     }
                 }
                 .navigationDestination(for: Route.self) { route in

@@ -1,14 +1,19 @@
 import SwiftUI
 
-/// Glass funnel button used to reveal a filter panel over an immersive (scroll-behind) list.
-struct FilterFunnelButton: View {
+/// Funnel button that presents its filter panel as a **native popover** anchored to the button — real
+/// iOS present/dismiss physics, and it floats above all content so it can't be clipped. The panel's
+/// custom chips live inside; the container is the system popover material.
+struct FilterFunnelButton<Panel: View>: View {
     @Binding var expanded: Bool
     var isActive: Bool
+    @ViewBuilder var panel: () -> Panel
     @Environment(ThemeManager.self) private var themeManager
+    @Environment(AppState.self) private var appState
+    @Environment(LibraryEdits.self) private var edits
 
     var body: some View {
         Button {
-            withAnimation(PopoverReveal.animation) { expanded.toggle() }
+            expanded.toggle()   // the popover animates itself
         } label: {
             // No background — just themed lines, kept legible over content with a soft shadow.
             Image(systemName: "line.3.horizontal.decrease")
@@ -16,6 +21,15 @@ struct FilterFunnelButton: View {
                 .foregroundStyle(isActive ? themeManager.current.accentColor : themeManager.current.foregroundColor)
                 .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
                 .frame(width: 34, height: 34)
+        }
+        .popover(isPresented: $expanded) {
+            panel()
+                // Re-inject the observables the panel/tag editor rely on — presented content doesn't
+                // always inherit them, and a missing one is a hard crash.
+                .environment(themeManager)
+                .environment(appState)
+                .environment(edits)
+                .presentationCompactAdaptation(.popover)   // stay a popover on iPhone, not a sheet
         }
     }
 }
@@ -27,6 +41,8 @@ struct SceneFilterPanel: View {
     @Environment(ThemeManager.self) private var themeManager
 
     var body: some View {
+        // Popover content: no floating panel chrome (the system popover is the container); just the
+        // sort row + custom tag chips, sized to a comfortable popover width.
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Sort").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
@@ -36,11 +52,8 @@ struct SceneFilterPanel: View {
             Divider().opacity(0.25)
             InlineTagEditor(selected: $query.tags)
         }
-        .padding(14)
-        .background(themeManager.current.surfaceColor.opacity(0.96), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(.white.opacity(0.08)))
-        .shadow(color: .black.opacity(0.3), radius: 14, y: 8)
-        .padding(.horizontal, 12)
+        .padding(16)
+        .frame(width: 330)
     }
 
     private var sortMenu: some View {
@@ -105,11 +118,8 @@ struct PerformerFilterPanel: View {
             Divider().opacity(0.25)
             InlineTagEditor(selected: $query.tags)
         }
-        .padding(14)
-        .background(themeManager.current.surfaceColor.opacity(0.96), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(.white.opacity(0.08)))
-        .shadow(color: .black.opacity(0.3), radius: 14, y: 8)
-        .padding(.horizontal, 12)
+        .padding(16)
+        .frame(width: 330)
         .onAppear { name = query.search }
         .onChange(of: name) { _, value in
             nameTask?.cancel()
