@@ -152,14 +152,23 @@ struct VideoLoadingIndicator: View {
         VStack(spacing: 14) {
             ZStack {
                 Circle().stroke(.white.opacity(0.16), lineWidth: 4)
-                Circle()
-                    .trim(from: 0, to: CGFloat(progress.map { max(0.05, min(1.0, $0)) } ?? 0.25))
-                    .stroke(.white.opacity(0.9), style: StrokeStyle(lineWidth: 4, lineCap: .round))
-                    .animation(.easeInOut(duration: 0.3), value: progress)
+                if let progress {
+                    // Determinate: a static ring whose fill grows clockwise from the top with the buffer.
+                    Circle()
+                        .trim(from: 0, to: CGFloat(max(0.02, min(1, progress))))
+                        .stroke(.white.opacity(0.9), style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                        .animation(.easeInOut(duration: 0.3), value: progress)
+                } else {
+                    // Indeterminate (pre-buffer stages): a short arc that spins until progress is known.
+                    Circle()
+                        .trim(from: 0, to: 0.25)
+                        .stroke(.white.opacity(0.9), style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                        .rotationEffect(.degrees(spin ? 360 : 0))
+                        .animation(.linear(duration: 1.1).repeatForever(autoreverses: false), value: spin)
+                }
             }
             .frame(width: 48, height: 48)
-            .rotationEffect(.degrees(spin ? 360 : 0))
-            .animation(.linear(duration: 1.4).repeatForever(autoreverses: false), value: spin)
 
             Text(message)
                 .font(.system(size: 12, weight: .regular))

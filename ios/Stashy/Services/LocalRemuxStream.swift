@@ -81,6 +81,20 @@ final class LocalRemuxStream: LocalPlaybackStream {
         try? FileManager.default.removeItem(at: tempURL)
     }
 
+    /// Delete stale remux/probe temp files left behind by a crash or force-quit (normal teardown removes
+    /// its own). Safe to call at launch — nothing is in use yet.
+    nonisolated static func sweepStaleTempFiles() {
+        let tmp = FileManager.default.temporaryDirectory
+        guard let items = try? FileManager.default.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil)
+        else { return }
+        for url in items {
+            let name = url.lastPathComponent
+            if name.hasPrefix("stashy-stream-") || name.hasPrefix("stashy-loopback-") {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+    }
+
     /// Snapshot of remux + index progress + the server's recent requests, for the Stats overlay when
     /// diagnosing a stall/fallback.
     func updatePlayhead(_ seconds: Double) { playheadBox.value = seconds }

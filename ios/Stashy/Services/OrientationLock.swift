@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         if RemoteLog.isLoggingEnabled { RemoteLog.shared.enable() }   // off by default; toggle in Stats
+        LocalRemuxStream.sweepStaleTempFiles()   // clear remux temps left by a prior crash/force-quit
         return true
     }
 
