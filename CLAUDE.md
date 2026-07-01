@@ -80,8 +80,9 @@ works (separate proxy), so keep committing and ask the owner to re-auth the conn
   Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
   Claude-Session: https://claude.ai/code/session_019GbW6mvDp5D1A3xeyLYF4U
   ```
-- **NEVER put a raw model identifier (e.g. `claude-opus-4-8`) in any artifact** — commits, PR text, code,
-  comments. Chat replies only.
+- **NEVER put a raw model identifier (the lowercase-hyphenated API model ID, e.g. `claude-<family>-<ver>`)
+  in any artifact** — commits, PR text, code, comments, or these docs. Chat replies only. (The
+  `Co-Authored-By: Claude Opus 4.8` trailer uses the marketing name and is the one sanctioned exception.)
 - **GitHub scope = `nphil/stashy` only.** Don't read/search other repos.
 - **Telemetry must be removed before any wider release.** `RemoteLog` → ntfy (`Services/RemoteLog.swift`)
   is OFF by default and isolated, kept as a live debug channel. Deletion checklist is in
