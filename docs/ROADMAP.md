@@ -228,6 +228,16 @@ blocks, both first-class iOS APIs:
   offline, re-download at different quality). ✅ (Downloader screen)
 - **Background continuation + Live Activity / Dynamic Island** — ✅ downloads run under a background
   `URLSession` and survive suspension; a Live Activity shows aggregate progress.
+- **Private storage** — ✅ downloaded media + sidecars live in a Stashy-scoped Application Support folder
+  (never surfaced in the Files app or to other apps), excluded from iCloud/iTunes backup, migrated from
+  the old Documents location.
+- **⏳ Encrypt downloads (option).** Add a setting to encrypt offline video at rest so files are unreadable
+  even if extracted from the container (beyond iOS's default Data Protection). Options to weigh:
+  raise the files' Data Protection class to `.complete` (kernel-encrypted, unreadable while the device is
+  locked) as the cheap win; or app-level encryption (per-file AES-GCM via CryptoKit with a Keychain-held
+  key, decrypted on the fly through an `AVAssetResourceLoaderDelegate`/local proxy) for
+  encrypted-even-while-unlocked, tied to the existing Face ID app-lock. Weigh playback cost (streaming
+  decrypt) vs. security; make it opt-in per the privacy tenet.
 - **⏳ AV1 encode option (deferred — needs an FFmpeg rebuild).** The current FFmpeg XCFrameworks are
   LGPL-minimal: `h264_videotoolbox` / `hevc_videotoolbox` / `aac` encoders only (AV1 *decode* only). An
   AV1 *encode* preset requires rebuilding FFmpeg with an AV1 encoder (libaom / SVT-AV1) — GPL/heavy,

@@ -48,12 +48,13 @@ final class DownloadItem: Identifiable {
     let title: String
     let url: URL
     let fileName: String
-    let ext: String
-    let codec: String?
-    let width: Int?
-    let height: Int?
-    let bitRate: Int?
-    let totalBytes: Int64
+    // Spec fields are var so an on-device transcode can update them in place once it rewrites the file.
+    var ext: String
+    var codec: String?
+    var width: Int?
+    var height: Int?
+    var bitRate: Int?
+    var totalBytes: Int64
     /// Source scene (for the card thumbnail/performer and tap-to-play). Persisted in a sidecar so it
     /// survives relaunch.
     let scene: StashScene?
@@ -232,14 +233,22 @@ final class DownloadManager {
     @ObservationIgnored private let metaDir: URL
 
     init() {
-        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        downloadsDir = docs.appendingPathComponent("Downloads", isDirectory: true)
+        let fm = FileManager.default
+        let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        // Downloaded media + sidecars live under Application Support (private to the app — never surfaced
+        // in the Files app or to other apps, unlike Documents which *can* be exposed via file-sharing), in
+        // a Stashy-scoped folder excluded from iCloud/iTunes backup. Parts are transient → Caches.
+        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Stashy", isDirectory: true)
+        downloadsDir = base.appendingPathComponent("Downloads", isDirectory: true)
+        metaDir = base.appendingPathComponent("DownloadsMeta", isDirectory: true)
         partsDir = caches.appendingPathComponent("DownloadParts", isDirectory: true)
-        metaDir = docs.appendingPathComponent("DownloadsMeta", isDirectory: true)
         for dir in [downloadsDir, partsDir, metaDir] {
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
+        Self.excludeFromBackup(base)
+        Self.migrateLegacyStore(from: docs, downloadsDir: downloadsDir, metaDir: metaDir)
 
         delegate = DownloadDelegate(
             store: store,
@@ -675,6 +684,31 @@ final class DownloadManager {
     }
 
     // MARK: - Files
+
+    /// Keep large offline media out of iCloud/iTunes backups.
+    nonisolated private static func excludeFromBackup(_ url: URL) {
+        var u = url
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? u.setResourceValues(values)
+    }
+
+    /// Move downloads/meta from the old `Documents` location into the private Application Support store so
+    /// offline videos from earlier builds aren't lost and no longer sit in a potentially user-visible folder.
+    nonisolated private static func migrateLegacyStore(from docs: URL, downloadsDir: URL, metaDir: URL) {
+        let fm = FileManager.default
+        let moves = [(docs.appendingPathComponent("Downloads", isDirectory: true), downloadsDir),
+                     (docs.appendingPathComponent("DownloadsMeta", isDirectory: true), metaDir)]
+        for (old, new) in moves {
+            guard let files = try? fm.contentsOfDirectory(at: old, includingPropertiesForKeys: nil) else { continue }
+            for file in files {
+                let dest = new.appendingPathComponent(file.lastPathComponent)
+                if fm.fileExists(atPath: dest.path) { continue }
+                try? fm.moveItem(at: file, to: dest)
+            }
+            try? fm.removeItem(at: old)   // drop the now-empty legacy folder
+        }
+    }
 
     private func partURL(_ itemID: String, _ conn: Int) -> URL {
         partsDir.appendingPathComponent("\(itemID)-\(conn).part")
