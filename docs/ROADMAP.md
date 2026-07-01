@@ -178,15 +178,44 @@ never sees a spinner.
   preview URL per scene.
 - Open questions: exact-frame switch vs. small overlap; audio continuity; storage/cleanup policy.
 
-### XR glasses support (Viture Pro XR et al.)
-Develop the capability to play video on XR/AR glasses — including VR/180°/360° and big-virtual-screen
-viewing — with a clean handoff (no duplicated video mirrored on the phone screen).
-- Known constraint: iOS restricts head-tracking IMU access from the glasses, which limits true
-  head-locked virtual-display behavior vs. what the Steam Deck / decky-XRGaming achieves. Plan around
-  what iOS *does* allow (external-display / AirPlay-style output, flat big-screen, side-by-side for
-  VR videos) and revisit IMU as the platform evolves.
-- Revisit alongside / after core playback; the Android app (later) may be the better home for full
-  head-tracked virtual displays.
+### XR glasses support (Viture Pro XR et al.) — "phone becomes the remote"
+**Refined vision (Netflix-style handoff).** When XR glasses are connected (they present to iOS as a
+standard external DisplayPort display over USB-C), Stashy switches into a big-screen "10-foot" layout on
+the glasses, and when a video goes fullscreen the **entire phone screen becomes a gesture remote /
+trackpad** — exactly how Netflix on iPhone drives an external screen while the handset turns into a
+controller.
+
+**Feasibility: confirmed possible on iPhone 15+ (USB-C, DisplayPort out up to 4K60).** Two building
+blocks, both first-class iOS APIs:
+- **External-display scene** — `UIWindowSceneSessionRoleExternalDisplayNonInteractive`: declare a second
+  scene configuration in Info.plist; when a display connects, iOS creates a scene for it and the app
+  renders **separate** SwiftUI content there (not mirroring). This is what lets the glasses show the
+  big-screen UI while the phone shows the remote. Detect connect/disconnect via the external-display
+  scene lifecycle (or `UIScreen.didConnect/didDisconnectNotification`, though `UIScreen` is being phased
+  out in favor of scenes). Audio auto-routes over DP.
+- **AVPlayer external playback** — `allowsExternalPlayback` + `usesExternalPlaybackWhileExternalScreen
+  IsActive`: the lightest path for the *video* half — video auto-routes to the glasses and the phone is
+  freed for controls. (The external-display scene gives more control — full-bleed video + our own
+  overlay — so prefer that for the player and keep AVPlayer external playback as the fallback.)
+
+**Proposed behavior:**
+- **On connect →** enter "big-screen mode." Render the browsing UI (landscape, large type, focusable
+  rows) on the glasses scene. Phone shows the same browsing UI (so it reads as "mirrored" while
+  browsing) or a simplified navigator.
+- **On fullscreen video →** glasses scene shows the video full-bleed; the **phone window swaps to a
+  full-screen remote**: tap = play/pause, horizontal drag = scrub (with the sprite/heat overlay), edge
+  swipes = back / next, vertical drag = volume/brightness, double-tap = seek ±10s. Haptics for feedback.
+- **On disconnect →** seamlessly fall back to the normal on-phone player at the current timestamp.
+
+**Caveats / unknowns:**
+- **No head tracking.** iOS doesn't expose the glasses' IMU, so this is a *flat virtual big screen*, not
+  a head-locked 3DoF display (the glasses' own firmware may do smooth-follow). True head-tracked / VR
+  180°·360° stays out of reach on iOS; revisit on the (later) Android app.
+- The app can't tell "XR glasses" from any HDMI/DP monitor — behavior simply keys off "external display
+  connected," which is fine (and also gives free TV/monitor support).
+- Requires real hardware to build/test (simulator external-display support is limited); needs its own
+  test pass on device.
+- Orientation handling: phone remote can stay portrait while the glasses scene is landscape 16:9.
 
 ## Downloads & offline
 
