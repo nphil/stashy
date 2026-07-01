@@ -19,6 +19,10 @@ final class LibraryEdits {
     private var performerRatings: [String: Int?] = [:]
     private var performerFavorites: [String: Bool] = [:]
     private var tagFavorites: [String: Bool] = [:]
+    /// Ids removed this session — hidden from every list immediately (optimistic), re-shown if the
+    /// server delete fails. On relaunch the server is authoritative and these start empty.
+    private var deletedScenes: Set<String> = []
+    private var deletedPerformers: Set<String> = []
 
     /// Set briefly when a save fails, for optional UI surfacing; cleared after it's shown.
     var lastError: String?
@@ -39,6 +43,10 @@ final class LibraryEdits {
     func isFavorite(_ tag: Tag) -> Bool {
         tagFavorites[tag.id] ?? (tag.favorite ?? false)
     }
+
+    /// Filter out scenes/performers deleted this session — call in every list's `ForEach`.
+    func visible(_ scenes: [StashScene]) -> [StashScene] { scenes.filter { !deletedScenes.contains($0.id) } }
+    func visible(_ performers: [Performer]) -> [Performer] { performers.filter { !deletedPerformers.contains($0.id) } }
 
     // MARK: Optimistic writes
 
@@ -85,6 +93,37 @@ final class LibraryEdits {
                 if let previous { tagFavorites[id] = previous } else { tagFavorites.removeValue(forKey: id) }
                 lastError = "Couldn't save favorite"
             }
+        }
+    }
+
+    /// Optimistically remove a scene (hides it everywhere), then delete on the server. Returns whether
+    /// the server delete succeeded; on failure the scene reappears and an error is surfaced.
+    func deleteScene(id: String, deleteFile: Bool = false, client: StashClient?) async -> Bool {
+        deletedScenes.insert(id)
+        guard let client else { return false }
+        do {
+            let ok = try await client.deleteScene(id: id, deleteFile: deleteFile)
+            if !ok { deletedScenes.remove(id); lastError = "Couldn't delete scene" }
+            return ok
+        } catch {
+            deletedScenes.remove(id)
+            lastError = "Couldn't delete scene"
+            return false
+        }
+    }
+
+    /// Optimistically remove a performer, then delete on the server.
+    func deletePerformer(id: String, client: StashClient?) async -> Bool {
+        deletedPerformers.insert(id)
+        guard let client else { return false }
+        do {
+            let ok = try await client.deletePerformer(id: id)
+            if !ok { deletedPerformers.remove(id); lastError = "Couldn't delete performer" }
+            return ok
+        } catch {
+            deletedPerformers.remove(id)
+            lastError = "Couldn't delete performer"
+            return false
         }
     }
 

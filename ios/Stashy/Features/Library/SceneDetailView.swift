@@ -9,6 +9,7 @@ struct SceneDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("blurTitles") private var blurTitles = false
     @State private var isFullscreen = false
+    @State private var confirmDelete = false
     /// The scene list query slims performers to id+name to keep the payload small. Once the detail
     /// screen appears we re-fetch this one scene's full performer profiles (rating, urls, tags…) for
     /// the performer card and social links. Nil until the fetch lands; falls back to the slim scene.
@@ -71,6 +72,20 @@ struct SceneDetailView: View {
             fullScene = try? await client.findScene(id: scene.id)
         }
         .libraryEditErrorToast(edits)
+        .confirmationDialog(
+            "Delete this scene?",
+            isPresented: $confirmDelete,
+            titleVisibility: .visible
+        ) {
+            Button("Remove from Stash", role: .destructive) {
+                Task {
+                    if await edits.deleteScene(id: scene.id, client: appState.client) { dismiss() }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Removes the scene and its generated previews from Stash. The source video file is left in place.")
+        }
     }
 
     private var metadata: some View {
@@ -101,8 +116,15 @@ struct SceneDetailView: View {
                         edits.setSceneRating(new, id: scene.id, client: appState.client)
                     }
                     .fixedSize()
+
+                    PopupMenu(actions: [
+                        PopupMenuAction(title: "Delete Scene", systemImage: "trash", isDestructive: true) {
+                            confirmDelete = true
+                        }
+                    ])
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .zIndex(1)   // let the popup menu float above the cards below
 
                 // Performer card (left, enlarged) + socials stack (right, truncated to fit).
                 HStack(alignment: .top, spacing: spacing) {

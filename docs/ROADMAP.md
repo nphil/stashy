@@ -131,6 +131,15 @@ TheHandy / Intiface/Buttplug / FunScript — is a separate, optional feature are
 
 ## Deferred ideas (revisit once core features + bug-fixing are solid)
 
+### Performer social feed (Twitter/X) in the socials card
+On the performer screen, when a performer has a Twitter/X link, use that card to show their latest
+tweets, laid out to fit the card. **Feasibility caveats:** (1) X's API is paywalled and hostile to
+scraping, and unauthenticated timeline embeds are increasingly locked down — likely needs a syndication
+/ oEmbed endpoint, a self-hosted nitter-style proxy, or a lightweight server-side fetch; (2) content is
+frequently NSFW, so any embedded webview/images must respect the app's blur toggles and age gating.
+Scope as: fetch a few recent posts (text + first media), render compact rows inside the socials card,
+tap-through to open the profile. Treat as best-effort/optional given the API constraints.
+
 ### AI upscaling — "high quality from low bandwidth"
 **Core goal:** usable video quality on **very low-quality / low-reliability networks** (poor cellular,
 remote access, congested links) — get a watchable, good-looking stream when bandwidth is too low for
@@ -194,7 +203,11 @@ viewing — with a clean handoff (no duplicated video mirrored on the phone scre
 - **Rework the filter/sort chips UI** (the current chip row needs a cleaner interaction model).
 - **Integrate search into the main library UI** via a **pull-down** (scroll-to-reveal search field)
   instead of a separate Search tab/menu.
-- **Filter by favorites.**
+- **Filter by favorites.** (Performers done — favorites-only toggle.)
+- **Filter performers by country** — a country picker in the performer filter panel (Stash
+  `PerformerFilterType.country` is a `StringCriterionInput`), mirroring the existing ethnicity filter.
+- **Persist sort across launches (not filters).** Remember the chosen sort field + direction for scenes
+  and performers between app starts; filters (tags, favorites, ethnicity/country) still reset each launch.
 
 ## Stash feature parity
 

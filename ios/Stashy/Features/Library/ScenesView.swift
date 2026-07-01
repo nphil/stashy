@@ -6,6 +6,7 @@ struct ScenesView: View {
     @Environment(\.imageCache) private var imageCache
     @Environment(ThemeManager.self) private var themeManager
     @Environment(AppRouter.self) private var router
+    @Environment(LibraryEdits.self) private var edits
     @State private var loader = PaginatedLoader<StashScene>(pageSize: 25)
     @State private var query = SceneQuery()
     @State private var path: [Route] = []
@@ -37,8 +38,9 @@ struct ScenesView: View {
                 .overlay(alignment: .top) {
                     if filterExpanded {
                         SceneFilterPanel(query: $query)
+                            .geometryGroup()
                             .padding(.top, 4)
-                            .transition(.scale(scale: 0.05, anchor: .topTrailing).combined(with: .opacity))
+                            .transition(PopoverReveal.transition(.topTrailing))
                     }
                 }
                 .navigationTitle("Scenes")
@@ -102,7 +104,7 @@ struct ScenesView: View {
         } else {
             ScrollView {
                 LazyVGrid(columns: columns, spacing: 10) {
-                    ForEach(loader.items) { scene in
+                    ForEach(edits.visible(loader.items)) { scene in
                         SceneGridCell(
                             scene: scene,
                             apiKey: appState.client?.apiKey ?? "",

@@ -36,8 +36,9 @@ struct PerformersView: View {
                 .overlay(alignment: .top) {
                     if filterExpanded {
                         PerformerFilterPanel(query: $query)
+                            .geometryGroup()
                             .padding(.top, 4)
-                            .transition(.scale(scale: 0.05, anchor: .topTrailing).combined(with: .opacity))
+                            .transition(PopoverReveal.transition(.topTrailing))
                     }
                 }
                 .navigationTitle("Performers")
@@ -75,7 +76,7 @@ struct PerformersView: View {
         } else {
             ScrollView {
                 LazyVGrid(columns: columns, spacing: 16) {
-                    ForEach(loader.items) { performer in
+                    ForEach(edits.visible(loader.items)) { performer in
                         // Heart is overlaid *outside* the NavigationLink so its tap never conflicts with
                         // (or double-fires alongside) navigation. Anchored top-trailing over the portrait.
                         NavigationLink(value: Route.performer(performer)) {

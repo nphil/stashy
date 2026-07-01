@@ -275,6 +275,26 @@ struct StashClient: Sendable {
             gql, variables: FavoriteInputVariables(input: FavoriteInput(id: id, favorite: favorite)))
         return response.tagUpdate?.favorite
     }
+
+    /// Remove a scene from Stash. `deleteFile` also deletes the source media file from disk (destructive
+    /// and irreversible) — defaults to false, so by default only the library entry + generated content
+    /// (previews/sprites) are removed and the original file is left in place.
+    @discardableResult
+    func deleteScene(id: String, deleteFile: Bool = false) async throws -> Bool {
+        let gql = "mutation SceneDestroy($input: SceneDestroyInput!) { sceneDestroy(input: $input) }"
+        let response: SceneDestroyResponse = try await query(
+            gql, variables: SceneDestroyVariables(input: SceneDestroyInput(id: id, delete_file: deleteFile, delete_generated: true)))
+        return response.sceneDestroy ?? false
+    }
+
+    /// Remove a performer from Stash (does not touch scene files).
+    @discardableResult
+    func deletePerformer(id: String) async throws -> Bool {
+        let gql = "mutation PerformerDestroy($input: PerformerDestroyInput!) { performerDestroy(input: $input) }"
+        let response: PerformerDestroyResponse = try await query(
+            gql, variables: PerformerDestroyVariables(input: PerformerDestroyInput(id: id)))
+        return response.performerDestroy ?? false
+    }
 }
 
 // MARK: - Scene query model
@@ -440,6 +460,13 @@ private struct FavoriteInputVariables: Encodable, Sendable { let input: Favorite
 
 private struct RatingResult: Decodable, Sendable { let id: String; let rating100: Int? }
 private struct FavoriteResult: Decodable, Sendable { let id: String; let favorite: Bool? }
+private struct SceneDestroyInput: Encodable, Sendable { let id: String; let delete_file: Bool; let delete_generated: Bool }
+private struct SceneDestroyVariables: Encodable, Sendable { let input: SceneDestroyInput }
+private struct SceneDestroyResponse: Decodable, Sendable { let sceneDestroy: Bool? }
+private struct PerformerDestroyInput: Encodable, Sendable { let id: String }
+private struct PerformerDestroyVariables: Encodable, Sendable { let input: PerformerDestroyInput }
+private struct PerformerDestroyResponse: Decodable, Sendable { let performerDestroy: Bool? }
+
 private struct SceneUpdateResponse: Decodable, Sendable { let sceneUpdate: RatingResult? }
 private struct PerformerUpdateResponse: Decodable, Sendable { let performerUpdate: PerformerUpdateResult? }
 private struct PerformerUpdateResult: Decodable, Sendable { let id: String; let rating100: Int?; let favorite: Bool? }

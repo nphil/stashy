@@ -38,6 +38,7 @@ final class SearchViewModel {
 struct SearchView: View {
     @Environment(AppState.self) private var appState
     @Environment(ThemeManager.self) private var themeManager
+    @Environment(LibraryEdits.self) private var edits
     @Environment(\.imageCache) private var imageCache
     @State private var viewModel = SearchViewModel()
     @State private var path: [Route] = []
@@ -64,7 +65,7 @@ struct SearchView: View {
                     List {
                         if !viewModel.performers.isEmpty {
                             Section("Performers") {
-                                ForEach(viewModel.performers) { performer in
+                                ForEach(edits.visible(viewModel.performers)) { performer in
                                     NavigationLink(value: Route.performer(performer)) {
                                         PerformerRow(performer: performer, apiKey: appState.client?.apiKey ?? "")
                                     }
@@ -82,7 +83,7 @@ struct SearchView: View {
                         }
                         if !viewModel.scenes.isEmpty {
                             Section("Scenes") {
-                                ForEach(viewModel.scenes) { scene in
+                                ForEach(edits.visible(viewModel.scenes)) { scene in
                                     SearchSceneRow(scene: scene, apiKey: appState.client?.apiKey ?? "")
                                         .scenePreview(scene, apiKey: appState.client?.apiKey ?? "") { path.append(.scene($0)) }
                                 }
@@ -159,6 +160,7 @@ struct TagScenesView: View {
     @Binding var path: [Route]
     @Environment(AppState.self) private var appState
     @Environment(ThemeManager.self) private var themeManager
+    @Environment(LibraryEdits.self) private var edits
     @State private var loader = PaginatedLoader<StashScene>(pageSize: 24)
 
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
@@ -166,7 +168,7 @@ struct TagScenesView: View {
     var body: some View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 10) {
-                ForEach(loader.items) { scene in
+                ForEach(edits.visible(loader.items)) { scene in
                     NavigationLink(value: Route.scene(scene)) {
                         SceneCard(scene: scene, apiKey: appState.client?.apiKey ?? "")
                     }

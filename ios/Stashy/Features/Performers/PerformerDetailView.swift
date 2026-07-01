@@ -12,6 +12,8 @@ struct PerformerDetailView: View {
     @State private var portrait: UIImage?
     @State private var previewPresenter = ScenePreviewPresenter()
     @State private var showImageViewer = false
+    @State private var confirmDelete = false
+    @Environment(\.dismiss) private var dismiss
     @AppStorage("blurThumbnails") private var blurThumbnails = false
     @AppStorage("blurTitles") private var blurTitles = false
 
@@ -43,7 +45,7 @@ struct PerformerDetailView: View {
 
                 if !loader.items.isEmpty {
                     LazyVGrid(columns: columns, spacing: 10) {
-                        ForEach(loader.items) { scene in
+                        ForEach(edits.visible(loader.items)) { scene in
                             SceneGridCell(
                                 scene: scene,
                                 apiKey: apiKey,
@@ -92,6 +94,20 @@ struct PerformerDetailView: View {
             portrait = try? await imageCache.image(for: url, priority: true)
         }
         .libraryEditErrorToast(edits)
+        .confirmationDialog(
+            "Delete this performer?",
+            isPresented: $confirmDelete,
+            titleVisibility: .visible
+        ) {
+            Button("Remove from Stash", role: .destructive) {
+                Task {
+                    if await edits.deletePerformer(id: performer.id, client: appState.client) { dismiss() }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Removes \(performer.name) from Stash. Scene files are not affected.")
+        }
     }
 
     // Portrait enlarged ~1.5x (was 120×160) and tappable to open the Photos-style fullscreen viewer.
@@ -109,8 +125,14 @@ struct PerformerDetailView: View {
                 FavoriteHeart(isFavorite: edits.isFavorite(performer), size: 22, offColor: .secondary) { new in
                     edits.setPerformerFavorite(new, id: performer.id, client: appState.client)
                 }
+                PopupMenu(actions: [
+                    PopupMenuAction(title: "Delete Performer", systemImage: "trash", isDestructive: true) {
+                        confirmDelete = true
+                    }
+                ])
             }
             .padding(.horizontal, 12)
+            .zIndex(1)   // let the popup menu float above the content below
 
             StarRating(rating100: edits.rating(for: performer), starSize: 20) { new in
                 edits.setPerformerRating(new, id: performer.id, client: appState.client)

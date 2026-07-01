@@ -8,7 +8,7 @@ struct FilterFunnelButton: View {
 
     var body: some View {
         Button {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { expanded.toggle() }
+            withAnimation(PopoverReveal.animation) { expanded.toggle() }
         } label: {
             // No background — just themed lines, kept legible over content with a soft shadow.
             Image(systemName: "line.3.horizontal.decrease")
