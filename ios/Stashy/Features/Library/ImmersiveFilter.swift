@@ -1,36 +1,50 @@
 import SwiftUI
 
-/// Funnel button that presents its filter panel as a **native popover** anchored to the button — real
-/// iOS present/dismiss physics, and it floats above all content so it can't be clipped. The panel's
-/// custom chips live inside; the container is the system popover material.
-struct FilterFunnelButton<Panel: View>: View {
+/// Funnel toggle button for the nav bar. It only flips `expanded` — the popover is presented from a
+/// stable anchor in the list content (see `filterPopover`), NOT from this toolbar item: a popover hosted
+/// on a toolbar item is torn down and re-presented whenever the toolbar rebuilds (which happens on every
+/// query change, since `isActive` changes), which caused the pop-down/pop-up flicker and instability.
+struct FilterFunnelButton: View {
     @Binding var expanded: Bool
     var isActive: Bool
-    @ViewBuilder var panel: () -> Panel
     @Environment(ThemeManager.self) private var themeManager
-    @Environment(AppState.self) private var appState
-    @Environment(LibraryEdits.self) private var edits
 
     var body: some View {
         Button {
-            expanded.toggle()   // the popover animates itself
+            expanded.toggle()
         } label: {
-            // No background — just themed lines, kept legible over content with a soft shadow.
             Image(systemName: "line.3.horizontal.decrease")
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(isActive ? themeManager.current.accentColor : themeManager.current.foregroundColor)
                 .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
                 .frame(width: 34, height: 34)
         }
-        .popover(isPresented: $expanded) {
-            panel()
-                // Re-inject the observables the panel/tag editor rely on — presented content doesn't
-                // always inherit them, and a missing one is a hard crash.
-                .environment(themeManager)
-                .environment(appState)
-                .environment(edits)
-                .presentationCompactAdaptation(.popover)   // stay a popover on iPhone, not a sheet
-        }
+    }
+}
+
+/// A stable, tiny top-trailing anchor that hosts the filter popover, kept in the list content (not the
+/// toolbar) so re-rendering on query changes never re-presents it. Attach to the list via `.overlay`.
+struct FilterPopoverAnchor<Panel: View>: View {
+    @Binding var isPresented: Bool
+    @ViewBuilder var panel: () -> Panel
+    @Environment(ThemeManager.self) private var themeManager
+    @Environment(AppState.self) private var appState
+    @Environment(LibraryEdits.self) private var edits
+
+    var body: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .padding(.trailing, 22)
+            .padding(.top, 2)
+            .popover(isPresented: $isPresented) {
+                panel()
+                    // Re-inject the observables the panel/tag editor rely on — presented content doesn't
+                    // always inherit them, and a missing one is a hard crash.
+                    .environment(themeManager)
+                    .environment(appState)
+                    .environment(edits)
+                    .presentationCompactAdaptation(.popover)
+            }
     }
 }
 
@@ -49,11 +63,32 @@ struct SceneFilterPanel: View {
                 Spacer()
                 sortMenu
             }
+            HStack {
+                Text("Show").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Spacer()
+                downloadedToggle
+            }
             Divider().opacity(0.25)
             InlineTagEditor(selected: $query.tags)
         }
         .padding(16)
         .frame(width: 330)
+    }
+
+    private var downloadedToggle: some View {
+        Button {
+            query.downloadedOnly.toggle()
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: query.downloadedOnly ? "arrow.down.circle.fill" : "square.grid.2x2").font(.caption)
+                Text(query.downloadedOnly ? "Downloaded" : "All videos")
+            }
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(query.downloadedOnly ? themeManager.current.accentColor : themeManager.current.foregroundColor)
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(themeManager.current.backgroundColor.opacity(0.6), in: Capsule())
+        }
+        .buttonStyle(.plain)
     }
 
     private var sortMenu: some View {

@@ -380,6 +380,8 @@ struct SceneQuery: Sendable, Equatable {
     var direction: SortDirection = .desc
     var tags: [Tag] = []
     var performerID: String? = nil
+    /// Client-side filter: show only scenes that have a completed on-device download (not a Stash concept).
+    var downloadedOnly: Bool = false
 
     var tagIDs: [String] { tags.map(\.id) }
 }

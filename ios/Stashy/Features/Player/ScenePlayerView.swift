@@ -15,6 +15,7 @@ struct ScenePlayerView: View {
     @Binding var isFullscreen: Bool
     var onBack: (() -> Void)?
     @Environment(\.imageCache) private var imageCache
+    @Environment(DownloadManager.self) private var downloads
     @State private var model: ScenePlayerModel
     @State private var sprites = SpriteThumbnails()
     @State private var suppressAutoFullscreen = false
@@ -147,8 +148,10 @@ struct ScenePlayerView: View {
         // Live window geometry for fullscreen layout (independent of the presenting screen's context).
         .background(WindowMetricsReader(bounds: $windowBounds, safeArea: $windowSafeArea))
         .task {
-            guard let vtt = scene.vttURL(apiKey: apiKey),
-                  let sprite = scene.spriteURL(apiKey: apiKey) else { return }
+            // Prefer the locally-downloaded sprite sheet + VTT (instant, offline) when this scene has
+            // been downloaded; fall back to the Stash endpoints otherwise.
+            guard let vtt = downloads.localVTT(sceneID: scene.id) ?? scene.vttURL(apiKey: apiKey),
+                  let sprite = downloads.localSprite(sceneID: scene.id) ?? scene.spriteURL(apiKey: apiKey) else { return }
             await sprites.load(vttURL: vtt, spriteURL: sprite, imageCache: imageCache)
         }
         // Landscape videos: rotating to landscape enters fullscreen (and back to portrait exits).

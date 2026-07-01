@@ -233,6 +233,18 @@ final class DownloadManager {
         return nil
     }
 
+    /// Local sprite sheet downloaded alongside the video, so scrub previews work offline / instantly.
+    func localSprite(sceneID: String) -> URL? {
+        let url = metaDir.appendingPathComponent("\(sceneID)-sprite.jpg")
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// Local WebVTT sprite index downloaded alongside the video (crop rects for `localSprite`).
+    func localVTT(sceneID: String) -> URL? {
+        let url = metaDir.appendingPathComponent("\(sceneID).vtt")
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
     /// Best-effort download of the poster + sprite sheet + WebVTT alongside the video, and a Codable
     /// sidecar of the scene so the card and offline playback survive relaunch.
     private func fetchSidecar(_ item: DownloadItem, scene: StashScene, apiKey: String) {

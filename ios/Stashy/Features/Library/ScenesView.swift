@@ -7,6 +7,7 @@ struct ScenesView: View {
     @Environment(ThemeManager.self) private var themeManager
     @Environment(AppRouter.self) private var router
     @Environment(LibraryEdits.self) private var edits
+    @Environment(DownloadManager.self) private var downloads
     @State private var loader = PaginatedLoader<StashScene>(pageSize: 25)
     @State private var query = SceneQuery()
     @State private var path: [Route] = []
@@ -26,11 +27,23 @@ struct ScenesView: View {
     }
 
     private var filterActive: Bool {
-        !query.tags.isEmpty || query.sort != .date || query.direction != .desc
+        !query.tags.isEmpty || query.sort != .date || query.direction != .desc || query.downloadedOnly
+    }
+
+    /// Scenes to show: the downloaded-only view reads completed downloads locally (no network),
+    /// otherwise the paginated library results. Both pass through `edits.visible` so deletes/overrides
+    /// apply.
+    private var displayedScenes: [StashScene] {
+        if query.downloadedOnly {
+            return edits.visible(downloads.items.filter { $0.state == .completed }.compactMap(\.scene))
+        }
+        return edits.visible(loader.items)
     }
 
     /// Reload the first page for the current query. Called on appear and on every query change.
     private func reload() async {
+        // Downloaded-only is served entirely from local state — no library fetch.
+        guard !query.downloadedOnly else { return }
         guard let client = appState.client else { return }
         let q = query
         await loader.reload { page, perPage in
@@ -44,13 +57,16 @@ struct ScenesView: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(themeManager.current.backgroundColor.ignoresSafeArea())
+                .overlay(alignment: .topTrailing) {
+                    FilterPopoverAnchor(isPresented: $filterExpanded) {
+                        SceneFilterPanel(query: $query)
+                    }
+                }
                 .navigationTitle("Scenes")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
-                        FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive) {
-                            SceneFilterPanel(query: $query)
-                        }
+                        FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
                     }
                 }
                 .navigationDestination(for: Route.self) { route in
@@ -88,7 +104,9 @@ struct ScenesView: View {
 
     @ViewBuilder
     private var content: some View {
-        if loader.items.isEmpty && loader.isLoading {
+        if query.downloadedOnly {
+            downloadedContent
+        } else if loader.items.isEmpty && loader.isLoading {
             ProgressView("Loading scenes…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if loader.items.isEmpty && !loader.isLoading {
@@ -116,7 +134,7 @@ struct ScenesView: View {
         } else {
             ScrollView {
                 LazyVGrid(columns: columns, spacing: 10) {
-                    ForEach(edits.visible(loader.items)) { scene in
+                    ForEach(displayedScenes) { scene in
                         SceneGridCell(
                             scene: scene,
                             apiKey: appState.client?.apiKey ?? "",
@@ -135,6 +153,32 @@ struct ScenesView: View {
                 }
             }
             .refreshable { await reload() }
+        }
+    }
+
+    /// Downloaded-only view: a grid of completed offline scenes, or an empty state when none exist.
+    @ViewBuilder
+    private var downloadedContent: some View {
+        let scenes = displayedScenes
+        if scenes.isEmpty {
+            ContentUnavailableView(
+                "No Downloads",
+                systemImage: "arrow.down.circle",
+                description: Text("Download a scene from its ••• menu to watch it offline.")
+            )
+        } else {
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 10) {
+                    ForEach(scenes) { scene in
+                        SceneGridCell(
+                            scene: scene,
+                            apiKey: appState.client?.apiKey ?? "",
+                            onOpen: { path.append(.scene($0)) }
+                        ) {}
+                    }
+                }
+                .padding(12)
+            }
         }
     }
 

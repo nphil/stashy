@@ -43,13 +43,16 @@ struct PerformersView: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(themeManager.current.backgroundColor.ignoresSafeArea())
+                .overlay(alignment: .topTrailing) {
+                    FilterPopoverAnchor(isPresented: $filterExpanded) {
+                        PerformerFilterPanel(query: $query)
+                    }
+                }
                 .navigationTitle("Performers")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
-                        FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive) {
-                            PerformerFilterPanel(query: $query)
-                        }
+                        FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
                     }
                 }
                 .navigationDestination(for: Route.self) { route in
