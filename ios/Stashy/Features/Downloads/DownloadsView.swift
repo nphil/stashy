@@ -1,10 +1,12 @@
 import SwiftUI
 
-/// The Downloader screen: a live list of download cards (multi-connection coloured progress + stats) and
-/// finished offline videos. Reached from a scene's 3-dot menu and from Settings.
+/// The Downloader screen: a live list of download cards (thumbnail + multi-connection coloured progress
+/// + stats) and finished offline videos. Reached from a scene's 3-dot menu and from Settings. Tapping a
+/// card opens the scene player (playing the local file once downloaded).
 struct DownloadsView: View {
     @Environment(DownloadManager.self) private var downloads
     @Environment(ThemeManager.self) private var themeManager
+    @State private var playing: DownloadItem?
 
     var body: some View {
         Group {
@@ -18,7 +20,7 @@ struct DownloadsView: View {
                 ScrollView {
                     LazyVStack(spacing: 12) {
                         ForEach(downloads.items) { item in
-                            DownloadCard(item: item)
+                            DownloadCard(item: item) { if item.scene != nil { playing = item } }
                         }
                     }
                     .padding(14)
@@ -28,62 +30,126 @@ struct DownloadsView: View {
         .background(themeManager.current.backgroundColor.ignoresSafeArea())
         .navigationTitle("Downloads")
         .navigationBarTitleDisplayMode(.inline)
-        // Rows the user stopped while away are pruned on return.
         .onAppear { downloads.pruneStopped() }
+        .fullScreenCover(item: $playing) { item in
+            DownloadPlayerCover(item: item)
+        }
+    }
+}
+
+/// Presents the full scene player for a downloaded item in its own navigation stack (so performer
+/// links etc. still work), reusing SceneDetailView — which prefers the local file for playback.
+private struct DownloadPlayerCover: View {
+    let item: DownloadItem
+    @State private var path: [Route] = []
+
+    var body: some View {
+        if let scene = item.scene {
+            NavigationStack(path: $path) {
+                SceneDetailView(scene: scene, path: $path)
+                    .navigationDestination(for: Route.self) { RouteDestination(route: $0, path: $path) }
+            }
+        } else {
+            Color.black.ignoresSafeArea()
+        }
     }
 }
 
 private struct DownloadCard: View {
     @Bindable var item: DownloadItem
+    var onPlay: () -> Void
     @Environment(DownloadManager.self) private var downloads
     @Environment(ThemeManager.self) private var themeManager
+    @Environment(\.imageCache) private var imageCache
+    @State private var thumb: UIImage?
+    @State private var performer: UIImage?
+    @State private var confirmDelete = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            // Title + extension.
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Image(systemName: icon).font(.subheadline).foregroundStyle(themeManager.current.accentColor)
-                Text(item.fileName)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(themeManager.current.foregroundColor)
-                    .lineLimit(1)
-                Text(item.ext.uppercased())
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 5).padding(.vertical, 1)
-                    .background(themeManager.current.backgroundColor, in: RoundedRectangle(cornerRadius: 4))
-                Spacer(minLength: 4)
-            }
-
-            // Spec chips.
-            FlowLayout(spacing: 6) {
-                ForEach(specs, id: \.self) { spec in
-                    Text(spec)
-                        .font(.caption2.weight(.medium))
+        HStack(alignment: .top, spacing: 12) {
+            thumbnail
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(item.fileName)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(themeManager.current.foregroundColor)
+                        .lineLimit(1)
+                    Text(item.ext.uppercased())
+                        .font(.caption2.weight(.bold))
                         .foregroundStyle(.secondary)
-                        .padding(.horizontal, 7).padding(.vertical, 3)
-                        .background(themeManager.current.backgroundColor, in: Capsule())
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(themeManager.current.backgroundColor, in: RoundedRectangle(cornerRadius: 4))
+                    Spacer(minLength: 4)
+                    performerThumb
+                }
+
+                FlowLayout(spacing: 6) {
+                    ForEach(specs, id: \.self) { spec in
+                        Text(spec)
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 7).padding(.vertical, 3)
+                            .background(themeManager.current.backgroundColor, in: Capsule())
+                    }
+                }
+
+                if item.state != .completed { connectionBar }
+
+                HStack(spacing: 10) {
+                    Text(statusText)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(statusColor)
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                    controls
                 }
             }
-
-            // Multi-connection coloured progress (single bar once completed).
-            if item.state != .completed {
-                connectionBar
-            }
-
-            // Status line + controls.
-            HStack(spacing: 10) {
-                Text(statusText)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(statusColor)
-                    .lineLimit(1)
-                Spacer(minLength: 8)
-                controls
-            }
         }
-        .padding(14)
+        .padding(12)
         .background(themeManager.current.surfaceColor, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.white.opacity(0.06)))
+        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .onTapGesture(perform: onPlay)   // the control buttons intercept their own taps
+        .task(id: thumbKey) { await loadThumb() }
+        .task(id: item.performerImageURL) {
+            if let url = item.performerImageURL { performer = try? await imageCache.image(for: url, priority: true) }
+        }
+        .confirmationDialog("Delete this download?", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Delete", role: .destructive) { downloads.delete(item) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Removes the downloaded file from this device. It stays in your Stash library.")
+        }
+    }
+
+    // MARK: - Pieces
+
+    private var thumbnail: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 9, style: .continuous).fill(themeManager.current.backgroundColor)
+            if let thumb {
+                Image(uiImage: thumb).resizable().scaledToFill()
+            } else {
+                Image(systemName: "film").font(.title3).foregroundStyle(.tertiary)
+            }
+            if item.state == .completed {
+                Image(systemName: "play.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(.white.opacity(0.9))
+                    .shadow(radius: 3)
+            }
+        }
+        .frame(width: 104, height: 62)
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+
+    @ViewBuilder private var performerThumb: some View {
+        if let performer {
+            Image(uiImage: performer).resizable().scaledToFill()
+                .frame(width: 28, height: 28)
+                .clipShape(Circle())
+                .overlay(Circle().strokeBorder(.white.opacity(0.15)))
+        }
     }
 
     private var connectionBar: some View {
@@ -121,7 +187,7 @@ private struct DownloadCard: View {
                 ProgressView().controlSize(.small)
             case .completed:
                 iconButton("wand.and.stars", disabled: true) {}   // on-device transcode — M3
-                iconButton("trash", tint: .red) { downloads.delete(item) }
+                iconButton("trash", tint: .red) { confirmDelete = true }
             }
         }
     }
@@ -131,12 +197,21 @@ private struct DownloadCard: View {
             Image(systemName: system)
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(disabled ? .secondary : (tint ?? themeManager.current.foregroundColor))
-                .frame(width: 34, height: 34)
+                .frame(width: 32, height: 32)
                 .background(themeManager.current.backgroundColor, in: Circle())
         }
         .buttonStyle(.plain)
         .disabled(disabled)
         .opacity(disabled ? 0.4 : 1)
+    }
+
+    // MARK: - Data
+
+    private var thumbKey: String { item.localThumb?.path ?? item.thumbnailURL?.absoluteString ?? item.id }
+
+    private func loadThumb() async {
+        if let local = item.localThumb, let img = UIImage(contentsOfFile: local.path) { thumb = img; return }
+        if let url = item.thumbnailURL { thumb = try? await imageCache.image(for: url) }
     }
 
     private var specs: [String] {
@@ -146,15 +221,6 @@ private struct DownloadCard: View {
         if let b = item.bitrateLabel { out.append(b) }
         if let s = item.sizeLabel { out.append(s) }
         return out
-    }
-
-    private var icon: String {
-        switch item.state {
-        case .completed: return "checkmark.circle.fill"
-        case .failed: return "exclamationmark.triangle.fill"
-        case .stopped: return "stop.circle"
-        default: return "arrow.down.circle.fill"
-        }
     }
 
     private var statusText: String {

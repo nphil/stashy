@@ -20,6 +20,10 @@ struct SceneDetailView: View {
     private var performers: [Performer] { (fullScene ?? scene).performers }
 
     private var route: PlaybackRoute? {
+        // Prefer a completed download: play the local file (offline, instant), direct via AVPlayer.
+        if let local = downloads.localFile(sceneID: scene.id) {
+            return PlaybackRoute(url: local, engine: .avPlayer, streamType: "Downloaded", reason: "Local file")
+        }
         guard let client = appState.client else { return nil }
         return scene.playbackRoute(apiKey: client.apiKey)
     }

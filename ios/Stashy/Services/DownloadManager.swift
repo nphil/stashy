@@ -33,6 +33,15 @@ final class DownloadItem: Identifiable {
     let height: Int?
     let bitRate: Int?
     let totalBytes: Int64
+    /// Source scene (for the card thumbnail/performer and tap-to-play). Persisted in a sidecar so it
+    /// survives relaunch.
+    let scene: StashScene?
+    let apiKey: String
+    /// Local thumbnail file downloaded alongside the video, so the card shows imagery offline.
+    var localThumb: URL?
+
+    var thumbnailURL: URL? { scene?.thumbnailURL(apiKey: apiKey) }
+    var performerImageURL: URL? { scene?.performers.first?.imageURL(apiKey: apiKey) }
 
     var state: DownloadState = .queued
     var connections: [DownloadConnection]
@@ -68,7 +77,8 @@ final class DownloadItem: Identifiable {
     }
 
     init(id: String, title: String, url: URL, fileName: String, ext: String,
-         codec: String?, width: Int?, height: Int?, bitRate: Int?, totalBytes: Int64, connectionCount: Int) {
+         codec: String?, width: Int?, height: Int?, bitRate: Int?, totalBytes: Int64, connectionCount: Int,
+         scene: StashScene? = nil, apiKey: String = "", localThumb: URL? = nil) {
         self.id = id
         self.title = title
         self.url = url
@@ -79,6 +89,9 @@ final class DownloadItem: Identifiable {
         self.height = height
         self.bitRate = bitRate
         self.totalBytes = totalBytes
+        self.scene = scene
+        self.apiKey = apiKey
+        self.localThumb = localThumb
         let n = max(1, connectionCount)
         let chunk = totalBytes / Int64(n)
         self.connections = (0..<n).map { i in
@@ -165,14 +178,17 @@ final class DownloadManager {
 
     @ObservationIgnored private let downloadsDir: URL
     @ObservationIgnored private let partsDir: URL
+    @ObservationIgnored private let metaDir: URL
 
     init() {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         downloadsDir = docs.appendingPathComponent("Downloads", isDirectory: true)
         partsDir = caches.appendingPathComponent("DownloadParts", isDirectory: true)
+        metaDir = docs.appendingPathComponent("DownloadsMeta", isDirectory: true)
         try? FileManager.default.createDirectory(at: downloadsDir, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: partsDir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: metaDir, withIntermediateDirectories: true)
 
         delegate = DownloadDelegate(
             store: store,
@@ -204,11 +220,45 @@ final class DownloadManager {
             id: scene.id, title: scene.title ?? base, url: url,
             fileName: base, ext: ext, codec: file?.video_codec,
             width: file?.width, height: file?.height, bitRate: file?.bit_rate,
-            totalBytes: total, connectionCount: n
+            totalBytes: total, connectionCount: n, scene: scene, apiKey: apiKey
         )
         items.insert(item, at: 0)
         startConnections(item)
+        fetchSidecar(item, scene: scene, apiKey: apiKey)
     }
+
+    /// Completed local video file for a scene (used to play a downloaded scene offline / instantly).
+    func localFile(sceneID: String) -> URL? {
+        if let item = items.first(where: { $0.id == sceneID }), item.state == .completed { return item.localURL }
+        return nil
+    }
+
+    /// Best-effort download of the poster + sprite sheet + WebVTT alongside the video, and a Codable
+    /// sidecar of the scene so the card and offline playback survive relaunch.
+    private func fetchSidecar(_ item: DownloadItem, scene: StashScene, apiKey: String) {
+        let meta = metaDir
+        let id = scene.id
+        let thumbURL = scene.thumbnailURL(apiKey: apiKey)
+        let spriteURL = scene.spriteURL(apiKey: apiKey)
+        let vttURL = scene.vttURL(apiKey: apiKey)
+        // Sidecar JSON (scene + apiKey) written synchronously — it's tiny.
+        if let data = try? JSONEncoder().encode(Sidecar(scene: scene, apiKey: apiKey)) {
+            try? data.write(to: meta.appendingPathComponent("\(id).json"), options: .atomic)
+        }
+        Task.detached(priority: .background) {
+            func save(_ url: URL?, _ name: String) async -> URL? {
+                guard let url, let (data, _) = try? await URLSession.shared.data(from: url) else { return nil }
+                let dest = meta.appendingPathComponent(name)
+                return (try? data.write(to: dest, options: .atomic)) != nil ? dest : nil
+            }
+            let thumb = await save(thumbURL, "\(id)-thumb.jpg")
+            _ = await save(spriteURL, "\(id)-sprite.jpg")
+            _ = await save(vttURL, "\(id).vtt")
+            if let thumb { await MainActor.run { item.localThumb = thumb } }
+        }
+    }
+
+    private struct Sidecar: Codable { let scene: StashScene; let apiKey: String }
 
     func pause(_ item: DownloadItem) { suspend(item, auto: false) }
     func resume(_ item: DownloadItem) {
@@ -227,6 +277,7 @@ final class DownloadManager {
         cancelTasks(item, produceResumeData: false)
         if let local = item.localURL { try? FileManager.default.removeItem(at: local) }
         cleanupParts(item.id)
+        cleanupMeta(item.id)
         items.removeAll { $0.id == item.id }
     }
 
@@ -421,16 +472,31 @@ final class DownloadManager {
         for i in 0..<connectionCount { try? FileManager.default.removeItem(at: partURL(itemID, i)) }
         finished[itemID] = nil
     }
+    private func cleanupMeta(_ itemID: String) {
+        for name in ["\(itemID).json", "\(itemID)-thumb.jpg", "\(itemID)-sprite.jpg", "\(itemID).vtt"] {
+            try? FileManager.default.removeItem(at: metaDir.appendingPathComponent(name))
+        }
+    }
 
-    /// Re-attach already-downloaded files on launch so the Downloads list survives app restarts.
+    /// Re-attach already-downloaded files on launch so the Downloads list survives app restarts, pulling
+    /// scene metadata + the local thumbnail from the sidecar when present.
     private func loadCompleted() {
-        guard let files = try? FileManager.default.contentsOfDirectory(at: downloadsDir, includingPropertiesForKeys: [.fileSizeKey]) else { return }
+        guard let files = try? FileManager.default.contentsOfDirectory(at: downloadsDir, includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey]) else { return }
         for url in files {
+            if (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { continue }
             let id = url.deletingPathExtension().lastPathComponent
             let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { Int64($0) } ?? 0
-            let item = DownloadItem(id: id, title: url.lastPathComponent, url: url,
-                                    fileName: url.deletingPathExtension().lastPathComponent, ext: url.pathExtension,
-                                    codec: nil, width: nil, height: nil, bitRate: nil, totalBytes: size, connectionCount: 1)
+            let sidecar = try? JSONDecoder().decode(Sidecar.self, from: Data(contentsOf: metaDir.appendingPathComponent("\(id).json")))
+            let thumb = metaDir.appendingPathComponent("\(id)-thumb.jpg")
+            let file = sidecar?.scene.files.first
+            let item = DownloadItem(
+                id: id, title: sidecar?.scene.title ?? url.lastPathComponent, url: url,
+                fileName: url.deletingPathExtension().lastPathComponent, ext: url.pathExtension,
+                codec: file?.video_codec, width: file?.width, height: file?.height, bitRate: file?.bit_rate,
+                totalBytes: size, connectionCount: 1,
+                scene: sidecar?.scene, apiKey: sidecar?.apiKey ?? "",
+                localThumb: FileManager.default.fileExists(atPath: thumb.path) ? thumb : nil
+            )
             item.state = .completed
             item.localURL = url
             item.receivedBytes = size
