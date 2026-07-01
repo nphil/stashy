@@ -63,7 +63,12 @@ struct SceneDetailView: View {
         }
         .background(themeManager.current.backgroundColor.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
-        .toolbar(isFullscreen ? .hidden : .visible, for: .tabBar)
+        // Hide the tab bar for the whole scene screen, not just in fullscreen. Toggling tab-bar
+        // visibility *in place* is unreliable: SwiftUI only re-applies it on a navigation push/pop or an
+        // orientation change, so landscape fullscreen (which rotates) hid it but portrait fullscreen
+        // (button-triggered, no rotation) left it showing. Hiding unconditionally binds the change to
+        // push/pop, which always works — and a dedicated player/detail screen doesn't need the tab bar.
+        .toolbar(.hidden, for: .tabBar)
         .navigationBarBackButtonHidden(true)
         .statusBarHidden(isFullscreen)
         .background(EnableSwipeBack()) // keep edge-swipe back even with the nav bar hidden
