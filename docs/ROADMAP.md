@@ -220,15 +220,30 @@ blocks, both first-class iOS APIs:
 ## Downloads & offline
 
 - **Download videos for offline viewing**, with a choice of source:
-  - **Original file** (as-is from Stash).
+  - **Original file** (as-is from Stash). ✅
   - **Stash-transcoded version** (ask the server for a smaller/compatible encode).
   - **On-device transcode on the fly** (reuse the FFmpeg engine to produce a smaller/compatible file
-    locally).
+    locally). ✅ H.264/HEVC (VideoToolbox) with resolution + quality presets.
 - **Downloaded Videos management screen** — list/manage offline videos (size, source, delete, play
-  offline, re-download at different quality).
+  offline, re-download at different quality). ✅ (Downloader screen)
+- **Background continuation + Live Activity / Dynamic Island** — ✅ downloads run under a background
+  `URLSession` and survive suspension; a Live Activity shows aggregate progress.
+- **⏳ AV1 encode option (deferred — needs an FFmpeg rebuild).** The current FFmpeg XCFrameworks are
+  LGPL-minimal: `h264_videotoolbox` / `hevc_videotoolbox` / `aac` encoders only (AV1 *decode* only). An
+  AV1 *encode* preset requires rebuilding FFmpeg with an AV1 encoder (libaom / SVT-AV1) — GPL/heavy,
+  CPU-only and slow on a phone. Ship H.264/HEVC hardware transcode now; revisit AV1 encode as a separate
+  build effort. (Build brief for the FFmpeg XCFrameworks exists.)
 
 ## Library & UX redesign
 
+- **Navigation / "back" model cleanup.** Going back and moving between screens doesn't make sense once
+  you're deep inside menus — the back affordance and inter-screen navigation need a coherent model.
+  Audit every push/cover/sheet path (scenes ⇄ performers ⇄ tags ⇄ studios, the player, downloads reached
+  from both a scene menu and Settings, filter popovers) for: a consistent back control (chevron vs.
+  swipe vs. close) and label, correct pop-to-root vs. pop-one behavior, no dead-ends or screens you can
+  only leave by force-quitting, and predictable state when the same destination is reachable from
+  multiple entry points. Likely wants a single navigation source of truth (the existing `AppRouter` /
+  per-tab `NavigationStack` paths) rather than ad-hoc `fullScreenCover`/`sheet` stacks.
 - **Rework the filter/sort chips UI** (the current chip row needs a cleaner interaction model).
 - **Integrate search into the main library UI** via a **pull-down** (scroll-to-reveal search field)
   instead of a separate Search tab/menu.

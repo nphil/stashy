@@ -24,6 +24,21 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     ) -> UIInterfaceOrientationMask {
         AppDelegate.orientationLock
     }
+
+    /// iOS relaunched the app (often straight into the background) to finish queued background downloads.
+    /// Stash the completion handler; `DownloadManager`'s session delegate calls it once every event has
+    /// been delivered (`urlSessionDidFinishEvents`), letting the system suspend us again.
+    func application(
+        _ application: UIApplication,
+        handleEventsForBackgroundURLSession identifier: String,
+        completionHandler: @escaping () -> Void
+    ) {
+        if identifier == BackgroundDownloadSession.identifier {
+            BackgroundDownloadSession.completionHandler = completionHandler
+        } else {
+            completionHandler()
+        }
+    }
 }
 
 enum OrientationController {

@@ -66,7 +66,8 @@ private struct DownloadCard: View {
     @State private var confirmDelete = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
+        // Centre-aligned so the scene thumbnail sits vertically centred against the taller text column.
+        HStack(alignment: .center, spacing: 12) {
             thumbnail
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -79,9 +80,10 @@ private struct DownloadCard: View {
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 5).padding(.vertical, 1)
                         .background(themeManager.current.backgroundColor, in: RoundedRectangle(cornerRadius: 4))
-                    Spacer(minLength: 4)
-                    performerThumb
+                    Spacer(minLength: 0)
                 }
+
+                performerChip
 
                 FlowLayout(spacing: 6) {
                     ForEach(specs, id: \.self) { spec in
@@ -95,11 +97,12 @@ private struct DownloadCard: View {
 
                 if item.state != .completed { connectionBar }
 
-                HStack(spacing: 10) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Text(statusText)
                         .font(.caption.weight(.medium))
                         .foregroundStyle(statusColor)
-                        .lineLimit(1)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 8)
                     controls
                 }
@@ -143,12 +146,31 @@ private struct DownloadCard: View {
         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
     }
 
-    @ViewBuilder private var performerThumb: some View {
-        if let performer {
-            Image(uiImage: performer).resizable().scaledToFill()
-                .frame(width: 28, height: 28)
+    /// Performer thumbnail (30% larger than before) with the performer's name alongside. Shown whenever
+    /// the scene has a performer; falls back to a person glyph until the image loads.
+    @ViewBuilder private var performerChip: some View {
+        if item.performerName != nil || item.performerImageURL != nil {
+            HStack(spacing: 7) {
+                Group {
+                    if let performer {
+                        Image(uiImage: performer).resizable().scaledToFill()
+                    } else {
+                        Image(systemName: "person.fill").resizable().scaledToFit()
+                            .padding(8).foregroundStyle(.secondary)
+                    }
+                }
+                .frame(width: 36, height: 36)
+                .background(themeManager.current.backgroundColor)
                 .clipShape(Circle())
                 .overlay(Circle().strokeBorder(.white.opacity(0.15)))
+
+                if let name = item.performerName {
+                    Text(name)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
         }
     }
 

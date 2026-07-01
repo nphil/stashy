@@ -1,6 +1,27 @@
 import SwiftUI
+import UIKit
 import Network
 import Observation
+
+/// Process-wide handoff for the background `URLSession`. iOS relaunches the app (possibly straight into
+/// the background) when queued transfers finish while it was suspended, handing the app delegate a
+/// completion handler that must be called once the session has drained its events — see
+/// `AppDelegate.application(_:handleEventsForBackgroundURLSession:completionHandler:)` and
+/// `DownloadDelegate.urlSessionDidFinishEvents`.
+enum BackgroundDownloadSession {
+    static let identifier = "com.nphil.stashy.downloads"
+    /// Set on the main thread by the app delegate; called (and cleared) on the main thread once the
+    /// session reports it has delivered every queued event. `nonisolated(unsafe)` because it is only ever
+    /// touched on the main thread.
+    nonisolated(unsafe) static var completionHandler: (() -> Void)?
+}
+
+/// Ferries a non-Sendable value across a concurrency boundary when the caller guarantees the access is
+/// safe (e.g. `URLSessionTask`s whose only cross-thread use is reading identifiers / calling `cancel`).
+private struct UncheckedSendableBox<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
+}
 
 /// Lifecycle of a download. `waitingForNetwork` is an automatic pause (connectivity lost) distinct from
 /// a user `paused`; `stopped` items are pruned when the Downloads screen is re-entered.
@@ -42,6 +63,7 @@ final class DownloadItem: Identifiable {
 
     var thumbnailURL: URL? { scene?.thumbnailURL(apiKey: apiKey) }
     var performerImageURL: URL? { scene?.performers.first?.imageURL(apiKey: apiKey) }
+    var performerName: String? { scene?.performers.first?.name }
 
     var state: DownloadState = .queued
     var connections: [DownloadConnection]
@@ -125,17 +147,31 @@ private final class TransferStore: @unchecked Sendable {
 /// a background queue, do the synchronous part-file move there, and forward structural events to the
 /// manager on the main actor via `@Sendable` closures. High-frequency progress goes straight to the
 /// lock-guarded store (the manager polls it), so it never hops the actor per byte.
+///
+/// A task's identity (item id, connection, part path) is also encoded in its `taskDescription`, so after
+/// the app is relaunched to finish a background transfer — when the in-memory store is empty — the
+/// delegate can still route the finished file to the right part and item.
 private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     let store: TransferStore
     let onFinish: @Sendable (String, Int) -> Void
-    let onError: @Sendable (String, String) -> Void
+    let onError: @Sendable (String, String, Int) -> Void
 
     init(store: TransferStore,
          onFinish: @escaping @Sendable (String, Int) -> Void,
-         onError: @escaping @Sendable (String, String) -> Void) {
+         onError: @escaping @Sendable (String, String, Int) -> Void) {
         self.store = store
         self.onFinish = onFinish
         self.onError = onError
+    }
+
+    /// Task → (item, conn, part), from the live store or, after a cold background relaunch, decoded from
+    /// the task's persisted `taskDescription` ("<itemID>\u{1}<conn>\u{1}<partPath>").
+    private func info(for task: URLSessionTask) -> (item: String, conn: Int, part: URL)? {
+        if let live = store.info(task: task.taskIdentifier) { return live }
+        guard let desc = task.taskDescription else { return nil }
+        let parts = desc.components(separatedBy: "\u{1}")
+        guard parts.count == 3, let conn = Int(parts[1]) else { return nil }
+        return (parts[0], conn, URL(fileURLWithPath: parts[2]))
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
@@ -144,7 +180,7 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unc
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        guard let info = store.info(task: downloadTask.taskIdentifier) else { return }
+        guard let info = info(for: downloadTask) else { return }
         let fm = FileManager.default
         try? fm.removeItem(at: info.part)
         try? fm.moveItem(at: location, to: info.part)
@@ -155,9 +191,18 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unc
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let error else { return }                            // success handled by didFinishDownloadingTo
         if (error as NSError).code == NSURLErrorCancelled { return }   // pause/stop
-        let info = store.info(task: task.taskIdentifier)
+        let info = info(for: task)
         store.drop(task: task.taskIdentifier)
-        if let info { onError(info.item, error.localizedDescription) }
+        if let info { onError(info.item, error.localizedDescription, (error as NSError).code) }
+    }
+
+    /// The background session has delivered every event queued while the app was suspended — release the
+    /// system's background-launch completion handler so iOS can suspend us again.
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        DispatchQueue.main.async {
+            BackgroundDownloadSession.completionHandler?()
+            BackgroundDownloadSession.completionHandler = nil
+        }
     }
 }
 
@@ -175,6 +220,12 @@ final class DownloadManager {
     @ObservationIgnored private var finished: [String: Set<Int>] = [:]
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     @ObservationIgnored private let monitor = NWPathMonitor()
+    /// Latest connectivity status from the monitor (whether the current path can carry traffic).
+    @ObservationIgnored private var pathSatisfied = true
+    /// Consecutive transient-network retries per item, so a persistently-unreachable URL eventually fails
+    /// instead of retrying forever; reset when the item makes real progress.
+    @ObservationIgnored private var networkRetries: [String: Int] = [:]
+    private let maxNetworkRetries = 10
 
     @ObservationIgnored private let downloadsDir: URL
     @ObservationIgnored private let partsDir: URL
@@ -184,22 +235,33 @@ final class DownloadManager {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         downloadsDir = docs.appendingPathComponent("Downloads", isDirectory: true)
-        partsDir = caches.appendingPathComponent("DownloadParts", isDirectory: true)
+        // Parts live in Application Support (not Caches): iOS may purge Caches under storage pressure,
+        // which would silently discard an in-flight background download's partial data.
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        partsDir = appSupport.appendingPathComponent("DownloadParts", isDirectory: true)
         metaDir = docs.appendingPathComponent("DownloadsMeta", isDirectory: true)
-        try? FileManager.default.createDirectory(at: downloadsDir, withIntermediateDirectories: true)
-        try? FileManager.default.createDirectory(at: partsDir, withIntermediateDirectories: true)
-        try? FileManager.default.createDirectory(at: metaDir, withIntermediateDirectories: true)
+        for dir in [downloadsDir, partsDir, metaDir] {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
 
         delegate = DownloadDelegate(
             store: store,
             onFinish: { [weak self] item, conn in Task { @MainActor in self?.connectionFinished(itemID: item, conn: conn) } },
-            onError: { [weak self] item, msg in Task { @MainActor in self?.connectionFailed(itemID: item, message: msg) } }
+            onError: { [weak self] item, msg, code in Task { @MainActor in self?.connectionFailed(itemID: item, message: msg, code: code) } }
         )
-        let config = URLSessionConfiguration.default
+        // A background session keeps transfers running while the app is suspended and hands them back on
+        // the next launch; `sessionSendsLaunchEvents` lets iOS relaunch us to finish/merge, and
+        // non-discretionary means downloads start promptly instead of being deferred by the system.
+        let config = URLSessionConfiguration.background(withIdentifier: BackgroundDownloadSession.identifier)
+        config.sessionSendsLaunchEvents = true
+        config.isDiscretionary = false
         config.waitsForConnectivity = true
         session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
 
         loadCompleted()
+        loadInterrupted()      // rebuild in-flight items from sidecars so relaunch callbacks find them
+        finalizeReadyItems()   // any item whose parts are all present already → assemble now
+        reconnectTasks()       // re-attach to still-running background tasks
         startNetworkMonitor()
         startPolling()
     }
@@ -283,6 +345,7 @@ final class DownloadManager {
         cancelTasks(item, produceResumeData: false)
         item.state = .stopped
         cleanupParts(item.id)
+        clearActive(item.id)
     }
 
     func delete(_ item: DownloadItem) {
@@ -315,6 +378,7 @@ final class DownloadManager {
         item.error = nil
         item.lastSampleTime = Date()
         item.lastSampleBytes = item.receivedBytes
+        markActive(item.id)
         var newTasks: [URLSessionDownloadTask] = []
         let done = finished[item.id] ?? []
         for i in item.connections.indices where !done.contains(i) {
@@ -329,12 +393,15 @@ final class DownloadManager {
                 }
                 task = session.downloadTask(with: req)
             }
+            // Persist identity so a cold background relaunch can route this task's finished file.
+            task.taskDescription = "\(item.id)\u{1}\(i)\u{1}\(partURL(item.id, i).path)"
             store.register(task: task.taskIdentifier, item: item.id, conn: i, part: partURL(item.id, i))
             newTasks.append(task)
             task.resume()
         }
         tasks[item.id] = newTasks
         resumeData[item.id] = nil
+        clearResumeFiles(item.id)                          // resume blobs are now consumed by live tasks
         if newTasks.isEmpty { finalizeIfComplete(item) }   // everything was already downloaded
     }
 
@@ -353,7 +420,11 @@ final class DownloadManager {
             if produceResumeData {
                 task.cancel(byProducingResumeData: { [weak self] data in
                     guard let data, let conn else { return }
-                    Task { @MainActor in self?.resumeData[item.id, default: [:]][conn] = data }
+                    Task { @MainActor in
+                        guard let self else { return }
+                        self.resumeData[item.id, default: [:]][conn] = data
+                        try? data.write(to: self.resumeDataURL(item.id, conn), options: .atomic)
+                    }
                 })
             } else {
                 task.cancel()
@@ -377,6 +448,9 @@ final class DownloadManager {
         item.state = .merging
         let parts = (0..<item.connections.count).map { partURL(item.id, $0) }
         let dest = downloadsDir.appendingPathComponent("\(item.id).\(item.ext)")
+        // Keep the process alive long enough to assemble the file even when this fires during a background
+        // relaunch (the merge is plain I/O off the main actor and can outlast the launch event window).
+        let bg = UIApplication.shared.beginBackgroundTask(withName: "merge-\(item.id)")
         Task.detached(priority: .userInitiated) {
             let ok = Self.merge(parts: parts, into: dest)
             await MainActor.run {
@@ -385,11 +459,13 @@ final class DownloadManager {
                     if item.totalBytes > 0 { item.receivedBytes = item.totalBytes }
                     for i in item.connections.indices { item.connections[i].received = item.connections[i].total }
                     item.state = .completed
+                    self.clearActive(item.id)
                 } else {
                     item.error = "Couldn't assemble the file"
                     item.state = .failed
                 }
                 self.cleanupParts(item.id)
+                if bg != .invalid { UIApplication.shared.endBackgroundTask(bg) }
             }
         }
     }
@@ -418,11 +494,45 @@ final class DownloadManager {
         finalizeIfComplete(item)
     }
 
-    private func connectionFailed(itemID: String, message: String) {
+    /// Connection lost / not connected / timed out / host unreachable — transient, so we wait and
+    /// auto-resume rather than surfacing a scary (and truncated) error. The background session already
+    /// rides out ordinary app-backgrounding; this covers the cases where a task still errors out.
+    private static let transientNetworkCodes: Set<Int> = [
+        NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost, NSURLErrorTimedOut,
+        NSURLErrorCannotConnectToHost, NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed,
+        NSURLErrorDataNotAllowed, NSURLErrorInternationalRoamingOff, NSURLErrorCallIsActive,
+        NSURLErrorResourceUnavailable, NSURLErrorSecureConnectionFailed
+    ]
+
+    private func connectionFailed(itemID: String, message: String, code: Int) {
         guard let item = items.first(where: { $0.id == itemID }), item.state == .downloading else { return }
-        item.state = .failed
-        item.error = message
-        cancelTasks(item, produceResumeData: false)
+        let retries = networkRetries[itemID] ?? 0
+        if Self.transientNetworkCodes.contains(code) && retries < maxNetworkRetries {
+            // Pause the *whole* item with resume data and wait — resuming when connectivity is back keeps
+            // the partial progress of every connection instead of restarting from zero.
+            item.state = .waitingForNetwork
+            item.error = nil
+            cancelTasks(item, produceResumeData: true)
+            scheduleNetworkRetry(item)
+        } else {
+            item.state = .failed
+            item.error = message
+            cancelTasks(item, produceResumeData: false)
+        }
+    }
+
+    /// Relaunch a waiting item shortly after a transient failure if the current path is healthy (covers
+    /// the case where connectivity never actually dropped, so the monitor won't fire a fresh event).
+    private func scheduleNetworkRetry(_ item: DownloadItem) {
+        let id = item.id
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard let self,
+                  let item = self.items.first(where: { $0.id == id }),
+                  item.state == .waitingForNetwork, self.pathSatisfied else { return }
+            self.networkRetries[id, default: 0] += 1
+            self.launch(item, reset: false)
+        }
     }
 
     // MARK: - Poll loop (throttled UI updates)
@@ -453,6 +563,7 @@ final class DownloadManager {
                 item.lastSampleBytes = sum
                 item.lastSampleTime = now
             }
+            if sum > item.receivedBytes { networkRetries[item.id] = 0 }   // real progress → clear retry count
             item.receivedBytes = sum
         }
     }
@@ -467,11 +578,101 @@ final class DownloadManager {
         monitor.start(queue: DispatchQueue(label: "stashy.downloads.net"))
     }
 
+    /// The monitor now only *resumes* waiting downloads when connectivity returns; it no longer proactively
+    /// pauses healthy downloads on a path blip. The background `URLSession` (waitsForConnectivity) rides out
+    /// ordinary drops itself, and proactively cancelling tasks every time the app briefly backgrounded was
+    /// exactly what made a quick app-switch strand a download in "Waiting for network…".
     private func networkChanged(satisfied: Bool) {
-        if satisfied {
-            for item in items where item.state == .waitingForNetwork { launch(item, reset: false) }
-        } else {
-            for item in items where item.state == .downloading { suspend(item, auto: true) }
+        pathSatisfied = satisfied
+        guard satisfied else { return }
+        for item in items where item.state == .waitingForNetwork {
+            networkRetries[item.id, default: 0] += 1
+            launch(item, reset: false)
+        }
+    }
+
+    // MARK: - Relaunch reconnection
+
+    /// Rebuild in-flight download items from their sidecars so, after a suspend/relaunch, the delegate's
+    /// finish callbacks have an item to update and partial progress is restored from what's on disk. Only
+    /// items flagged active (a `.active` marker written while downloading) are resurrected — stopped ones
+    /// are left dropped.
+    private func loadInterrupted() {
+        guard let sidecars = try? FileManager.default.contentsOfDirectory(at: metaDir, includingPropertiesForKeys: nil) else { return }
+        for url in sidecars where url.pathExtension == "json" {
+            let id = url.deletingPathExtension().lastPathComponent
+            if items.contains(where: { $0.id == id }) { continue }        // already loaded (completed)
+            guard FileManager.default.fileExists(atPath: activeURL(id).path) else { continue }  // not active
+            guard let sidecar = try? JSONDecoder().decode(Sidecar.self, from: Data(contentsOf: url)),
+                  let fileURL = sidecar.scene.directFileURL(apiKey: sidecar.apiKey) else { continue }
+            let scene = sidecar.scene
+            let file = scene.files.first
+            let total = Int64(file?.size ?? 0)
+            let n = total > 0 ? connectionCount : 1
+            let base = ((file?.basename ?? scene.title ?? "video") as NSString).deletingPathExtension
+            let ext = scene.fileContainer.isEmpty ? "mp4" : scene.fileContainer
+            let thumb = metaDir.appendingPathComponent("\(id)-thumb.jpg")
+            let item = DownloadItem(
+                id: id, title: scene.title ?? base, url: fileURL,
+                fileName: base, ext: ext, codec: file?.video_codec,
+                width: file?.width, height: file?.height, bitRate: file?.bit_rate,
+                totalBytes: total, connectionCount: n, scene: scene, apiKey: sidecar.apiKey,
+                localThumb: FileManager.default.fileExists(atPath: thumb.path) ? thumb : nil
+            )
+            var sum: Int64 = 0
+            for i in 0..<n {
+                let received = Int64((try? partURL(id, i).resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0 ?? 0)
+                item.connections[i].received = received
+                sum += received
+                if item.connections[i].total > 0, received >= item.connections[i].total {
+                    finished[id, default: []].insert(i)
+                }
+                if let data = try? Data(contentsOf: resumeDataURL(id, i)) {
+                    resumeData[id, default: [:]][i] = data
+                }
+            }
+            item.receivedBytes = sum
+            item.state = .paused   // reconnectTasks() flips this to .downloading if a live task is found
+            items.append(item)
+        }
+    }
+
+    /// After `loadInterrupted`, assemble any item whose every connection already has a complete part
+    /// (e.g. all connections finished while the app was suspended in a prior session).
+    private func finalizeReadyItems() {
+        for item in items where item.state == .paused {
+            if (finished[item.id] ?? []).count == item.connections.count { finalizeIfComplete(item) }
+        }
+    }
+
+    /// Re-attach to background tasks still running after a relaunch, registering them so progress and
+    /// finish callbacks resolve to the right item. Tasks with no matching item are cancelled.
+    private func reconnectTasks() {
+        session.getAllTasks { [weak self] allTasks in
+            // URLSessionTask isn't Sendable; box it to hand the array to the main actor. Safe here — we
+            // only read taskIdentifier/taskDescription and call cancel(), all thread-safe operations.
+            let box = UncheckedSendableBox(allTasks)
+            Task { @MainActor in self?.attach(box.value) }
+        }
+    }
+
+    private func attach(_ allTasks: [URLSessionTask]) {
+        var grouped: [String: [URLSessionDownloadTask]] = [:]
+        for task in allTasks {
+            guard let dl = task as? URLSessionDownloadTask, let desc = task.taskDescription else { task.cancel(); continue }
+            let parts = desc.components(separatedBy: "\u{1}")
+            guard parts.count == 3, let conn = Int(parts[1]),
+                  items.contains(where: { $0.id == parts[0] }) else { task.cancel(); continue }
+            store.register(task: dl.taskIdentifier, item: parts[0], conn: conn, part: URL(fileURLWithPath: parts[2]))
+            grouped[parts[0], default: []].append(dl)
+        }
+        for (id, dlTasks) in grouped {
+            tasks[id] = dlTasks
+            if let item = items.first(where: { $0.id == id }) {
+                item.state = .downloading
+                item.lastSampleTime = Date()
+                item.lastSampleBytes = item.receivedBytes
+            }
         }
     }
 
@@ -480,14 +681,34 @@ final class DownloadManager {
     private func partURL(_ itemID: String, _ conn: Int) -> URL {
         partsDir.appendingPathComponent("\(itemID)-\(conn).part")
     }
+    private func resumeDataURL(_ itemID: String, _ conn: Int) -> URL {
+        partsDir.appendingPathComponent("\(itemID)-\(conn).resume")
+    }
+    private func clearResumeFiles(_ itemID: String) {
+        for i in 0..<connectionCount { try? FileManager.default.removeItem(at: resumeDataURL(itemID, i)) }
+    }
     private func cleanupParts(_ itemID: String) {
-        for i in 0..<connectionCount { try? FileManager.default.removeItem(at: partURL(itemID, i)) }
+        for i in 0..<connectionCount {
+            try? FileManager.default.removeItem(at: partURL(itemID, i))
+            try? FileManager.default.removeItem(at: resumeDataURL(itemID, i))
+        }
         finished[itemID] = nil
+        resumeData[itemID] = nil
     }
     private func cleanupMeta(_ itemID: String) {
-        for name in ["\(itemID).json", "\(itemID)-thumb.jpg", "\(itemID)-sprite.jpg", "\(itemID).vtt"] {
+        for name in ["\(itemID).json", "\(itemID)-thumb.jpg", "\(itemID)-sprite.jpg", "\(itemID).vtt", "\(itemID).active"] {
             try? FileManager.default.removeItem(at: metaDir.appendingPathComponent(name))
         }
+    }
+
+    /// A marker distinguishing an active (resumable) download from a completed/stopped one, so relaunch
+    /// only resurrects transfers the user actually wants continued.
+    private func activeURL(_ itemID: String) -> URL { metaDir.appendingPathComponent("\(itemID).active") }
+    private func markActive(_ itemID: String) {
+        FileManager.default.createFile(atPath: activeURL(itemID).path, contents: nil)
+    }
+    private func clearActive(_ itemID: String) {
+        try? FileManager.default.removeItem(at: activeURL(itemID))
     }
 
     /// Re-attach already-downloaded files on launch so the Downloads list survives app restarts, pulling
@@ -513,6 +734,7 @@ final class DownloadManager {
             item.localURL = url
             item.receivedBytes = size
             item.connections[0].received = size
+            clearActive(id)   // completed files are never "active"
             items.append(item)
         }
     }
