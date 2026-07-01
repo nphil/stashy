@@ -386,23 +386,23 @@ final class DownloadManager {
         let id = item.id
         let dest = downloadsDir.appendingPathComponent("\(id).transcode.mp4")
         let bg = UIApplication.shared.beginBackgroundTask(withName: "transcode-\(id)")
-        Task { [weak self] in
+        Task { @MainActor in
             do {
+                // Capture `item` (a main-actor Sendable @Observable) directly so the progress callback
+                // never re-captures `self` across the concurrency boundary.
                 try await transcoder.run(input: src, output: dest, settings: settings) { p in
-                    Task { @MainActor [weak self] in
-                        if let it = self?.items.first(where: { $0.id == id }) { it.transcodeProgress = p }
-                    }
+                    Task { @MainActor in item.transcodeProgress = p }
                 }
-                await self?.transcodeFinished(id: id, output: dest, src: src, settings: settings)
+                self.transcodeFinished(id: id, output: dest, src: src, settings: settings)
             } catch {
                 try? FileManager.default.removeItem(at: dest)
                 // A user cancel isn't an error to surface; anything else is.
                 let cancelled: Bool
                 if case VideoTranscoder.TranscodeError.cancelled = error { cancelled = true } else { cancelled = false }
                 let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                await self?.transcodeFailed(id: id, message: cancelled ? nil : message)
+                self.transcodeFailed(id: id, message: cancelled ? nil : message)
             }
-            if bg != .invalid { await MainActor.run { UIApplication.shared.endBackgroundTask(bg) } }
+            if bg != .invalid { UIApplication.shared.endBackgroundTask(bg) }
         }
     }
 
@@ -710,7 +710,7 @@ final class DownloadManager {
             )
             var sum: Int64 = 0
             for i in 0..<n {
-                let received = Int64((try? partURL(id, i).resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0 ?? 0)
+                let received = Int64((try? partURL(id, i).resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
                 item.connections[i].received = received
                 sum += received
                 if item.connections[i].total > 0, received >= item.connections[i].total {
