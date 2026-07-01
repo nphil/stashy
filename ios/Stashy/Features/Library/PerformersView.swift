@@ -40,24 +40,27 @@ struct PerformersView: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            content
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(themeManager.current.backgroundColor.ignoresSafeArea())
-                .overlay(alignment: .topTrailing) {
-                    FilterPopoverAnchor(isPresented: $filterExpanded) {
-                        PerformerFilterPanel(query: $query)
-                    }
+            ZStack(alignment: .topTrailing) {
+                content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // Popover hosted from a stable sibling of `content` (not an overlay on it) so it survives
+                // `content`'s branch flips during reloads — see the detailed note in ScenesView.
+                FilterPopoverAnchor(isPresented: $filterExpanded) {
+                    PerformerFilterPanel(query: $query)
                 }
-                .navigationTitle("Performers")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
-                    }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(themeManager.current.backgroundColor.ignoresSafeArea())
+            .navigationTitle("Performers")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
                 }
-                .navigationDestination(for: Route.self) { route in
-                    RouteDestination(route: route, path: $path)
-                }
+            }
+            .navigationDestination(for: Route.self) { route in
+                RouteDestination(route: route, path: $path)
+            }
         }
         // Debounced: rapid filter changes (e.g. tapping the favorites toggle repeatedly) coalesce into
         // one reload instead of firing an overlapping storm of loads under the open popover.

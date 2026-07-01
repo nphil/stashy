@@ -54,24 +54,31 @@ struct ScenesView: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            content
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(themeManager.current.backgroundColor.ignoresSafeArea())
-                .overlay(alignment: .topTrailing) {
-                    FilterPopoverAnchor(isPresented: $filterExpanded) {
-                        SceneFilterPanel(query: $query)
-                    }
+            ZStack(alignment: .topTrailing) {
+                content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // The popover is hosted from a *stable sibling* of `content`, never as an overlay on it.
+                // `content` flips its `@ViewBuilder` branch (grid ⇄ full-screen spinner ⇄ empty state)
+                // every time a reload clears `items`; a popover attached to that churning subtree is torn
+                // down and re-presented on each branch flip — exactly the "tap a tag → window closes and
+                // reopens" bug. As a peer in the ZStack the anchor keeps its identity regardless of which
+                // branch `content` renders, so the popover stays put across reloads.
+                FilterPopoverAnchor(isPresented: $filterExpanded) {
+                    SceneFilterPanel(query: $query)
                 }
-                .navigationTitle("Scenes")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
-                    }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(themeManager.current.backgroundColor.ignoresSafeArea())
+            .navigationTitle("Scenes")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
                 }
-                .navigationDestination(for: Route.self) { route in
-                    RouteDestination(route: route, path: $path)
-                }
+            }
+            .navigationDestination(for: Route.self) { route in
+                RouteDestination(route: route, path: $path)
+            }
         }
         .environment(\.scenePreviewPresenter, previewPresenter)
         .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: { path.append(.scene($0)) }) }
