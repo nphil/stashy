@@ -44,7 +44,7 @@ struct PerformerCard: View {
         .frame(width: width)
         .task(id: performer.id) {
             guard let url = performer.imageURL(apiKey: apiKey) else { return }
-            image = try? await imageCache.image(for: url)
+            image = try? await imageCache.image(for: url, priority: true)
         }
     }
 }

@@ -62,13 +62,29 @@ struct StashClient: Sendable {
         return response.stats
     }
 
-    // Shared scene selection set, reused across scene queries.
-    private static let sceneFields = """
+    // Scene selection set for the *list* query. Deliberately slim on performers — a list can carry
+    // dozens of scenes, and pulling every performer's full profile (rating, scene_count, urls, tags…)
+    // for each one bloats the payload for data the card never shows. Just id+name here; the detail
+    // view re-fetches the full set for the one scene being viewed via `findScene(id:)`. Everything the
+    // card and the player need (files, paths, streams) stays in, so both open instantly.
+    private static let sceneListFields = """
       id title date
       files { duration video_codec width height basename size bit_rate frame_rate }
       paths { screenshot preview sprite vtt }
       studio { id name }
-      performers { id name image_path rating100 scene_count country birthdate gender urls tags { id name } }
+      performers { id name }
+      tags { id name }
+      sceneStreams { url mime_type label }
+    """
+
+    // Full scene selection set for the single-scene detail fetch: complete performer profiles for the
+    // performer cards and social links.
+    private static let sceneDetailFields = """
+      id title date
+      files { duration video_codec width height basename size bit_rate frame_rate }
+      paths { screenshot preview sprite vtt }
+      studio { id name }
+      performers { \(performerFields) }
       tags { id name }
       sceneStreams { url mime_type label }
     """
@@ -81,7 +97,7 @@ struct StashClient: Sendable {
         query FindScenes($filter: FindFilterType, $scene_filter: SceneFilterType) {
           findScenes(filter: $filter, scene_filter: $scene_filter) {
             count
-            scenes { \(Self.sceneFields) }
+            scenes { \(Self.sceneListFields) }
           }
         }
         """
@@ -105,6 +121,19 @@ struct StashClient: Sendable {
         )
         let response: FindScenesResponse = try await query(gql, variables: vars)
         return response.findScenes
+    }
+
+    /// Full detail for a single scene (complete performer profiles + social links). The list query
+    /// returns performers slimmed to id+name; the detail view calls this to fill in the rest for the
+    /// one scene on screen.
+    func findScene(id: String) async throws -> StashScene? {
+        let gql = """
+        query FindScene($id: ID!) {
+          findScene(id: $id) { \(Self.sceneDetailFields) }
+        }
+        """
+        let response: FindSceneResponse = try await query(gql, variables: FindSceneVariables(id: id))
+        return response.findScene
     }
 
     func findPerformers(page: Int = 1, perPage: Int = 25, query q: String = "") async throws -> FindPerformersResult {
@@ -301,6 +330,7 @@ struct FindFilter: Encodable, Sendable {
 }
 
 private struct FilterVariables: Encodable, Sendable { let filter: FindFilter }
+private struct FindSceneVariables: Encodable, Sendable { let id: String }
 private struct FindScenesVariables: Encodable, Sendable {
     let filter: FindFilter
     let scene_filter: SceneFilter?
@@ -343,6 +373,8 @@ struct StatsData: Decodable, Sendable {
     let studio_count: Int?
     let tag_count: Int?
 }
+
+struct FindSceneResponse: Decodable, Sendable { let findScene: StashScene? }
 
 struct FindScenesResponse: Decodable, Sendable { let findScenes: FindScenesResult }
 struct FindScenesResult: Decodable, Sendable {

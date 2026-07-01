@@ -42,8 +42,15 @@ actor ImageCache {
 
     /// Returns a downsampled image sized to ~`maxPixel` on its longest edge. Served from memory,
     /// then disk, then network (downsampling + persisting on the way back).
-    func image(for url: URL, maxPixel: CGFloat = 600) async throws -> UIImage {
-        let key = cacheKey(url, maxPixel)
+    ///
+    /// `priority` marks images we want to keep on device the longest and show at the best quality —
+    /// performer portraits, which appear on cards throughout the app and look noticeably worse when
+    /// re-compressed hard. Priority images are stored at a higher JPEG quality and are the *last* to be
+    /// evicted when the disk cache is over its budget (see `enforceLimit`). The priority flag is baked
+    /// into the on-disk filename (a `-p` marker) so eviction can recognise them from the directory
+    /// listing alone, without tracking any separate index.
+    func image(for url: URL, maxPixel: CGFloat = 600, priority: Bool = false) async throws -> UIImage {
+        let key = cacheKey(url, maxPixel, priority: priority)
         let nsKey = key as NSString
         if let hit = memoryCache.object(forKey: nsKey) { return hit }
 
@@ -58,7 +65,9 @@ actor ImageCache {
         guard let image = Self.downsample(data: data, maxPixel: maxPixel) else {
             throw ImageCacheError.invalidData
         }
-        if let jpeg = image.jpegData(compressionQuality: 0.7) {
+        // Higher quality for priority (performer) images so they stay crisp on the cards; the ordinary
+        // 0.7 keeps grid thumbnails small.
+        if let jpeg = image.jpegData(compressionQuality: priority ? 0.85 : 0.7) {
             if (try? jpeg.write(to: file, options: .atomic)) != nil {
                 ensureDiskBytesLoaded()
                 diskBytes += jpeg.count
@@ -96,14 +105,14 @@ actor ImageCache {
         return image
     }
 
-    func prefetch(urls: [URL], maxPixel: CGFloat = 600) {
+    func prefetch(urls: [URL], maxPixel: CGFloat = 600, priority: Bool = false) {
         for url in urls {
-            let key = cacheKey(url, maxPixel)
+            let key = cacheKey(url, maxPixel, priority: priority)
             if memoryCache.object(forKey: key as NSString) != nil { continue }
             if FileManager.default.fileExists(atPath: directory.appendingPathComponent(key + ".jpg").path) { continue }
             // Capture only Sendable values (self + url); `image(for:)` populates the cache.
             Task.detached(priority: .background) { [weak self] in
-                _ = try? await self?.image(for: url, maxPixel: maxPixel)
+                _ = try? await self?.image(for: url, maxPixel: maxPixel, priority: priority)
             }
         }
     }
@@ -140,25 +149,31 @@ actor ImageCache {
         guard let urls = try? FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: keys
         ) else { return }
-        var entries = urls.compactMap { url -> (url: URL, size: Int, date: Date)? in
+        var entries = urls.compactMap { url -> (url: URL, size: Int, date: Date, priority: Bool)? in
             guard let v = try? url.resourceValues(forKeys: Set(keys)) else { return nil }
-            return (url, v.fileSize ?? 0, v.contentModificationDate ?? .distantPast)
+            // Priority images carry the `-p` filename marker (see `cacheKey`).
+            let isPriority = url.deletingPathExtension().lastPathComponent.hasSuffix("-p")
+            return (url, v.fileSize ?? 0, v.contentModificationDate ?? .distantPast, isPriority)
         }
-        entries.sort { $0.date < $1.date } // oldest first
+        // Evict non-priority first, then oldest-first within each tier — so performer portraits are the
+        // last thing dropped when the cache is over budget.
+        entries.sort { ($0.priority ? 1 : 0, $0.date) < ($1.priority ? 1 : 0, $1.date) }
         for entry in entries where diskBytes > maxBytes {
             try? FileManager.default.removeItem(at: entry.url)
             diskBytes -= entry.size
         }
     }
 
-    private func cacheKey(_ url: URL, _ maxPixel: CGFloat) -> String {
+    private func cacheKey(_ url: URL, _ maxPixel: CGFloat, priority: Bool = false) -> String {
         var key = url.absoluteString
         if var comps = URLComponents(url: url, resolvingAgainstBaseURL: false) {
             comps.queryItems = comps.queryItems?.filter { $0.name != "apikey" }
             key = comps.url?.absoluteString ?? url.absoluteString
         }
         let digest = SHA256.hash(data: Data(key.utf8))
-        return digest.map { String(format: "%02x", $0) }.joined() + "_\(Int(maxPixel))"
+        // The trailing `-p` marks a priority (performer) image so eviction can spot it from the
+        // filename alone — see `enforceLimit`. Kept after the size so the base hash is unaffected.
+        return digest.map { String(format: "%02x", $0) }.joined() + "_\(Int(maxPixel))" + (priority ? "-p" : "")
     }
 
     /// Memory-efficient downsample via ImageIO — decodes straight to a thumbnail without ever

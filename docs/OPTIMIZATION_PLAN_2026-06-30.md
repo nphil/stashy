@@ -79,12 +79,15 @@ inefficiency.
 ---
 
 ## 3. Performance — browsing & rendering (medium impact)
-3.1 **Slim the scene-list query.** `StashClient.sceneFields` fetches **full** performer records
-    (`image_path`, `tags`, `birthdate`, `urls`, `rating100`, …) for *every* scene in list pages. For a
-    25-scene page that's a lot of redundant payload + JSON decode. Use a minimal performer projection
-    (`id name`) for list queries and fetch full performer data only on the detail screen.
-    **Impact:** smaller responses, faster decode, snappier scroll. **Risk:** low (verify detail view
-    still has what it needs).
+3.1 **Slim the scene-list query.** ✅ **DONE.** Split into `sceneListFields` (performers → `id name`
+    only) for `findScenes`, and `sceneDetailFields` (full performer profiles) fetched per-scene via the
+    new `findScene(id:)`. `SceneDetailView` re-fetches the full scene on appear and falls back to the
+    slim scene until it lands (`fullScene ?? scene`), so the player still opens instantly (playback only
+    needs files/paths/streams, which stay in the slim set).
+    Bonus: performer images now cache at a higher JPEG quality (0.85 vs 0.7) and are evicted **last**
+    when the disk cache is over budget — a `-p` filename marker lets `ImageCache.enforceLimit` sort
+    non-priority-then-oldest so portraits survive longest. All four performer-image call sites pass
+    `priority: true`.
 3.2 **ImageCache LRU scan.** `enforceLimit()` / `totalSize()` scan the whole Thumbnails directory on
     every *new* image write — O(n) per fetch during fast scroll/prefetch. Track total bytes
     incrementally (in-actor counter) and only do a full scan occasionally (or when over a soft cap).

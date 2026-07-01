@@ -163,7 +163,7 @@ struct PerformerRow: View {
         }
         .task(id: performer.id) {
             guard let url = performer.imageURL(apiKey: apiKey) else { return }
-            avatar = try? await imageCache.image(for: url)
+            avatar = try? await imageCache.image(for: url, priority: true)
         }
     }
 }

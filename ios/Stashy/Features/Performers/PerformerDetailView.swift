@@ -130,7 +130,7 @@ struct PerformerDetailView: View {
         }
         .task(id: performer.id) {
             guard let url = performer.imageURL(apiKey: apiKey) else { return }
-            portrait = try? await imageCache.image(for: url)
+            portrait = try? await imageCache.image(for: url, priority: true)
         }
     }
 

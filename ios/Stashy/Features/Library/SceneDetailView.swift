@@ -8,6 +8,13 @@ struct SceneDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("blurTitles") private var blurTitles = false
     @State private var isFullscreen = false
+    /// The scene list query slims performers to id+name to keep the payload small. Once the detail
+    /// screen appears we re-fetch this one scene's full performer profiles (rating, urls, tags…) for
+    /// the performer card and social links. Nil until the fetch lands; falls back to the slim scene.
+    @State private var fullScene: StashScene?
+
+    /// Full performers if the detail fetch has landed, otherwise the slim (id+name) list.
+    private var performers: [Performer] { (fullScene ?? scene).performers }
 
     private var route: PlaybackRoute? {
         guard let client = appState.client else { return nil }
@@ -58,6 +65,10 @@ struct SceneDetailView: View {
         .navigationBarBackButtonHidden(true)
         .statusBarHidden(isFullscreen)
         .background(EnableSwipeBack()) // keep edge-swipe back even with the nav bar hidden
+        .task(id: scene.id) {
+            guard let client = appState.client else { return }
+            fullScene = try? await client.findScene(id: scene.id)
+        }
     }
 
     private var metadata: some View {
@@ -85,7 +96,7 @@ struct SceneDetailView: View {
 
                 // Performer card (left, enlarged) + socials stack (right, truncated to fit).
                 HStack(alignment: .top, spacing: spacing) {
-                    ScenePerformerCard(performers: scene.performers, apiKey: apiKey) { performer in
+                    ScenePerformerCard(performers: performers, apiKey: apiKey) { performer in
                         path.openPerformer(performer)
                     }
                     .frame(width: 150, height: topRowHeight)
@@ -108,7 +119,7 @@ struct SceneDetailView: View {
     }
 
     private var socialLinks: [SocialLink]? {
-        let raw = scene.performers.flatMap { $0.urls ?? [] }
+        let raw = performers.flatMap { $0.urls ?? [] }
         let links = raw.compactMap { SocialLink(raw: $0) }
         guard !links.isEmpty else { return nil }
         var seen = Set<URL>()
@@ -215,7 +226,7 @@ struct ScenePerformerCard: View {
             .buttonStyle(.plain)
             .task(id: performer.id) {
                 guard let url = performer.imageURL(apiKey: apiKey) else { return }
-                image = try? await imageCache.image(for: url)
+                image = try? await imageCache.image(for: url, priority: true)
             }
         } else {
             PerformerPlaceholder()
