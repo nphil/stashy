@@ -218,7 +218,8 @@ final class DownloadManager {
 
     @ObservationIgnored private let connectionCount = 8
     @ObservationIgnored private let store = TransferStore()
-    @ObservationIgnored private var session: URLSession!
+    @ObservationIgnored private var session: URLSession!       // foreground: 8-way parallel
+    @ObservationIgnored private var bgSession: URLSession!     // background: one connection at a time
     @ObservationIgnored private var delegate: DownloadDelegate!
     @ObservationIgnored private var tasks: [String: [URLSessionDownloadTask]] = [:]
     @ObservationIgnored private var resumeData: [String: [Int: Data]] = [:]
@@ -231,6 +232,14 @@ final class DownloadManager {
     /// instead of retrying forever; reset when the item makes real progress.
     @ObservationIgnored private var networkRetries: [String: Int] = [:]
     private let maxNetworkRetries = 10
+    /// True while the app is backgrounded: downloads run one connection at a time on the background session
+    /// (surviving suspension) instead of 8-way parallel on the foreground session.
+    @ObservationIgnored private var inBackground = false
+    /// Outstanding resume-data cancellations per item during a foreground⇄background handoff (we restart on
+    /// the other engine only once every task has produced its resume data).
+    @ObservationIgnored private var pendingHandoff: [String: Int] = [:]
+    /// Keeps the app alive briefly while a background handoff completes and its background task starts.
+    @ObservationIgnored private var handoffAssertion: UIBackgroundTaskIdentifier = .invalid
 
     @ObservationIgnored private let downloadsDir: URL
     @ObservationIgnored private let partsDir: URL
@@ -259,20 +268,28 @@ final class DownloadManager {
             onFinish: { [weak self] item, conn in Task { @MainActor in self?.connectionFinished(itemID: item, conn: conn) } },
             onError: { [weak self] item, msg, code in Task { @MainActor in self?.connectionFailed(itemID: item, message: msg, code: code) } }
         )
-        // Multi-connection range downloads run on a *foreground* session (proven). A background session
-        // (URLSessionConfiguration.background) fails 8-way HTTP range (206 partial-content) tasks with
-        // NSURLErrorCannotCreateFile (-3000): the out-of-process background daemon doesn't handle parallel
-        // partial-content downloads. So transfers run in the foreground; the app still restores and resumes
-        // interrupted downloads after a relaunch (see loadInterrupted / reconnectTasks). True background
-        // continuation would need a single full-file background task per item — a separate design.
+        // Foreground: 8-way parallel range downloads on a default session (fast). Background: a single
+        // connection at a time on a background session, so a download keeps going while the app is
+        // suspended — without the NSURLErrorCannotCreateFile (-3000) the background daemon returns for
+        // *parallel* range (206) tasks. We switch engines on app-phase changes, reusing the same 8 part
+        // files either way, so no progress is lost in either direction.
         let config = URLSessionConfiguration.default
         config.waitsForConnectivity = true
         session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
 
+        let bgConfig = URLSessionConfiguration.background(withIdentifier: BackgroundDownloadSession.identifier)
+        bgConfig.sessionSendsLaunchEvents = true
+        bgConfig.isDiscretionary = false
+        bgConfig.waitsForConnectivity = true
+        bgSession = URLSession(configuration: bgConfig, delegate: delegate, delegateQueue: nil)
+
+        inBackground = UIApplication.shared.applicationState == .background
+
         loadCompleted()
         loadInterrupted()      // rebuild in-flight items from sidecars so relaunch callbacks find them
         finalizeReadyItems()   // any item whose parts are all present already → assemble now
-        reconnectTasks()       // re-attach to still-running background tasks
+        reconnectTasks()       // re-attach to still-running tasks on both sessions
+        observeAppPhase()
         startNetworkMonitor()
         startPolling()
     }
@@ -459,7 +476,7 @@ final class DownloadManager {
             item.receivedBytes = 0
             item.error = nil
         }
-        startConnections(item)
+        if inBackground { startBackgroundConnection(item) } else { startConnections(item) }
     }
 
     private func startConnections(_ item: DownloadItem) {
@@ -529,6 +546,114 @@ final class DownloadManager {
         return (lo, hi)
     }
 
+    // MARK: - Foreground / background handoff
+
+    /// Move active downloads between the fast foreground engine and the suspend-surviving single-connection
+    /// background engine when the app changes phase.
+    private func observeAppPhase() {
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.enterBackground() }
+        }
+        nc.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.enterForeground() }
+        }
+    }
+
+    private func enterBackground() {
+        guard !inBackground else { return }
+        inBackground = true
+        for item in items where item.state == .downloading { handoff(item, toBackground: true) }
+        // Hold a short assertion so the resume-data cancellations finish and the background tasks actually
+        // start before iOS suspends us (a background URLSession task, once running, then survives on its own).
+        if !pendingHandoff.isEmpty, handoffAssertion == .invalid {
+            handoffAssertion = UIApplication.shared.beginBackgroundTask(withName: "dl-handoff")
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(15))
+                self?.endHandoffAssertion()
+            }
+        }
+    }
+
+    private func enterForeground() {
+        guard inBackground else { return }
+        inBackground = false
+        for item in items where item.state == .downloading { handoff(item, toBackground: false) }
+    }
+
+    private func endHandoffAssertion() {
+        guard handoffAssertion != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(handoffAssertion)
+        handoffAssertion = .invalid
+    }
+
+    /// Cancel the item's in-flight tasks (saving each one's resume data), then — once every cancellation has
+    /// produced its resume data — restart on the target engine: one connection on the background session, or
+    /// all remaining connections in parallel on the foreground session.
+    private func handoff(_ item: DownloadItem, toBackground: Bool) {
+        let active = tasks[item.id] ?? []
+        tasks[item.id] = []
+        guard !active.isEmpty else {
+            if toBackground { startBackgroundConnection(item) } else { startConnections(item) }
+            return
+        }
+        pendingHandoff[item.id] = active.count
+        for task in active {
+            let conn = store.info(task: task.taskIdentifier)?.conn
+            store.drop(task: task.taskIdentifier)
+            task.cancel(byProducingResumeData: { [weak self] data in
+                Task { @MainActor in
+                    guard let self else { return }
+                    if let data, let conn {
+                        self.resumeData[item.id, default: [:]][conn] = data
+                        try? data.write(to: self.resumeDataURL(item.id, conn), options: .atomic)
+                    }
+                    let remaining = (self.pendingHandoff[item.id] ?? 1) - 1
+                    if remaining > 0 { self.pendingHandoff[item.id] = remaining; return }
+                    self.pendingHandoff[item.id] = nil
+                    if item.state == .downloading {
+                        // Honour the *current* phase in case it flipped again mid-handoff.
+                        if self.inBackground { self.startBackgroundConnection(item) }
+                        else { self.startConnections(item) }
+                    }
+                    if self.pendingHandoff.isEmpty { self.endHandoffAssertion() }
+                }
+            })
+        }
+    }
+
+    /// Start a single connection (the first unfinished) on the background session so it continues while the
+    /// app is suspended; `connectionFinished` chains the next one. Unlike `startConnections` it preserves the
+    /// other connections' saved resume data (they resume when we return to the foreground).
+    private func startBackgroundConnection(_ item: DownloadItem) {
+        guard item.state != .completed, item.state != .merging else { return }
+        item.state = .downloading
+        item.error = nil
+        item.lastSampleTime = Date()
+        item.lastSampleBytes = item.receivedBytes
+        markActive(item.id)
+        let done = finished[item.id] ?? []
+        guard let i = item.connections.indices.first(where: { !done.contains($0) }) else {
+            finalizeIfComplete(item); return
+        }
+        let task: URLSessionDownloadTask
+        if let data = resumeData[item.id]?[i] {
+            task = bgSession.downloadTask(withResumeData: data)
+            resumeData[item.id]?[i] = nil
+        } else {
+            var req = URLRequest(url: item.url)
+            if item.totalBytes > 0 {
+                let (lo, hi) = chunkRange(item, i)
+                req.setValue("bytes=\(lo)-\(hi)", forHTTPHeaderField: "Range")
+            }
+            task = bgSession.downloadTask(with: req)
+        }
+        task.taskDescription = "\(item.id)\u{1}\(i)\u{1}\(partURL(item.id, i).path)"
+        store.register(task: task.taskIdentifier, item: item.id, conn: i, part: partURL(item.id, i))
+        tasks[item.id] = [task]
+        task.resume()
+    }
+
     // MARK: - Completion / merge
 
     private func finalizeIfComplete(_ item: DownloadItem) {
@@ -580,7 +705,13 @@ final class DownloadManager {
         guard let item = items.first(where: { $0.id == itemID }) else { return }
         finished[itemID, default: []].insert(conn)
         if conn < item.connections.count { item.connections[conn].received = item.connections[conn].total }
-        finalizeIfComplete(item)
+        if (finished[itemID] ?? []).count == item.connections.count {
+            finalizeIfComplete(item)
+        } else if inBackground, item.state == .downloading {
+            // Single-connection background mode: this part is done, kick off the next remaining one.
+            startBackgroundConnection(item)
+        }
+        // Foreground: the other parallel connections are still running — nothing to start here.
     }
 
     /// Connection lost / not connected / timed out / host unreachable — transient, so we wait and
@@ -737,12 +868,15 @@ final class DownloadManager {
     /// Re-attach to background tasks still running after a relaunch, registering them so progress and
     /// finish callbacks resolve to the right item. Tasks with no matching item are cancelled.
     private func reconnectTasks() {
-        session.getAllTasks { [weak self] allTasks in
-            // URLSessionTask isn't Sendable; box it to hand the array to the main actor. Safe here — we
-            // only read taskIdentifier/taskDescription and call cancel(), all thread-safe operations.
+        // Query both sessions: after a cold relaunch the still-running tasks live on the background session,
+        // but a warm foreground relaunch may have foreground tasks too. URLSessionTask isn't Sendable, so
+        // box the array to hand it to the main actor — safe here (we only read identifiers / call cancel).
+        let handler: @Sendable ([URLSessionTask]) -> Void = { [weak self] allTasks in
             let box = UncheckedSendableBox(allTasks)
             Task { @MainActor in self?.attach(box.value) }
         }
+        session.getAllTasks(completionHandler: handler)
+        bgSession.getAllTasks(completionHandler: handler)
     }
 
     private func attach(_ allTasks: [URLSessionTask]) {
