@@ -158,12 +158,18 @@ viewing — with a clean handoff (no duplicated video mirrored on the phone scre
 - **Multi-threaded downloader that adds directly to the Stash library** — parallel downloads that hand
   finished files to Stash for import. Big effort; sequence carefully.
 
-## Tech debt / cleanup (do before more features)
-- **See `docs/OPTIMIZATION_PLAN_2026-06-30.md`** — full prioritized plan: remove the dead segmented-HLS
-  code (~750 lines), **bound the remux to the playhead** (biggest perf win — today it downloads the whole
-  file regardless of watch time), slim the scene-list query, ImageCache LRU counter, seek/AV1 bug pass.
+## Tech debt / cleanup
+**✅ Optimization pass complete (2026-07-01, through v1.0.84).** The prioritized plan in
+`docs/OPTIMIZATION_PLAN_2026-06-30.md` is done: dead segmented-HLS code removed (~750 lines), remux
+**bounded to the playhead** (network/CPU/disk now proportional to watched duration, not file size),
+temp-file cleanup, correctness pass (seek-by-reinit / AV1 / seek-to-end / audio session), scene-list
+query slimmed + performer images cached at higher quality (evicted last), ImageCache LRU counter, and
+`ScenePlayerModel` split out of the view. Remaining items are optional/deferred and not blocking
+features: §3.3 (cheaper 4K blur), §6.2 (shared RangeReader tidy), §2.3 (reinit debounce — deferred, seek
+latency tradeoff).
 - **⚠️ REMOVE ALL TELEMETRY before any wider release.** Debug logging (`RemoteLog` → ntfy) is OFF by
-  default and isolated; deletion checklist is in §5 of the optimization plan. Reminder per Nitin.
+  default and isolated; deletion checklist is in §5 of the optimization plan. Reminder per Nitin. This is
+  the one tech-debt item still intentionally open (kept as the live debug channel until release).
 
 ## Other
 - Android app — later.
