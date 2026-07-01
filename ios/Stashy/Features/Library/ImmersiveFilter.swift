@@ -191,6 +191,7 @@ struct InlineTagEditor: View {
     @Binding var selected: [Tag]
     @Environment(AppState.self) private var appState
     @Environment(ThemeManager.self) private var themeManager
+    @Environment(LibraryEdits.self) private var edits
     @State private var search = ""
     @State private var results: [Tag] = []
     @State private var searchTask: Task<Void, Never>?
@@ -224,18 +225,25 @@ struct InlineTagEditor: View {
                 .padding(.vertical, 8)
                 .background(themeManager.current.backgroundColor.opacity(0.6), in: Capsule())
 
-            let suggestions = results.filter { !selected.contains($0) }
+            // Suggestions with favourited tags floated to the front. Each chip has a heart (toggles the
+            // tag's favorite) and a tap area (adds it to the filter) — adjacent buttons, not nested.
+            let unselected = results.filter { !selected.contains($0) }
+            let suggestions = unselected.filter { edits.isFavorite($0) } + unselected.filter { !edits.isFavorite($0) }
             if !suggestions.isEmpty {
                 FlowLayout(spacing: 6) {
-                    ForEach(suggestions.prefix(14)) { tag in
-                        Button { add(tag) } label: {
-                            Text(tag.name)
-                                .font(.caption)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .glassEffect(.regular, in: Capsule())
+                    ForEach(suggestions.prefix(16)) { tag in
+                        HStack(spacing: 5) {
+                            FavoriteHeart(isFavorite: edits.isFavorite(tag), size: 11, offColor: .secondary) { newValue in
+                                edits.setTagFavorite(newValue, id: tag.id, client: appState.client)
+                            }
+                            Button { add(tag) } label: {
+                                Text(tag.name).font(.caption)
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .glassEffect(edits.isFavorite(tag) ? .regular.tint(.pink.opacity(0.5)) : .regular, in: Capsule())
                     }
                 }
             }
