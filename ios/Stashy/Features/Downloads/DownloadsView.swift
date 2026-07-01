@@ -64,6 +64,7 @@ private struct DownloadCard: View {
     @State private var thumb: UIImage?
     @State private var performer: UIImage?
     @State private var confirmDelete = false
+    @State private var showTranscode = false
 
     var body: some View {
         // Centre-aligned so the scene thumbnail sits vertically centred against the taller text column.
@@ -95,7 +96,8 @@ private struct DownloadCard: View {
                     }
                 }
 
-                if item.state != .completed { connectionBar }
+                if item.transcoding { transcodeBar }
+                else if item.state != .completed { connectionBar }
 
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Text(statusText)
@@ -122,6 +124,9 @@ private struct DownloadCard: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Removes the downloaded file from this device. It stays in your Stash library.")
+        }
+        .sheet(isPresented: $showTranscode) {
+            TranscodePresetSheet(item: item) { settings in downloads.transcode(item, settings: settings) }
         }
     }
 
@@ -193,23 +198,40 @@ private struct DownloadCard: View {
         .animation(.linear(duration: 0.12), value: item.receivedBytes)
     }
 
+    /// Single-bar accent progress shown while an on-device transcode runs.
+    private var transcodeBar: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(themeManager.current.accentColor.opacity(0.18))
+                Capsule().fill(themeManager.current.accentColor)
+                    .frame(width: max(0, geo.size.width * item.transcodeProgress))
+            }
+        }
+        .frame(height: 6)
+        .animation(.linear(duration: 0.2), value: item.transcodeProgress)
+    }
+
     private var controls: some View {
         HStack(spacing: 8) {
-            switch item.state {
-            case .downloading:
-                iconButton("pause.fill") { downloads.pause(item) }
-                iconButton("stop.fill", tint: .red) { downloads.stop(item) }
-            case .paused, .waitingForNetwork:
-                iconButton("play.fill") { downloads.resume(item) }
-                iconButton("stop.fill", tint: .red) { downloads.stop(item) }
-            case .failed, .stopped:
-                iconButton("arrow.clockwise") { downloads.retry(item) }
-                iconButton("trash", tint: .red) { downloads.delete(item) }
-            case .merging, .queued:
-                ProgressView().controlSize(.small)
-            case .completed:
-                iconButton("wand.and.stars", disabled: true) {}   // on-device transcode — M3
-                iconButton("trash", tint: .red) { confirmDelete = true }
+            if item.transcoding {
+                iconButton("xmark", tint: .red) { downloads.cancelTranscode(item) }
+            } else {
+                switch item.state {
+                case .downloading:
+                    iconButton("pause.fill") { downloads.pause(item) }
+                    iconButton("stop.fill", tint: .red) { downloads.stop(item) }
+                case .paused, .waitingForNetwork:
+                    iconButton("play.fill") { downloads.resume(item) }
+                    iconButton("stop.fill", tint: .red) { downloads.stop(item) }
+                case .failed, .stopped:
+                    iconButton("arrow.clockwise") { downloads.retry(item) }
+                    iconButton("trash", tint: .red) { downloads.delete(item) }
+                case .merging, .queued:
+                    ProgressView().controlSize(.small)
+                case .completed:
+                    iconButton("wand.and.stars") { showTranscode = true }   // on-device transcode
+                    iconButton("trash", tint: .red) { confirmDelete = true }
+                }
             }
         }
     }
@@ -246,6 +268,7 @@ private struct DownloadCard: View {
     }
 
     private var statusText: String {
+        if item.transcoding { return "Transcoding… \(Int(item.transcodeProgress * 100))%" }
         switch item.state {
         case .queued: return "Queued…"
         case .downloading:
@@ -262,11 +285,67 @@ private struct DownloadCard: View {
     }
 
     private var statusColor: Color {
+        if item.transcoding { return themeManager.current.accentColor }
         switch item.state {
         case .completed: return .green
         case .failed: return .red
         case .waitingForNetwork, .paused, .stopped: return .secondary
         default: return themeManager.current.foregroundColor.opacity(0.85)
         }
+    }
+}
+
+/// Bottom sheet to pick on-device transcode presets (resolution / quality / codec) for a completed
+/// download, then kick it off.
+private struct TranscodePresetSheet: View {
+    let item: DownloadItem
+    var onStart: (VideoTranscoder.Settings) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var resolution: TranscodeResolution = .fhd1080
+    @State private var quality: TranscodeQuality = .medium
+    @State private var codec: TranscodeCodec = .hevc
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Resolution") {
+                    Picker("Resolution", selection: $resolution) {
+                        ForEach(TranscodeResolution.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.menu)
+                }
+                Section("Quality") {
+                    Picker("Quality", selection: $quality) {
+                        ForEach(TranscodeQuality.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                }
+                Section {
+                    Picker("Codec", selection: $codec) {
+                        ForEach(TranscodeCodec.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                } header: {
+                    Text("Codec")
+                } footer: {
+                    Text("HEVC is smaller at the same quality and plays natively on iPhone. Transcoding replaces the offline copy; it stays in your Stash library.")
+                }
+                Section {
+                    Button {
+                        onStart(VideoTranscoder.Settings(resolution: resolution, quality: quality, codec: codec))
+                        dismiss()
+                    } label: {
+                        Text("Start Transcode").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .navigationTitle("Transcode")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() } }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 }

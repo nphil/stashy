@@ -73,6 +73,10 @@ final class DownloadItem: Identifiable {
     var error: String?
     var localURL: URL?
 
+    /// On-device transcode progress (0…1) while `transcoding`; the card shows it in place of the download bar.
+    var transcoding = false
+    var transcodeProgress: Double = 0
+
     @ObservationIgnored var lastSampleBytes: Int64 = 0
     @ObservationIgnored var lastSampleTime = Date()
 
@@ -365,6 +369,84 @@ final class DownloadManager {
 
     /// Called when the Downloads screen re-appears: drop rows the user stopped while away.
     func pruneStopped() { items.removeAll { $0.state == .stopped } }
+
+    // MARK: - On-device transcode
+
+    @ObservationIgnored private var transcoders: [String: VideoTranscoder] = [:]
+
+    /// Re-encode a completed download in place to the chosen resolution/quality/codec (hardware
+    /// VideoToolbox), replacing the offline file with the smaller/normalised copy on success.
+    func transcode(_ item: DownloadItem, settings: VideoTranscoder.Settings) {
+        guard item.state == .completed, let src = item.localURL, !item.transcoding else { return }
+        item.transcoding = true
+        item.transcodeProgress = 0
+        item.error = nil
+        let transcoder = VideoTranscoder()
+        transcoders[item.id] = transcoder
+        let id = item.id
+        let dest = downloadsDir.appendingPathComponent("\(id).transcode.mp4")
+        let bg = UIApplication.shared.beginBackgroundTask(withName: "transcode-\(id)")
+        Task { [weak self] in
+            do {
+                try await transcoder.run(input: src, output: dest, settings: settings) { p in
+                    Task { @MainActor [weak self] in
+                        if let it = self?.items.first(where: { $0.id == id }) { it.transcodeProgress = p }
+                    }
+                }
+                await self?.transcodeFinished(id: id, output: dest, src: src, settings: settings)
+            } catch {
+                try? FileManager.default.removeItem(at: dest)
+                // A user cancel isn't an error to surface; anything else is.
+                let cancelled: Bool
+                if case VideoTranscoder.TranscodeError.cancelled = error { cancelled = true } else { cancelled = false }
+                let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                await self?.transcodeFailed(id: id, message: cancelled ? nil : message)
+            }
+            if bg != .invalid { await MainActor.run { UIApplication.shared.endBackgroundTask(bg) } }
+        }
+    }
+
+    func cancelTranscode(_ item: DownloadItem) { transcoders[item.id]?.cancel() }
+
+    private func transcodeFailed(id: String, message: String?) {
+        guard let item = items.first(where: { $0.id == id }) else { return }
+        item.transcoding = false
+        item.transcodeProgress = 0
+        if let message { item.error = message }
+        transcoders[id] = nil
+    }
+
+    private func transcodeFinished(id: String, output: URL, src: URL, settings: VideoTranscoder.Settings) {
+        guard let item = items.first(where: { $0.id == id }) else { return }
+        let fm = FileManager.default
+        let finalURL = downloadsDir.appendingPathComponent("\(id).mp4")
+        try? fm.removeItem(at: src)
+        if src.path != finalURL.path { try? fm.removeItem(at: finalURL) }
+        do {
+            try fm.moveItem(at: output, to: finalURL)
+        } catch {
+            item.transcoding = false
+            item.error = "Couldn't save the transcoded file"
+            transcoders[id] = nil
+            return
+        }
+        let size = (try? finalURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { Int64($0) } ?? item.totalBytes
+        item.localURL = finalURL
+        item.ext = "mp4"
+        item.totalBytes = size
+        item.receivedBytes = size
+        item.codec = settings.codec == .hevc ? "hevc" : "h264"
+        // Reflect the downscale in the spec chips.
+        if let w = item.width, let h = item.height, let cap = settings.resolution.maxDimension, max(w, h) > cap {
+            let scale = Double(cap) / Double(max(w, h))
+            item.width = Int((Double(w) * scale).rounded())
+            item.height = Int((Double(h) * scale).rounded())
+        }
+        item.bitRate = nil
+        item.transcodeProgress = 1
+        item.transcoding = false
+        transcoders[id] = nil
+    }
 
     // MARK: - Launch / suspend
 
