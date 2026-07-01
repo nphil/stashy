@@ -21,6 +21,14 @@
       ],
       "versions": [
         {
+          "version": "1.0.90",
+          "buildVersion": "1.0.90",
+          "date": "2026-07-01T04:57:39Z",
+          "localizedDescription": "Unsigned IPA \u2014 sideload with Feather/AltStore. Built from `a2a9c6e` on 2026-07-01 04:57 UTC",
+          "downloadURL": "https://github.com/nphil/stashy/releases/download/v1.0.90/Stashy.ipa",
+          "size": 7520557
+        },
+        {
           "version": "1.0.89",
           "buildVersion": "1.0.89",
           "date": "2026-07-01T04:52:21Z",
