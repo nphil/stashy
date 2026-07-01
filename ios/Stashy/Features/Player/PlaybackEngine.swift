@@ -31,6 +31,9 @@ protocol PlaybackEngine: AnyObject {
     /// Actual decoded video size (after pixel-aspect/rotation), once known — for correct layout when
     /// the server's file dimensions are missing or wrong.
     var onPresentationSize: ((CGSize) -> Void)? { get set }
+    /// Playback reached the end of the item (player parked at the end). The facade uses this so the next
+    /// play() restarts from the beginning instead of no-opping at the end.
+    var onEnded: (() -> Void)? { get set }
 
     /// Muted state. Starts muted unless a private audio route (headphones / AirPods / other Bluetooth)
     /// is connected, so audio never blasts out of the phone speaker unexpectedly.

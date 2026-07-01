@@ -33,6 +33,7 @@ final class AVPlaybackEngine: PlaybackEngine {
     private var timeControlObservation: NSKeyValueObservation?
     private var bufferObservation: NSKeyValueObservation?
     private var stallObserver: NSObjectProtocol?
+    private var endObserver: NSObjectProtocol?
     private var lastStatLog: CFTimeInterval = 0
 
     var onTime: ((TimeInterval, TimeInterval) -> Void)?
@@ -41,6 +42,7 @@ final class AVPlaybackEngine: PlaybackEngine {
     var onLoadProgress: ((Double) -> Void)?
     var onPresentationSize: ((CGSize) -> Void)?
     var onFailed: ((String?) -> Void)?
+    var onEnded: (() -> Void)?
     private var didFail = false
     private var lastPresentation: CGSize = .zero
 
@@ -82,6 +84,13 @@ final class AVPlaybackEngine: PlaybackEngine {
         stallObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemPlaybackStalled, object: item, queue: .main) { _ in
             RemoteLog.shared.log("⏸ AVPlayer playback STALLED")
+        }
+
+        // Playback reached the end — the player stays parked at the end (actionAtItemEnd = .pause), so
+        // the facade knows a subsequent play() must restart from the beginning.
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.onEnded?() }
         }
 
         // ~10 Hz so the scrubber/time label rebuild a handful of times a second, not per frame.
@@ -169,6 +178,7 @@ final class AVPlaybackEngine: PlaybackEngine {
         timeControlObservation?.invalidate(); timeControlObservation = nil
         bufferObservation?.invalidate(); bufferObservation = nil
         if let stallObserver { NotificationCenter.default.removeObserver(stallObserver); self.stallObserver = nil }
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver); self.endObserver = nil }
         player.pause()
     }
 

@@ -32,6 +32,8 @@ final class ScenePlayerModel {
     /// choice is preserved across a seek-by-reinit engine swap.
     var isMuted = false
     @ObservationIgnored private var didAdoptMute = false
+    /// True once playback has run to the end (player parked there). The next play() restarts from 0.
+    @ObservationIgnored private var reachedEnd = false
 
     @ObservationIgnored private var engine: PlaybackEngine?
     @ObservationIgnored private let route: PlaybackRoute
@@ -201,7 +203,9 @@ final class ScenePlayerModel {
                 if abs(absolute - target) < 1.5 || Date() > self.seekHoldUntil { self.seekTarget = nil }
                 else { return }
             }
-            self.currentTime = absolute
+            // Never let the reported time exceed the known duration (a zero-based remux can produce a
+            // hair past the end, and rounding at the very end could otherwise show > total).
+            self.currentTime = self.duration > 0 ? min(absolute, self.duration) : absolute
         }
         engine.onReady = { [weak self] ready in
             guard let self, self.isReady != ready else { return }
@@ -217,6 +221,11 @@ final class ScenePlayerModel {
         engine.onLoadProgress = { [weak self] progress in
             guard let self else { return }
             if self.loadingProgress != progress { self.loadingProgress = progress }
+        }
+        engine.onEnded = { [weak self] in
+            guard let self else { return }
+            self.reachedEnd = true
+            self.isPlaying = false
         }
         engine.onPresentationSize = { [weak self] size in
             guard let self, size.width > 0, size.height > 0 else { return }
@@ -280,7 +289,14 @@ final class ScenePlayerModel {
         seekTarget = nil
     }
 
-    func play() { engine?.play() }
+    func play() {
+        if reachedEnd {
+            // Playback was parked at the end — restart from the beginning instead of no-opping at EOF.
+            reachedEnd = false
+            seek(to: 0)
+        }
+        engine?.play()
+    }
     func pause() { engine?.pause() }
     func togglePlayPause() { isPlaying ? pause() : play() }
 
@@ -291,6 +307,7 @@ final class ScenePlayerModel {
     }
 
     func seek(to time: TimeInterval) {
+        reachedEnd = false   // any seek means we're no longer parked at EOF
         // Never seek to the literal end — AVPlayer then waits for a forward buffer that can't exist past
         // EOF and hangs on "waiting to minimize stalls". Land a hair before the end instead.
         let ceiling = duration > 0 ? max(0, duration - 0.3) : time
