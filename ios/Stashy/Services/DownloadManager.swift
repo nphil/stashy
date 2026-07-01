@@ -235,10 +235,7 @@ final class DownloadManager {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         downloadsDir = docs.appendingPathComponent("Downloads", isDirectory: true)
-        // Parts live in Application Support (not Caches): iOS may purge Caches under storage pressure,
-        // which would silently discard an in-flight background download's partial data.
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        partsDir = appSupport.appendingPathComponent("DownloadParts", isDirectory: true)
+        partsDir = caches.appendingPathComponent("DownloadParts", isDirectory: true)
         metaDir = docs.appendingPathComponent("DownloadsMeta", isDirectory: true)
         for dir in [downloadsDir, partsDir, metaDir] {
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -249,12 +246,13 @@ final class DownloadManager {
             onFinish: { [weak self] item, conn in Task { @MainActor in self?.connectionFinished(itemID: item, conn: conn) } },
             onError: { [weak self] item, msg, code in Task { @MainActor in self?.connectionFailed(itemID: item, message: msg, code: code) } }
         )
-        // A background session keeps transfers running while the app is suspended and hands them back on
-        // the next launch; `sessionSendsLaunchEvents` lets iOS relaunch us to finish/merge, and
-        // non-discretionary means downloads start promptly instead of being deferred by the system.
-        let config = URLSessionConfiguration.background(withIdentifier: BackgroundDownloadSession.identifier)
-        config.sessionSendsLaunchEvents = true
-        config.isDiscretionary = false
+        // Multi-connection range downloads run on a *foreground* session (proven). A background session
+        // (URLSessionConfiguration.background) fails 8-way HTTP range (206 partial-content) tasks with
+        // NSURLErrorCannotCreateFile (-3000): the out-of-process background daemon doesn't handle parallel
+        // partial-content downloads. So transfers run in the foreground; the app still restores and resumes
+        // interrupted downloads after a relaunch (see loadInterrupted / reconnectTasks). True background
+        // continuation would need a single full-file background task per item — a separate design.
+        let config = URLSessionConfiguration.default
         config.waitsForConnectivity = true
         session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
 
