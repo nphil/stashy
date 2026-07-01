@@ -4,6 +4,9 @@ struct StashScene: Codable, Identifiable, Sendable, Hashable {
     let id: String
     let title: String?
     let date: String?
+    /// 0–100 rating (Stash's scale). Mutable so optimistic rating updates reflect immediately in the
+    /// owning list/detail without a refetch. Identity is id-based, so this never affects hashing/equality.
+    var rating100: Int?
     let files: [SceneFile]
     let paths: ScenePaths?
     let studio: Studio?
@@ -13,6 +16,12 @@ struct StashScene: Codable, Identifiable, Sendable, Hashable {
 
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
     static func == (lhs: StashScene, rhs: StashScene) -> Bool { lhs.id == rhs.id }
+
+    /// Star rating on a 0–5 scale (Stash stores rating100 as 0–100).
+    var ratingStars: Double? {
+        guard let rating100 else { return nil }
+        return Double(rating100) / 20.0
+    }
 }
 
 // Modern Stash exposes duration (and other media metadata) on the file, not the scene.
@@ -43,6 +52,19 @@ struct SceneStreamEndpoint: Codable, Sendable {
 struct Tag: Codable, Identifiable, Sendable, Equatable, Hashable {
     let id: String
     let name: String
+    /// Favorite flag (present when fetched via `findTags`; nil for tags embedded in scenes, which only
+    /// select id+name). Mutable for optimistic toggles.
+    var favorite: Bool?
+
+    // Tags embedded in scenes carry only id+name; favorite must decode as nil when absent.
+    init(id: String, name: String, favorite: Bool? = nil) {
+        self.id = id
+        self.name = name
+        self.favorite = favorite
+    }
+
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
+    static func == (lhs: Tag, rhs: Tag) -> Bool { lhs.id == rhs.id }
 }
 
 extension SceneStreamEndpoint {

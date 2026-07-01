@@ -38,6 +38,9 @@ targets:
         CFBundleExecutable: $(EXECUTABLE_NAME)
         LSRequiresIPhoneOS: true
         UIRequiresFullScreen: false
+        # Opt out of iPhone's default 60fps cap on Core Animation / CADisplayLink so custom animations
+        # and display-link rendering can hit the full 120Hz ProMotion rate (scrolling is already 120Hz).
+        CADisableMinimumFrameDurationOnPhone: true
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
         NSFaceIDUsageDescription: Unlock Stashy with Face ID.

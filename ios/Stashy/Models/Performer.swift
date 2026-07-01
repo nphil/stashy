@@ -4,7 +4,10 @@ struct Performer: Codable, Identifiable, Sendable, Hashable {
     let id: String
     let name: String
     let image_path: String?
-    let rating100: Int?
+    /// Mutable for optimistic rating/favorite updates; identity is id-based so neither affects
+    /// hashing/equality.
+    var rating100: Int?
+    var favorite: Bool?
     let scene_count: Int?
     let country: String?
     let birthdate: String?

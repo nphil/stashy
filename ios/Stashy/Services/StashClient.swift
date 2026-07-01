@@ -68,7 +68,7 @@ struct StashClient: Sendable {
     // view re-fetches the full set for the one scene being viewed via `findScene(id:)`. Everything the
     // card and the player need (files, paths, streams) stays in, so both open instantly.
     private static let sceneListFields = """
-      id title date
+      id title date rating100
       files { duration video_codec width height basename size bit_rate frame_rate }
       paths { screenshot preview sprite vtt }
       studio { id name }
@@ -80,7 +80,7 @@ struct StashClient: Sendable {
     // Full scene selection set for the single-scene detail fetch: complete performer profiles for the
     // performer cards and social links.
     private static let sceneDetailFields = """
-      id title date
+      id title date rating100
       files { duration video_codec width height basename size bit_rate frame_rate }
       paths { screenshot preview sprite vtt }
       studio { id name }
@@ -89,7 +89,7 @@ struct StashClient: Sendable {
       sceneStreams { url mime_type label }
     """
 
-    private static let performerFields = "id name image_path rating100 scene_count country birthdate gender urls tags { id name }"
+    private static let performerFields = "id name image_path rating100 favorite scene_count country birthdate gender urls tags { id name }"
 
     /// Unified scene query: full-text search, sort + direction, optional tag and performer filters.
     func findScenes(_ q: SceneQuery, page: Int = 1, perPage: Int = 25) async throws -> FindScenesResult {
@@ -169,6 +169,10 @@ struct StashClient: Sendable {
             performerFilter = (performerFilter ?? PerformerFilter())
             performerFilter?.tags = HierarchicalMultiCriterion(value: q.tagIDs, modifier: "INCLUDES_ALL", depth: 0)
         }
+        if q.favoritesOnly {
+            performerFilter = (performerFilter ?? PerformerFilter())
+            performerFilter?.filter_favorites = true
+        }
         let vars = FindPerformersFilterVariables(
             filter: FindFilter(
                 q: q.search.isEmpty ? nil : q.search,
@@ -188,12 +192,70 @@ struct StashClient: Sendable {
     func findTags(query q: String, limit: Int = 20, sort: String = "name", direction: String = "ASC") async throws -> [Tag] {
         let gql = """
         query FindTags($filter: FindFilterType) {
-          findTags(filter: $filter) { tags { id name } }
+          findTags(filter: $filter) { tags { id name favorite } }
         }
         """
         let vars = FilterVariables(filter: FindFilter(q: q.isEmpty ? nil : q, page: 1, per_page: limit, sort: sort, direction: direction))
         let response: FindTagsResponse = try await query(gql, variables: vars)
         return response.findTags.tags
+    }
+
+    // MARK: - Mutations (ratings + favorites)
+    //
+    // All are single-field updates used behind optimistic UI: the control flips instantly, these persist
+    // in the background, and the caller reverts only if the mutation throws. Rating clears (nil) send an
+    // explicit `null` so Stash unsets the value rather than leaving it unchanged.
+
+    /// Set (or clear, when nil) a scene's 0–100 rating. Returns the server's stored value.
+    @discardableResult
+    func setSceneRating(id: String, rating100: Int?) async throws -> Int? {
+        let gql = """
+        mutation SceneUpdate($input: SceneUpdateInput!) {
+          sceneUpdate(input: $input) { id rating100 }
+        }
+        """
+        let response: SceneUpdateResponse = try await query(
+            gql, variables: RatingInputVariables(input: RatingInput(id: id, rating100: rating100)))
+        return response.sceneUpdate?.rating100
+    }
+
+    /// Set (or clear, when nil) a performer's 0–100 rating. Returns the server's stored value.
+    @discardableResult
+    func setPerformerRating(id: String, rating100: Int?) async throws -> Int? {
+        let gql = """
+        mutation PerformerUpdate($input: PerformerUpdateInput!) {
+          performerUpdate(input: $input) { id rating100 }
+        }
+        """
+        let response: PerformerUpdateResponse = try await query(
+            gql, variables: RatingInputVariables(input: RatingInput(id: id, rating100: rating100)))
+        return response.performerUpdate?.rating100
+    }
+
+    /// Toggle a performer's favorite flag. Returns the server's stored value.
+    @discardableResult
+    func setPerformerFavorite(id: String, favorite: Bool) async throws -> Bool? {
+        let gql = """
+        mutation PerformerUpdate($input: PerformerUpdateInput!) {
+          performerUpdate(input: $input) { id favorite }
+        }
+        """
+        let response: PerformerUpdateResponse = try await query(
+            gql, variables: FavoriteInputVariables(input: FavoriteInput(id: id, favorite: favorite)))
+        return response.performerUpdate?.favorite
+    }
+
+    /// Toggle a tag's favorite flag. Returns the server's stored value.
+    @discardableResult
+    func setTagFavorite(id: String, favorite: Bool) async throws -> Bool? {
+        let gql = """
+        mutation TagUpdate($input: TagUpdateInput!) {
+          tagUpdate(input: $input) { id favorite }
+        }
+        """
+        let response: TagUpdateResponse = try await query(
+            gql, variables: FavoriteInputVariables(input: FavoriteInput(id: id, favorite: favorite)))
+        return response.tagUpdate?.favorite
     }
 }
 
@@ -291,6 +353,7 @@ struct PerformerQuery: Sendable, Equatable {
     var direction: SortDirection = .asc
     var ethnicity: String? = nil
     var tags: [Tag] = []
+    var favoritesOnly: Bool = false
 
     var tagIDs: [String] { tags.map(\.id) }
 }
@@ -331,6 +394,38 @@ struct FindFilter: Encodable, Sendable {
 
 private struct FilterVariables: Encodable, Sendable { let filter: FindFilter }
 private struct FindSceneVariables: Encodable, Sendable { let id: String }
+
+// MARK: Mutation inputs
+
+/// `{id, rating100}` update input. `rating100` is always encoded — as `null` when nil — so a clear
+/// unsets the rating instead of leaving it unchanged (Stash omits unspecified fields on update).
+private struct RatingInput: Encodable, Sendable {
+    let id: String
+    let rating100: Int?
+    enum CodingKeys: String, CodingKey { case id, rating100 }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        if let rating100 { try c.encode(rating100, forKey: .rating100) }
+        else { try c.encodeNil(forKey: .rating100) }
+    }
+}
+private struct RatingInputVariables: Encodable, Sendable { let input: RatingInput }
+
+private struct FavoriteInput: Encodable, Sendable {
+    let id: String
+    let favorite: Bool
+}
+private struct FavoriteInputVariables: Encodable, Sendable { let input: FavoriteInput }
+
+// MARK: Mutation responses
+
+private struct RatingResult: Decodable, Sendable { let id: String; let rating100: Int? }
+private struct FavoriteResult: Decodable, Sendable { let id: String; let favorite: Bool? }
+private struct SceneUpdateResponse: Decodable, Sendable { let sceneUpdate: RatingResult? }
+private struct PerformerUpdateResponse: Decodable, Sendable { let performerUpdate: PerformerUpdateResult? }
+private struct PerformerUpdateResult: Decodable, Sendable { let id: String; let rating100: Int?; let favorite: Bool? }
+private struct TagUpdateResponse: Decodable, Sendable { let tagUpdate: FavoriteResult? }
 private struct FindScenesVariables: Encodable, Sendable {
     let filter: FindFilter
     let scene_filter: SceneFilter?
@@ -343,6 +438,7 @@ private struct FindPerformersFilterVariables: Encodable, Sendable {
 struct PerformerFilter: Encodable, Sendable {
     var ethnicity: StringCriterion? = nil
     var tags: HierarchicalMultiCriterion? = nil
+    var filter_favorites: Bool? = nil
 }
 
 struct StringCriterion: Encodable, Sendable {

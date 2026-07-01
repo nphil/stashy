@@ -44,6 +44,21 @@ final class PerformersViewModel {
             errorMessage = error.localizedDescription
         }
     }
+
+    /// Optimistically toggle a performer's favorite in the list, persist, and revert on failure.
+    func setFavorite(_ value: Bool, id: String, client: StashClient?) {
+        guard let idx = performers.firstIndex(where: { $0.id == id }) else { return }
+        performers[idx].favorite = value
+        guard let client else { return }
+        Task {
+            do {
+                let stored = try await client.setPerformerFavorite(id: id, favorite: value)
+                if let i = performers.firstIndex(where: { $0.id == id }) { performers[i].favorite = stored ?? value }
+            } catch {
+                if let i = performers.firstIndex(where: { $0.id == id }) { performers[i].favorite = !value }
+            }
+        }
+    }
 }
 
 struct PerformersView: View {
@@ -58,7 +73,8 @@ struct PerformersView: View {
 
     private var filterActive: Bool {
         !viewModel.query.search.isEmpty || viewModel.query.ethnicity != nil
-            || !viewModel.query.tags.isEmpty || viewModel.query.sort != .name || viewModel.query.direction != .asc
+            || !viewModel.query.tags.isEmpty || viewModel.query.favoritesOnly
+            || viewModel.query.sort != .name || viewModel.query.direction != .asc
     }
 
     var body: some View {
@@ -109,10 +125,21 @@ struct PerformersView: View {
             ScrollView {
                 LazyVGrid(columns: columns, spacing: 16) {
                     ForEach(viewModel.performers) { performer in
+                        // Heart is overlaid *outside* the NavigationLink so its tap never conflicts with
+                        // (or double-fires alongside) navigation. Anchored top-trailing over the portrait.
                         NavigationLink(value: Route.performer(performer)) {
                             PerformerCard(performer: performer, apiKey: appState.client?.apiKey ?? "")
                         }
                         .buttonStyle(.plain)
+                        .overlay(alignment: .top) {
+                            HStack {
+                                Spacer()
+                                FavoriteHeart(isFavorite: performer.favorite ?? false, size: 15) { newValue in
+                                    viewModel.setFavorite(newValue, id: performer.id, client: appState.client)
+                                }
+                            }
+                            .padding(8)
+                        }
                         .onAppear {
                             guard let client = appState.client else { return }
                             Task {

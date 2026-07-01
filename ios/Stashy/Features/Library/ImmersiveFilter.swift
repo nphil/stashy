@@ -97,6 +97,11 @@ struct PerformerFilterPanel: View {
                 Spacer()
                 ethnicityMenu
             }
+            HStack {
+                Text("Favorites").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Spacer()
+                favoritesToggle
+            }
             Divider().opacity(0.25)
             InlineTagEditor(selected: $query.tags)
         }
@@ -139,6 +144,23 @@ struct PerformerFilterPanel: View {
             .padding(.vertical, 7)
             .background(themeManager.current.backgroundColor.opacity(0.6), in: Capsule())
         }
+    }
+
+    private var favoritesToggle: some View {
+        Button {
+            query.favoritesOnly.toggle()
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: query.favoritesOnly ? "heart.fill" : "heart").font(.caption)
+                Text(query.favoritesOnly ? "Favorites only" : "All")
+            }
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(query.favoritesOnly ? .pink : themeManager.current.foregroundColor)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(themeManager.current.backgroundColor.opacity(0.6), in: Capsule())
+        }
+        .buttonStyle(.plain)
     }
 
     private var ethnicityMenu: some View {

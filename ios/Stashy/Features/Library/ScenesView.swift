@@ -234,6 +234,19 @@ struct SceneCard: View {
                             .padding(6)
                     }
                 }
+                .overlay(alignment: .topLeading) {
+                    if let stars = scene.ratingStars, stars > 0 {
+                        HStack(spacing: 2) {
+                            Image(systemName: "star.fill").font(.system(size: 8))
+                            Text(String(format: "%.1f", stars)).font(.caption2.weight(.semibold))
+                        }
+                        .foregroundStyle(.yellow)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(.black.opacity(0.55), in: Capsule())
+                        .padding(6)
+                    }
+                }
                 .clipped()
 
             Text(scene.title ?? "Untitled")

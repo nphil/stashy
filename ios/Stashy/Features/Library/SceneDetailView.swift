@@ -12,6 +12,15 @@ struct SceneDetailView: View {
     /// screen appears we re-fetch this one scene's full performer profiles (rating, urls, tags…) for
     /// the performer card and social links. Nil until the fetch lands; falls back to the slim scene.
     @State private var fullScene: StashScene?
+    /// Optimistic local rating (0–100). Seeded from the scene; flips instantly on tap and persists in
+    /// the background, reverting only if the server rejects it.
+    @State private var rating100: Int?
+
+    init(scene: StashScene, path: Binding<[Route]>) {
+        self.scene = scene
+        _path = path
+        _rating100 = State(initialValue: scene.rating100)
+    }
 
     /// Full performers if the detail fetch has landed, otherwise the slim (id+name) list.
     private var performers: [Performer] { (fullScene ?? scene).performers }
@@ -78,19 +87,25 @@ struct SceneDetailView: View {
             // the bottom of the socials card; the tags card then fills down to just above the specs box.
             let topRowHeight = min(max(geo.size.height * 0.46, 170), 230)
             VStack(spacing: spacing) {
-                // Title + studio + date — deliberately understated.
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(scene.title ?? "Untitled")
-                        .font(.headline)
-                        .foregroundStyle(themeManager.current.foregroundColor)
-                        .lineLimit(1)
-                        .blur(radius: blurTitles ? 6 : 0)
-                    HStack(spacing: 6) {
-                        if let studio = scene.studio { Text(studio.name).lineLimit(1) }
-                        if let date = scene.date { Text("· \(date)").lineLimit(1) }
+                // Title + studio + date (left) with the star rating anchored trailing.
+                HStack(alignment: .top, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(scene.title ?? "Untitled")
+                            .font(.headline)
+                            .foregroundStyle(themeManager.current.foregroundColor)
+                            .lineLimit(1)
+                            .blur(radius: blurTitles ? 6 : 0)
+                        HStack(spacing: 6) {
+                            if let studio = scene.studio { Text(studio.name).lineLimit(1) }
+                            if let date = scene.date { Text("· \(date)").lineLimit(1) }
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    StarRating(rating100: rating100, starSize: 18, onChange: setRating)
+                        .fixedSize()
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -159,6 +174,17 @@ struct SceneDetailView: View {
     }
 
     private var apiKey: String { appState.client?.apiKey ?? "" }
+
+    /// Optimistically apply a new rating, persist in the background, and revert on failure.
+    private func setRating(_ new: Int?) {
+        let previous = rating100
+        rating100 = new
+        guard let client = appState.client else { return }
+        Task { @MainActor in
+            do { rating100 = try await client.setSceneRating(id: scene.id, rating100: new) }
+            catch { rating100 = previous }
+        }
+    }
 }
 
 /// Enlarged, left-aligned performer card for the scene screen: a large portrait of the primary
