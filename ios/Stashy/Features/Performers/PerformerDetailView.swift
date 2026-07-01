@@ -51,26 +51,16 @@ struct PerformerDetailView: View {
     @Binding var path: [Route]
     @Environment(AppState.self) private var appState
     @Environment(ThemeManager.self) private var themeManager
+    @Environment(LibraryEdits.self) private var edits
     @Environment(\.imageCache) private var imageCache
     @State private var viewModel = PerformerScenesViewModel()
     @State private var portrait: UIImage?
     @State private var previewPresenter = ScenePreviewPresenter()
     @State private var showImageViewer = false
-    /// Optimistic rating/favorite, seeded from the performer; flip instantly and persist in the
-    /// background, reverting only on server failure.
-    @State private var rating100: Int?
-    @State private var favorite: Bool
     @AppStorage("blurThumbnails") private var blurThumbnails = false
     @AppStorage("blurTitles") private var blurTitles = false
 
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
-
-    init(performer: Performer, path: Binding<[Route]>) {
-        self.performer = performer
-        _path = path
-        _rating100 = State(initialValue: performer.rating100)
-        _favorite = State(initialValue: performer.favorite ?? false)
-    }
 
     private var apiKey: String { appState.client?.apiKey ?? "" }
 
@@ -143,6 +133,7 @@ struct PerformerDetailView: View {
             guard let url = performer.imageURL(apiKey: apiKey) else { return }
             portrait = try? await imageCache.image(for: url, priority: true)
         }
+        .libraryEditErrorToast(edits)
     }
 
     // Portrait enlarged ~1.5x (was 120×160) and tappable to open the Photos-style fullscreen viewer.
@@ -157,12 +148,16 @@ struct PerformerDetailView: View {
                     .foregroundStyle(themeManager.current.foregroundColor)
                     .blur(radius: blurTitles ? 6 : 0)
                 Spacer(minLength: 8)
-                FavoriteHeart(isFavorite: favorite, size: 22, offColor: .secondary, onToggle: setFavorite)
+                FavoriteHeart(isFavorite: edits.isFavorite(performer), size: 22, offColor: .secondary) { new in
+                    edits.setPerformerFavorite(new, id: performer.id, client: appState.client)
+                }
             }
             .padding(.horizontal, 12)
 
-            StarRating(rating100: rating100, starSize: 20, onChange: setRating)
-                .padding(.horizontal, 12)
+            StarRating(rating100: edits.rating(for: performer), starSize: 20) { new in
+                edits.setPerformerRating(new, id: performer.id, client: appState.client)
+            }
+            .padding(.horizontal, 12)
 
             HStack(alignment: .top, spacing: 12) {
                 Button { if portrait != nil { showImageViewer = true } } label: {
@@ -213,28 +208,6 @@ struct PerformerDetailView: View {
             out.append(("gift", "Born", birthdate))
         }
         return out.map { (symbol: $0.0, label: $0.1, value: $0.2) }
-    }
-
-    /// Optimistically apply a new rating, persist, and revert on failure.
-    private func setRating(_ new: Int?) {
-        let previous = rating100
-        rating100 = new
-        guard let client = appState.client else { return }
-        Task { @MainActor in
-            do { rating100 = try await client.setPerformerRating(id: performer.id, rating100: new) }
-            catch { rating100 = previous }
-        }
-    }
-
-    /// Optimistically toggle favorite, persist, and revert on failure.
-    private func setFavorite(_ new: Bool) {
-        let previous = favorite
-        favorite = new
-        guard let client = appState.client else { return }
-        Task { @MainActor in
-            do { favorite = try await client.setPerformerFavorite(id: performer.id, favorite: new) ?? new }
-            catch { favorite = previous }
-        }
     }
 
     private var socialLinks: [SocialLink]? {

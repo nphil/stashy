@@ -93,3 +93,38 @@ struct FavoriteHeart: View {
         .accessibilityLabel(isFavorite ? "Remove from favorites" : "Add to favorites")
     }
 }
+
+// MARK: - Save-failure toast
+
+extension View {
+    /// Overlays a brief, auto-dismissing banner whenever a rating/favorite save fails, so a rejected
+    /// write is visible instead of only reverting silently.
+    func libraryEditErrorToast(_ edits: LibraryEdits) -> some View {
+        modifier(LibraryEditErrorToast(edits: edits))
+    }
+}
+
+private struct LibraryEditErrorToast: ViewModifier {
+    @Bindable var edits: LibraryEdits
+
+    func body(content: Content) -> some View {
+        content.overlay(alignment: .bottom) {
+            if let message = edits.lastError {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.red.opacity(0.9), in: Capsule())
+                    .shadow(color: .black.opacity(0.3), radius: 8, y: 3)
+                    .padding(.bottom, 24)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .task(id: message) {
+                        try? await Task.sleep(for: .seconds(2.5))
+                        edits.lastError = nil
+                    }
+            }
+        }
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: edits.lastError)
+    }
+}

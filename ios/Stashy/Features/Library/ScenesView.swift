@@ -194,9 +194,17 @@ struct SceneCard: View {
     let apiKey: String
     @Environment(\.imageCache) private var imageCache
     @Environment(ThemeManager.self) private var themeManager
+    @Environment(LibraryEdits.self) private var edits
     @AppStorage("blurThumbnails") private var blurThumbnails = false
     @AppStorage("blurTitles") private var blurTitles = false
     @State private var thumbnail: UIImage?
+
+    /// Rating on a 0–5 scale, reading through the edits store so a rating set on the detail screen
+    /// shows here immediately.
+    private var ratingStars: Double? {
+        guard let r = edits.rating(for: scene) else { return nil }
+        return Double(r) / 20.0
+    }
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -235,7 +243,7 @@ struct SceneCard: View {
                     }
                 }
                 .overlay(alignment: .topLeading) {
-                    if let stars = scene.ratingStars, stars > 0 {
+                    if let stars = ratingStars, stars > 0 {
                         HStack(spacing: 2) {
                             Image(systemName: "star.fill").font(.system(size: 8))
                             Text(String(format: "%.1f", stars)).font(.caption2.weight(.semibold))

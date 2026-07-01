@@ -72,7 +72,7 @@ struct StashClient: Sendable {
       files { duration video_codec width height basename size bit_rate frame_rate }
       paths { screenshot preview sprite vtt }
       studio { id name }
-      performers { id name }
+      performers { id name image_path }
       tags { id name }
       sceneStreams { url mime_type label }
     """

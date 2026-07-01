@@ -5,6 +5,7 @@ struct SceneDetailView: View {
     @Binding var path: [Route]
     @Environment(AppState.self) private var appState
     @Environment(ThemeManager.self) private var themeManager
+    @Environment(LibraryEdits.self) private var edits
     @Environment(\.dismiss) private var dismiss
     @AppStorage("blurTitles") private var blurTitles = false
     @State private var isFullscreen = false
@@ -12,15 +13,6 @@ struct SceneDetailView: View {
     /// screen appears we re-fetch this one scene's full performer profiles (rating, urls, tags…) for
     /// the performer card and social links. Nil until the fetch lands; falls back to the slim scene.
     @State private var fullScene: StashScene?
-    /// Optimistic local rating (0–100). Seeded from the scene; flips instantly on tap and persists in
-    /// the background, reverting only if the server rejects it.
-    @State private var rating100: Int?
-
-    init(scene: StashScene, path: Binding<[Route]>) {
-        self.scene = scene
-        _path = path
-        _rating100 = State(initialValue: scene.rating100)
-    }
 
     /// Full performers if the detail fetch has landed, otherwise the slim (id+name) list.
     private var performers: [Performer] { (fullScene ?? scene).performers }
@@ -78,6 +70,7 @@ struct SceneDetailView: View {
             guard let client = appState.client else { return }
             fullScene = try? await client.findScene(id: scene.id)
         }
+        .libraryEditErrorToast(edits)
     }
 
     private var metadata: some View {
@@ -104,8 +97,10 @@ struct SceneDetailView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                    StarRating(rating100: rating100, starSize: 18, onChange: setRating)
-                        .fixedSize()
+                    StarRating(rating100: edits.rating(for: scene), starSize: 18) { new in
+                        edits.setSceneRating(new, id: scene.id, client: appState.client)
+                    }
+                    .fixedSize()
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -174,17 +169,6 @@ struct SceneDetailView: View {
     }
 
     private var apiKey: String { appState.client?.apiKey ?? "" }
-
-    /// Optimistically apply a new rating, persist in the background, and revert on failure.
-    private func setRating(_ new: Int?) {
-        let previous = rating100
-        rating100 = new
-        guard let client = appState.client else { return }
-        Task { @MainActor in
-            do { rating100 = try await client.setSceneRating(id: scene.id, rating100: new) }
-            catch { rating100 = previous }
-        }
-    }
 }
 
 /// Enlarged, left-aligned performer card for the scene screen: a large portrait of the primary
@@ -250,7 +234,10 @@ struct ScenePerformerCard: View {
                 .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
             .buttonStyle(.plain)
-            .task(id: performer.id) {
+            // Key on image_path, not id: the scene list provides slim performers (no image_path), and
+            // the full performer arrives later with the *same* id — keying on the path re-fires the load
+            // when the path finally appears (otherwise the portrait never loads until the view is rebuilt).
+            .task(id: performer.image_path) {
                 guard let url = performer.imageURL(apiKey: apiKey) else { return }
                 image = try? await imageCache.image(for: url, priority: true)
             }

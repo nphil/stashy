@@ -44,26 +44,12 @@ final class PerformersViewModel {
             errorMessage = error.localizedDescription
         }
     }
-
-    /// Optimistically toggle a performer's favorite in the list, persist, and revert on failure.
-    func setFavorite(_ value: Bool, id: String, client: StashClient?) {
-        guard let idx = performers.firstIndex(where: { $0.id == id }) else { return }
-        performers[idx].favorite = value
-        guard let client else { return }
-        Task {
-            do {
-                let stored = try await client.setPerformerFavorite(id: id, favorite: value)
-                if let i = performers.firstIndex(where: { $0.id == id }) { performers[i].favorite = stored ?? value }
-            } catch {
-                if let i = performers.firstIndex(where: { $0.id == id }) { performers[i].favorite = !value }
-            }
-        }
-    }
 }
 
 struct PerformersView: View {
     @Environment(AppState.self) private var appState
     @Environment(ThemeManager.self) private var themeManager
+    @Environment(LibraryEdits.self) private var edits
     @Environment(\.imageCache) private var imageCache
     @State private var viewModel = PerformersViewModel()
     @State private var filterExpanded = false
@@ -108,6 +94,7 @@ struct PerformersView: View {
             guard viewModel.performers.isEmpty, let client = appState.client else { return }
             await viewModel.loadFirstPage(client: client)
         }
+        .libraryEditErrorToast(edits)
     }
 
     @ViewBuilder
@@ -134,8 +121,8 @@ struct PerformersView: View {
                         .overlay(alignment: .top) {
                             HStack {
                                 Spacer()
-                                FavoriteHeart(isFavorite: performer.favorite ?? false, size: 15) { newValue in
-                                    viewModel.setFavorite(newValue, id: performer.id, client: appState.client)
+                                FavoriteHeart(isFavorite: edits.isFavorite(performer), size: 15) { newValue in
+                                    edits.setPerformerFavorite(newValue, id: performer.id, client: appState.client)
                                 }
                             }
                             .padding(8)
