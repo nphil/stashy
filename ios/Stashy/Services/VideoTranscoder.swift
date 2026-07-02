@@ -187,12 +187,16 @@ final class VideoTranscoder: @unchecked Sendable {
                       totalSeconds: Double, onProgress: (@Sendable (Double) -> Void)?) async throws {
         let box = UncheckedTranscodeBox((input, output))
         let queue = DispatchQueue(label: "stashy.transcode.pump")
-        // Throttle state, touched only from `requestMediaDataWhenReady`'s callback, which always runs on
-        // `queue` (serial) — single writer, no lock needed. Without this, a video pump at HW transcode
-        // speed calls onProgress per frame (100–500+/sec), each spawning a MainActor Task + animated
-        // re-render; here we only report when progress moved meaningfully or enough time passed.
-        var lastReportedProgress: Double = -1
-        var lastReportTime = Date.distantPast
+        // Throttle state. The `requestMediaDataWhenReady` block is @Sendable, so it can't capture and
+        // mutate plain locals — hold the state in a reference box it captures by reference. Only ever
+        // touched from `queue` (serial, single writer), so @unchecked Sendable is honest. Without the
+        // throttle a video pump at HW transcode speed calls onProgress per frame (100–500+/sec), each
+        // spawning a MainActor Task + animated re-render; here we report only on meaningful movement.
+        final class ProgressThrottle: @unchecked Sendable {
+            var lastProgress: Double = -1
+            var lastTime = Date.distantPast
+        }
+        let throttle = ProgressThrottle()
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             box.value.0.requestMediaDataWhenReady(on: queue) { [weak self] in
                 let (input, output) = box.value
@@ -204,9 +208,9 @@ final class VideoTranscoder: @unchecked Sendable {
                             if t.isFinite, t >= 0 {
                                 let p = min(1, t / totalSeconds)
                                 let now = Date()
-                                if p - lastReportedProgress >= 0.005 || now.timeIntervalSince(lastReportTime) >= 0.1 {
-                                    lastReportedProgress = p
-                                    lastReportTime = now
+                                if p - throttle.lastProgress >= 0.005 || now.timeIntervalSince(throttle.lastTime) >= 0.1 {
+                                    throttle.lastProgress = p
+                                    throttle.lastTime = now
                                     onProgress(p)
                                 }
                             }
