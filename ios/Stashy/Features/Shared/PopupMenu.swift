@@ -15,6 +15,9 @@ struct PopupMenuAction: Identifiable {
 /// those live in the filter panels, which stay custom). Destructive actions render red via the button role.
 struct PopupMenu: View {
     var systemImage = "ellipsis"
+    /// Render the ellipsis vertically (⋮) by rotating the always-valid `ellipsis` symbol. There is no
+    /// `ellipsis.vertical` SF Symbol, so naming it renders nothing — an invisible-but-tappable button.
+    var vertical = false
     let actions: [PopupMenuAction]
     @Environment(ThemeManager.self) private var themeManager
 
@@ -27,6 +30,7 @@ struct PopupMenu: View {
             }
         } label: {
             Image(systemName: systemImage)
+                .rotationEffect(.degrees(vertical ? 90 : 0))
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(themeManager.current.foregroundColor)
                 .frame(width: 34, height: 34)

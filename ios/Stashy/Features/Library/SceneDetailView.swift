@@ -56,6 +56,11 @@ struct SceneDetailView: View {
                             isFullscreen: $isFullscreen,
                             onBack: { dismiss() }
                         )
+                        // Rebuild the player (and its ScenePlayerModel, whose route is a `let` set once at
+                        // init) whenever the resolved source changes — e.g. a download/transcode completes
+                        // while the scene is open, flipping the route from the online stream to the local
+                        // file. Fullscreen toggles don't change the URL, so the in-place resize is intact.
+                        .id(route.url)
                     } else {
                         Rectangle()
                             .fill(.black)
@@ -112,27 +117,25 @@ struct SceneDetailView: View {
             VStack(spacing: spacing) {
                 // Title + studio + date (left) with the star rating anchored trailing.
                 HStack(alignment: .top, spacing: 10) {
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: 4) {
                         Text(scene.title ?? "Untitled")
                             .font(.headline)
                             .foregroundStyle(themeManager.current.foregroundColor)
                             .lineLimit(1)
                             .blur(radius: blurTitles ? 6 : 0)
-                        HStack(spacing: 6) {
-                            if let studio = scene.studio { Text(studio.name).lineLimit(1) }
-                            if let date = scene.date { Text("· \(date)").lineLimit(1) }
+                        // Rating stars sit under the title (replacing the old studio line); the date trails.
+                        HStack(spacing: 8) {
+                            StarRating(rating100: edits.rating(for: scene), starSize: 18) { new in
+                                edits.setSceneRating(new, id: scene.id, client: appState.client)
+                            }
+                            if let date = scene.date {
+                                Text(date).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            }
                         }
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                    StarRating(rating100: edits.rating(for: scene), starSize: 18) { new in
-                        edits.setSceneRating(new, id: scene.id, client: appState.client)
-                    }
-                    .fixedSize()
-
-                    PopupMenu(systemImage: "ellipsis.vertical", actions: [
+                    PopupMenu(vertical: true, actions: [
                         PopupMenuAction(title: "Download Video", systemImage: "arrow.down.circle") {
                             downloads.start(scene: fullScene ?? scene, apiKey: apiKey)
                             path.append(.downloads)
