@@ -80,6 +80,12 @@ risky: batch `loadInterrupted`'s 8 per-connection `resourceValues` calls into on
 
 ## Phase 2 — mechanical fixes (verified recipes, CI is the compile gate)
 
+> **Status (shipped v1.0.112–114):** #4–#12 and #14 done. #13 (delete ScenePreviewGesture's redundant
+> thumbnail `.task`) **folded into Phase 3 cluster A** — its main cost is the duplicate network fetch that
+> #15's ImageCache coalescing removes at the source, and both touch ImageCache, so they land together
+> (edit ImageCache once). #12 shipped its primary half (cancel-on-dismiss); the in-flight download dedup is
+> deferred to cluster A too (it conflicts with clean caller-cancellation without awaiter ref-counting).
+
 ### 4. [H] beginBackgroundTask without expiration handlers → ~30s watchdog kill mid-transcode
 `Services/DownloadManager.swift:405` (and merge at `:667`)
 Both `beginBackgroundTask` sites pass a nil expiration handler; iOS terminates the app when the ~30s grace
