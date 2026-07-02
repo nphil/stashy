@@ -409,7 +409,14 @@ final class DownloadManager {
         transcoders[item.id] = transcoder
         let id = item.id
         let dest = downloadsDir.appendingPathComponent("\(id).transcode.mp4")
-        let bg = UIApplication.shared.beginBackgroundTask(withName: "transcode-\(id)")
+        var bg: UIBackgroundTaskIdentifier = .invalid
+        bg = UIApplication.shared.beginBackgroundTask(withName: "transcode-\(id)") {
+            // Last-seconds notice before the watchdog kills us, not extra time. Capture `transcoder`
+            // directly (it's @unchecked Sendable with a lock-guarded cancel) so the handler needs no
+            // main-actor hop and makes no assumption about which thread it runs on.
+            transcoder.cancel()
+            if bg != .invalid { UIApplication.shared.endBackgroundTask(bg) }
+        }
         Task { @MainActor in
             do {
                 // Capture `item` (a main-actor Sendable @Observable) directly so the progress callback
@@ -444,12 +451,22 @@ final class DownloadManager {
         guard let item = items.first(where: { $0.id == id }) else { return }
         let fm = FileManager.default
         let finalURL = downloadsDir.appendingPathComponent("\(id).mp4")
-        try? fm.removeItem(at: src)
-        if src.path != finalURL.path { try? fm.removeItem(at: finalURL) }
+        // Put the transcoded output in place WITHOUT destroying the original first, so a failed move can
+        // never strand us with neither file. When finalURL already exists (src was already <id>.mp4)
+        // replaceItemAt swaps atomically; otherwise (e.g. a .mov source → <id>.mp4) there's nothing to
+        // replace, so move into place. Only after success do we drop the now-superseded original.
         do {
-            try fm.moveItem(at: output, to: finalURL)
+            if fm.fileExists(atPath: finalURL.path) {
+                _ = try fm.replaceItemAt(finalURL, withItemAt: output)
+            } else {
+                try fm.moveItem(at: output, to: finalURL)
+            }
+            if src.path != finalURL.path { try? fm.removeItem(at: src) }
         } catch {
+            // Move/replace failed before the original was touched — the offline copy is intact and still
+            // playable, so keep the item .completed and just surface that the transcode didn't save.
             item.transcoding = false
+            item.transcodeProgress = 0
             item.error = "Couldn't save the transcoded file"
             transcoders[id] = nil
             return
@@ -678,7 +695,10 @@ final class DownloadManager {
         let dest = downloadsDir.appendingPathComponent("\(item.id).\(item.ext)")
         // Keep the process alive long enough to assemble the file even when this fires during a background
         // relaunch (the merge is plain I/O off the main actor and can outlast the launch event window).
-        let bg = UIApplication.shared.beginBackgroundTask(withName: "merge-\(item.id)")
+        var bg: UIBackgroundTaskIdentifier = .invalid
+        bg = UIApplication.shared.beginBackgroundTask(withName: "merge-\(item.id)") {
+            if bg != .invalid { UIApplication.shared.endBackgroundTask(bg) }
+        }
         Task.detached(priority: .userInitiated) {
             let ok = Self.merge(parts: parts, into: dest)
             await MainActor.run {
