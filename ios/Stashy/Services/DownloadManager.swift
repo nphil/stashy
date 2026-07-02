@@ -56,8 +56,9 @@ final class DownloadItem: Identifiable {
     var bitRate: Int?
     var totalBytes: Int64
     /// Source scene (for the card thumbnail/performer and tap-to-play). Persisted in a sidecar so it
-    /// survives relaunch.
-    let scene: StashScene?
+    /// survives relaunch. `var` so an on-device transcode can update the media specs in place (and rewrite
+    /// the sidecar), keeping the detail view / stats in sync with the transcoded file.
+    var scene: StashScene?
     let apiKey: String
     /// Local thumbnail file downloaded alongside the video, so the card shows imagery offline.
     var localThumb: URL?
@@ -76,6 +77,12 @@ final class DownloadItem: Identifiable {
     /// On-device transcode progress (0…1) while `transcoding`; the card shows it in place of the download bar.
     var transcoding = false
     var transcodeProgress: Double = 0
+    /// Compact target label ("HEVC 1080p") shown live during a transcode; nil when not transcoding.
+    var transcodeTargetLabel: String?
+    /// True once a completed download has been transcoded on-device, so the card can badge it "Transcoded".
+    /// In-memory only (not in the sidecar), so it resets on relaunch — the transcoded specs themselves DO
+    /// persist via the rewritten sidecar.
+    var wasTranscoded = false
 
     @ObservationIgnored var lastSampleBytes: Int64 = 0
     @ObservationIgnored var lastSampleTime = Date()
@@ -351,7 +358,7 @@ final class DownloadManager {
         let spriteURL = scene.spriteURL(apiKey: apiKey)
         let vttURL = scene.vttURL(apiKey: apiKey)
         // Sidecar JSON (scene + apiKey) written synchronously — it's tiny.
-        if let data = try? JSONEncoder().encode(Sidecar(scene: scene, apiKey: apiKey)) {
+        if let data = try? JSONEncoder().encode(Sidecar(scene: scene, apiKey: apiKey, transcoded: false)) {
             try? data.write(to: meta.appendingPathComponent("\(id).json"), options: .atomic)
         }
         Task.detached(priority: .background) {
@@ -367,7 +374,8 @@ final class DownloadManager {
         }
     }
 
-    private struct Sidecar: Codable { let scene: StashScene; let apiKey: String }
+    // `transcoded` is optional so sidecars written before this field existed still decode (absent → nil).
+    private struct Sidecar: Codable { let scene: StashScene; let apiKey: String; let transcoded: Bool? }
 
     func pause(_ item: DownloadItem) { suspend(item, auto: false) }
     func resume(_ item: DownloadItem) {
@@ -404,6 +412,7 @@ final class DownloadManager {
         guard item.state == .completed, let src = item.localURL, !item.transcoding else { return }
         item.transcoding = true
         item.transcodeProgress = 0
+        item.transcodeTargetLabel = "\(settings.codec.label) \(settings.resolution.label)"
         item.error = nil
         let transcoder = VideoTranscoder()
         transcoders[item.id] = transcoder
@@ -443,6 +452,7 @@ final class DownloadManager {
         guard let item = items.first(where: { $0.id == id }) else { return }
         item.transcoding = false
         item.transcodeProgress = 0
+        item.transcodeTargetLabel = nil
         if let message { item.error = message }
         transcoders[id] = nil
     }
@@ -467,6 +477,7 @@ final class DownloadManager {
             // playable, so keep the item .completed and just surface that the transcode didn't save.
             item.transcoding = false
             item.transcodeProgress = 0
+            item.transcodeTargetLabel = nil
             item.error = "Couldn't save the transcoded file"
             transcoders[id] = nil
             return
@@ -486,6 +497,19 @@ final class DownloadManager {
         item.bitRate = nil
         item.transcodeProgress = 1
         item.transcoding = false
+        item.transcodeTargetLabel = nil
+        item.wasTranscoded = true
+        // Rewrite the persisted scene metadata to match the transcoded file, so the detail view and the
+        // player stats stop showing the pre-transcode container/codec/resolution — and so it survives
+        // relaunch, where loadCompleted re-derives the item's specs from this sidecar.
+        if let updated = item.scene?.replacingPrimaryFileSpecs(
+            container: "mp4", codec: item.codec, width: item.width, height: item.height,
+            bitRate: item.bitRate, size: Int(item.totalBytes)) {
+            item.scene = updated
+            if let data = try? JSONEncoder().encode(Sidecar(scene: updated, apiKey: item.apiKey, transcoded: true)) {
+                try? data.write(to: metaDir.appendingPathComponent("\(id).json"), options: .atomic)
+            }
+        }
         transcoders[id] = nil
     }
 
@@ -1020,6 +1044,7 @@ final class DownloadManager {
                 localThumb: FileManager.default.fileExists(atPath: thumb.path) ? thumb : nil
             )
             item.state = .completed
+            item.wasTranscoded = sidecar?.transcoded ?? false
             item.localURL = url
             item.receivedBytes = size
             item.connections[0].received = size

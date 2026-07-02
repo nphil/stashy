@@ -241,6 +241,27 @@ extension StashScene {
             ? String(format: "%d:%02d:%02d", h, m, s)
             : String(format: "%d:%02d", m, s)
     }
+
+    /// Return a copy with the primary file's media specs replaced — used after an on-device transcode
+    /// rewrites the offline file in place, so the detail view and player stats reflect the transcoded
+    /// output (new container/codec/resolution/size) instead of the original's. Duration and frame rate
+    /// are preserved from the source. All model fields are `let`, so this reconstructs rather than mutates.
+    func replacingPrimaryFileSpecs(container: String, codec: String?, width: Int?, height: Int?,
+                                   bitRate: Int?, size: Int?) -> StashScene {
+        guard let first = files.first else { return self }
+        let newName: String? = first.basename.map { name in
+            if let dot = name.lastIndex(of: ".") { return String(name[..<dot]) + "." + container }
+            return name + "." + container
+        }
+        let updatedFile = SceneFile(duration: first.duration, video_codec: codec, width: width,
+                                    height: height, basename: newName, size: size, bit_rate: bitRate,
+                                    frame_rate: first.frame_rate)
+        var updatedFiles = files
+        updatedFiles[0] = updatedFile
+        return StashScene(id: id, title: title, date: date, rating100: rating100, files: updatedFiles,
+                          paths: paths, studio: studio, performers: performers, tags: tags,
+                          sceneStreams: sceneStreams)
+    }
 }
 
 private func appendingAPIKey(_ key: String, to urlString: String) -> URL? {
