@@ -902,6 +902,13 @@ final class DownloadManager {
                 item.state = .downloading
                 item.lastSampleTime = Date()
                 item.lastSampleBytes = item.receivedBytes
+                // Cold *foreground* relaunch: the reattached task(s) came off the single-connection
+                // background session, but `connectionFinished` only chains the next part while
+                // `inBackground`, so once this lone task finishes the item would crawl at 1/8 speed and
+                // then silently stall at a partial %. Hand it back to the fast 8-way foreground engine.
+                // (The background-launch case is left alone — it chains correctly, and a cancel/restart
+                // inside the time-boxed relaunch window is exactly what we don't want there.)
+                if !inBackground { handoff(item, toBackground: false) }
             }
         }
     }
