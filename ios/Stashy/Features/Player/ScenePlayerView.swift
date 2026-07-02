@@ -110,7 +110,22 @@ struct ScenePlayerView: View {
                 )
                 .frame(width: surfaceSize.width, height: surfaceSize.height)
 
-                if model.isLoading {
+                if model.didFail {
+                    VStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill").font(.largeTitle)
+                        Text("Playback failed").font(.headline)
+                        if let err = model.lastError {
+                            Text(err).font(.caption).foregroundStyle(.white.opacity(0.7))
+                                .multilineTextAlignment(.center)
+                        }
+                        Text("Go back and try again.").font(.caption).foregroundStyle(.white.opacity(0.7))
+                    }
+                    .foregroundStyle(.white)
+                    .padding()
+                    .frame(width: avail.width, height: avail.height)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+                } else if model.isLoading {
                     VideoLoadingIndicator(progress: model.loadingProgress, message: model.loadingStage)
                         .frame(width: avail.width, height: avail.height)
                         .allowsHitTesting(false)

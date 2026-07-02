@@ -59,6 +59,10 @@ final class ScenePlayerModel {
     var activeStreamType: String?
     /// Last engine failure reason (AVPlayer error / watchdog), surfaced in Stats for diagnosis.
     var lastError: String?
+    /// Terminal playback failure with no fallback route left — drives an honest error overlay instead of
+    /// a loading donut that would otherwise spin forever. Resets naturally: reopening the scene builds a
+    /// fresh model.
+    var didFail = false
     /// Loopback server request log captured at the moment of fallback, for diagnosing remux stalls.
     var loopbackLog: [String] = []
     /// Fires a fallback if the local path produces no frames in time (covers stalls AVPlayer never
@@ -253,7 +257,16 @@ final class ScenePlayerModel {
     /// The local remux/loopback path failed (or stalled) — switch to the Stash HLS stream, once.
     /// Resetting `isReady` makes the zoom surface re-attach the new engine's render view.
     private func fallbackToHLS(error: String? = nil) {
-        guard !didFallback, let fallback = route.fallbackURL else { return }
+        guard !stopped else { return }   // the scene was already left — don't resurrect a zombie engine
+        guard !didFallback, let fallback = route.fallbackURL else {
+            // No fallback route (direct play / server-HLS / downloaded / last-resort), or the HLS fallback
+            // itself already failed — this is terminal. Surface it instead of spinning the donut forever.
+            if let error { lastError = error }
+            isBuffering = false
+            loadingStage = "Playback failed"
+            didFail = true
+            return
+        }
         didFallback = true
         watchdog?.cancel()
         RemoteLog.shared.log("⤵︎ fallback to Stash HLS: \(error ?? "—")")
