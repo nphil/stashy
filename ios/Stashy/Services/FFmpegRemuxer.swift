@@ -416,10 +416,15 @@ final class FFmpegRemuxer: @unchecked Sendable {
     fileprivate func write(from buffer: UnsafePointer<UInt8>?, size count: Int32) -> Int32 {
         guard let buffer, count > 0 else { return 0 }
         if let fileHandle {
-            try? fileHandle.write(contentsOf: Data(bytes: buffer, count: Int(count)))
+            do {
+                try fileHandle.write(contentsOf: Data(bytes: buffer, count: Int(count)))
+            } catch {
+                return -28   // AVERROR(ENOSPC) — disk full; don't lie to FFmpeg that the bytes landed
+            }
         } else {
             produced.append(buffer, count: Int(count))
         }
+        // Only advance on success — a swallowed write error previously still counted the bytes as written.
         progressLock.withLock { bytesWritten += Int(count) }
         return count
     }
