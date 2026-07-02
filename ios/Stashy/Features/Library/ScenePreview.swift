@@ -155,6 +155,7 @@ private struct ScenePreviewContainer: View {
     @Environment(\.previewCache) private var previewCache
 
     @State private var model: PreviewScrubModel?
+    @State private var loadTask: Task<Void, Never>?
     @State private var appeared = false
     @State private var dimLevel: CGFloat = 0.45
     @State private var drag: PreviewDrag = .none
@@ -203,7 +204,7 @@ private struct ScenePreviewContainer: View {
                 loadPlayer()
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) { appeared = true }
             }
-            .onDisappear { model?.stop() }
+            .onDisappear { loadTask?.cancel(); model?.stop() }
         }
     }
 
@@ -222,8 +223,11 @@ private struct ScenePreviewContainer: View {
 
     private func loadPlayer() {
         guard let url = active.scene.previewURL(apiKey: active.apiKey) else { return }
-        Task {
-            guard let local = await previewCache.localURL(for: url) else { return }
+        // Hold the load so onDisappear can cancel it — a long-press dismissed before the clip finishes
+        // would otherwise download the whole thing in the background for content that's never watched.
+        // Cancellation propagates through the actor await into URLSession.download, aborting the transfer.
+        loadTask = Task {
+            guard let local = await previewCache.localURL(for: url), !Task.isCancelled else { return }
             let m = PreviewScrubModel(url: local)
             m.play()
             model = m
