@@ -99,12 +99,8 @@ private struct DownloadCard: View {
                 if item.transcoding { transcodeBar }
                 else if item.state != .completed { connectionBar }
 
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text(statusText)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(statusColor)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .center, spacing: 10) {
+                    statusView
                     Spacer(minLength: 8)
                     controls
                 }
@@ -267,8 +263,37 @@ private struct DownloadCard: View {
         return out
     }
 
+    /// Status row: for a finished download, small rounded "Downloaded" (+ "Transcoded") chips; otherwise
+    /// the live status text (queued / downloading / transcoding progress / etc.).
+    @ViewBuilder private var statusView: some View {
+        if !item.transcoding, item.state == .completed {
+            HStack(spacing: 6) {
+                statusChip("Downloaded", color: .green)
+                if item.wasTranscoded { statusChip("Transcoded", color: themeManager.current.accentColor) }
+            }
+        } else {
+            Text(statusText)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(statusColor)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func statusChip(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background(color.opacity(0.15), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+
     private var statusText: String {
-        if item.transcoding { return "Transcoding… \(Int(item.transcodeProgress * 100))%" }
+        if item.transcoding {
+            let pct = Int(item.transcodeProgress * 100)
+            if let target = item.transcodeTargetLabel { return "Transcoding → \(target) · \(pct)%" }
+            return "Transcoding… \(pct)%"
+        }
         switch item.state {
         case .queued: return "Queued…"
         case .downloading:
