@@ -591,6 +591,11 @@ final class DownloadManager {
     /// produced its resume data — restart on the target engine: one connection on the background session, or
     /// all remaining connections in parallel on the foreground session.
     private func handoff(_ item: DownloadItem, toBackground: Bool) {
+        // A prior handoff for this item is still awaiting its resume-data cancellations. That pending
+        // completion re-reads the *current* phase when it fires and restarts on the right engine, so a
+        // second phase flip landing mid-handoff must not clear the tasks again or start a duplicate engine
+        // here — doing so orphaned the first engine's tasks and let 16 tasks write the same 8 part files.
+        if pendingHandoff[item.id] != nil { return }
         let active = tasks[item.id] ?? []
         tasks[item.id] = []
         guard !active.isEmpty else {
@@ -611,7 +616,9 @@ final class DownloadManager {
                     let remaining = (self.pendingHandoff[item.id] ?? 1) - 1
                     if remaining > 0 { self.pendingHandoff[item.id] = remaining; return }
                     self.pendingHandoff[item.id] = nil
-                    if item.state == .downloading {
+                    // Only start if nothing else already did (tasks stay empty for the whole handoff window
+                    // unless a start slipped in) — belt-and-suspenders against a duplicate engine.
+                    if item.state == .downloading, (self.tasks[item.id] ?? []).isEmpty {
                         // Honour the *current* phase in case it flipped again mid-handoff.
                         if self.inBackground { self.startBackgroundConnection(item) }
                         else { self.startConnections(item) }
