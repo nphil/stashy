@@ -132,7 +132,7 @@ struct SceneDetailView: View {
                     }
                     .fixedSize()
 
-                    PopupMenu(actions: [
+                    PopupMenu(systemImage: "ellipsis.vertical", actions: [
                         PopupMenuAction(title: "Download Video", systemImage: "arrow.down.circle") {
                             downloads.start(scene: fullScene ?? scene, apiKey: apiKey)
                             path.append(.downloads)
