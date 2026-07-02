@@ -202,6 +202,18 @@ only in the uncaught-exception handler.
 
 ## Phase 3 — load-bearing or design-decision fixes
 
+> **Status (shipped v1.0.115):** #16 (decoded costing + 128MB budget), #17 (low-water eviction), #L1
+> (diskBytes resync), #18 Tier 1 (LibraryEdits ordering token) done. **Remaining, grouped by why:**
+> — *Subtle, needs a careful session:* #15 (ImageCache in-flight coalescing — the awaiter-cancellation
+>   shield is the trap) + #13 (nonisolated memory-peek accessor + delete ScenePreviewGesture's `.task`) +
+>   #12 download-dedup. #18 Tier 2 (server-side coalescing).
+> — *Sacred, needs the owner's on-device test between batches:* #20 (merge hardening), #21 (remux EOF
+>   read-retry), #22 (engine-swap teardown leak), #25 (serveMedia double-buffer).
+> — *Non-sacred downloads housekeeping:* #23 (ghost transcode temp), #24 (stop() meta cleanup).
+> — *Folded into the pending connection-screen feature:* #19 (keychain accessibility) — that rework
+>   rewrites KeychainService anyway.
+> — *Deferred lows:* disk-hit decode, per-frame GeometryReader, deadline race; and Phase-1 #3(b).
+
 ### Cluster A — caching / data layer (read ImageCache once, edit coherently)
 
 ### 15. [M] ImageCache has no in-flight coalescing → every uncached thumbnail fetched 2–3×
