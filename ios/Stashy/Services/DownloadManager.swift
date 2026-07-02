@@ -261,7 +261,14 @@ final class DownloadManager {
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
         Self.excludeFromBackup(base)
-        Self.migrateLegacyStore(from: docs, downloadsDir: downloadsDir, metaDir: metaDir)
+        // The legacy Documents store is a one-time migration; after the first run there is nothing left to
+        // move, so skip the Documents enumeration on every subsequent launch. The move is best-effort and
+        // idempotent (dest-exists guarded), so setting the flag right after the call is safe.
+        let defaults = UserDefaults.standard
+        if !defaults.bool(forKey: "didMigrateLegacyDownloadStore") {
+            Self.migrateLegacyStore(from: docs, downloadsDir: downloadsDir, metaDir: metaDir)
+            defaults.set(true, forKey: "didMigrateLegacyDownloadStore")
+        }
 
         delegate = DownloadDelegate(
             store: store,

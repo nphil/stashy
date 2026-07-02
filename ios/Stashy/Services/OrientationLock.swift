@@ -12,7 +12,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         if RemoteLog.isLoggingEnabled { RemoteLog.shared.enable() }   // off by default; toggle in Stats
-        LocalRemuxStream.sweepStaleTempFiles()   // clear remux temps left by a prior crash/force-quit
+        // Clear remux temps left by a prior crash/force-quit. Nothing is in use at launch, so run it off
+        // the main thread — it enumerates + unlinks tmp files and needn't block the first frame.
+        Task.detached(priority: .utility) { LocalRemuxStream.sweepStaleTempFiles() }
         // Configure the audio category once (constant for the app) — the player just activates it on play.
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         return true
