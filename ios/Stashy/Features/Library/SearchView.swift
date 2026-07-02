@@ -27,9 +27,15 @@ final class SearchViewModel {
             async let scenesResult = client.findScenes(SceneQuery(search: q), page: 1, perPage: 20)
             async let performersResult = client.findPerformers(page: 1, perPage: 10, query: q)
             async let tagsResult = client.findTags(query: q, limit: 10)
-            scenes = (try? await scenesResult)?.scenes ?? []
-            performers = (try? await performersResult)?.performers ?? []
-            tags = (try? await tagsResult) ?? []
+            let s = (try? await scenesResult)?.scenes ?? []
+            let p = (try? await performersResult)?.performers ?? []
+            let t = (try? await tagsResult) ?? []
+            // A superseded search was cancelled mid-fetch; its `try?` failures would otherwise stomp the
+            // newer search's results and spinner with empty arrays. Drop the stale write entirely.
+            guard !Task.isCancelled else { return }
+            scenes = s
+            performers = p
+            tags = t
             isSearching = false
         }
     }
