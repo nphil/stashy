@@ -38,7 +38,12 @@ final class LoopbackServer: @unchecked Sendable {
 
     /// Start listening; returns the URL AVPlayer should open — the playlist in HLS mode, else the file.
     func start() throws -> URL {
-        let listener = try NWListener(using: .tcp)
+        // Bind loopback only — an unrestricted .tcp listener binds the wildcard address, letting any LAN
+        // peer port-scan and pull the currently-playing media with zero auth. AVPlayer already hardcodes
+        // http://127.0.0.1:<port>/ below, so restricting the bind can't change what it connects to.
+        let params = NWParameters.tcp
+        params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: .any)
+        let listener = try NWListener(using: params)
         self.listener = listener
         listener.newConnectionHandler = { [weak self] conn in self?.accept(conn) }
 
