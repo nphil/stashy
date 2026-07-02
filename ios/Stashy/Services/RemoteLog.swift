@@ -39,8 +39,20 @@ final class RemoteLog: @unchecked Sendable {
         session = URLSession(configuration: cfg)
     }
 
+    /// Set once per process; the memory-warning observer + uncaught-exception handler are installed a
+    /// single time, regardless of how many enable()/disable() cycles happen.
+    private var hasInstalledHooks = false
+
     func enable() {
         queue.async {
+            // Install the process-lifetime hooks exactly once — NOT gated on `enabled`, since a
+            // disable→enable toggle would otherwise stack another memory-warning observer each time (and
+            // each accumulated observer fires its own main-thread flush on a memory warning).
+            if !self.hasInstalledHooks {
+                self.hasInstalledHooks = true
+                self.observeMemoryWarning()
+                self.installExceptionHandler()
+            }
             guard !self.enabled else { return }
             self.enabled = true
             // Recover + re-send the previous session's tail (captures a hard crash the live flush missed).
@@ -65,8 +77,6 @@ final class RemoteLog: @unchecked Sendable {
             self.memTimer = m
         }
         log("=== RemoteLog enabled (\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)) ===")
-        observeMemoryWarning()
-        installExceptionHandler()
     }
 
     func disable() {
@@ -143,7 +153,10 @@ final class RemoteLog: @unchecked Sendable {
         NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: nil) { _ in
             RemoteLog.shared.log("⚠️ MEMORY WARNING at \(Int(RemoteLog.memoryMB()))MB")
-            RemoteLog.shared.flushSync(timeout: 1)
+            // Async flush — this notification is delivered on the main thread, and the blocking network
+            // wait it used to do stalled the main thread up to 1s exactly when the app is under pressure.
+            // The tail is already persisted to disk in flushLocked(), so the hard-kill case stays covered.
+            RemoteLog.shared.queue.async { RemoteLog.shared.flushLocked() }
         }
     }
 
