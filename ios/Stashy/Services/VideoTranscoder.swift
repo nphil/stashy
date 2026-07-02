@@ -187,6 +187,12 @@ final class VideoTranscoder: @unchecked Sendable {
                       totalSeconds: Double, onProgress: (@Sendable (Double) -> Void)?) async throws {
         let box = UncheckedTranscodeBox((input, output))
         let queue = DispatchQueue(label: "stashy.transcode.pump")
+        // Throttle state, touched only from `requestMediaDataWhenReady`'s callback, which always runs on
+        // `queue` (serial) — single writer, no lock needed. Without this, a video pump at HW transcode
+        // speed calls onProgress per frame (100–500+/sec), each spawning a MainActor Task + animated
+        // re-render; here we only report when progress moved meaningfully or enough time passed.
+        var lastReportedProgress: Double = -1
+        var lastReportTime = Date.distantPast
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             box.value.0.requestMediaDataWhenReady(on: queue) { [weak self] in
                 let (input, output) = box.value
@@ -195,7 +201,15 @@ final class VideoTranscoder: @unchecked Sendable {
                     if let sample = output.copyNextSampleBuffer() {
                         if let onProgress {
                             let t = CMSampleBufferGetPresentationTimeStamp(sample).seconds
-                            if t.isFinite, t >= 0 { onProgress(min(1, t / totalSeconds)) }
+                            if t.isFinite, t >= 0 {
+                                let p = min(1, t / totalSeconds)
+                                let now = Date()
+                                if p - lastReportedProgress >= 0.005 || now.timeIntervalSince(lastReportTime) >= 0.1 {
+                                    lastReportedProgress = p
+                                    lastReportTime = now
+                                    onProgress(p)
+                                }
+                            }
                         }
                         if !input.append(sample) {
                             input.markAsFinished()
