@@ -27,6 +27,14 @@ final class LibraryEdits {
     /// Set briefly when a save fails, for optional UI surfacing; cleared after it's shown.
     var lastError: String?
 
+    // Per-id ordering token, namespaced by field. Each optimistic write's async response/rollback is
+    // applied only if no newer edit for the same field+id has landed since. Without it, a slow write —
+    // e.g. one delayed behind StashClient's 500/1000/1500ms DB-lock retry — could resolve after a newer
+    // edit and stomp the newer local value back to the stale one (tap 3★, correct to 5★, watch it snap
+    // back to 3★). @MainActor makes the read-check-write on this dict atomic within a hop.
+    private var editSeq: [String: Int] = [:]
+    private func bumpSeq(_ key: String) -> Int { let t = (editSeq[key] ?? 0) + 1; editSeq[key] = t; return t }
+
     // MARK: Resolved reads (local edit wins, else the model's fetched value)
 
     func rating(for scene: StashScene) -> Int? {
@@ -54,9 +62,14 @@ final class LibraryEdits {
         let previous = sceneRatings[id]
         sceneRatings.updateValue(value, forKey: id)
         guard let client else { return }
+        let key = "sr:\(id)"; let token = bumpSeq(key)
         Task {
-            do { sceneRatings.updateValue(try await client.setSceneRating(id: id, rating100: value), forKey: id) }
-            catch { restore(&sceneRatings, id: id, previous: previous); lastError = "Couldn't save rating" }
+            do {
+                let saved = try await client.setSceneRating(id: id, rating100: value)
+                if editSeq[key] == token { sceneRatings.updateValue(saved, forKey: id) }
+            } catch {
+                if editSeq[key] == token { restore(&sceneRatings, id: id, previous: previous); lastError = "Couldn't save rating" }
+            }
         }
     }
 
@@ -64,9 +77,14 @@ final class LibraryEdits {
         let previous = performerRatings[id]
         performerRatings.updateValue(value, forKey: id)
         guard let client else { return }
+        let key = "pr:\(id)"; let token = bumpSeq(key)
         Task {
-            do { performerRatings.updateValue(try await client.setPerformerRating(id: id, rating100: value), forKey: id) }
-            catch { restore(&performerRatings, id: id, previous: previous); lastError = "Couldn't save rating" }
+            do {
+                let saved = try await client.setPerformerRating(id: id, rating100: value)
+                if editSeq[key] == token { performerRatings.updateValue(saved, forKey: id) }
+            } catch {
+                if editSeq[key] == token { restore(&performerRatings, id: id, previous: previous); lastError = "Couldn't save rating" }
+            }
         }
     }
 
@@ -74,11 +92,16 @@ final class LibraryEdits {
         let previous = performerFavorites[id]
         performerFavorites[id] = value
         guard let client else { return }
+        let key = "pf:\(id)"; let token = bumpSeq(key)
         Task {
-            do { performerFavorites[id] = try await client.setPerformerFavorite(id: id, favorite: value) ?? value }
-            catch {
-                if let previous { performerFavorites[id] = previous } else { performerFavorites.removeValue(forKey: id) }
-                lastError = "Couldn't save favorite"
+            do {
+                let saved = try await client.setPerformerFavorite(id: id, favorite: value) ?? value
+                if editSeq[key] == token { performerFavorites[id] = saved }
+            } catch {
+                if editSeq[key] == token {
+                    if let previous { performerFavorites[id] = previous } else { performerFavorites.removeValue(forKey: id) }
+                    lastError = "Couldn't save favorite"
+                }
             }
         }
     }
@@ -87,11 +110,16 @@ final class LibraryEdits {
         let previous = tagFavorites[id]
         tagFavorites[id] = value
         guard let client else { return }
+        let key = "tf:\(id)"; let token = bumpSeq(key)
         Task {
-            do { tagFavorites[id] = try await client.setTagFavorite(id: id, favorite: value) ?? value }
-            catch {
-                if let previous { tagFavorites[id] = previous } else { tagFavorites.removeValue(forKey: id) }
-                lastError = "Couldn't save favorite"
+            do {
+                let saved = try await client.setTagFavorite(id: id, favorite: value) ?? value
+                if editSeq[key] == token { tagFavorites[id] = saved }
+            } catch {
+                if editSeq[key] == token {
+                    if let previous { tagFavorites[id] = previous } else { tagFavorites.removeValue(forKey: id) }
+                    lastError = "Couldn't save favorite"
+                }
             }
         }
     }
