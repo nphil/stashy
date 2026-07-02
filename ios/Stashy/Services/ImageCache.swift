@@ -11,7 +11,10 @@ actor ImageCache {
     private let memoryCache: NSCache<NSString, UIImage> = {
         let cache = NSCache<NSString, UIImage>()
         cache.countLimit = 500
-        cache.totalCostLimit = 64 * 1024 * 1024
+        // Cost is now the decoded bitmap size (see `memoryCost`), not the compressed JPEG size, so this
+        // budget finally binds. Raised from 64MB to soften the scroll-back regression from honest costing
+        // (still an order of magnitude under the ~400-700MB the mis-costed cache could hold).
+        cache.totalCostLimit = 128 * 1024 * 1024
         return cache
     }()
 
@@ -56,7 +59,7 @@ actor ImageCache {
 
         let file = directory.appendingPathComponent(key + ".jpg")
         if let data = try? Data(contentsOf: file), let image = UIImage(data: data) {
-            memoryCache.setObject(image, forKey: nsKey, cost: data.count)
+            memoryCache.setObject(image, forKey: nsKey, cost: Self.memoryCost(image, fallback: data.count))
             touch(file)
             return image
         }
@@ -73,7 +76,7 @@ actor ImageCache {
                 diskBytes += jpeg.count
                 enforceLimit()
             }
-            memoryCache.setObject(image, forKey: nsKey, cost: jpeg.count)
+            memoryCache.setObject(image, forKey: nsKey, cost: Self.memoryCost(image, fallback: jpeg.count))
         } else {
             memoryCache.setObject(image, forKey: nsKey)
         }
@@ -89,7 +92,7 @@ actor ImageCache {
 
         let file = directory.appendingPathComponent(key + ".img")
         if let data = try? Data(contentsOf: file), let image = UIImage(data: data) {
-            memoryCache.setObject(image, forKey: nsKey, cost: data.count)
+            memoryCache.setObject(image, forKey: nsKey, cost: Self.memoryCost(image, fallback: data.count))
             touch(file)
             return image
         }
@@ -101,7 +104,7 @@ actor ImageCache {
             diskBytes += data.count
             enforceLimit()
         }
-        memoryCache.setObject(image, forKey: nsKey, cost: data.count)
+        memoryCache.setObject(image, forKey: nsKey, cost: Self.memoryCost(image, fallback: data.count))
         return image
     }
 
@@ -135,6 +138,13 @@ actor ImageCache {
         try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: file.path)
     }
 
+    /// Approximate resident cost of a decoded image (its bitmap backing store) for NSCache accounting.
+    /// The old code passed the compressed JPEG/data size, which under-counted decoded bitmaps 10-20x and
+    /// let the memory budget hold hundreds of MB. Falls back to the byte size if there's no CGImage.
+    private static func memoryCost(_ image: UIImage, fallback: Int) -> Int {
+        image.cgImage.map { $0.bytesPerRow * $0.height } ?? fallback
+    }
+
     private func totalSize() -> Int {
         guard let urls = try? FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: [.fileSizeKey]
@@ -157,8 +167,17 @@ actor ImageCache {
         }
         // Evict non-priority first, then oldest-first within each tier — so performer portraits are the
         // last thing dropped when the cache is over budget.
+        // Self-heal the incremental counter from the sizes we just listed — two concurrent fetches of the
+        // same thumbnail double-count diskBytes (the file is overwritten once but the counter bumps
+        // twice), and that phantom drift would otherwise evict live files to satisfy bytes that don't
+        // exist. If the real usage is actually under the cap, there's nothing to evict.
+        diskBytes = entries.reduce(0) { $0 + $1.size }
+        guard diskBytes > maxBytes else { return }
         entries.sort { ($0.priority ? 1 : 0, $0.date) < ($1.priority ? 1 : 0, $1.date) }
-        for entry in entries where diskBytes > maxBytes {
+        // Evict to a low-water mark rather than exactly to the cap: otherwise the next write is over the
+        // cap again and every new thumbnail triggers a full directory scan+sort at steady state.
+        let lowWater = maxBytes * 85 / 100
+        for entry in entries where diskBytes > lowWater {
             try? FileManager.default.removeItem(at: entry.url)
             diskBytes -= entry.size
         }
