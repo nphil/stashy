@@ -18,6 +18,11 @@ Legend: **[H]** high, **[M]** medium, **[L]** low. "SACRED" = the fix touches th
 
 ## Phase 1 — concurrency-interleaving trio (highest care)
 
+> **Status (shipped v1.0.108–110):** #1 and #2 done. #3 parts (a) temp-sweep-detached and
+> (c) migration one-shot flag done; part (b) — moving `loadCompleted`'s per-item sidecar decode off-main —
+> **deferred to Phase 3** because a race-free version needs `DownloadItem.title`/`scene`/`apiKey` to become
+> `var` (a model change best designed alongside the ImageCache work in cluster A).
+
 ### 1. [H] Handoff race double-starts engines, can delete a completed file
 `Services/DownloadManager.swift:596`
 `handoff()` clears `tasks[item.id]=[]` then its empty-active fast path starts immediately; meanwhile the
