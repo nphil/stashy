@@ -58,6 +58,26 @@ private struct DownloadPlayerCover: View {
     }
 }
 
+/// Presents a performer's page over the Downloads list (tapping the card's performer chip). Its own
+/// navigation stack so pushing scenes/performers works; a Close button dismisses it.
+private struct DownloadPerformerCover: View {
+    let performer: Performer
+    @Environment(\.dismiss) private var dismiss
+    @State private var path: [Route] = []
+
+    var body: some View {
+        NavigationStack(path: $path) {
+            PerformerDetailView(performer: performer, path: $path)
+                .navigationDestination(for: Route.self) { RouteDestination(route: $0, path: $path) }
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button { dismiss() } label: { Image(systemName: "xmark") }
+                    }
+                }
+        }
+    }
+}
+
 private struct DownloadCard: View {
     @Bindable var item: DownloadItem
     var onPlay: () -> Void
@@ -68,26 +88,27 @@ private struct DownloadCard: View {
     @State private var performer: UIImage?
     @State private var confirmDelete = false
     @State private var showTranscode = false
+    @State private var showingPerformer: Performer?
 
     var body: some View {
-        // Centre-aligned so the scene thumbnail sits vertically centred against the taller text column.
-        HStack(alignment: .center, spacing: 12) {
+        // Top-aligned: the thumbnail sits alongside the title/performer top row.
+        HStack(alignment: .top, spacing: 12) {
             thumbnail
             VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(item.fileName)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(themeManager.current.foregroundColor)
-                        .lineLimit(1)
-                    Text(item.ext.uppercased())
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 5).padding(.vertical, 1)
-                        .background(themeManager.current.backgroundColor, in: RoundedRectangle(cornerRadius: 4))
-                    Spacer(minLength: 0)
+                // Top row: scene/file name (horizontally scrollable if long) on the left; the tappable
+                // performer chip on the right. The name scrolls rather than wrapping, so it never crowds
+                // the performer or stretches the card past the screen edge.
+                HStack(alignment: .top, spacing: 10) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        Text(item.title.isEmpty ? item.fileName : item.title)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(themeManager.current.foregroundColor)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    performerChip
                 }
-
-                performerChip
 
                 FlowLayout(spacing: 6) {
                     ForEach(specs, id: \.self) { spec in
@@ -116,8 +137,6 @@ private struct DownloadCard: View {
         .padding(12)
         .background(themeManager.current.surfaceColor, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.white.opacity(0.06)))
-        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .onTapGesture(perform: onPlay)   // the control buttons intercept their own taps
         .task(id: thumbKey) { await loadThumb() }
         .task(id: item.performerImageURL) {
             if let url = item.performerImageURL { performer = try? await imageCache.image(for: url, priority: true) }
@@ -130,6 +149,9 @@ private struct DownloadCard: View {
         }
         .sheet(isPresented: $showTranscode) {
             TranscodePresetSheet(item: item) { settings in downloads.transcode(item, settings: settings) }
+        }
+        .fullScreenCover(item: $showingPerformer) { performer in
+            DownloadPerformerCover(performer: performer)
         }
     }
 
@@ -152,33 +174,41 @@ private struct DownloadCard: View {
         }
         .frame(width: 104, height: 62)
         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onPlay)   // ONLY the thumbnail opens the player
     }
 
-    /// Performer thumbnail (30% larger than before) with the performer's name alongside. Shown whenever
-    /// the scene has a performer; falls back to a person glyph until the image loads.
+    /// Tappable performer chip (image + name) pinned to the card's top-right; tapping opens the performer
+    /// page (not the video). Falls back to a person glyph until the image loads.
     @ViewBuilder private var performerChip: some View {
         if item.performerName != nil || item.performerImageURL != nil {
-            HStack(spacing: 7) {
-                Group {
-                    if let performer {
-                        Image(uiImage: performer).resizable().scaledToFill()
-                    } else {
-                        Image(systemName: "person.fill").resizable().scaledToFit()
-                            .padding(8).foregroundStyle(.secondary)
+            Button {
+                if let p = item.scene?.performers.first { showingPerformer = p }
+            } label: {
+                HStack(spacing: 6) {
+                    Group {
+                        if let performer {
+                            Image(uiImage: performer).resizable().scaledToFill()
+                        } else {
+                            Image(systemName: "person.fill").resizable().scaledToFit()
+                                .padding(7).foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(width: 30, height: 30)
+                    .background(themeManager.current.backgroundColor)
+                    .clipShape(Circle())
+                    .overlay(Circle().strokeBorder(.white.opacity(0.15)))
+
+                    if let name = item.performerName {
+                        Text(name)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .frame(maxWidth: 96, alignment: .leading)   // cap so the title keeps room
                     }
                 }
-                .frame(width: 36, height: 36)
-                .background(themeManager.current.backgroundColor)
-                .clipShape(Circle())
-                .overlay(Circle().strokeBorder(.white.opacity(0.15)))
-
-                if let name = item.performerName {
-                    Text(name)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
             }
+            .buttonStyle(.plain)
         }
     }
 
@@ -293,7 +323,7 @@ private struct DownloadCard: View {
     }
 
     private var specs: [String] {
-        var out: [String] = []
+        var out: [String] = [item.ext.uppercased()]   // container badge now lives with the other specs
         if let r = item.resolutionLabel { out.append(r) }
         if let c = item.codecLabel { out.append(c) }
         if let b = item.bitrateLabel { out.append(b) }
