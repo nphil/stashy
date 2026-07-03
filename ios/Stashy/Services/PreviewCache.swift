@@ -11,6 +11,9 @@ actor PreviewCache {
     private let session: URLSession
     /// Soft cap on disk used by cached preview clips. Least-recently-used files are evicted past it.
     private let maxBytes = 300 * 1024 * 1024
+    /// In-flight downloads keyed by content filename, so a long-press racing its own prefetch (or a
+    /// repress) shares one download instead of fetching the whole clip twice.
+    private var inFlight: [String: Task<URL?, Never>] = [:]
 
     init() {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -21,11 +24,24 @@ actor PreviewCache {
 
     /// Local file URL for a preview, downloading + caching it on first use. Returns nil on failure.
     func localURL(for remoteURL: URL) async -> URL? {
-        let file = directory.appendingPathComponent(filename(for: remoteURL))
+        let name = filename(for: remoteURL)
+        let file = directory.appendingPathComponent(name)
         if FileManager.default.fileExists(atPath: file.path) {
             touch(file) // mark recently used for LRU
             return file
         }
+        // Coalesce concurrent requests for the same clip (a long-press racing its own prefetch, or a
+        // repress) onto one download. The shared Task is unstructured and cleared on completion — so a
+        // dismissed preview's small clip finishes and caches (making a repress instant) instead of being
+        // torn down mid-flight; the caller's own loadTask cancellation still skips the model setup.
+        if let existing = inFlight[name] { return await existing.value }
+        let task = Task { await self.download(remoteURL, to: file) }
+        inFlight[name] = task
+        defer { if inFlight[name] == task { inFlight[name] = nil } }
+        return await task.value
+    }
+
+    private func download(_ remoteURL: URL, to file: URL) async -> URL? {
         do {
             let (tmp, response) = try await session.download(from: remoteURL)
             if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
