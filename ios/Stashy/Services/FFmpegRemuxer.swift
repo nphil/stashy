@@ -79,6 +79,7 @@ final class FFmpegRemuxer: @unchecked Sendable {
     private final class Box: @unchecked Sendable {
         var data: Data?
         var total: Int64?
+        var error: Error?
     }
 
     /// Seconds to input-seek to before remuxing (0 = from the start). Used for seek-by-reinit: a far
@@ -378,28 +379,51 @@ final class FFmpegRemuxer: @unchecked Sendable {
         var end = offset + Int64(max(want, readAhead)) - 1
         if size >= 0 { end = min(end, size - 1) }
         guard end >= offset else { return averrorEOF }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 8   // so a single wedged read returns and lets FFmpeg poll the interrupt
-        request.setValue("bytes=\(offset)-\(end)", forHTTPHeaderField: "Range")
 
-        let box = Box()
-        let semaphore = DispatchSemaphore(value: 0)
-        let task = session.dataTask(with: request) { data, response, _ in
-            box.data = data
-            box.total = Self.totalLength(from: response)
-            semaphore.signal()
+        // Retry a failed slab a few times: a transient network stall on a long HEVC/MKV remux (a primary
+        // daily route) must NOT be reported as EOF — that writes the trailer + ENDLIST and AVPlayer sees a
+        // clean end mid-movie (fires onEnded, no `.failed`, watchdog already disarmed). We distinguish a
+        // genuine end-of-file (a *successful* empty response — no transport error) from a failure (a
+        // non-nil completion error, e.g. a timeout / connection-lost), retrying only the latter and finally
+        // returning EIO so `reachedEOF` stays false and no trailer is written. Poll the abort flag between
+        // attempts so teardown stays prompt. (Residual gap: a server that never sends Content-Range keeps
+        // `size == -1`; we still rely on the error flag, which is correct as long as EOF arrives as a clean
+        // empty response rather than a dropped connection.)
+        let maxAttempts = 3
+        for attempt in 0..<maxAttempts {
+            if isAborted { return averrorExit }
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 8   // so a single wedged read returns and lets FFmpeg poll the interrupt
+            request.setValue("bytes=\(offset)-\(end)", forHTTPHeaderField: "Range")
+
+            let box = Box()
+            let semaphore = DispatchSemaphore(value: 0)
+            let task = session.dataTask(with: request) { data, response, err in
+                box.data = data
+                box.total = Self.totalLength(from: response)
+                box.error = err
+                semaphore.signal()
+            }
+            task.resume()
+            semaphore.wait()
+
+            if let total = box.total { size = total }
+            if let data = box.data, !data.isEmpty {
+                cache = data
+                cacheStart = offset
+                let n = min(data.count, want)
+                data.copyBytes(to: buffer, count: n)
+                offset += Int64(n)
+                return Int32(n)
+            }
+            // Empty response with no transport error → genuine EOF. With an error → a stall/failure: back
+            // off (polling abort so we bail promptly) and retry.
+            if box.error == nil { return averrorEOF }
+            if attempt < maxAttempts - 1 {
+                for _ in 0..<10 { if isAborted { return averrorExit }; Thread.sleep(forTimeInterval: 0.05) }
+            }
         }
-        task.resume()
-        semaphore.wait()
-
-        if let total = box.total { size = total }
-        guard let data = box.data, !data.isEmpty else { return averrorEOF }
-        cache = data
-        cacheStart = offset
-        let n = min(data.count, want)
-        data.copyBytes(to: buffer, count: n)
-        offset += Int64(n)
-        return Int32(n)
+        return -5   // AVERROR(EIO): a persistent read failure, not EOF — no trailer, player can error/fallback
     }
 
     fileprivate func seek(to target: Int64, whence: Int32) -> Int64 {
