@@ -76,11 +76,12 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   checklist; plus playback engineering learnings.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.107** (background download handoff, commit `b8ea21d`) — confirmed green,
-  7.73 MB.
-- Awaiting on-device verification (owner tests each build): background download continues while
-  suspended; a single bg range task doesn't -3000; transcode output plays and is smaller; offline
-  sprites scrub; downloads invisible in the Files app.
+- Latest release: **v1.0.123** (downloaded HEVC plays offline via local-file remux + visible
+  transcode errors, commit `97b8af5`) — confirmed green, 7.77 MB.
+- Awaiting on-device verification (owner tests each build): a downloaded HEVC scene plays offline
+  (routes through the local-file FFmpeg remux, not a bare AVPlayer); transcoding an MKV/undecodable
+  container now shows a clear error on the download card; earlier: bg download continues while
+  suspended, single bg range task doesn't -3000, offline sprites scrub, downloads invisible in Files.
 - Next candidates: reconcile the OUTSTANDING punch list; **Live Activity / Dynamic Island** (riskiest
   downloads item — a new Widget Extension target changes the IPA structure for a sideloaded app;
   isolate it in its own commit).
