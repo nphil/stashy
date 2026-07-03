@@ -301,6 +301,7 @@ final class DownloadManager {
 
         loadCompleted()
         loadInterrupted()      // rebuild in-flight items from sidecars so relaunch callbacks find them
+        sweepOrphanedMeta()    // reclaim sidecars left by stopped/abandoned/crashed downloads
         finalizeReadyItems()   // any item whose parts are all present already → assemble now
         reconnectTasks()       // re-attach to still-running tasks on both sessions
         observeAppPhase()
@@ -382,12 +383,21 @@ final class DownloadManager {
         guard item.state == .paused || item.state == .waitingForNetwork || item.state == .failed else { return }
         launch(item, reset: false)
     }
-    func retry(_ item: DownloadItem) { launch(item, reset: true) }
+    func retry(_ item: DownloadItem) {
+        // stop() (or a prior-launch orphan sweep) may have removed the sidecar. Re-fetch it from the
+        // in-memory scene so a completed retry keeps its offline metadata + sprites on the next launch.
+        if let scene = item.scene,
+           !FileManager.default.fileExists(atPath: metaDir.appendingPathComponent("\(item.id).json").path) {
+            fetchSidecar(item, scene: scene, apiKey: item.apiKey)
+        }
+        launch(item, reset: true)
+    }
 
     func stop(_ item: DownloadItem) {
         cancelTasks(item, produceResumeData: false)
         item.state = .stopped
         cleanupParts(item.id)
+        cleanupMeta(item.id)   // reclaim the sidecar/thumb/sprite/vtt now; retry() re-heals if resumed
         clearActive(item.id)
     }
 
@@ -417,7 +427,11 @@ final class DownloadManager {
         let transcoder = VideoTranscoder()
         transcoders[item.id] = transcoder
         let id = item.id
-        let dest = downloadsDir.appendingPathComponent("\(id).transcode.mp4")
+        // Transcode into the OS tmp dir, NOT downloadsDir: a kill/crash mid-transcode must not leave a
+        // truncated `<id>.transcode.mp4` that loadCompleted() would resurrect as a ghost "completed"
+        // download. tmp is also OS-purgeable, so a purged in-progress transcode just fails cleanly.
+        // tmp and Application Support share the app-container volume, so the finish move stays a rename.
+        let dest = FileManager.default.temporaryDirectory.appendingPathComponent("\(id).transcode.mp4")
         var bg: UIBackgroundTaskIdentifier = .invalid
         bg = UIApplication.shared.beginBackgroundTask(withName: "transcode-\(id)") {
             // Last-seconds notice before the watchdog kills us, not extra time. Capture `transcoder`
@@ -1014,6 +1028,27 @@ final class DownloadManager {
         }
     }
 
+    /// Reclaim sidecar meta sets (`<id>.json`, `-thumb.jpg`, `-sprite.jpg`, `.vtt`) left behind by a
+    /// stopped/abandoned download or orphaned by a crash. Keyed EXACTLY like `loadInterrupted`: an id is
+    /// kept only if it has a completed file in `downloadsDir` OR an `.active` marker. Both discriminators
+    /// are required — completed downloads have no `.active` marker but do have a downloadsDir file, so an
+    /// active-only check would wipe every completed download's sidecar. Runs once at init (before any new
+    /// download writes a sidecar), so it can't race a fresh write.
+    private func sweepOrphanedMeta() {
+        let fm = FileManager.default
+        guard let metaFiles = try? fm.contentsOfDirectory(at: metaDir, includingPropertiesForKeys: nil) else { return }
+        let completedIDs: Set<String> = {
+            guard let files = try? fm.contentsOfDirectory(at: downloadsDir, includingPropertiesForKeys: nil) else { return [] }
+            return Set(files.map { $0.deletingPathExtension().lastPathComponent })
+        }()
+        for url in metaFiles where url.pathExtension == "json" {
+            let id = url.deletingPathExtension().lastPathComponent
+            if completedIDs.contains(id) { continue }                     // completed download → keep
+            if fm.fileExists(atPath: activeURL(id).path) { continue }     // active / resumable → keep
+            cleanupMeta(id)
+        }
+    }
+
     /// A marker distinguishing an active (resumable) download from a completed/stopped one, so relaunch
     /// only resurrects transfers the user actually wants continued.
     private func activeURL(_ itemID: String) -> URL { metaDir.appendingPathComponent("\(itemID).active") }
@@ -1029,6 +1064,12 @@ final class DownloadManager {
     private func loadCompleted() {
         guard let files = try? FileManager.default.contentsOfDirectory(at: downloadsDir, includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey]) else { return }
         for url in files {
+            // Reclaim stray transcode temps (from builds that wrote them here, or a crash mid-transcode)
+            // so they're never resurrected as ghost completed downloads.
+            if url.lastPathComponent.hasSuffix(".transcode.mp4") {
+                try? FileManager.default.removeItem(at: url)
+                continue
+            }
             if (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { continue }
             let id = url.deletingPathExtension().lastPathComponent
             let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { Int64($0) } ?? 0
