@@ -414,7 +414,11 @@ final class DownloadManager {
 
     // MARK: - On-device transcode
 
-    @ObservationIgnored private var transcoders: [String: VideoTranscoder] = [:]
+    @ObservationIgnored private var transcoders: [String: any OnDeviceTranscoder] = [:]
+
+    /// Containers Apple's `AVAssetReader` can demux natively — everything else (MKV/WebM/AVI/…) has to go
+    /// through the FFmpeg transcoder.
+    private static let avNativeContainers: Set<String> = ["mp4", "m4v", "mov"]
 
     /// Re-encode a completed download in place to the chosen resolution/quality/codec (hardware
     /// VideoToolbox), replacing the offline file with the smaller/normalised copy on success.
@@ -424,7 +428,10 @@ final class DownloadManager {
         item.transcodeProgress = 0
         item.transcodeTargetLabel = "\(settings.codec.label) \(settings.resolution.label)"
         item.error = nil
-        let transcoder = VideoTranscoder()
+        // Native container → Apple's AVFoundation transcoder (proven, hardware-fast). Exotic container
+        // (MKV/WebM/AVI/…) → the FFmpeg transcoder, which can actually demux it.
+        let native = Self.avNativeContainers.contains(src.pathExtension.lowercased())
+        let transcoder: any OnDeviceTranscoder = native ? VideoTranscoder() : FFmpegTranscoder()
         transcoders[item.id] = transcoder
         let id = item.id
         // Transcode into the OS tmp dir, NOT downloadsDir: a kill/crash mid-transcode must not leave a
@@ -450,9 +457,12 @@ final class DownloadManager {
                 self.transcodeFinished(id: id, output: dest, src: src, settings: settings)
             } catch {
                 try? FileManager.default.removeItem(at: dest)
-                // A user cancel isn't an error to surface; anything else is.
+                // A user cancel isn't an error to surface; anything else is. (VideoTranscoder throws its own
+                // .cancelled; FFmpegTranscoder throws Swift's CancellationError.)
                 let cancelled: Bool
-                if case VideoTranscoder.TranscodeError.cancelled = error { cancelled = true } else { cancelled = false }
+                if error is CancellationError { cancelled = true }
+                else if case VideoTranscoder.TranscodeError.cancelled = error { cancelled = true }
+                else { cancelled = false }
                 let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 self.transcodeFailed(id: id, message: cancelled ? nil : message)
             }
