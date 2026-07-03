@@ -762,14 +762,31 @@ final class DownloadManager {
         if parts.count == 1 {   // single-connection download — nothing to concatenate
             do { try fm.moveItem(at: parts[0], to: dest); return true } catch { return false }
         }
+        func fileSize(_ path: String) -> Int64 { ((try? fm.attributesOfItem(atPath: path))?[.size] as? NSNumber)?.int64Value ?? 0 }
+        // Expected merged size = sum of the parts; used to reject a silently-short merge below.
+        let expected = parts.reduce(Int64(0)) { $0 + fileSize($1.path) }
         guard fm.createFile(atPath: dest.path, contents: nil),
               let out = try? FileHandle(forWritingTo: dest) else { return false }
         defer { try? out.close() }
-        for part in parts {
-            guard let inHandle = try? FileHandle(forReadingFrom: part) else { return false }
-            while let chunk = try? inHandle.read(upToCount: 4 << 20), !chunk.isEmpty { out.write(chunk) }
-            try? inHandle.close()
+        do {
+            for part in parts {
+                guard let inHandle = try? FileHandle(forReadingFrom: part) else { return false }
+                defer { try? inHandle.close() }
+                // Non-optional read: a mid-file I/O error must FAIL the merge, not be mistaken for EOF (which
+                // would delete the parts and mark a truncated file `.completed`). `write(contentsOf:)` is the
+                // throwing API — the legacy `write(_:)` raises an UNcatchable NSException, so a disk-full
+                // (ENOSPC) mid-merge crashed the whole process; peak disk use is ~2× the file here.
+                while true {
+                    guard let chunk = try inHandle.read(upToCount: 4 << 20), !chunk.isEmpty else { break }
+                    try out.write(contentsOf: chunk)
+                }
+            }
+        } catch {
+            return false
         }
+        try? out.synchronize()   // flush to disk before sizing
+        // Only declare success (→ parts deleted, item marked complete) if every byte actually landed.
+        guard expected == 0 || fileSize(dest.path) == expected else { return false }
         return true
     }
 
