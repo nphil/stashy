@@ -109,6 +109,9 @@ private struct DownloadCard: View {
                     controls
                 }
             }
+            // Pin the text column to the available width so a long monospaced log line in the transcode
+            // box can't report a huge ideal width and stretch the whole card past the screen edge.
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(12)
         .background(themeManager.current.surfaceColor, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
