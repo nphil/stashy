@@ -415,6 +415,11 @@ final class DownloadManager {
     // MARK: - On-device transcode
 
     @ObservationIgnored private var transcoders: [String: any OnDeviceTranscoder] = [:]
+    /// Per-item transcode generation. A VideoToolbox call can wedge when the app is backgrounded (no GPU
+    /// access) and won't return, so `cancel()` alone can't unstick the UI. Cancelling bumps this counter,
+    /// which detaches the (possibly wedged) job: its late completion is ignored because its captured
+    /// generation no longer matches.
+    @ObservationIgnored private var transcodeGen: [String: Int] = [:]
 
     /// Containers Apple's `AVAssetReader` can demux natively — everything else (MKV/WebM/AVI/…) has to go
     /// through the FFmpeg transcoder.
@@ -439,6 +444,8 @@ final class DownloadManager {
         let transcoder: any OnDeviceTranscoder = useAVFoundation ? VideoTranscoder() : FFmpegTranscoder()
         transcoders[item.id] = transcoder
         let id = item.id
+        let gen = (transcodeGen[id] ?? 0) + 1
+        transcodeGen[id] = gen
         // Transcode into the OS tmp dir, NOT downloadsDir: a kill/crash mid-transcode must not leave a
         // truncated `<id>.transcode.mp4` that loadCompleted() would resurrect as a ghost "completed"
         // download. tmp is also OS-purgeable, so a purged in-progress transcode just fails cleanly.
@@ -459,7 +466,7 @@ final class DownloadManager {
                 try await transcoder.run(input: src, output: dest, settings: settings) { p in
                     Task { @MainActor in item.transcodeProgress = p }
                 }
-                self.transcodeFinished(id: id, output: dest, src: src, settings: settings)
+                self.transcodeFinished(id: id, gen: gen, output: dest, src: src, settings: settings)
             } catch {
                 try? FileManager.default.removeItem(at: dest)
                 // A user cancel isn't an error to surface; anything else is. (VideoTranscoder throws its own
@@ -469,16 +476,29 @@ final class DownloadManager {
                 else if case VideoTranscoder.TranscodeError.cancelled = error { cancelled = true }
                 else { cancelled = false }
                 let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                self.transcodeFailed(id: id, message: cancelled ? nil : message)
+                self.transcodeFailed(id: id, gen: gen, message: cancelled ? nil : message)
             }
             if bg != .invalid { UIApplication.shared.endBackgroundTask(bg) }
         }
     }
 
-    func cancelTranscode(_ item: DownloadItem) { transcoders[item.id]?.cancel() }
+    /// Cancel a running transcode. Signals the engine AND resets the UI immediately — a wedged VideoToolbox
+    /// call (e.g. after backgrounding) may never return to fire the normal completion, so we can't wait for
+    /// it. Bumping the generation detaches that job: if it ever unblocks, its completion is ignored.
+    func cancelTranscode(_ item: DownloadItem) {
+        let id = item.id
+        transcoders[id]?.cancel()
+        transcoders[id] = nil
+        transcodeGen[id] = (transcodeGen[id] ?? 0) + 1
+        item.transcoding = false
+        item.transcodeProgress = 0
+        item.transcodeTargetLabel = nil
+        try? FileManager.default.removeItem(
+            at: FileManager.default.temporaryDirectory.appendingPathComponent("\(id).transcode.mp4"))
+    }
 
-    private func transcodeFailed(id: String, message: String?) {
-        guard let item = items.first(where: { $0.id == id }) else { return }
+    private func transcodeFailed(id: String, gen: Int, message: String?) {
+        guard transcodeGen[id] == gen, let item = items.first(where: { $0.id == id }) else { return }
         item.transcoding = false
         item.transcodeProgress = 0
         item.transcodeTargetLabel = nil
@@ -486,8 +506,11 @@ final class DownloadManager {
         transcoders[id] = nil
     }
 
-    private func transcodeFinished(id: String, output: URL, src: URL, settings: VideoTranscoder.Settings) {
-        guard let item = items.first(where: { $0.id == id }) else { return }
+    private func transcodeFinished(id: String, gen: Int, output: URL, src: URL, settings: VideoTranscoder.Settings) {
+        guard transcodeGen[id] == gen, let item = items.first(where: { $0.id == id }) else {
+            try? FileManager.default.removeItem(at: output)   // detached/cancelled job — drop its temp output
+            return
+        }
         let fm = FileManager.default
         let finalURL = downloadsDir.appendingPathComponent("\(id).mp4")
         // Put the transcoded output in place WITHOUT destroying the original first, so a failed move can
