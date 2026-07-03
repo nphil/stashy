@@ -210,9 +210,13 @@ struct SceneCard: View {
     @Environment(\.imageCache) private var imageCache
     @Environment(ThemeManager.self) private var themeManager
     @Environment(LibraryEdits.self) private var edits
+    @Environment(DownloadManager.self) private var downloads
     @AppStorage("blurThumbnails") private var blurThumbnails = false
     @AppStorage("blurTitles") private var blurTitles = false
     @State private var thumbnail: UIImage?
+
+    private var isDownloaded: Bool { downloads.localFile(sceneID: scene.id) != nil }
+    private var wasTranscoded: Bool { downloads.wasTranscoded(sceneID: scene.id) }
 
     /// Rating on a 0–5 scale, reading through the edits store so a rating set on the detail screen
     /// shows here immediately.
@@ -247,15 +251,26 @@ struct SceneCard: View {
                     )
                 }
                 .overlay(alignment: .topTrailing) {
-                    if let dur = scene.formattedDuration() {
-                        Text(dur)
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 3)
-                            .background(.black.opacity(0.55), in: Capsule())
-                            .padding(6)
+                    VStack(alignment: .trailing, spacing: 4) {
+                        if let dur = scene.formattedDuration() {
+                            Text(dur)
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(.black.opacity(0.55), in: Capsule())
+                        }
+                        // Offline status, tucked under the duration: green = downloaded, accent = transcoded.
+                        if isDownloaded {
+                            HStack(spacing: 4) {
+                                if wasTranscoded {
+                                    statusIcon("wand.and.stars", tint: themeManager.current.accentColor)
+                                }
+                                statusIcon("arrow.down.circle.fill", tint: .green)
+                            }
+                        }
                     }
+                    .padding(6)
                 }
                 .overlay(alignment: .topLeading) {
                     if let stars = ratingStars, stars > 0 {
@@ -286,6 +301,14 @@ struct SceneCard: View {
             guard let url = scene.thumbnailURL(apiKey: apiKey) else { return }
             thumbnail = try? await imageCache.image(for: url)
         }
+    }
+
+    private func statusIcon(_ system: String, tint: Color) -> some View {
+        Image(systemName: system)
+            .font(.system(size: 10, weight: .bold))
+            .foregroundStyle(tint)
+            .padding(4)
+            .background(.black.opacity(0.55), in: Circle())
     }
 }
 
