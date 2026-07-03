@@ -55,7 +55,17 @@ enum TranscodeCodec: String, CaseIterable, Identifiable {
 /// Reads/writes only files AVFoundation can decode (H.264 / HEVC in mp4/mov/m4v, etc.). Exotic containers
 /// FFmpeg-only formats (MKV/WebM/VP9/AV1) will throw `.unreadable` — a future FFmpeg-based path can cover
 /// those.
-final class VideoTranscoder: @unchecked Sendable {
+/// A pluggable on-device re-encoder. Two implementations: `VideoTranscoder` (AVFoundation, for native
+/// MP4/MOV sources) and `FFmpegTranscoder` (libav*, for MKV/WebM/AVI and exotic codecs). Both take the
+/// same `VideoTranscoder.Settings` and report 0…1 progress off the main actor, so `DownloadManager` can
+/// pick one per source without caring which.
+protocol OnDeviceTranscoder: AnyObject, Sendable {
+    func run(input: URL, output: URL, settings: VideoTranscoder.Settings,
+             onProgress: @escaping @Sendable (Double) -> Void) async throws
+    func cancel()
+}
+
+final class VideoTranscoder: OnDeviceTranscoder, @unchecked Sendable {
     enum TranscodeError: LocalizedError {
         case unreadable, noVideo, readFailed, writeFailed, cancelled
         var errorDescription: String? {
