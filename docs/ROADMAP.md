@@ -31,6 +31,31 @@ input-seeked (`av_seek_frame`) near the target keyframe** and rebuild the loopba
 (playback stays one continuous mux = smooth). Track a time offset so the scrubber shows absolute time.
 This is the immediate next lever for responsive scrubbing.
 
+### Next milestone (planned 2026-07-03): on-device transcode as a playback tier + manual server-quality menu
+Two linked pieces, both approved by the owner. They build on the **file** transcoder shipped in
+v1.0.12x (`FFmpegTranscoder`: libavformat demux → FFmpeg decode → libswscale NV12 → VideoToolbox
+`h264/hevc_videotoolbox` encode → MP4; audio copy for AAC/AC3/EAC3/MP3/ALAC). That class is the encode
+core both items reuse.
+
+- **M-A — Streaming on-device transcode tier.** Insert **between remux and the Stash server fallback**:
+  `direct-play → remux → on-device streaming transcode → Stash server (final fallback)`. Needs a
+  *streaming* variant of `FFmpegTranscoder` — transcode-ahead into fragmented MP4 served over the
+  loopback with **seek-by-reinit** and pacing, analogous to `LocalRemuxStream` (reuse `LoopbackServer`
+  + `FMP4Index`). Only fires for the "Apple can't decode it at all" bucket (VP9, 10-bit 4:2:2/4:4:4
+  HEVC, exotic) — everything else already remuxes. **Gate it**: attempt on-device ≤1080p always, ≤4K
+  only for lighter codecs; heavy 4K software-decode → skip straight to the server (a server GPU is
+  faster and won't thermally throttle the phone). **Auto-fallback**: if the on-device transcode can't
+  keep the buffer fed, fall to the server automatically (reuse the `armWatchdog`/`buildFallback`
+  machinery). Rationale/tradeoff analysis captured in chat 2026-07-03 (privacy/server-load/offline win;
+  server better for heavy-4K/long sessions).
+- **M-B — Player-overlay gear button → manual quality menu (server-side transcode).** A gear/settings
+  button on the playback overlay opening a menu of manual quality options (resolution/bitrate) that
+  **force the Stash server HLS transcode** at the chosen setting — the deliberate escape hatch for
+  **cellular/limited-bandwidth streaming** (pick a lower rung to save data). This is the concrete form
+  of roadmap items 3 & 4 below. Distinct from M-A: M-A is automatic on-device; M-B is a manual,
+  server-side override the user selects. Wire through `ScenePlayerModel` route override + `Player
+  ControlsView` overlay.
+
 1. **Routing brain — capability detection** ✅
    - **Direct play** — H.264 in mp4/mov/m4v → AVPlayer plays the file URL directly.
    - **HLS** — everything else (HEVC, H.264-in-MKV, MPEG4-ASP/VC1/VP9/AV1, 4:2:2/4:4:4 HEVC that Apple
