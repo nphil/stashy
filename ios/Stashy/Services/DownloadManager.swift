@@ -663,6 +663,14 @@ final class DownloadManager {
     private func enterBackground() {
         guard !inBackground else { return }
         inBackground = true
+        // On-device transcode uses the VideoToolbox hardware engine, which iOS denies to a backgrounded
+        // app — the encode call would wedge (the "stuck at N%" the user hit). Stop any running transcode
+        // cleanly now and tell the user why, so the card is recoverable instead of frozen. (There's no
+        // mid-stream checkpoint to resume from, so this is a stop, not a true pause — restart re-runs it.)
+        for item in items where item.transcoding {
+            cancelTranscode(item)
+            item.error = "Transcoding paused — keep Stashy open (it needs the foreground). Tap transcode to restart."
+        }
         for item in items where item.state == .downloading { handoff(item, toBackground: true) }
         // Hold a short assertion so the resume-data cancellations finish and the background tasks actually
         // start before iOS suspends us (a background URLSession task, once running, then survives on its own).
