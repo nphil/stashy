@@ -428,10 +428,15 @@ final class DownloadManager {
         item.transcodeProgress = 0
         item.transcodeTargetLabel = "\(settings.codec.label) \(settings.resolution.label)"
         item.error = nil
-        // Native container → Apple's AVFoundation transcoder (proven, hardware-fast). Exotic container
-        // (MKV/WebM/AVI/…) → the FFmpeg transcoder, which can actually demux it.
+        // Pick the engine. Apple's AVFoundation transcoder is fast and proven, but ONLY for plain H.264
+        // in a native container — it chokes on HEVC even inside an MP4 (hev1 tag / 4:2:2 / 10-bit), which
+        // is the "cannot decode" the user hit. Everything else — HEVC in any container, and all exotic
+        // containers (MKV/WebM/AVI) — goes to the FFmpeg transcoder, which decodes it properly.
         let native = Self.avNativeContainers.contains(src.pathExtension.lowercased())
-        let transcoder: any OnDeviceTranscoder = native ? VideoTranscoder() : FFmpegTranscoder()
+        let codec = (item.codec ?? "").lowercased()
+        let isH264 = codec.contains("h264") || codec.contains("avc")
+        let useAVFoundation = native && isH264
+        let transcoder: any OnDeviceTranscoder = useAVFoundation ? VideoTranscoder() : FFmpegTranscoder()
         transcoders[item.id] = transcoder
         let id = item.id
         // Transcode into the OS tmp dir, NOT downloadsDir: a kill/crash mid-transcode must not leave a
