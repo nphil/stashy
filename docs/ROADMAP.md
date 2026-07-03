@@ -325,6 +325,22 @@ latency tradeoff).
   the one tech-debt item still intentionally open (kept as the live debug channel until release).
 
 ## Privacy & security
+- **★ PRIORITY — "Blur Media": one blur that covers ALL imagery, app-wide (owner-requested 2026-07-03).**
+  Rename the existing **Blur Thumbnails** toggle to **Blur Media** and make it apply the *same* blur
+  everywhere a frame/image is shown, with no gaps: scene/performer **thumbnails on every screen**
+  (scenes grid, performer page, search, and the **Downloads cards — currently unblurred**), **scrub
+  sprites**, the **long-press peek**, and **video playback itself** (inline AND fullscreen). Today
+  `blurThumbnails` only hits `SceneCard`, so coverage is patchy.
+  - **Approach (performance-safe):** a single global flag (`@AppStorage("blurMedia")`) + one reusable
+    `.privacyBlur(_ on:)` modifier applied at every media site so nothing is missed. **Static images**
+    (thumbnails/sprites) → SwiftUI `.blur(radius:)` — cheap, they don't animate. **Live video** → do NOT
+    per-frame CIFilter (expensive); overlay a **`UIVisualEffectView(UIBlurEffect)`** on the player layer
+    — hardware-accelerated, ~free, blurs whatever's behind it. (The player already has the Metal
+    `LiveBlurBackdropView` as precedent that blurring video on-device is cheap.)
+  - **Open decisions (ask owner):** fixed strong blur vs. an adjustable radius slider; whether to allow a
+    temporary **long-press-to-peek** reveal or keep it fully locked; whether to fold the separate **Blur
+    Titles** toggle into this or keep it independent; and whether this replaces/relates to the
+    app-switcher blur below.
 - **App-switcher / background privacy blur.** Blur (or cover) the app's content the moment it resigns
   active — going to the App Switcher, Control Center, a call, etc. — so the multitasking snapshot iOS
   captures never shows video/thumbnails. Implement by adding a heavy blur overlay on
