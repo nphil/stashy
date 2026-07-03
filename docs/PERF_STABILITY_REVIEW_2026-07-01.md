@@ -209,8 +209,12 @@ only in the uncaught-exception handler.
 >   `image(for:)`/`originalImage(for:)` join an in-flight fetch or start one, body moved to
 >   `fetchDownsampled`/`fetchOriginal`; shared unstructured Task shields against one awaiter's cancellation;
 >   registry cleared on success AND failure (identity-guarded); also kills the #L1 double-count at source.
->   Remaining in cluster: #13 (nonisolated memory-peek accessor + delete ScenePreviewGesture's `.task`) +
->   #12 download-dedup. #18 Tier 2 (server-side coalescing).
+>   ~~Remaining in cluster: #13 + #12 download-dedup. #18 Tier 2.~~ **DONE (commits `fa87e8b`/`d812c16`/
+>   `95ee4fe`):** #13 deleted ScenePreviewGesture's `.task`, poster resolved via nonisolated
+>   `ImageCache.cachedImage(for:)`; #12(b) per-content-filename in-flight registry in PreviewCache
+>   (#12(a) loadTask-cancel already shipped); #18 Tier 2 per-key coalescing worker in LibraryEdits
+>   (one write in flight, re-send live value, editSeq removed). #18 T2 touches the daily ratings/favorites
+>   path → **device-verify rapid-tap persistence.**
 > — *Sacred batch:* **#20/#21/#22 DONE (commits `c7b3dd7`/`f6b0c7f`/`7f4ee67`, awaiting owner device
 >   test):** #20 catchable `write(contentsOf:)` + non-optional read + size-verify before success; #21 read
 >   callback retries a transport error (EOF only on a clean empty response) → EIO not fake-EOF; #22
