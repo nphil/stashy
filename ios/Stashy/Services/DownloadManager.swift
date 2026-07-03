@@ -99,8 +99,14 @@ final class DownloadItem: Identifiable {
     var resolutionLabel: String? { height.map { "\($0)p" } }
     var codecLabel: String? { codec?.uppercased() }
     var bitrateLabel: String? {
-        guard let b = bitRate, b > 0 else { return nil }
-        return String(format: "%.1f Mbps", Double(b) / 1_000_000)
+        // Prefer the stored bitrate; fall back to size÷duration so files transcoded before the bitrate was
+        // recomputed (or any item missing it) still show one.
+        var bps = bitRate.map(Double.init) ?? 0
+        if bps <= 0, let dur = scene?.files.first?.duration, dur > 0, totalBytes > 0 {
+            bps = Double(totalBytes) * 8 / dur
+        }
+        guard bps > 0 else { return nil }
+        return String(format: "%.1f Mbps", bps / 1_000_000)
     }
     var sizeLabel: String? {
         guard totalBytes > 0 else { return nil }
@@ -581,7 +587,10 @@ final class DownloadManager {
             item.width = Int((Double(w) * scale).rounded())
             item.height = Int((Double(h) * scale).rounded())
         }
-        item.bitRate = nil
+        // Recompute the bitrate from the new file size + duration (both copy and re-encode change it), so
+        // the card and the scene info show it instead of going blank.
+        let duration = item.scene?.files.first?.duration ?? 0
+        item.bitRate = duration > 0 ? Int((Double(size) * 8 / duration).rounded()) : nil
         item.transcodeProgress = 1
         item.transcoding = false
         item.transcodeTargetLabel = nil
