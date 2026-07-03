@@ -211,8 +211,14 @@ only in the uncaught-exception handler.
 >   registry cleared on success AND failure (identity-guarded); also kills the #L1 double-count at source.
 >   Remaining in cluster: #13 (nonisolated memory-peek accessor + delete ScenePreviewGesture's `.task`) +
 >   #12 download-dedup. #18 Tier 2 (server-side coalescing).
-> — *Sacred, needs the owner's on-device test between batches:* #20 (merge hardening), #21 (remux EOF
->   read-retry), #22 (engine-swap teardown leak), #25 (serveMedia double-buffer).
+> — ~~*Sacred, needs the owner's on-device test between batches:* #20 (merge hardening), #21 (remux EOF
+>   read-retry), #22 (engine-swap teardown leak), #25 (serveMedia double-buffer).~~ **CODE DONE (commits
+>   `c7b3dd7`/`f6b0c7f`/`7f4ee67`/`a65d932`, one build):** #20 catchable `write(contentsOf:)` + non-optional
+>   read + size-verify before success; #21 read callback retries a transport error (EOF only on a clean
+>   empty response) → EIO not fake-EOF; #22 `teardown()` nulls `hostView.player` + removes host/backdrop +
+>   `LiveBlurBackdropView.invalidate()`; #25 `sendHeaderThenBody` (two ordered writes, no concat copy).
+>   **⏳ AWAITING OWNER ON-DEVICE VERIFICATION** — low-disk merge, mid-play Wi-Fi toggle, far-seek/HLS
+>   fallback/scene reopen, HEVC playback. Revert the offending commit individually if a regression shows.
 > — ~~*Non-sacred downloads housekeeping:* #23 (ghost transcode temp), #24 (stop() meta cleanup).~~
 >   **DONE (commit `bc42aeb`):** #23 transcode temp → OS tmp dir + `loadCompleted` sweeps stray
 >   `*.transcode.mp4`; #24 `stop()` now calls `cleanupMeta`, `retry()` re-heals the sidecar from the
