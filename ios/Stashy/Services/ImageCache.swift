@@ -26,6 +26,10 @@ actor ImageCache {
     /// directory each time (that scan on every cached thumbnail added up during fast scrolling).
     private var diskBytes = 0
     private var diskBytesReady = false
+    /// In-flight fetches keyed by cache key, so concurrent requests for the same image (a cell asking
+    /// twice + a prefetch a row ahead) share ONE download/decode instead of each doing its own. See
+    /// `image(for:)` for the cancellation-shield reasoning.
+    private var inFlight: [String: Task<UIImage, Error>] = [:]
 
     private func ensureDiskBytesLoaded() {
         guard !diskBytesReady else { return }
@@ -54,9 +58,24 @@ actor ImageCache {
     /// listing alone, without tracking any separate index.
     func image(for url: URL, maxPixel: CGFloat = 600, priority: Bool = false) async throws -> UIImage {
         let key = cacheKey(url, maxPixel, priority: priority)
-        let nsKey = key as NSString
-        if let hit = memoryCache.object(forKey: nsKey) { return hit }
+        if let hit = memoryCache.object(forKey: key as NSString) { return hit }
+        // Coalesce: if this key is already being fetched, await that shared work instead of starting a
+        // second identical download/decode. The shared Task is *unstructured* (`Task { }`), so it is NOT
+        // a child of any caller — one caller's `.task` being cancelled (its cell scrolled off) can't tear
+        // the fetch down for the others. Checking then inserting `inFlight` happens with no `await`
+        // between, so the actor runs it atomically and two callers can't both create a task.
+        if let existing = inFlight[key] { return try await existing.value }
+        let task = Task { try await self.fetchDownsampled(url: url, key: key, maxPixel: maxPixel, priority: priority) }
+        inFlight[key] = task
+        // Clear on BOTH success and failure (a failed fetch must not permanently poison the key); guard by
+        // identity so we never clobber a newer task that replaced ours.
+        defer { if inFlight[key] == task { inFlight[key] = nil } }
+        return try await task.value
+    }
 
+    /// The disk-then-network body of `image(for:)`, run inside the coalesced Task so joiners share it.
+    private func fetchDownsampled(url: URL, key: String, maxPixel: CGFloat, priority: Bool) async throws -> UIImage {
+        let nsKey = key as NSString
         let file = directory.appendingPathComponent(key + ".jpg")
         if let data = try? Data(contentsOf: file), let image = UIImage(data: data) {
             memoryCache.setObject(image, forKey: nsKey, cost: Self.memoryCost(image, fallback: data.count))
@@ -86,10 +105,19 @@ actor ImageCache {
     /// Full-resolution fetch (no downsampling) for images whose exact pixels matter — e.g. sprite
     /// sheets, where WebVTT crop coordinates are in the original pixel space.
     func originalImage(for url: URL) async throws -> UIImage {
-        let key = cacheKey(url, 0) // 0 == "original"
-        let nsKey = key as NSString
-        if let hit = memoryCache.object(forKey: nsKey) { return hit }
+        let key = cacheKey(url, 0) // 0 == "original" (distinct key namespace from image(for:), safe to
+                                   // share the one inFlight dict)
+        if let hit = memoryCache.object(forKey: key as NSString) { return hit }
+        if let existing = inFlight[key] { return try await existing.value }
+        let task = Task { try await self.fetchOriginal(url: url, key: key) }
+        inFlight[key] = task
+        defer { if inFlight[key] == task { inFlight[key] = nil } }
+        return try await task.value
+    }
 
+    /// The disk-then-network body of `originalImage(for:)`, run inside the coalesced Task.
+    private func fetchOriginal(url: URL, key: String) async throws -> UIImage {
+        let nsKey = key as NSString
         let file = directory.appendingPathComponent(key + ".img")
         if let data = try? Data(contentsOf: file), let image = UIImage(data: data) {
             memoryCache.setObject(image, forKey: nsKey, cost: Self.memoryCost(image, fallback: data.count))
