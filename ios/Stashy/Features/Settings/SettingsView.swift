@@ -16,8 +16,7 @@ struct SettingsView: View {
     @State private var isClearingCache = false
     @AppStorage("animatedPreviews") private var animatedPreviews = true
     @AppStorage("appLockEnabled") private var appLockEnabled = false
-    @AppStorage("blurThumbnails") private var blurThumbnails = false
-    @AppStorage("blurTitles") private var blurTitles = false
+    @AppStorage("privacyMode") private var privacyMode = false
     @State private var debugLogging = RemoteLog.isLoggingEnabled
 
     private let swatchColumns = [GridItem(.adaptive(minimum: 64), spacing: 12)]
@@ -151,14 +150,13 @@ struct SettingsView: View {
                 Section {
                     Toggle("Require Face ID", isOn: $appLockEnabled)
                         .disabled(!AppLock.isAvailable)
-                    Toggle("Blur thumbnails", isOn: $blurThumbnails)
-                    Toggle("Blur titles", isOn: $blurTitles)
+                    Toggle("Privacy Mode", isOn: $privacyMode)
                 } header: {
                     Text("Privacy")
                 } footer: {
                     Text(AppLock.isAvailable
-                         ? "Require Face ID, Touch ID, or your passcode to open Stashy. Blur thumbnails to obscure imagery throughout the app."
-                         : "Set up Face ID, Touch ID, or a passcode in iOS Settings to enable app lock. Blur thumbnails to obscure imagery throughout the app.")
+                         ? "Require Face ID, Touch ID, or your passcode to open Stashy. Privacy Mode blurs all media — thumbnails, names, sprites, and video (press and hold to peek)."
+                         : "Set up Face ID, Touch ID, or a passcode in iOS Settings to enable app lock. Privacy Mode blurs all media — thumbnails, names, sprites, and video (press and hold to peek).")
                 }
 
                 // Cache section

@@ -14,8 +14,6 @@ struct PerformerDetailView: View {
     @State private var showImageViewer = false
     @State private var confirmDelete = false
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("blurThumbnails") private var blurThumbnails = false
-    @AppStorage("blurTitles") private var blurTitles = false
 
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
@@ -129,7 +127,7 @@ struct PerformerDetailView: View {
                 Text(performer.name)
                     .font(.title2.weight(.bold))
                     .foregroundStyle(themeManager.current.foregroundColor)
-                    .blur(radius: blurTitles ? 6 : 0)
+                    .privacyTitleBlur()
                 Spacer(minLength: 8)
                 FavoriteHeart(isFavorite: edits.isFavorite(performer), size: 22, offColor: .secondary) { new in
                     edits.setPerformerFavorite(new, id: performer.id, client: appState.client)
@@ -153,7 +151,7 @@ struct PerformerDetailView: View {
                     Group {
                         if let portrait {
                             Image(uiImage: portrait).resizable().scaledToFill()
-                                .blur(radius: blurThumbnails ? 26 : 0)
+                                .privacyImageBlur()
                         } else {
                             PerformerPlaceholder()
                         }

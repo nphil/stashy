@@ -125,7 +125,6 @@ struct SearchSceneRow: View {
     let scene: StashScene
     let apiKey: String
     @Environment(\.imageCache) private var imageCache
-    @AppStorage("blurThumbnails") private var blurThumbnails = false
     @State private var thumbnail: UIImage?
 
     var body: some View {
@@ -133,7 +132,7 @@ struct SearchSceneRow: View {
             Group {
                 if let img = thumbnail {
                     Image(uiImage: img).resizable().scaledToFill()
-                        .blur(radius: blurThumbnails ? 18 : 0)
+                        .privacyImageBlur()
                 } else {
                     Rectangle().fill(.tertiary)
                         .overlay { Image(systemName: "film").foregroundStyle(.quaternary) }

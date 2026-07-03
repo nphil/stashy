@@ -8,7 +8,6 @@ struct SceneDetailView: View {
     @Environment(LibraryEdits.self) private var edits
     @Environment(DownloadManager.self) private var downloads
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("blurTitles") private var blurTitles = false
     @State private var isFullscreen = false
     @State private var confirmDelete = false
     /// The scene list query slims performers to id+name to keep the payload small. Once the detail
@@ -52,19 +51,22 @@ struct SceneDetailView: View {
                 // keeps the render surface alive across the rotation that previously blanked it.
                 Group {
                     if let route {
-                        ScenePlayerView(
-                            scene: scene,
-                            apiKey: apiKey,
-                            route: route,
-                            safeArea: geo.safeAreaInsets,
-                            isFullscreen: $isFullscreen,
-                            onBack: { dismiss() }
-                        )
-                        // Rebuild the player (and its ScenePlayerModel, whose route is a `let` set once at
-                        // init) whenever the resolved source changes — e.g. a download/transcode completes
-                        // while the scene is open, flipping the route from the online stream to the local
-                        // file. Fullscreen toggles don't change the URL, so the in-place resize is intact.
-                        .id(route.url)
+                        // Privacy Mode blurs the video (inline + fullscreen); press-and-hold to peek.
+                        PrivacyPeek {
+                            ScenePlayerView(
+                                scene: scene,
+                                apiKey: apiKey,
+                                route: route,
+                                safeArea: geo.safeAreaInsets,
+                                isFullscreen: $isFullscreen,
+                                onBack: { dismiss() }
+                            )
+                            // Rebuild the player (and its ScenePlayerModel, whose route is a `let` set once at
+                            // init) whenever the resolved source changes — e.g. a download/transcode completes
+                            // while the scene is open, flipping the route from the online stream to the local
+                            // file. Fullscreen toggles don't change the URL, so the in-place resize is intact.
+                            .id(route.url)
+                        }
                     } else {
                         Rectangle()
                             .fill(.black)
@@ -126,7 +128,7 @@ struct SceneDetailView: View {
                             .font(.headline)
                             .foregroundStyle(themeManager.current.foregroundColor)
                             .lineLimit(1)
-                            .blur(radius: blurTitles ? 6 : 0)
+                            .privacyTitleBlur()
                         // Rating stars sit under the title (replacing the old studio line); the date trails.
                         HStack(spacing: 8) {
                             StarRating(rating100: edits.rating(for: scene), starSize: 18) { new in
@@ -230,8 +232,6 @@ struct ScenePerformerCard: View {
     @Environment(ThemeManager.self) private var themeManager
     @Environment(AppState.self) private var appState
     @Environment(LibraryEdits.self) private var edits
-    @AppStorage("blurThumbnails") private var blurThumbnails = false
-    @AppStorage("blurTitles") private var blurTitles = false
     @State private var image: UIImage?
 
     var body: some View {
@@ -243,7 +243,7 @@ struct ScenePerformerCard: View {
                         .overlay {
                             if let image {
                                 Image(uiImage: image).resizable().scaledToFill()
-                                    .blur(radius: blurThumbnails ? 26 : 0)
+                                    .privacyImageBlur()
                             } else {
                                 PerformerPlaceholder()
                             }
@@ -260,7 +260,7 @@ struct ScenePerformerCard: View {
                             .font(.subheadline.weight(.bold))
                             .foregroundStyle(.white)
                             .lineLimit(1)
-                            .blur(radius: blurTitles ? 5 : 0)
+                            .privacyTitleBlur()
                         HStack(spacing: 5) {
                             if let age = performer.age { Text("\(age)") }
                             if let country = performer.country, !country.isEmpty { Text(country.countryFlag) }

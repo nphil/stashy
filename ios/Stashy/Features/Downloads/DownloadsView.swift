@@ -101,6 +101,7 @@ private struct DownloadCard: View {
                         .foregroundStyle(themeManager.current.foregroundColor)
                         .lineLimit(1)
                         .fixedSize()
+                        .privacyTitleBlur()
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 performerChip
@@ -161,7 +162,7 @@ private struct DownloadCard: View {
         ZStack {
             RoundedRectangle(cornerRadius: 9, style: .continuous).fill(themeManager.current.backgroundColor)
             if let thumb {
-                Image(uiImage: thumb).resizable().scaledToFill()
+                Image(uiImage: thumb).resizable().scaledToFill().privacyImageBlur()
             } else {
                 Image(systemName: "film").font(.title3).foregroundStyle(.tertiary)
             }
@@ -207,6 +208,7 @@ private struct DownloadCard: View {
                             .multilineTextAlignment(.center)       // both lines centered
                             .minimumScaleFactor(0.7)               // shrink before it would ever truncate
                             .frame(maxWidth: 104, alignment: .center)
+                            .privacyTitleBlur()
                     }
                 }
             }

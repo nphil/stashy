@@ -8,8 +8,6 @@ struct PerformerCard: View {
     var width: CGFloat? = nil
     @Environment(\.imageCache) private var imageCache
     @Environment(ThemeManager.self) private var themeManager
-    @AppStorage("blurThumbnails") private var blurThumbnails = false
-    @AppStorage("blurTitles") private var blurTitles = false
     @State private var image: UIImage?
 
     var body: some View {
@@ -22,7 +20,7 @@ struct PerformerCard: View {
                         Image(uiImage: image)
                             .resizable()
                             .scaledToFill()
-                            .blur(radius: blurThumbnails ? 28 : 0)
+                            .privacyImageBlur()
                     } else {
                         PerformerPlaceholder()
                     }
@@ -33,7 +31,7 @@ struct PerformerCard: View {
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(themeManager.current.foregroundColor)
                 .lineLimit(1)
-                .blur(radius: blurTitles ? 5 : 0)
+                .privacyTitleBlur()
 
             if let count = performer.scene_count {
                 Text("\(count) scene\(count == 1 ? "" : "s")")

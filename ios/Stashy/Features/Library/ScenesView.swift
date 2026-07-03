@@ -211,8 +211,6 @@ struct SceneCard: View {
     @Environment(ThemeManager.self) private var themeManager
     @Environment(LibraryEdits.self) private var edits
     @Environment(DownloadManager.self) private var downloads
-    @AppStorage("blurThumbnails") private var blurThumbnails = false
-    @AppStorage("blurTitles") private var blurTitles = false
     @State private var thumbnail: UIImage?
 
     private var isDownloaded: Bool { downloads.localFile(sceneID: scene.id) != nil }
@@ -236,7 +234,7 @@ struct SceneCard: View {
                         Image(uiImage: img)
                             .resizable()
                             .scaledToFill()
-                            .blur(radius: blurThumbnails ? 28 : 0)
+                            .privacyImageBlur()
                     } else {
                         Image(systemName: "film")
                             .font(.title2)
@@ -291,7 +289,7 @@ struct SceneCard: View {
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.7))
                 .lineLimit(2)
-                .blur(radius: blurTitles ? 5 : 0)
+                .privacyTitleBlur()
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
