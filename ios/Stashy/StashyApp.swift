@@ -1,9 +1,18 @@
 import SwiftUI
+import UIKit
 
 @main
 struct StashyApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var themeManager = ThemeManager()
+
+    init() {
+        // No scroll bars anywhere in the app (chip rows, grids, lists) — hide the indicators globally via
+        // the UIScrollView appearance proxy that backs SwiftUI's ScrollView/List.
+        UIScrollView.appearance().showsVerticalScrollIndicator = false
+        UIScrollView.appearance().showsHorizontalScrollIndicator = false
+    }
+
     @State private var appState = AppState()
     @State private var imageCache = ImageCache()
     @State private var router = AppRouter()
