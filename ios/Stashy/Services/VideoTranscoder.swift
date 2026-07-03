@@ -85,6 +85,10 @@ final class VideoTranscoder: @unchecked Sendable {
     func run(input: URL, output: URL, settings: Settings,
              onProgress: @escaping @Sendable (Double) -> Void) async throws {
         let asset = AVURLAsset(url: input)
+        // Fail fast + clearly on containers AVFoundation can't demux (MKV/WebM etc.): otherwise
+        // loadTracks just returns empty and the user sees a vague "no video track". These need the
+        // FFmpeg-based path (not yet wired for transcode).
+        guard (try? await asset.load(.isReadable)) == true else { throw TranscodeError.unreadable }
         let videoTracks = (try? await asset.loadTracks(withMediaType: .video)) ?? []
         guard let videoTrack = videoTracks.first else { throw TranscodeError.noVideo }
         let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first

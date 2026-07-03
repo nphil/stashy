@@ -267,9 +267,19 @@ private struct DownloadCard: View {
     /// the live status text (queued / downloading / transcoding progress / etc.).
     @ViewBuilder private var statusView: some View {
         if !item.transcoding, item.state == .completed {
-            HStack(spacing: 6) {
-                statusChip("Downloaded", color: .green)
-                if item.wasTranscoded { statusChip("Transcoded", color: themeManager.current.accentColor) }
+            // A completed item only carries an `error` when its last transcode failed — surface it (the
+            // chips would otherwise hide it), so the user actually sees why nothing happened.
+            if let error = item.error {
+                Text(error)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.red)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                HStack(spacing: 6) {
+                    statusChip("Downloaded", color: .green)
+                    if item.wasTranscoded { statusChip("Transcoded", color: themeManager.current.accentColor) }
+                }
             }
         } else {
             Text(statusText)
