@@ -220,12 +220,13 @@ final class AVPlaybackEngine: PlaybackEngine {
     func play() { player.play() }
     func pause() { player.pause() }
 
-    func seek(to time: TimeInterval) {
-        // Allow a small tolerance so the player can snap to the nearest already-decodable keyframe
-        // instead of fetching a frame-exact position. On HLS (server transcode) a zero-tolerance seek
-        // is the worst case — it stalls while the server produces the precise frame; tolerance makes
-        // scrubbing land and repaint far faster. On a local/direct file it's near-instant either way.
-        let tolerance = CMTime(seconds: 1, preferredTimescale: 600)
+    func seek(to time: TimeInterval, precise: Bool) {
+        // Precise = zero tolerance → the player lands on the exact frame the scrub sprite previewed,
+        // instead of snapping up to ±1s to the nearest keyframe. The caller only asks for precise on
+        // local media (direct file / on-device loopback remux), where a frame-exact seek is near-instant.
+        // For a Stash *server* HLS transcode it passes precise=false: a zero-tolerance seek there stalls
+        // while the server renders the exact frame, so the 1s tolerance keeps scrubbing responsive.
+        let tolerance = precise ? .zero : CMTime(seconds: 1, preferredTimescale: 600)
         player.seek(to: CMTime(seconds: time, preferredTimescale: 600),
                     toleranceBefore: tolerance, toleranceAfter: tolerance)
     }

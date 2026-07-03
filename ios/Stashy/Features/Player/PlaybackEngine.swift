@@ -41,7 +41,10 @@ protocol PlaybackEngine: AnyObject {
 
     func play()
     func pause()
-    func seek(to time: TimeInterval)
+    /// `precise` seeks frame-accurately (zero tolerance) so the frame lands exactly where the scrub
+    /// preview showed — affordable for local media (direct file / loopback remux). Non-precise keeps a
+    /// tolerance for server HLS, where a frame-exact seek stalls waiting on the transcoder.
+    func seek(to time: TimeInterval, precise: Bool)
     /// Deterministic cleanup before release (remove observers, stop playback) — must run on the main
     /// actor while the backend is still alive, since a nonisolated deinit can't touch its members.
     func teardown()

@@ -52,6 +52,15 @@ final class ScenePlayerModel {
     /// True while a local zero-based remux drives playback (so time is offset and duration stays the full
     /// metadata value). False for direct play / HLS (incl. after a fallback), where engine time is absolute.
     private var usesAbsoluteTime: Bool { route.engine == .localFFmpeg && !didFallback }
+    /// Whether a seek can be frame-accurate (zero tolerance) so the video lands exactly where the scrub
+    /// sprite previewed. True for local media — the on-device loopback remux, and direct play of a file/
+    /// direct stream (both seek near-instantly). False once we've fallen back to a Stash *server* HLS
+    /// transcode, or for an initial server-HLS (`.m3u8`) route, where a zero-tolerance seek would stall.
+    private var seekPrecise: Bool {
+        if didFallback { return false }
+        if route.engine == .localFFmpeg { return true }
+        return route.url.pathExtension.lowercased() != "m3u8"
+    }
     /// Guards re-entrant starts, and discards an engine built after the scene was already left.
     @ObservationIgnored private var startInProgress = false
     @ObservationIgnored private var stopped = false
@@ -329,7 +338,7 @@ final class ScenePlayerModel {
         seekTarget = clamped                    // hold the scrubber here until the player lands (no pop-back)
         seekHoldUntil = Date().addingTimeInterval(4)
         guard usesAbsoluteTime else {           // direct play / HLS — engine time is absolute
-            engine?.seek(to: clamped)
+            engine?.seek(to: clamped, precise: seekPrecise)
             return
         }
         // Local linear remux: an in-stream seek only works within what AVPlayer can actually reach right
@@ -342,7 +351,7 @@ final class ScenePlayerModel {
         let inStream = local >= 0 && local <= seekEnd + 1.0
         RemoteLog.shared.log("seek →\(Int(clamped))s local=\(Int(local)) seekEnd=\(Int(seekEnd)) \(inStream ? "in-stream" : "REINIT")")
         if inStream {
-            engine?.seek(to: local)
+            engine?.seek(to: local, precise: seekPrecise)   // loopback remux is local → frame-accurate
         } else {
             reinitLocal(at: clamped)
         }
