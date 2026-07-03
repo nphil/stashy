@@ -76,12 +76,20 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   checklist; plus playback engineering learnings.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.123** (downloaded HEVC plays offline via local-file remux + visible
-  transcode errors, commit `97b8af5`) — confirmed green, 7.77 MB.
-- Awaiting on-device verification (owner tests each build): a downloaded HEVC scene plays offline
-  (routes through the local-file FFmpeg remux, not a bare AVPlayer); transcoding an MKV/undecodable
-  container now shows a clear error on the download card; earlier: bg download continues while
-  suspended, single bg range task doesn't -3000, offline sprites scrub, downloads invisible in Files.
+- Latest release: **v1.0.125** (universal FFmpeg transcoder for exotic containers, commit `71678d2`) —
+  confirmed green, 8.01 MB (grew +240 KB as libswscale/avcodec-encode linked in).
+- New: `FFmpegTranscoder` (Services/) — libavformat demux → FFmpeg decode → libswscale NV12 →
+  VideoToolbox h264/hevc encode → MP4; audio COPY for AAC/AC3/EAC3/MP3/ALAC, else `.audioUnsupported`
+  (Opus/Vorbis → AAC re-encode is the planned follow-up). `OnDeviceTranscoder` protocol picks it vs the
+  AVFoundation `VideoTranscoder` by container (native mp4/m4v/mov → AVFoundation; else FFmpeg).
+- Awaiting on-device verification (owner tests each build): transcoding a downloaded **MKV/WebM** HEVC/
+  H.264 now produces a playable MP4 (video re-encode + audio copy); Opus/Vorbis audio shows the clear
+  `.audioUnsupported` error; the Downloaded/Transcoded chips sit on one line; earlier: downloaded HEVC
+  plays offline, visible transcode errors, bg download continues suspended, offline sprites scrub.
+- Next milestone (owner-approved, see ROADMAP): **M-A** on-device *streaming* transcode tier (remux →
+  on-device transcode → server fallback, resolution-gated + auto-fallback) and **M-B** player-overlay
+  gear button → manual **server-side** quality menu (cellular escape hatch). Build on the shipped
+  `FFmpegTranscoder` encode core after device verification.
 - Next candidates: reconcile the OUTSTANDING punch list; **Live Activity / Dynamic Island** (riskiest
   downloads item — a new Widget Extension target changes the IPA structure for a sideloaded app;
   isolate it in its own commit).
