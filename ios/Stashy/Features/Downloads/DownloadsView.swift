@@ -91,48 +91,48 @@ private struct DownloadCard: View {
     @State private var showingPerformer: Performer?
 
     var body: some View {
-        // Thumbnail vertically centered against the (taller) text column; equal padding all around.
-        HStack(alignment: .center, spacing: 12) {
-            thumbnail
-            VStack(alignment: .leading, spacing: 8) {
-                // Top row: scene/file name (horizontally scrollable if long) on the left; the tappable
-                // performer chip on the right. The name scrolls rather than wrapping, so it never crowds
-                // the performer or stretches the card past the screen edge.
-                HStack(alignment: .top, spacing: 10) {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        Text(item.title.isEmpty ? item.fileName : item.title)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(themeManager.current.foregroundColor)
-                            .lineLimit(1)
-                            .fixedSize()
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    performerChip
+        VStack(alignment: .leading, spacing: 10) {
+            // Top row spanning the full card: scene/file name at the top-left (scrolls if long), tappable
+            // performer chip at the top-right.
+            HStack(alignment: .top, spacing: 10) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    Text(item.title.isEmpty ? item.fileName : item.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(themeManager.current.foregroundColor)
+                        .lineLimit(1)
+                        .fixedSize()
                 }
-
-                FlowLayout(spacing: 6) {
-                    ForEach(specs, id: \.self) { spec in
-                        Text(spec)
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 7).padding(.vertical, 3)
-                            .background(themeManager.current.backgroundColor, in: Capsule())
-                    }
-                }
-
-                if item.transcoding { transcodeBar }
-                else if item.state != .completed { connectionBar }
-                transcodeLogBox
-
-                HStack(alignment: .bottom, spacing: 10) {
-                    statusView
-                    Spacer(minLength: 8)
-                    controls
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                performerChip
             }
-            // Pin the text column to the available width so a long monospaced log line in the transcode
-            // box can't report a huge ideal width and stretch the whole card past the screen edge.
-            .frame(maxWidth: .infinity, alignment: .leading)
+
+            // Body: thumbnail (vertically centered) alongside the specs + status/controls column.
+            HStack(alignment: .center, spacing: 12) {
+                thumbnail
+                VStack(alignment: .leading, spacing: 8) {
+                    FlowLayout(spacing: 6) {
+                        ForEach(specs, id: \.self) { spec in
+                            Text(spec)
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 7).padding(.vertical, 3)
+                                .background(themeManager.current.backgroundColor, in: Capsule())
+                        }
+                    }
+
+                    if item.transcoding { transcodeBar }
+                    else if item.state != .completed { connectionBar }
+                    transcodeLogBox
+
+                    HStack(alignment: .center, spacing: 10) {
+                        statusView
+                        Spacer(minLength: 8)
+                        controls
+                    }
+                }
+                // Pin the column so a long monospaced log line in the transcode box can't stretch the card.
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
         .padding(12)
         .background(themeManager.current.surfaceColor, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -362,12 +362,12 @@ private struct DownloadCard: View {
 
     private func statusChip(_ text: String, color: Color) -> some View {
         Text(text)
-            .font(.system(size: 9, weight: .bold))   // as small as stays legible
+            .font(.system(size: 9, weight: .bold))   // both chips: identical size + weight (no per-chip scaling)
             .foregroundStyle(color)
-            .lineLimit(1)                             // single line WITHOUT fixedSize: two chips + controls
-            .minimumScaleFactor(0.8)                  // stay compressible so the row can't overflow the card
-            .padding(.horizontal, 8).padding(.vertical, 7)   // taller, so the bottoms line up with the icons
-            .background(color.opacity(0.15), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .lineLimit(1)
+            .padding(.horizontal, 9)
+            .frame(height: 32)                        // match the 32pt wand/delete circles so they line up
+            .background(color.opacity(0.15), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     private var statusText: String {
