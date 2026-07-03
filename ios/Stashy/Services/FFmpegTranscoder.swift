@@ -260,7 +260,7 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
                 }
 
                 let sW = Int(src!.pointee.width), sH = Int(src!.pointee.height)
-                let srcFmt = AVPixelFormat(rawValue: src!.pointee.format) ?? AV_PIX_FMT_NV12
+                let srcFmt = AVPixelFormat(rawValue: src!.pointee.format)
                 let best = decFrame!.pointee.best_effort_timestamp
 
                 // Fast path: the frame is already NV12 at the target size (common for a hardware-decoded
@@ -348,4 +348,16 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
 private func transcodeInterrupt(_ opaque: UnsafeMutableRawPointer?) -> Int32 {
     guard let opaque else { return 0 }
     return Unmanaged<FFmpegTranscoder>.fromOpaque(opaque).takeUnretainedValue().isCancelled ? 1 : 0
+}
+
+/// C-convention `get_format` callback: pick the VideoToolbox pixel format from the decoder's offered
+/// list so the hardware decode path engages; fall back to the first (software) format otherwise.
+private func transcodeGetHWFormat(_ ctx: UnsafeMutablePointer<AVCodecContext>?,
+                                  _ fmts: UnsafePointer<AVPixelFormat>?) -> AVPixelFormat {
+    var p = fmts
+    while let cur = p?.pointee, cur != AV_PIX_FMT_NONE {
+        if cur == AV_PIX_FMT_VIDEOTOOLBOX { return cur }
+        p = p?.advanced(by: 1)
+    }
+    return fmts?.pointee ?? AV_PIX_FMT_NONE
 }
