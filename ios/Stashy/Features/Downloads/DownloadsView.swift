@@ -91,8 +91,8 @@ private struct DownloadCard: View {
     @State private var showingPerformer: Performer?
 
     var body: some View {
-        // Top-aligned: the thumbnail sits alongside the title/performer top row.
-        HStack(alignment: .top, spacing: 12) {
+        // Thumbnail vertically centered against the (taller) text column; equal padding all around.
+        HStack(alignment: .center, spacing: 12) {
             thumbnail
             VStack(alignment: .leading, spacing: 8) {
                 // Top row: scene/file name (horizontally scrollable if long) on the left; the tappable
@@ -124,7 +124,7 @@ private struct DownloadCard: View {
                 else if item.state != .completed { connectionBar }
                 transcodeLogBox
 
-                HStack(alignment: .center, spacing: 10) {
+                HStack(alignment: .bottom, spacing: 10) {
                     statusView
                     Spacer(minLength: 8)
                     controls
@@ -201,10 +201,12 @@ private struct DownloadCard: View {
 
                     if let name = item.performerName {
                         Text(name)
-                            .font(.caption.weight(.semibold))
+                            .font(.caption2.weight(.semibold))
                             .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .frame(maxWidth: 96, alignment: .leading)   // cap so the title keeps room
+                            .lineLimit(2)                          // fits on one line, or two clean lines
+                            .multilineTextAlignment(.center)       // both lines centered
+                            .minimumScaleFactor(0.7)               // shrink before it would ever truncate
+                            .frame(maxWidth: 104, alignment: .center)
                     }
                 }
             }
@@ -360,12 +362,11 @@ private struct DownloadCard: View {
 
     private func statusChip(_ text: String, color: Color) -> some View {
         Text(text)
-            .font(.caption2.weight(.bold))
+            .font(.system(size: 9, weight: .bold))   // as small as stays legible
             .foregroundStyle(color)
-            .lineLimit(1)   // single line WITHOUT fixedSize: two chips ("Downloaded" + "Transcoded") + the
-                            // controls must stay compressible, or the incompressible row stretched the whole
-                            // card past the screen edge (the transcoded-card width bug).
-            .padding(.horizontal, 8).padding(.vertical, 3)
+            .lineLimit(1)                             // single line WITHOUT fixedSize: two chips + controls
+            .minimumScaleFactor(0.8)                  // stay compressible so the row can't overflow the card
+            .padding(.horizontal, 8).padding(.vertical, 7)   // taller, so the bottoms line up with the icons
             .background(color.opacity(0.15), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 
