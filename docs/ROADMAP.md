@@ -271,6 +271,14 @@ blocks, both first-class iOS APIs:
 
 ## Library & UX redesign
 
+- **★ PRIORITY — Replace the bottom-nav Search tab with a Downloads tab + universal search.** Two linked
+  changes to the tab bar (owner-requested 2026-07-03):
+  1. **Remove the Search icon** from the bottom navigation. Fold its function into a **universal search**
+     that spans **both performers and scenes** (one query → results across content types), surfaced from
+     within the library rather than as its own tab (pairs with the pull-down search-field idea below).
+  2. **Put a Downloads icon where Search was**, opening the Downloads/Transcodes screen directly (today
+     it's only reachable from a scene's ••• menu and Settings — see Downloads section). This makes the
+     daily-driven downloads/transcode flow a first-class destination.
 - **Navigation / "back" model cleanup.** Going back and moving between screens doesn't make sense once
   you're deep inside menus — the back affordance and inter-screen navigation need a coherent model.
   Audit every push/cover/sheet path (scenes ⇄ performers ⇄ tags ⇄ studios, the player, downloads reached
