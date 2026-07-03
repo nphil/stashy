@@ -176,7 +176,11 @@ final class LoopbackServer: @unchecked Sendable {
         head += "Content-Range: bytes \(start)-\(start + Int64(data.count) - 1)/\(total)\r\n"
         head += "Content-Length: \(data.count)\r\n"
         head += "Connection: close\r\n\r\n"
-        send(box, Data(head.utf8) + (method == "HEAD" ? Data() : data))
+        if method == "HEAD" {
+            send(box, Data(head.utf8))
+        } else {
+            sendHeaderThenBody(box, head: Data(head.utf8), body: data)
+        }
     }
 
     // MARK: - IO + diagnostics
@@ -197,6 +201,20 @@ final class LoopbackServer: @unchecked Sendable {
         // flushes all of it before we cancel — otherwise cancel() would truncate a large body.
         box.c.send(content: data, contentContext: .finalMessage, isComplete: true,
                    completion: .contentProcessed { _ in box.c.cancel() })
+    }
+
+    /// Send the head and a (possibly large) body as two ordered writes, so we never allocate a second
+    /// full-size buffer just to concatenate `head + body` (a 4K GOP fragment is 10-50 MB; the copy doubled
+    /// the transient spike, multiplied by overlapping segment fetches). The head is a *non-final* write
+    /// with no cancel; only after it's handed to the connection do we queue the body as the final message,
+    /// which cancels once fully flushed — preserving `send()`'s truncation-safe semantics. Getting this
+    /// wrong (cancelling after the head, or marking the head final) truncates the load-bearing HEVC stream.
+    private func sendHeaderThenBody(_ box: Conn, head: Data, body: Data) {
+        box.c.send(content: head, contentContext: .defaultMessage, isComplete: false,
+                   completion: .contentProcessed { [body] _ in
+            box.c.send(content: body, contentContext: .finalMessage, isComplete: true,
+                       completion: .contentProcessed { _ in box.c.cancel() })
+        })
     }
 
     private let logLock = NSLock()
