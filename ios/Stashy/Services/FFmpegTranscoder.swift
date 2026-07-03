@@ -90,24 +90,54 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
         defer { var p: UnsafeMutablePointer<AVFormatContext>? = input; avformat_close_input(&p) }
         guard avformat_find_stream_info(input, nil) >= 0 else { throw TranscodeError.unreadable }
 
-        // --- Locate the video stream + its decoder ---
+        // --- Locate the video stream (its decoder is only opened if we actually re-encode) ---
         var vDecCodec: UnsafePointer<AVCodec>?
         let vIdx = av_find_best_stream(input, AVMEDIA_TYPE_VIDEO, -1, -1, &vDecCodec, 0)
-        guard vIdx >= 0, let vDecCodec, let vInStream = input.pointee.streams[Int(vIdx)] else {
+        guard vIdx >= 0, let vDecCodec, let vInStream = input.pointee.streams[Int(vIdx)],
+              let vCodecpar = vInStream.pointee.codecpar else {
             throw TranscodeError.noVideo
         }
-        let vDecCodecName = String(cString: avcodec_get_name(vInStream.pointee.codecpar.pointee.codec_id))
+        let vDecCodecName = String(cString: avcodec_get_name(vCodecpar.pointee.codec_id))
+
+        // --- Optional audio stream: decide copy vs. reject up front (needs no decoder) ---
+        var aInStream: UnsafeMutablePointer<AVStream>?
+        let aIdx = av_find_best_stream(input, AVMEDIA_TYPE_AUDIO, -1, -1, nil, 0)
+        var audioName = "none"
+        if aIdx >= 0, let s = input.pointee.streams[Int(aIdx)] {
+            let name = String(cString: avcodec_get_name(s.pointee.codecpar.pointee.codec_id))
+            guard Self.copyableAudio.contains(name) else { throw TranscodeError.audioUnsupported(name) }
+            aInStream = s
+            audioName = name
+        }
+
+        // --- Sizing + the key decision: is a full re-encode even needed? ---
+        let srcW = Int(vCodecpar.pointee.width), srcH = Int(vCodecpar.pointee.height)
+        let outSize = VideoTranscoder.outputSize(
+            naturalSize: CGSize(width: srcW, height: srcH),
+            maxDimension: settings.resolution.maxDimension)
+        let targetCodecId = settings.codec == .hevc ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264
+        onLog("Input: \(vDecCodecName) \(srcW)×\(srcH)")
+        onLog(audioName == "none" ? "Audio: none" : "Audio: \(audioName) (stream copy)")
+
+        // Same codec AND same pixel size → there is nothing to re-encode. A stream copy (which also fixes
+        // hev1→hvc1) is near-instant and lossless — versus minutes of pointlessly re-encoding a long video.
+        if vCodecpar.pointee.codec_id == targetCodecId, outSize.width == srcW, outSize.height == srcH {
+            try streamCopy(input: input, outputPath: outputPath, vIdx: Int(vIdx),
+                           aIdx: aInStream != nil ? Int(aIdx) : -1, onLog: onLog, onProgress: onProgress)
+            return
+        }
+
+        // --- Re-encode path: open the decoder. Software HEVC/H.264 decode is the slow part, so prefer
+        // VideoToolbox hardware decode; if the device context can't be created we fall through to a
+        // multithreaded software decode. `get_format` must return the VT pixel format for the hwaccel to
+        // engage; both must be set before avcodec_open2. ---
         guard let vDecCtx = avcodec_alloc_context3(vDecCodec) else {
             throw TranscodeError.decoderUnavailable(vDecCodecName)
         }
         defer { var p: UnsafeMutablePointer<AVCodecContext>? = vDecCtx; avcodec_free_context(&p) }
-        guard avcodec_parameters_to_context(vDecCtx, vInStream.pointee.codecpar) >= 0 else {
+        guard avcodec_parameters_to_context(vDecCtx, vCodecpar) >= 0 else {
             throw TranscodeError.decoderUnavailable(vDecCodecName)
         }
-        // Software HEVC/H.264 decode is the slow part (the remux path is fast precisely because it never
-        // decodes). Prefer VideoToolbox hardware decode; if the device context can't be created we simply
-        // fall through to a multithreaded software decode. `get_format` must return the VT pixel format
-        // for the hwaccel to engage; both must be set before avcodec_open2.
         vDecCtx.pointee.thread_count = 0   // 0 = auto: use all cores for the software fallback
         var hwDeviceCtx: UnsafeMutablePointer<AVBufferRef>?
         if av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_VIDEOTOOLBOX, nil, nil, 0) >= 0 {
@@ -118,34 +148,21 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
         guard avcodec_open2(vDecCtx, vDecCodec, nil) >= 0 else {
             throw TranscodeError.decoderUnavailable(vDecCodecName)
         }
-        onLog("Input: \(vDecCodecName) \(vDecCtx.pointee.width)×\(vDecCtx.pointee.height)")
         onLog("Decode: requesting \(hwDeviceCtx != nil ? "VideoToolbox hardware" : "software (\(ProcessInfo.processInfo.activeProcessorCount) cores)")")
 
-        // --- Optional audio stream: decide copy vs. reject up front ---
-        var aInStream: UnsafeMutablePointer<AVStream>?
-        let aIdx = av_find_best_stream(input, AVMEDIA_TYPE_AUDIO, -1, -1, nil, 0)
-        if aIdx >= 0, let s = input.pointee.streams[Int(aIdx)] {
-            let name = String(cString: avcodec_get_name(s.pointee.codecpar.pointee.codec_id))
-            guard Self.copyableAudio.contains(name) else { throw TranscodeError.audioUnsupported(name) }
-            aInStream = s
-            onLog("Audio: \(name) (stream copy)")
-        } else {
-            onLog("Audio: none")
-        }
-
-        // --- Target size / bitrate (shared sizing with the AVFoundation path) ---
-        let srcW = Int(vDecCtx.pointee.width), srcH = Int(vDecCtx.pointee.height)
-        let outSize = VideoTranscoder.outputSize(
-            naturalSize: CGSize(width: srcW, height: srcH),
-            maxDimension: settings.resolution.maxDimension)
         // Frame rate for the encoder's time base (fall back to 30 when the container doesn't declare one).
         var fr = vInStream.pointee.avg_frame_rate
         if fr.num <= 0 || fr.den <= 0 { fr = vInStream.pointee.r_frame_rate }
         if fr.num <= 0 || fr.den <= 0 { fr = AVRational(num: 30, den: 1) }
         let fps = av_q2d(fr)
-        let bitrate = VideoTranscoder.videoBitrate(width: outSize.width, height: outSize.height,
+        var bitrate = VideoTranscoder.videoBitrate(width: outSize.width, height: outSize.height,
                                                    fps: fps > 0 ? fps : 30,
                                                    quality: settings.quality, codec: settings.codec)
+        // Never spend effort to make the file bigger: cap a same-codec re-encode at the source bitrate.
+        let srcBitrate = vCodecpar.pointee.bit_rate
+        if vCodecpar.pointee.codec_id == targetCodecId, srcBitrate > 100_000 {
+            bitrate = min(bitrate, Int(srcBitrate))
+        }
 
         // --- Output MP4 + VideoToolbox encoder ---
         var outFmtOpt: UnsafeMutablePointer<AVFormatContext>?
@@ -373,6 +390,67 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
         onLog(String(format: "Done: %d frames in %.1fs (avg %.0f fps, %.1f× realtime)", frames, elapsed,
                      elapsed > 0 ? Double(frames) / elapsed : 0,
                      elapsed > 0 ? totalSeconds / elapsed : 0))
+    }
+
+    /// No-re-encode path: copy the video (+ audio) packets straight into a fresh MP4, clearing the codec
+    /// tag so an `hev1` source becomes a QuickTime-friendly `hvc1`. This is the fast, lossless case — a
+    /// long HEVC file finishes in seconds instead of minutes because nothing is decoded or encoded.
+    private func streamCopy(input: UnsafeMutablePointer<AVFormatContext>, outputPath: String,
+                            vIdx: Int, aIdx: Int,
+                            onLog: @escaping @Sendable (String) -> Void,
+                            onProgress: @escaping @Sendable (Double) -> Void) throws {
+        onLog("Same codec & size → stream copy (no re-encode)")
+        let totalSeconds = input.pointee.duration > 0 ? Double(input.pointee.duration) / 1_000_000 : 0
+
+        var outFmtOpt: UnsafeMutablePointer<AVFormatContext>?
+        guard avformat_alloc_output_context2(&outFmtOpt, nil, "mp4", outputPath) >= 0,
+              let outFmt = outFmtOpt else { throw TranscodeError.writeFailed }
+        defer {
+            if outFmt.pointee.pb != nil { avio_closep(&outFmt.pointee.pb) }
+            avformat_free_context(outFmt)
+        }
+
+        // Create one output stream per copied input stream (video first, then audio).
+        var outStreams: [Int: UnsafeMutablePointer<AVStream>] = [:]
+        for inIdx in [vIdx, aIdx] where inIdx >= 0 {
+            guard let inStream = input.pointee.streams[inIdx],
+                  let outStream = avformat_new_stream(outFmt, nil),
+                  avcodec_parameters_copy(outStream.pointee.codecpar, inStream.pointee.codecpar) >= 0 else {
+                throw TranscodeError.writeFailed
+            }
+            outStream.pointee.codecpar.pointee.codec_tag = 0   // let the MP4 muxer assign hvc1/avc1/mp4a
+            outStreams[inIdx] = outStream
+        }
+        guard avio_open(&outFmt.pointee.pb, outputPath, avioFlagWrite) >= 0 else { throw TranscodeError.writeFailed }
+        guard avformat_write_header(outFmt, nil) >= 0 else { throw TranscodeError.writeFailed }
+
+        let pkt = av_packet_alloc()
+        defer { var p: UnsafeMutablePointer<AVPacket>? = pkt; av_packet_free(&p) }
+        var lastReported = -1.0
+        while !isCancelled {
+            let r = av_read_frame(input, pkt)
+            if r < 0 { break }
+            let inIdx = Int(pkt!.pointee.stream_index)
+            guard let outStream = outStreams[inIdx], let inStream = input.pointee.streams[inIdx] else {
+                av_packet_unref(pkt); continue
+            }
+            // Progress from the video stream's timestamps (read before the muxer consumes the packet).
+            if inIdx == vIdx, totalSeconds > 0 {
+                let raw = pkt!.pointee.pts != Int64.min ? pkt!.pointee.pts : pkt!.pointee.dts
+                if raw != Int64.min {
+                    let p = min(1, max(0, Double(raw) * av_q2d(inStream.pointee.time_base) / totalSeconds))
+                    if p - lastReported >= 0.01 { lastReported = p; onProgress(p) }
+                }
+            }
+            av_packet_rescale_ts(pkt, inStream.pointee.time_base, outStream.pointee.time_base)
+            pkt!.pointee.stream_index = outStream.pointee.index
+            pkt!.pointee.pos = -1
+            if av_interleaved_write_frame(outFmt, pkt) < 0 { throw TranscodeError.ffmpeg("copy write failed") }
+        }
+        if isCancelled { throw CancellationError() }
+        guard av_write_trailer(outFmt) >= 0 else { throw TranscodeError.writeFailed }
+        onProgress(1)
+        onLog("Done: stream copy complete")
     }
 
     private func errString(_ code: Int32) -> String {
