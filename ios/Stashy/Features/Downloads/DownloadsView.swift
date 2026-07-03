@@ -294,6 +294,8 @@ private struct DownloadCard: View {
         Text(text)
             .font(.caption2.weight(.bold))
             .foregroundStyle(color)
+            .lineLimit(1)
+            .fixedSize()   // keep each chip on one line; the row has room for both side by side
             .padding(.horizontal, 8).padding(.vertical, 3)
             .background(color.opacity(0.15), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
