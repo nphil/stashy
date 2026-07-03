@@ -162,6 +162,8 @@ private struct ScenePreviewContainer: View {
     @State private var dragScale: CGFloat = 1
     @State private var pausedProgress: CGFloat = 0
     @State private var dimStart: CGFloat = 0.45
+    @AppStorage(Privacy.key) private var privacyMode = false
+    @GestureState private var touching = false   // Privacy Mode: reveal the sprite while a finger is down
 
     var body: some View {
         GeometryReader { geo in
@@ -183,6 +185,7 @@ private struct ScenePreviewContainer: View {
 
                 popupContent
                     .frame(width: popupW, height: popupH)
+                    .blur(radius: privacyMode && !touching ? 30 : 0)   // Privacy Mode: hold to peek
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -198,6 +201,9 @@ private struct ScenePreviewContainer: View {
                 Color.clear
                     .contentShape(Rectangle())
                     .gesture(dragGesture(popupFrame: popupFrame, width: geo.size.width))
+                    // Privacy Mode peek: a finger down anywhere on the preview reveals it (runs alongside
+                    // the scrub/dismiss drag, so it never disturbs that logic).
+                    .simultaneousGesture(DragGesture(minimumDistance: 0).updating($touching) { _, s, _ in s = true })
             }
             .onAppear {
                 loadPlayer()
