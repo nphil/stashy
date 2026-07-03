@@ -79,9 +79,13 @@ final class DownloadItem: Identifiable {
     var transcodeProgress: Double = 0
     /// Compact target label ("HEVC 1080p") shown live during a transcode; nil when not transcoding.
     var transcodeTargetLabel: String?
-    /// Live diagnostic log shown in a scrolling box on the card while transcoding (decoder hw/sw, encoder,
-    /// fps, ffmpeg detail). Cleared when a transcode starts; left in place after so it can be inspected.
+    /// Live diagnostic event log shown in a box on the card while/after transcoding (decoder hw/sw,
+    /// encoder, audio, done). Append-only distinct lines. Cleared when a transcode starts, and wiped when
+    /// the user leaves the Downloads screen and returns.
     var transcodeLog: String = ""
+    /// The single live status line (fps · frame · %), updated in place under the event log so it doesn't
+    /// flood the box with a new line every tick.
+    var transcodeStatus: String = ""
     /// True once a completed download has been transcoded on-device, so the card can badge it "Transcoded".
     /// In-memory only (not in the sidecar), so it resets on relaunch — the transcoded specs themselves DO
     /// persist via the rewritten sidecar.
@@ -436,6 +440,7 @@ final class DownloadManager {
         item.transcodeProgress = 0
         item.transcodeTargetLabel = "\(settings.codec.label) \(settings.resolution.label)"
         item.transcodeLog = ""
+        item.transcodeStatus = ""
         item.error = nil
         // Pick the engine. Apple's AVFoundation transcoder is fast and proven, but ONLY for plain H.264
         // in a native container — it chokes on HEVC even inside an MP4 (hev1 tag / 4:2:2 / 10-bit), which
@@ -471,11 +476,13 @@ final class DownloadManager {
                     Task { @MainActor in item.transcodeProgress = p }
                 } onLog: { line in
                     Task { @MainActor in
-                        // Keep the tail bounded so a long transcode doesn't grow the string without limit.
+                        // Distinct event → append. Keep the tail bounded on a long transcode.
                         var log = item.transcodeLog + line + "\n"
                         if log.count > 4000 { log = String(log.suffix(4000)) }
                         item.transcodeLog = log
                     }
+                } onStatus: { line in
+                    Task { @MainActor in item.transcodeStatus = line }   // live line → replace in place
                 }
                 self.transcodeFinished(id: id, gen: gen, output: dest, src: src, settings: settings)
             } catch {
@@ -504,8 +511,19 @@ final class DownloadManager {
         item.transcoding = false
         item.transcodeProgress = 0
         item.transcodeTargetLabel = nil
+        item.transcodeStatus = ""
         try? FileManager.default.removeItem(
             at: FileManager.default.temporaryDirectory.appendingPathComponent("\(id).transcode.mp4"))
+    }
+
+    /// Wipe the diagnostics box for any item that isn't actively transcoding — called when the Downloads
+    /// screen goes away, so a finished transcode's log shows while you're on the screen but is gone if you
+    /// leave and come back. An in-flight transcode keeps its log/status.
+    func clearFinishedTranscodeLogs() {
+        for item in items where !item.transcoding {
+            item.transcodeLog = ""
+            item.transcodeStatus = ""
+        }
     }
 
     private func transcodeFailed(id: String, gen: Int, message: String?) {

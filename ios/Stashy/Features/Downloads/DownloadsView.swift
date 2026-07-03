@@ -31,6 +31,9 @@ struct DownloadsView: View {
         .navigationTitle("Downloads")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { downloads.pruneStopped() }
+        // Leaving the screen wipes finished transcode diagnostics, so returning shows a clean card. An
+        // in-flight transcode keeps its box.
+        .onDisappear { downloads.clearFinishedTranscodeLogs() }
         .fullScreenCover(item: $playing) { item in
             DownloadPlayerCover(item: item)
         }
@@ -96,8 +99,9 @@ private struct DownloadCard: View {
                     }
                 }
 
-                if item.transcoding { transcodeBar; transcodeLogBox }
+                if item.transcoding { transcodeBar }
                 else if item.state != .completed { connectionBar }
+                transcodeLogBox
 
                 HStack(alignment: .center, spacing: 10) {
                     statusView
@@ -207,23 +211,30 @@ private struct DownloadCard: View {
         .animation(.linear(duration: 0.2), value: item.transcodeProgress)
     }
 
-    /// Live diagnostics while transcoding: a small monospaced scroll box (auto-scrolled to the newest
-    /// line) showing the decode path (HW/SW), encoder, and throughput. Grows the card downward; it and
-    /// the extra height disappear once the transcode finishes.
+    /// Transcode diagnostics box: append-only event lines (decode path HW/SW, encoder, audio, done) with
+    /// the single live status line (fps) pinned under them and updated in place. Shown while transcoding
+    /// and afterwards while you stay on the screen; DownloadsView wipes it on disappear. Grows the card
+    /// downward and collapses back when the log clears.
     @ViewBuilder private var transcodeLogBox: some View {
-        if !item.transcodeLog.isEmpty {
+        if item.transcoding || !item.transcodeLog.isEmpty {
             ScrollViewReader { proxy in
                 ScrollView {
-                    Text(item.transcodeLog)
-                        .font(.system(.caption2, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.transcodeLog.trimmingCharacters(in: .newlines))
+                        if !item.transcodeStatus.isEmpty {
+                            Text(item.transcodeStatus).foregroundStyle(themeManager.current.accentColor)
+                        }
+                    }
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
                     Color.clear.frame(height: 1).id("logEnd")
                 }
                 .frame(height: 96)
                 .padding(8)
                 .background(themeManager.current.backgroundColor, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                // Only auto-scroll on a NEW event line (not every fps tick), so the box stays readable.
                 .onChange(of: item.transcodeLog) { _, _ in
                     withAnimation(.linear(duration: 0.1)) { proxy.scrollTo("logEnd", anchor: .bottom) }
                 }

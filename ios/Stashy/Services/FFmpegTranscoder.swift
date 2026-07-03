@@ -55,14 +55,15 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
     /// Transcode `input` → `output` (a fresh MP4). `onProgress` (0…1) is called off the main actor.
     func run(input: URL, output: URL, settings: VideoTranscoder.Settings,
              onProgress: @escaping @Sendable (Double) -> Void,
-             onLog: @escaping @Sendable (String) -> Void) async throws {
+             onLog: @escaping @Sendable (String) -> Void,
+             onStatus: @escaping @Sendable (String) -> Void) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             // A dedicated thread, not the cooperative pool: the demux/decode/encode loop is a long,
             // fully-blocking C call that would otherwise starve a shared executor thread.
             Thread.detachNewThread { [self] in
                 do {
                     try runSync(inputPath: input.path, outputPath: output.path,
-                                settings: settings, onProgress: onProgress, onLog: onLog)
+                                settings: settings, onProgress: onProgress, onLog: onLog, onStatus: onStatus)
                     cont.resume()
                 } catch {
                     cont.resume(throwing: error)
@@ -75,7 +76,8 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
 
     private func runSync(inputPath: String, outputPath: String, settings: VideoTranscoder.Settings,
                          onProgress: @escaping @Sendable (Double) -> Void,
-                         onLog: @escaping @Sendable (String) -> Void) throws {
+                         onLog: @escaping @Sendable (String) -> Void,
+                         onStatus: @escaping @Sendable (String) -> Void) throws {
         // --- Open input (path-based; set the interrupt callback first so cancel aborts a slow demux) ---
         var inFmt = avformat_alloc_context()
         guard inFmt != nil else { throw TranscodeError.unreadable }
@@ -325,8 +327,9 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
                     lastFpsEmit = now
                     let elapsed = now.timeIntervalSince(startWall)
                     let fpsNow = elapsed > 0 ? Double(frames) / elapsed : 0
-                    onLog(String(format: "▸ %.0f fps · frame %d · %d%%", fpsNow, frames,
-                                 Int((lastReported >= 0 ? lastReported : 0) * 100)))
+                    // Live status line — replaced in place, NOT appended, so it doesn't flood the box.
+                    onStatus(String(format: "▸ %.0f fps · frame %d · %d%%", fpsNow, frames,
+                                    Int((lastReported >= 0 ? lastReported : 0) * 100)))
                 }
             }
         }
@@ -366,6 +369,7 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
 
         guard av_write_trailer(outFmt) >= 0 else { throw TranscodeError.writeFailed }
         let elapsed = Date().timeIntervalSince(startWall)
+        onStatus("")   // clear the live line; the summary below is a permanent event line
         onLog(String(format: "Done: %d frames in %.1fs (avg %.0f fps, %.1f× realtime)", frames, elapsed,
                      elapsed > 0 ? Double(frames) / elapsed : 0,
                      elapsed > 0 ? totalSeconds / elapsed : 0))

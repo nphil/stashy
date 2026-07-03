@@ -60,9 +60,11 @@ enum TranscodeCodec: String, CaseIterable, Identifiable {
 /// same `VideoTranscoder.Settings` and report 0…1 progress off the main actor, so `DownloadManager` can
 /// pick one per source without caring which.
 protocol OnDeviceTranscoder: AnyObject, Sendable {
+    /// `onLog` appends a distinct event line; `onStatus` replaces the single live status line (fps).
     func run(input: URL, output: URL, settings: VideoTranscoder.Settings,
              onProgress: @escaping @Sendable (Double) -> Void,
-             onLog: @escaping @Sendable (String) -> Void) async throws
+             onLog: @escaping @Sendable (String) -> Void,
+             onStatus: @escaping @Sendable (String) -> Void) async throws
     func cancel()
 }
 
@@ -95,7 +97,8 @@ final class VideoTranscoder: OnDeviceTranscoder, @unchecked Sendable {
     /// written. Throws on failure/cancel; the caller removes a partial `output`.
     func run(input: URL, output: URL, settings: Settings,
              onProgress: @escaping @Sendable (Double) -> Void,
-             onLog: @escaping @Sendable (String) -> Void) async throws {
+             onLog: @escaping @Sendable (String) -> Void,
+             onStatus: @escaping @Sendable (String) -> Void) async throws {
         onLog("Engine: AVFoundation (VideoToolbox)")
         let asset = AVURLAsset(url: input)
         // Fail fast + clearly on containers AVFoundation can't demux (MKV/WebM etc.): otherwise
