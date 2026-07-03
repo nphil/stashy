@@ -816,6 +816,12 @@ final class DownloadManager {
     // MARK: - Completion / merge
 
     private func finalizeIfComplete(_ item: DownloadItem) {
+        // Run the merge exactly once. Several paths can reach here (last part finishing, a foreground/
+        // background handoff finding everything already done, relaunch reconciliation), and during a
+        // background→foreground transition two can fire at once. A second merge would read parts the first
+        // merge already deleted on success → "Couldn't assemble the file", flipping a completed download to
+        // failed. Guarding on the transient/terminal states makes it idempotent.
+        guard item.state != .merging, item.state != .completed else { return }
         let done = finished[item.id] ?? []
         guard done.count == item.connections.count else { return }
         item.state = .merging
