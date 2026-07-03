@@ -52,6 +52,11 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
     /// Audio codecs an iPhone can decode inside an MP4, so we copy them through untouched.
     private static let copyableAudio: Set<String> = ["aac", "ac3", "eac3", "mp3", "alac"]
 
+    /// MKTAG('h','v','c','1') — the Apple-required sample-entry fourcc for HEVC in a progressive MP4.
+    private static let hvc1Tag: UInt32 =
+        UInt32(UInt8(ascii: "h")) | UInt32(UInt8(ascii: "v")) << 8
+        | UInt32(UInt8(ascii: "c")) << 16 | UInt32(UInt8(ascii: "1")) << 24
+
     /// Transcode `input` → `output` (a fresh MP4). `onProgress` (0…1) is called off the main actor.
     func run(input: URL, output: URL, settings: VideoTranscoder.Settings,
              onProgress: @escaping @Sendable (Double) -> Void,
@@ -202,6 +207,8 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
               avcodec_parameters_from_context(vOutStream.pointee.codecpar, vEncCtx) >= 0 else {
             throw TranscodeError.writeFailed
         }
+        // Same Apple 'hvc1' requirement for a freshly-encoded HEVC stream (see streamCopy).
+        if settings.codec == .hevc { vOutStream.pointee.codecpar.pointee.codec_tag = Self.hvc1Tag }
         vOutStream.pointee.time_base = vEncCtx.pointee.time_base
 
         // Audio: a straight copy stream (params carried over from the source).
@@ -418,7 +425,11 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
                   avcodec_parameters_copy(outStream.pointee.codecpar, inStream.pointee.codecpar) >= 0 else {
                 throw TranscodeError.writeFailed
             }
-            outStream.pointee.codecpar.pointee.codec_tag = 0   // let the MP4 muxer assign hvc1/avc1/mp4a
+            // HEVC MUST be tagged 'hvc1' (out-of-band params) for AVPlayer to decode a progressive MP4;
+            // FFmpeg's muxer otherwise writes 'hev1' → black video, audio only. Other codecs: let the
+            // muxer pick (avc1 / mp4a).
+            outStream.pointee.codecpar.pointee.codec_tag =
+                outStream.pointee.codecpar.pointee.codec_id == AV_CODEC_ID_HEVC ? Self.hvc1Tag : 0
             outStreams[inIdx] = outStream
         }
         guard avio_open(&outFmt.pointee.pb, outputPath, avioFlagWrite) >= 0 else { throw TranscodeError.writeFailed }
