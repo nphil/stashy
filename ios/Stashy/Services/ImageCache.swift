@@ -8,7 +8,9 @@ import CryptoKit
 /// thumbnails locally and serve them from memory/disk instead of re-fetching from Stash over the
 /// network, which is what keeps scrolling smooth. A size-capped LRU eviction keeps disk bounded.
 actor ImageCache {
-    private let memoryCache: NSCache<NSString, UIImage> = {
+    // `nonisolated(unsafe)` so the synchronous `cachedImage(for:)` peek can read it off the actor — NSCache
+    // is itself thread-safe, so the unsafe opt-out is honest here.
+    nonisolated(unsafe) private let memoryCache: NSCache<NSString, UIImage> = {
         let cache = NSCache<NSString, UIImage>()
         cache.countLimit = 500
         // Cost is now the decoded bitmap size (see `memoryCost`), not the compressed JPEG size, so this
@@ -211,7 +213,13 @@ actor ImageCache {
         }
     }
 
-    private func cacheKey(_ url: URL, _ maxPixel: CGFloat, priority: Bool = false) -> String {
+    /// Synchronous memory-cache-only peek (no disk, no network) — used to resolve a long-press preview
+    /// poster instantly without awaiting the actor. Returns nil if not resident (caller falls back to black).
+    nonisolated func cachedImage(for url: URL, maxPixel: CGFloat = 600, priority: Bool = false) -> UIImage? {
+        memoryCache.object(forKey: cacheKey(url, maxPixel, priority: priority) as NSString)
+    }
+
+    nonisolated private func cacheKey(_ url: URL, _ maxPixel: CGFloat, priority: Bool = false) -> String {
         var key = url.absoluteString
         if var comps = URLComponents(url: url, resolvingAgainstBaseURL: false) {
             comps.queryItems = comps.queryItems?.filter { $0.name != "apikey" }

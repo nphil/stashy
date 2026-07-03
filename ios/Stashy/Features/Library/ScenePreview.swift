@@ -83,7 +83,6 @@ struct ScenePreviewGesture: ViewModifier {
     @Environment(\.imageCache) private var imageCache
     @AppStorage("animatedPreviews") private var animatedPreviews = true
     @State private var frame: CGRect = .zero
-    @State private var thumbnail: UIImage?
 
     func body(content: Content) -> some View {
         content
@@ -100,13 +99,13 @@ struct ScenePreviewGesture: ViewModifier {
             .gesture(
                 LongPressTrigger {
                     guard animatedPreviews else { return }
-                    presenter?.begin(scene: scene, apiKey: apiKey, sourceRect: frame, thumbnail: thumbnail)
+                    // Resolve the poster from the memory cache synchronously (the visible SceneCard already
+                    // loaded it) instead of a second `.task`-driven fetch/decode of the same URL per cell.
+                    // A miss just shows black until the clip's first frame — the popup already handles that.
+                    let poster = scene.thumbnailURL(apiKey: apiKey).flatMap { imageCache.cachedImage(for: $0) }
+                    presenter?.begin(scene: scene, apiKey: apiKey, sourceRect: frame, thumbnail: poster)
                 }
             )
-            .task(id: scene.id) {
-                guard let url = scene.thumbnailURL(apiKey: apiKey) else { return }
-                thumbnail = try? await imageCache.image(for: url)
-            }
     }
 }
 
