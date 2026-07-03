@@ -204,8 +204,12 @@ only in the uncaught-exception handler.
 
 > **Status (shipped v1.0.115):** #16 (decoded costing + 128MB budget), #17 (low-water eviction), #L1
 > (diskBytes resync), #18 Tier 1 (LibraryEdits ordering token) done. **Remaining, grouped by why:**
-> — *Subtle, needs a careful session:* #15 (ImageCache in-flight coalescing — the awaiter-cancellation
->   shield is the trap) + #13 (nonisolated memory-peek accessor + delete ScenePreviewGesture's `.task`) +
+> — *Subtle, needs a careful session:* ~~#15 (ImageCache in-flight coalescing — the awaiter-cancellation
+>   shield is the trap)~~ **DONE (commit `3fb8ddd`, v1.0.118):** actor-local `inFlight` registry;
+>   `image(for:)`/`originalImage(for:)` join an in-flight fetch or start one, body moved to
+>   `fetchDownsampled`/`fetchOriginal`; shared unstructured Task shields against one awaiter's cancellation;
+>   registry cleared on success AND failure (identity-guarded); also kills the #L1 double-count at source.
+>   Remaining in cluster: #13 (nonisolated memory-peek accessor + delete ScenePreviewGesture's `.task`) +
 >   #12 download-dedup. #18 Tier 2 (server-side coalescing).
 > — *Sacred, needs the owner's on-device test between batches:* #20 (merge hardening), #21 (remux EOF
 >   read-retry), #22 (engine-swap teardown leak), #25 (serveMedia double-buffer).
