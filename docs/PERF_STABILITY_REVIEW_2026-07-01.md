@@ -211,14 +211,17 @@ only in the uncaught-exception handler.
 >   registry cleared on success AND failure (identity-guarded); also kills the #L1 double-count at source.
 >   Remaining in cluster: #13 (nonisolated memory-peek accessor + delete ScenePreviewGesture's `.task`) +
 >   #12 download-dedup. #18 Tier 2 (server-side coalescing).
-> — ~~*Sacred, needs the owner's on-device test between batches:* #20 (merge hardening), #21 (remux EOF
->   read-retry), #22 (engine-swap teardown leak), #25 (serveMedia double-buffer).~~ **CODE DONE (commits
->   `c7b3dd7`/`f6b0c7f`/`7f4ee67`/`a65d932`, one build):** #20 catchable `write(contentsOf:)` + non-optional
->   read + size-verify before success; #21 read callback retries a transport error (EOF only on a clean
->   empty response) → EIO not fake-EOF; #22 `teardown()` nulls `hostView.player` + removes host/backdrop +
->   `LiveBlurBackdropView.invalidate()`; #25 `sendHeaderThenBody` (two ordered writes, no concat copy).
->   **⏳ AWAITING OWNER ON-DEVICE VERIFICATION** — low-disk merge, mid-play Wi-Fi toggle, far-seek/HLS
->   fallback/scene reopen, HEVC playback. Revert the offending commit individually if a regression shows.
+> — *Sacred batch:* **#20/#21/#22 DONE (commits `c7b3dd7`/`f6b0c7f`/`7f4ee67`, awaiting owner device
+>   test):** #20 catchable `write(contentsOf:)` + non-optional read + size-verify before success; #21 read
+>   callback retries a transport error (EOF only on a clean empty response) → EIO not fake-EOF; #22
+>   `teardown()` nulls `hostView.player` + removes host/backdrop + `LiveBlurBackdropView.invalidate()`.
+>   **#25 REVERTED (commit `a65d932` → revert `0427952`): it regressed HEVC playback** — remux stuck →
+>   Stash-transcode fallback. `sendHeaderThenBody`'s non-final header (`isComplete: false`) + nested-
+>   completion send stalled segment delivery to AVPlayer, exactly the truncate/stall the finding warned
+>   about. Left as-is (low value — existing 15s-buffer / 75s-pace bounds already cap the double-buffer
+>   spike). Only revisit with real device testing (e.g. `NWConnection.batch{}` around two `.contentProcessed`
+>   sends, or chunk the body from the FileHandle) — do NOT re-apply the isComplete:false-header shape.
+>   Device-verify the survivors: low-disk merge, mid-play Wi-Fi toggle, far-seek/HLS fallback/scene reopen.
 > — ~~*Non-sacred downloads housekeeping:* #23 (ghost transcode temp), #24 (stop() meta cleanup).~~
 >   **DONE (commit `bc42aeb`):** #23 transcode temp → OS tmp dir + `loadCompleted` sweeps stray
 >   `*.transcode.mp4`; #24 `stop()` now calls `cleanupMeta`, `retry()` re-heals the sidecar from the
