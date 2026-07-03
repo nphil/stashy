@@ -25,7 +25,8 @@ struct SceneDetailView: View {
         // goes through the on-device remux (of the local file) instead of a bare AVPlayer that can't
         // decode it.
         if let local = downloads.localFile(sceneID: scene.id) {
-            return scene.localPlaybackRoute(localURL: local, apiKey: appState.client?.apiKey ?? "")
+            return scene.localPlaybackRoute(localURL: local, apiKey: appState.client?.apiKey ?? "",
+                                            nativeMP4: downloads.wasTranscoded(sceneID: scene.id))
         }
         guard let client = appState.client else { return nil }
         return scene.playbackRoute(apiKey: client.apiKey)

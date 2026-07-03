@@ -345,6 +345,12 @@ final class DownloadManager {
         return nil
     }
 
+    /// True if this scene's local file was produced by our on-device transcoder (a clean hvc1/avc1 MP4 that
+    /// direct-plays). Persists across relaunch via the sidecar's `transcoded` flag.
+    func wasTranscoded(sceneID: String) -> Bool {
+        items.first(where: { $0.id == sceneID })?.wasTranscoded ?? false
+    }
+
     /// Local sprite sheet downloaded alongside the video, so scrub previews work offline / instantly.
     func localSprite(sceneID: String) -> URL? {
         let url = metaDir.appendingPathComponent("\(sceneID)-sprite.jpg")

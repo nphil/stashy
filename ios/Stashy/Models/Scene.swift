@@ -155,12 +155,21 @@ extension StashScene {
     /// source is the local file for both direct play and the on-device remux (so a downloaded HEVC / MKV
     /// plays offline through the same remux path the server stream uses, instead of being force-fed to a
     /// bare AVPlayer that renders black / can't open the container). Server HLS is the online fallback.
-    func localPlaybackRoute(localURL: URL, apiKey: String) -> PlaybackRoute {
+    /// `nativeMP4` = this local file was produced by our on-device transcoder, so it's guaranteed a clean
+    /// hvc1/avc1 MP4 that AVPlayer plays directly — skip the remux path entirely (the whole point of
+    /// transcoding was to make it natively playable).
+    func localPlaybackRoute(localURL: URL, apiKey: String, nativeMP4: Bool = false) -> PlaybackRoute {
         let codec = files.first?.video_codec?.lowercased()
         let container = fileContainer
         let containerOK = Self.directPlayContainers.contains(container)
         let hlsURL = apiKey.isEmpty ? nil
             : sceneStreams.first(where: { $0.isHLS }).flatMap { appendingAPIKey(apiKey, to: $0.url) }
+
+        // A file we transcoded on-device is normalised to hvc1/avc1 MP4 → direct play, no remux.
+        if nativeMP4 {
+            return PlaybackRoute(url: localURL, engine: .avPlayer, streamType: "Downloaded",
+                                 reason: "Direct play (transcoded)", fallbackURL: hlsURL)
+        }
 
         let isH264 = codec.map { c in Self.directPlayCodecs.contains { c.contains($0) } } ?? false
         let isAV1 = codec.map { c in Self.av1Codecs.contains { c.contains($0) } } ?? false
