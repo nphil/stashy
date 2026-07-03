@@ -187,7 +187,7 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
             return d > 0 ? d : 0.1
         }()
 
-        var sws: OpaquePointer?
+        var sws: UnsafeMutablePointer<SwsContext>?   // this FFmpeg build types SwsContext as a named struct
         defer { if sws != nil { sws_freeContext(sws) } }
         let pkt = av_packet_alloc()
         let decFrame = av_frame_alloc()
