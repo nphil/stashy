@@ -151,6 +151,40 @@ extension StashScene {
                              reason: "Last resort: no HLS; on-device path pending")
     }
 
+    /// Playback route for a *downloaded* local file. Same capability decision as `playbackRoute`, but the
+    /// source is the local file for both direct play and the on-device remux (so a downloaded HEVC / MKV
+    /// plays offline through the same remux path the server stream uses, instead of being force-fed to a
+    /// bare AVPlayer that renders black / can't open the container). Server HLS is the online fallback.
+    func localPlaybackRoute(localURL: URL, apiKey: String) -> PlaybackRoute {
+        let codec = files.first?.video_codec?.lowercased()
+        let container = fileContainer
+        let containerOK = Self.directPlayContainers.contains(container)
+        let hlsURL = apiKey.isEmpty ? nil
+            : sceneStreams.first(where: { $0.isHLS }).flatMap { appendingAPIKey(apiKey, to: $0.url) }
+
+        let isH264 = codec.map { c in Self.directPlayCodecs.contains { c.contains($0) } } ?? false
+        let isAV1 = codec.map { c in Self.av1Codecs.contains { c.contains($0) } } ?? false
+        let isHEVC = codec.map { c in Self.remuxableCodecs.contains { c.contains($0) } } ?? false
+        let av1Native = isAV1 && DeviceCapabilities.av1HardwareDecode
+        let isDirectClass = isH264 || av1Native
+
+        // Direct-playable local file (H.264 / native-AV1 in a native container).
+        if isDirectClass, containerOK {
+            return PlaybackRoute(url: localURL, engine: .avPlayer, streamType: "Downloaded",
+                                 reason: "Direct play (offline)", fallbackURL: av1Native ? hlsURL : nil)
+        }
+        // HEVC (any container → hvc1) or a native codec in a foreign container → on-device remux of the
+        // local file; falls back to server HLS if we're online.
+        if isHEVC || (isDirectClass && !containerOK) {
+            let why = isHEVC ? "\(codec ?? "?") → hvc1 remux (offline)" : "container .\(container) → remux (offline)"
+            return PlaybackRoute(url: localURL, engine: .localFFmpeg, streamType: "Downloaded remux",
+                                 reason: why, fallbackURL: hlsURL, duration: files.first?.duration ?? 0)
+        }
+        // Codec AVPlayer can't decode at all → best-effort direct (may fail) with server HLS fallback.
+        return PlaybackRoute(url: localURL, engine: .avPlayer, streamType: "Downloaded",
+                             reason: "Offline (codec may need transcode)", fallbackURL: hlsURL)
+    }
+
     /// The direct (non-HLS/DASH) file stream URL — the actual media file the FFmpeg pipeline reads,
     /// used by the demux probe and (later) the on-device remux/transcode path.
     func directFileURL(apiKey: String) -> URL? {

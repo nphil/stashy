@@ -26,6 +26,11 @@ final class FFmpegRemuxer: @unchecked Sendable {
     // Input (read) state — same range-request approach proven in FFmpegSource.
     private var offset: Int64 = 0
     private var size: Int64 = -1
+    /// When the source is a local `file://` URL we read it directly via a FileHandle instead of URLSession
+    /// range requests (URLSession doesn't honour byte ranges on file URLs) — this is how a *downloaded*
+    /// HEVC/MKV plays offline through the same remux path the server stream uses.
+    private let isLocalFile: Bool
+    private var localHandle: FileHandle?
     private let ioBufferSize = 1 << 18          // 256 KB AVIO buffers (in + out)
 
     // Read-ahead cache: FFmpeg reads the input in small (≤ ioBufferSize) chunks, but one HTTP range
@@ -113,6 +118,8 @@ final class FFmpegRemuxer: @unchecked Sendable {
         self.outerTimeout = timeout
         self.startTime = startTime
         self.playhead = playhead
+        self.isLocalFile = url.isFileURL
+        self.localHandle = url.isFileURL ? try? FileHandle(forReadingFrom: url) : nil
         let cfg = URLSessionConfiguration.ephemeral
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
         session = URLSession(configuration: cfg)
@@ -122,6 +129,7 @@ final class FFmpegRemuxer: @unchecked Sendable {
         // A custom URLSession retains itself (and a delegate thread) until invalidated — leaking one per
         // playback/probe and eventually exhausting resources. Release it explicitly.
         session.invalidateAndCancel()
+        try? localHandle?.close()
     }
 
     /// Run the remux and return a short human-readable summary (or an error string). The interrupt
@@ -375,6 +383,21 @@ final class FFmpegRemuxer: @unchecked Sendable {
             return Int32(n)
         }
 
+        // Local file: read directly at the current offset (URLSession can't byte-range a file:// URL).
+        if isLocalFile {
+            guard let handle = localHandle else { return averrorEOF }
+            do {
+                try handle.seek(toOffset: UInt64(max(0, offset)))
+                guard let data = try handle.read(upToCount: want), !data.isEmpty else { return averrorEOF }
+                let n = min(data.count, want)
+                data.copyBytes(to: buffer, count: n)
+                offset += Int64(n)
+                return Int32(n)
+            } catch {
+                return -5   // AVERROR(EIO)
+            }
+        }
+
         // Miss: pull a big slab starting at `offset` in one request; subsequent reads hit the cache.
         var end = offset + Int64(max(want, readAhead)) - 1
         if size >= 0 { end = min(end, size - 1) }
@@ -455,6 +478,10 @@ final class FFmpegRemuxer: @unchecked Sendable {
 
     private func ensureSize() -> Int64 {
         if size >= 0 { return size }
+        if isLocalFile {
+            size = ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.int64Value ?? 0
+            return max(size, 0)
+        }
         var request = URLRequest(url: url)
         request.timeoutInterval = 5
         request.setValue("bytes=0-0", forHTTPHeaderField: "Range")

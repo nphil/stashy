@@ -20,9 +20,12 @@ struct SceneDetailView: View {
     private var performers: [Performer] { (fullScene ?? scene).performers }
 
     private var route: PlaybackRoute? {
-        // Prefer a completed download: play the local file (offline, instant), direct via AVPlayer.
+        // Prefer a completed download: play the local file offline. Route it through the same codec/
+        // container capability check as the server stream, so a downloaded HEVC / foreign-container file
+        // goes through the on-device remux (of the local file) instead of a bare AVPlayer that can't
+        // decode it.
         if let local = downloads.localFile(sceneID: scene.id) {
-            return PlaybackRoute(url: local, engine: .avPlayer, streamType: "Downloaded", reason: "Local file")
+            return scene.localPlaybackRoute(localURL: local, apiKey: appState.client?.apiKey ?? "")
         }
         guard let client = appState.client else { return nil }
         return scene.playbackRoute(apiKey: client.apiKey)

@@ -129,6 +129,14 @@ final class ScenePlayerModel {
     private func beginLocalFFmpeg() {
         let key = route.url.path
         loadingStage = "Reading video…"
+        // A downloaded local file: remux straight away. The pixel-format probe below uses FFmpegSource,
+        // which reads over HTTP (URLSession range requests) and can't open a `file://` URL — running it
+        // here would hang/fail. The common downloaded case (8-bit 4:2:0 HEVC) remuxes fine; a rare
+        // undecodable pixel format has no server fallback offline anyway, so probing buys nothing.
+        if route.url.isFileURL {
+            buildLinear()
+            return
+        }
         // Known-undecodable pixel format (cached): straight to HLS, skip opening the file entirely.
         if AppleDecodeCache.shared.decision(forKey: key) == true {
             buildFallback(reason: "HLS (Apple can't decode this pixel format)")
