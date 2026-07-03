@@ -209,7 +209,11 @@ only in the uncaught-exception handler.
 >   #12 download-dedup. #18 Tier 2 (server-side coalescing).
 > — *Sacred, needs the owner's on-device test between batches:* #20 (merge hardening), #21 (remux EOF
 >   read-retry), #22 (engine-swap teardown leak), #25 (serveMedia double-buffer).
-> — *Non-sacred downloads housekeeping:* #23 (ghost transcode temp), #24 (stop() meta cleanup).
+> — ~~*Non-sacred downloads housekeeping:* #23 (ghost transcode temp), #24 (stop() meta cleanup).~~
+>   **DONE (commit `bc42aeb`):** #23 transcode temp → OS tmp dir + `loadCompleted` sweeps stray
+>   `*.transcode.mp4`; #24 `stop()` now calls `cleanupMeta`, `retry()` re-heals the sidecar from the
+>   in-memory scene if missing, and `init` runs `sweepOrphanedMeta()` (delete meta whose id has neither a
+>   completed file nor an `.active` marker).
 > — *Folded into the pending connection-screen feature:* #19 (keychain accessibility) — that rework
 >   rewrites KeychainService anyway.
 > — *Deferred lows:* disk-hit decode, per-frame GeometryReader, deadline race; and Phase-1 #3(b).
