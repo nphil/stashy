@@ -79,6 +79,9 @@ final class DownloadItem: Identifiable {
     var transcodeProgress: Double = 0
     /// Compact target label ("HEVC 1080p") shown live during a transcode; nil when not transcoding.
     var transcodeTargetLabel: String?
+    /// Live diagnostic log shown in a scrolling box on the card while transcoding (decoder hw/sw, encoder,
+    /// fps, ffmpeg detail). Cleared when a transcode starts; left in place after so it can be inspected.
+    var transcodeLog: String = ""
     /// True once a completed download has been transcoded on-device, so the card can badge it "Transcoded".
     /// In-memory only (not in the sidecar), so it resets on relaunch — the transcoded specs themselves DO
     /// persist via the rewritten sidecar.
@@ -432,6 +435,7 @@ final class DownloadManager {
         item.transcoding = true
         item.transcodeProgress = 0
         item.transcodeTargetLabel = "\(settings.codec.label) \(settings.resolution.label)"
+        item.transcodeLog = ""
         item.error = nil
         // Pick the engine. Apple's AVFoundation transcoder is fast and proven, but ONLY for plain H.264
         // in a native container — it chokes on HEVC even inside an MP4 (hev1 tag / 4:2:2 / 10-bit), which
@@ -465,6 +469,13 @@ final class DownloadManager {
                 // never re-captures `self` across the concurrency boundary.
                 try await transcoder.run(input: src, output: dest, settings: settings) { p in
                     Task { @MainActor in item.transcodeProgress = p }
+                } onLog: { line in
+                    Task { @MainActor in
+                        // Keep the tail bounded so a long transcode doesn't grow the string without limit.
+                        var log = item.transcodeLog + line + "\n"
+                        if log.count > 4000 { log = String(log.suffix(4000)) }
+                        item.transcodeLog = log
+                    }
                 }
                 self.transcodeFinished(id: id, gen: gen, output: dest, src: src, settings: settings)
             } catch {

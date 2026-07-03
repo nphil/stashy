@@ -96,7 +96,7 @@ private struct DownloadCard: View {
                     }
                 }
 
-                if item.transcoding { transcodeBar }
+                if item.transcoding { transcodeBar; transcodeLogBox }
                 else if item.state != .completed { connectionBar }
 
                 HStack(alignment: .center, spacing: 10) {
@@ -205,6 +205,30 @@ private struct DownloadCard: View {
         }
         .frame(height: 6)
         .animation(.linear(duration: 0.2), value: item.transcodeProgress)
+    }
+
+    /// Live diagnostics while transcoding: a small monospaced scroll box (auto-scrolled to the newest
+    /// line) showing the decode path (HW/SW), encoder, and throughput. Grows the card downward; it and
+    /// the extra height disappear once the transcode finishes.
+    @ViewBuilder private var transcodeLogBox: some View {
+        if !item.transcodeLog.isEmpty {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Text(item.transcodeLog)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                    Color.clear.frame(height: 1).id("logEnd")
+                }
+                .frame(height: 96)
+                .padding(8)
+                .background(themeManager.current.backgroundColor, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .onChange(of: item.transcodeLog) { _, _ in
+                    withAnimation(.linear(duration: 0.1)) { proxy.scrollTo("logEnd", anchor: .bottom) }
+                }
+            }
+        }
     }
 
     private var controls: some View {

@@ -54,14 +54,15 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
 
     /// Transcode `input` → `output` (a fresh MP4). `onProgress` (0…1) is called off the main actor.
     func run(input: URL, output: URL, settings: VideoTranscoder.Settings,
-             onProgress: @escaping @Sendable (Double) -> Void) async throws {
+             onProgress: @escaping @Sendable (Double) -> Void,
+             onLog: @escaping @Sendable (String) -> Void) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             // A dedicated thread, not the cooperative pool: the demux/decode/encode loop is a long,
             // fully-blocking C call that would otherwise starve a shared executor thread.
             Thread.detachNewThread { [self] in
                 do {
                     try runSync(inputPath: input.path, outputPath: output.path,
-                                settings: settings, onProgress: onProgress)
+                                settings: settings, onProgress: onProgress, onLog: onLog)
                     cont.resume()
                 } catch {
                     cont.resume(throwing: error)
@@ -73,7 +74,8 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
     // MARK: - Blocking pipeline (runs on its own thread)
 
     private func runSync(inputPath: String, outputPath: String, settings: VideoTranscoder.Settings,
-                         onProgress: @escaping @Sendable (Double) -> Void) throws {
+                         onProgress: @escaping @Sendable (Double) -> Void,
+                         onLog: @escaping @Sendable (String) -> Void) throws {
         // --- Open input (path-based; set the interrupt callback first so cancel aborts a slow demux) ---
         var inFmt = avformat_alloc_context()
         guard inFmt != nil else { throw TranscodeError.unreadable }
@@ -114,6 +116,8 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
         guard avcodec_open2(vDecCtx, vDecCodec, nil) >= 0 else {
             throw TranscodeError.decoderUnavailable(vDecCodecName)
         }
+        onLog("Input: \(vDecCodecName) \(vDecCtx.pointee.width)×\(vDecCtx.pointee.height)")
+        onLog("Decode: requesting \(hwDeviceCtx != nil ? "VideoToolbox hardware" : "software (\(ProcessInfo.processInfo.activeProcessorCount) cores)")")
 
         // --- Optional audio stream: decide copy vs. reject up front ---
         var aInStream: UnsafeMutablePointer<AVStream>?
@@ -122,6 +126,9 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
             let name = String(cString: avcodec_get_name(s.pointee.codecpar.pointee.codec_id))
             guard Self.copyableAudio.contains(name) else { throw TranscodeError.audioUnsupported(name) }
             aInStream = s
+            onLog("Audio: \(name) (stream copy)")
+        } else {
+            onLog("Audio: none")
         }
 
         // --- Target size / bitrate (shared sizing with the AVFoundation path) ---
@@ -194,6 +201,7 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
             throw TranscodeError.writeFailed
         }
         guard avformat_write_header(outFmt, nil) >= 0 else { throw TranscodeError.writeFailed }
+        onLog("Encoder: \(encName) → \(outSize.width)×\(outSize.height) @ ~\(bitrate / 1000) kbps")
 
         // --- Transcode loop ---
         let totalSeconds: Double = {
@@ -201,6 +209,8 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
             let d = Double(vInStream.pointee.duration) * av_q2d(vInStream.pointee.time_base)
             return d > 0 ? d : 0.1
         }()
+        onLog(String(format: "Duration: %.0fs%@", totalSeconds,
+                     settings.resolution.maxDimension != nil ? " · scaling on" : ""))
 
         var sws: UnsafeMutablePointer<SwsContext>?   // this FFmpeg build types SwsContext as a named struct
         defer { if sws != nil { sws_freeContext(sws) } }
@@ -219,6 +229,11 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
             let p = totalSeconds > 0 ? min(1, max(0, seconds / totalSeconds)) : 0
             if p - lastReported >= 0.01 { lastReported = p; onProgress(p) }
         }
+        // Live throughput diagnostics for the on-card log.
+        let startWall = Date()
+        var frames = 0
+        var lastFpsEmit = Date.distantPast
+        var loggedDecodePath = false
 
         // Encode one scaled frame (or nil to flush) and drain the encoder into the muxer.
         func drainEncoder(_ frame: UnsafeMutablePointer<AVFrame>?) throws {
@@ -246,6 +261,10 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
                 // A VideoToolbox-decoded frame is a GPU surface — copy it down to a CPU frame (NV12) so we
                 // can scale/encode it. A software-decoded frame is already in system memory.
                 let usingHW = decFrame!.pointee.format == AV_PIX_FMT_VIDEOTOOLBOX.rawValue
+                if !loggedDecodePath {
+                    loggedDecodePath = true
+                    onLog("Decode path: \(usingHW ? "hardware (VideoToolbox) ✓" : "software (VT unavailable) ⚠︎")")
+                }
                 var transferred: UnsafeMutablePointer<AVFrame>?
                 defer { if transferred != nil { av_frame_free(&transferred) } }
                 let src: UnsafeMutablePointer<AVFrame>?
@@ -298,6 +317,17 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
                 }
                 try drainEncoder(encodeFrame)
                 av_frame_unref(decFrame)
+
+                // Live throughput: emit an fps/progress line at most a couple times a second.
+                frames += 1
+                let now = Date()
+                if now.timeIntervalSince(lastFpsEmit) >= 0.5 {
+                    lastFpsEmit = now
+                    let elapsed = now.timeIntervalSince(startWall)
+                    let fpsNow = elapsed > 0 ? Double(frames) / elapsed : 0
+                    onLog(String(format: "▸ %.0f fps · frame %d · %d%%", fpsNow, frames,
+                                 Int((lastReported >= 0 ? lastReported : 0) * 100)))
+                }
             }
         }
 
@@ -335,6 +365,10 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
         report(totalSeconds)
 
         guard av_write_trailer(outFmt) >= 0 else { throw TranscodeError.writeFailed }
+        let elapsed = Date().timeIntervalSince(startWall)
+        onLog(String(format: "Done: %d frames in %.1fs (avg %.0f fps, %.1f× realtime)", frames, elapsed,
+                     elapsed > 0 ? Double(frames) / elapsed : 0,
+                     elapsed > 0 ? totalSeconds / elapsed : 0))
     }
 
     private func errString(_ code: Int32) -> String {

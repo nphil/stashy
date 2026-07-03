@@ -61,7 +61,8 @@ enum TranscodeCodec: String, CaseIterable, Identifiable {
 /// pick one per source without caring which.
 protocol OnDeviceTranscoder: AnyObject, Sendable {
     func run(input: URL, output: URL, settings: VideoTranscoder.Settings,
-             onProgress: @escaping @Sendable (Double) -> Void) async throws
+             onProgress: @escaping @Sendable (Double) -> Void,
+             onLog: @escaping @Sendable (String) -> Void) async throws
     func cancel()
 }
 
@@ -93,7 +94,9 @@ final class VideoTranscoder: OnDeviceTranscoder, @unchecked Sendable {
     /// Transcode `input` → `output`. `onProgress` is called (0…1) off the main actor as video packets are
     /// written. Throws on failure/cancel; the caller removes a partial `output`.
     func run(input: URL, output: URL, settings: Settings,
-             onProgress: @escaping @Sendable (Double) -> Void) async throws {
+             onProgress: @escaping @Sendable (Double) -> Void,
+             onLog: @escaping @Sendable (String) -> Void) async throws {
+        onLog("Engine: AVFoundation (VideoToolbox)")
         let asset = AVURLAsset(url: input)
         // Fail fast + clearly on containers AVFoundation can't demux (MKV/WebM etc.): otherwise
         // loadTracks just returns empty and the user sees a vague "no video track". These need the
