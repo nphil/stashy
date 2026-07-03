@@ -362,8 +362,9 @@ private struct DownloadCard: View {
         Text(text)
             .font(.caption2.weight(.bold))
             .foregroundStyle(color)
-            .lineLimit(1)
-            .fixedSize()   // keep each chip on one line; the row has room for both side by side
+            .lineLimit(1)   // single line WITHOUT fixedSize: two chips ("Downloaded" + "Transcoded") + the
+                            // controls must stay compressible, or the incompressible row stretched the whole
+                            // card past the screen edge (the transcoded-card width bug).
             .padding(.horizontal, 8).padding(.vertical, 3)
             .background(color.opacity(0.15), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
@@ -409,6 +410,48 @@ private struct TranscodePresetSheet: View {
     @State private var resolution: TranscodeResolution = .fhd1080
     @State private var quality: TranscodeQuality = .medium
     @State private var codec: TranscodeCodec = .hevc
+    @State private var detent: PresentationDetent = .large
+
+    /// Instant (pure-arithmetic) estimate of the output size and transcode time for the current presets,
+    /// shown inside the Start button. Mirrors the engine's own decisions: a same-codec/same-size job is a
+    /// near-instant stream copy (source size); otherwise the target video bitrate × duration, and a time
+    /// scaled by how many megapixels/sec the hardware pipeline sustains.
+    private var estimate: (size: String, time: String) {
+        let srcW = item.width ?? 1280, srcH = item.height ?? 720
+        let duration = item.scene?.files.first?.duration ?? 0
+        let out = VideoTranscoder.outputSize(naturalSize: CGSize(width: srcW, height: srcH),
+                                             maxDimension: resolution.maxDimension)
+        let srcCodec = (item.codec ?? "").lowercased()
+        let sameCodec = codec == .hevc ? (srcCodec.contains("hevc") || srcCodec.contains("h265"))
+                                       : (srcCodec.contains("h264") || srcCodec.contains("avc"))
+        let sameSize = out.width == srcW && out.height == srcH
+
+        // No re-encode: stream copy → source size, seconds.
+        if sameCodec && sameSize { return (item.sizeLabel ?? "—", "~a few seconds") }
+
+        let fps = 30.0   // source fps isn't stored; 30 is a safe basis for the estimate
+        var vbps = Double(VideoTranscoder.videoBitrate(width: out.width, height: out.height, fps: fps,
+                                                       quality: quality, codec: codec))
+        if sameCodec, let sb = item.bitRate, sb > 100_000 { vbps = min(vbps, Double(sb)) }   // never inflate
+        let audioBps = 128_000.0
+        let bytes = duration > 0 ? (vbps + audioBps) * duration / 8 : Double(item.totalBytes)
+        let sizeStr = ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+
+        // Time: total work ≈ outputMegapixels × fps × duration; the A-series pipeline (HW decode + GPU↔CPU
+        // + HW encode) sustains ~200 MP/s here. Stream-copy short-circuits above, so this is re-encode only.
+        let outMP = Double(out.width * out.height) / 1_000_000
+        let secs = duration > 0 ? outMP * fps * duration / 200 : 0
+        return (sizeStr, Self.shortDuration(secs))
+    }
+
+    private static func shortDuration(_ secs: Double) -> String {
+        guard secs >= 1 else { return "~a few seconds" }
+        let s = Int(secs.rounded())
+        if s < 60 { return "~\(s)s" }
+        let m = s / 60, r = s % 60
+        if m < 60 { return r > 0 ? "~\(m)m \(r)s" : "~\(m)m" }
+        return "~\(m / 60)h \(m % 60)m"
+    }
 
     var body: some View {
         NavigationStack {
@@ -440,7 +483,13 @@ private struct TranscodePresetSheet: View {
                         onStart(VideoTranscoder.Settings(resolution: resolution, quality: quality, codec: codec))
                         dismiss()
                     } label: {
-                        Text("Start Transcode").frame(maxWidth: .infinity)
+                        VStack(spacing: 2) {
+                            Text("Start Transcode").fontWeight(.semibold)
+                            Text("≈ \(estimate.size) · \(estimate.time)")
+                                .font(.caption2)
+                                .opacity(0.85)
+                        }
+                        .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
                 }
@@ -451,6 +500,7 @@ private struct TranscodePresetSheet: View {
                 ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() } }
             }
         }
-        .presentationDetents([.medium, .large])
+        // Open tall so the Start button is visible without scrolling; still draggable down to medium.
+        .presentationDetents([.medium, .large], selection: $detent)
     }
 }
