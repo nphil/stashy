@@ -180,6 +180,14 @@ final class AVPlaybackEngine: PlaybackEngine {
         if let stallObserver { NotificationCenter.default.removeObserver(stallObserver); self.stallObserver = nil }
         if let endObserver { NotificationCenter.default.removeObserver(endObserver); self.endObserver = nil }
         player.pause()
+        // Detach the render layer + backdrop so an engine swap (far-seek reinit / HLS fallback) doesn't
+        // strand the whole previous AVPlayer stack: `AVPlayerLayer.player` is a strong ref (tens of MB with
+        // the 15s forward buffer on 4K), and the backdrop's CADisplayLink would keep ticking at 20 Hz. Both
+        // removeFromSuperview calls are idempotent no-ops if the view was already swapped out.
+        hostView.player = nil
+        hostView.removeFromSuperview()
+        blurBackdrop.invalidate()
+        blurBackdrop.removeFromSuperview()
     }
 
     /// Compute the start-up buffer fill (0…1) and push it for the loading donut.

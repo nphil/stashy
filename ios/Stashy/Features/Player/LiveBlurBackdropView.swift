@@ -60,6 +60,14 @@ final class LiveBlurBackdropView: UIView, MTKViewDelegate {
         displayLink?.isPaused = (window == nil)
     }
 
+    /// Permanently stop the display link and drop the frame source. Called when the owning engine is torn
+    /// down (an engine swap on far-seek / HLS fallback) so a stale backdrop can't keep doing 20 Hz work.
+    func invalidate() {
+        displayLink?.invalidate()
+        displayLink = nil
+        output = nil
+    }
+
     fileprivate func step() {
         guard let output else { return }
         let time = output.itemTime(forHostTime: CACurrentMediaTime())
