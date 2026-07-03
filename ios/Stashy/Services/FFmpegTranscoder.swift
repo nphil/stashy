@@ -97,8 +97,21 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
             throw TranscodeError.decoderUnavailable(vDecCodecName)
         }
         defer { var p: UnsafeMutablePointer<AVCodecContext>? = vDecCtx; avcodec_free_context(&p) }
-        guard avcodec_parameters_to_context(vDecCtx, vInStream.pointee.codecpar) >= 0,
-              avcodec_open2(vDecCtx, vDecCodec, nil) >= 0 else {
+        guard avcodec_parameters_to_context(vDecCtx, vInStream.pointee.codecpar) >= 0 else {
+            throw TranscodeError.decoderUnavailable(vDecCodecName)
+        }
+        // Software HEVC/H.264 decode is the slow part (the remux path is fast precisely because it never
+        // decodes). Prefer VideoToolbox hardware decode; if the device context can't be created we simply
+        // fall through to a multithreaded software decode. `get_format` must return the VT pixel format
+        // for the hwaccel to engage; both must be set before avcodec_open2.
+        vDecCtx.pointee.thread_count = 0   // 0 = auto: use all cores for the software fallback
+        var hwDeviceCtx: UnsafeMutablePointer<AVBufferRef>?
+        if av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_VIDEOTOOLBOX, nil, nil, 0) >= 0 {
+            vDecCtx.pointee.hw_device_ctx = av_buffer_ref(hwDeviceCtx)
+            vDecCtx.pointee.get_format = transcodeGetHWFormat
+        }
+        defer { if hwDeviceCtx != nil { av_buffer_unref(&hwDeviceCtx) } }
+        guard avcodec_open2(vDecCtx, vDecCodec, nil) >= 0 else {
             throw TranscodeError.decoderUnavailable(vDecCodecName)
         }
 
@@ -154,6 +167,8 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
         if outFmt.pointee.oformat.pointee.flags & avfmtGlobalHeader != 0 {
             vEncCtx.pointee.flags |= codecFlagGlobalHeader
         }
+        // Ask the VideoToolbox encoder to favour speed/low-latency (no-op if the option is absent).
+        av_opt_set(vEncCtx.pointee.priv_data, "realtime", "true", 0)
         guard avcodec_open2(vEncCtx, encCodec, nil) >= 0 else {
             throw TranscodeError.encoderUnavailable(encName)
         }
@@ -227,35 +242,62 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
                 let r = avcodec_receive_frame(vDecCtx, decFrame)
                 if r == averrorEAGAIN || r == averrorEOF { break }
                 guard r >= 0 else { throw TranscodeError.ffmpeg("decode failed (\(errString(r)))") }
-                // Lazily build the scaler from the first real frame's format/size.
-                if sws == nil {
-                    sws = sws_getContext(decFrame!.pointee.width, decFrame!.pointee.height,
-                                         vDecCtx.pointee.pix_fmt,
-                                         Int32(outSize.width), Int32(outSize.height), AV_PIX_FMT_NV12,
-                                         swsBilinear, nil, nil, nil)
-                    guard sws != nil else { throw TranscodeError.ffmpeg("scaler init failed") }
+
+                // A VideoToolbox-decoded frame is a GPU surface — copy it down to a CPU frame (NV12) so we
+                // can scale/encode it. A software-decoded frame is already in system memory.
+                let usingHW = decFrame!.pointee.format == AV_PIX_FMT_VIDEOTOOLBOX.rawValue
+                var transferred: UnsafeMutablePointer<AVFrame>?
+                defer { if transferred != nil { av_frame_free(&transferred) } }
+                let src: UnsafeMutablePointer<AVFrame>?
+                if usingHW {
+                    transferred = av_frame_alloc()
+                    guard av_hwframe_transfer_data(transferred, decFrame, 0) >= 0 else {
+                        throw TranscodeError.ffmpeg("hw frame transfer failed")
+                    }
+                    src = transferred
+                } else {
+                    src = decFrame
                 }
-                let nv12 = av_frame_alloc()
-                defer { var f: UnsafeMutablePointer<AVFrame>? = nv12; av_frame_free(&f) }
-                nv12!.pointee.format = Int32(AV_PIX_FMT_NV12.rawValue)
-                nv12!.pointee.width = Int32(outSize.width)
-                nv12!.pointee.height = Int32(outSize.height)
-                guard av_frame_get_buffer(nv12, 0) >= 0,
-                      sws_scale_frame(sws, nv12, decFrame) >= 0 else {
-                    throw TranscodeError.ffmpeg("scale failed")
+
+                let sW = Int(src!.pointee.width), sH = Int(src!.pointee.height)
+                let srcFmt = AVPixelFormat(rawValue: src!.pointee.format) ?? AV_PIX_FMT_NV12
+                let best = decFrame!.pointee.best_effort_timestamp
+
+                // Fast path: the frame is already NV12 at the target size (common for a hardware-decoded
+                // same-resolution HEVC→HEVC) — hand it straight to the encoder, no scale/convert.
+                var scaled: UnsafeMutablePointer<AVFrame>?
+                defer { if scaled != nil { av_frame_free(&scaled) } }
+                let encodeFrame: UnsafeMutablePointer<AVFrame>?
+                if srcFmt == AV_PIX_FMT_NV12, sW == outSize.width, sH == outSize.height {
+                    encodeFrame = src
+                } else {
+                    if sws == nil {
+                        sws = sws_getContext(Int32(sW), Int32(sH), srcFmt,
+                                             Int32(outSize.width), Int32(outSize.height), AV_PIX_FMT_NV12,
+                                             swsBilinear, nil, nil, nil)
+                        guard sws != nil else { throw TranscodeError.ffmpeg("scaler init failed") }
+                    }
+                    scaled = av_frame_alloc()
+                    scaled!.pointee.format = Int32(AV_PIX_FMT_NV12.rawValue)
+                    scaled!.pointee.width = Int32(outSize.width)
+                    scaled!.pointee.height = Int32(outSize.height)
+                    guard av_frame_get_buffer(scaled, 0) >= 0,
+                          sws_scale_frame(sws, scaled, src) >= 0 else {
+                        throw TranscodeError.ffmpeg("scale failed")
+                    }
+                    encodeFrame = scaled
                 }
+
                 // Carry the source timestamp into the encoder's time base (keeps A/V in sync with the
                 // copied audio); fall back to a monotonic counter when the source has no PTS.
-                let best = decFrame!.pointee.best_effort_timestamp
                 if best != Int64.min {
-                    nv12!.pointee.pts = av_rescale_q(best, vInStream.pointee.time_base, vEncCtx.pointee.time_base)
-                    let sec = Double(best) * av_q2d(vInStream.pointee.time_base)
-                    report(sec)
+                    encodeFrame!.pointee.pts = av_rescale_q(best, vInStream.pointee.time_base, vEncCtx.pointee.time_base)
+                    report(Double(best) * av_q2d(vInStream.pointee.time_base))
                 } else {
-                    nv12!.pointee.pts = nextPts; nextPts += 1
+                    encodeFrame!.pointee.pts = nextPts; nextPts += 1
                 }
+                try drainEncoder(encodeFrame)
                 av_frame_unref(decFrame)
-                try drainEncoder(nv12)
             }
         }
 
