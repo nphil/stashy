@@ -57,12 +57,12 @@ struct ScenesView: View {
             ZStack(alignment: .topTrailing) {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                // The popover is hosted from a *stable sibling* of `content`, never as an overlay on it.
-                // `content` flips its `@ViewBuilder` branch (grid ⇄ full-screen spinner ⇄ empty state)
-                // every time a reload clears `items`; a popover attached to that churning subtree is torn
+                // The filter dropdown is hosted from a *stable sibling* of `content`, never as an overlay on
+                // it. `content` flips its `@ViewBuilder` branch (grid ⇄ full-screen spinner ⇄ empty state)
+                // every time a reload clears `items`; a panel attached to that churning subtree is torn
                 // down and re-presented on each branch flip — exactly the "tap a tag → window closes and
                 // reopens" bug. As a peer in the ZStack the anchor keeps its identity regardless of which
-                // branch `content` renders, so the popover stays put across reloads.
+                // branch `content` renders, so the dropdown stays put across reloads.
                 FilterPopoverAnchor(isPresented: $filterExpanded) {
                     SceneFilterPanel(query: $query)
                 }

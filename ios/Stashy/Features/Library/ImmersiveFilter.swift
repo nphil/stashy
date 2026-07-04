@@ -22,8 +22,16 @@ struct FilterFunnelButton: View {
     }
 }
 
-/// A stable, tiny top-trailing anchor that hosts the filter popover, kept in the list content (not the
-/// toolbar) so re-rendering on query changes never re-presents it. Attach to the list via `.overlay`.
+/// The filter panel presented as a **custom dropdown** just under the nav bar's funnel button — NOT a
+/// system `.popover`. Two reasons the popover was replaced:
+///  1. `.presentationCompactAdaptation(.popover)` always draws a speech-bubble arrow, and anchored near
+///     the top-right corner that arrow overlapped/clipped the funnel button.
+///  2. A popover attached to the old 1×1 anchor routinely missed presentation on the first toggle — the
+///     "have to press the filter button twice" bug.
+/// This dropdown is driven purely by the `isPresented` Bool (opens first-tap, every time), pins itself
+/// top-trailing below the bar with no arrow, and dismisses on tap-outside. It's placed as a stable
+/// top-trailing sibling of the list content in the `ZStack`, so it still survives `content`'s branch
+/// flips during reloads (the reason the anchor never lived on the churning toolbar item).
 struct FilterPopoverAnchor<Panel: View>: View {
     @Binding var isPresented: Bool
     @ViewBuilder var panel: () -> Panel
@@ -32,19 +40,35 @@ struct FilterPopoverAnchor<Panel: View>: View {
     @Environment(LibraryEdits.self) private var edits
 
     var body: some View {
-        Color.clear
-            .frame(width: 1, height: 1)
-            .padding(.trailing, 22)
-            .padding(.top, 2)
-            .popover(isPresented: $isPresented) {
+        ZStack(alignment: .topTrailing) {
+            if isPresented {
+                // Near-invisible tap-catcher across the whole screen → tap outside to dismiss, while the
+                // list stays visible behind the panel (the immersive look).
+                Rectangle()
+                    .fill(.black.opacity(0.001))
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture { isPresented = false }
+
                 panel()
-                    // Re-inject the observables the panel/tag editor rely on — presented content doesn't
-                    // always inherit them, and a missing one is a hard crash.
+                    // Re-inject the observables the panel/tag editor rely on (harmless if already inherited).
                     .environment(themeManager)
                     .environment(appState)
                     .environment(edits)
-                    .presentationCompactAdaptation(.popover)
+                    // The system popover used to supply the container chrome; provide it ourselves now.
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .stroke(.white.opacity(0.12), lineWidth: 1)
+                    )
+                    .shadow(color: .black.opacity(0.28), radius: 18, y: 10)
+                    .padding(.trailing, 10)
+                    .padding(.top, 6)
+                    .transition(.scale(scale: 0.94, anchor: .topTrailing).combined(with: .opacity))
             }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+        .animation(.spring(response: 0.30, dampingFraction: 0.84), value: isPresented)
     }
 }
 
