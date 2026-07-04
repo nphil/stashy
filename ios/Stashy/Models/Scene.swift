@@ -257,6 +257,20 @@ extension StashScene {
         return appendingAPIKey(apiKey, to: urlString)
     }
 
+    /// Absolute URL (same scheme/host/port as this scene's streams, with the API key) for a file the
+    /// Stashy Companion plugin serves at a `/plugin/<id>/assets/…` path. The plugin records that path on
+    /// the scene's custom_fields after a transcode; the app turns it into a downloadable URL here.
+    func companionFileURL(path: String, apiKey: String) -> URL? {
+        guard let base = sceneStreams.first?.url,
+              var comps = URLComponents(string: base) else { return nil }
+        comps.path = path
+        comps.fragment = nil
+        var items = (comps.queryItems ?? []).filter { $0.name != "apikey" && $0.name != "resolution" }
+        if !apiKey.isEmpty { items.append(URLQueryItem(name: "apikey", value: apiKey)) }
+        comps.queryItems = items.isEmpty ? nil : items
+        return comps.url
+    }
+
     /// Lowercased container extension from the primary file's basename (e.g. "mp4", "mkv").
     var fileContainer: String {
         guard let basename = files.first?.basename,
