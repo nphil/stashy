@@ -76,10 +76,13 @@ struct ContentView: View {
     @Environment(AppState.self) private var appState
 
     var body: some View {
-        if appState.isAuthenticated {
-            LibraryView()
-        } else {
-            LoginView()
+        Group {
+            if appState.isAuthenticated {
+                LibraryView()
+            } else {
+                LoginView()
+            }
         }
+        .debugScreenshotOverlay()
     }
 }

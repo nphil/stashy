@@ -197,9 +197,22 @@ struct SettingsView: View {
                         }
                         .padding(.vertical, 2)
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Topic / channel")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            HStack {
+                                Text("Topic / channel")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                // ntfy has no delete API, so a fresh random topic is the way to "clear":
+                                // old messages orphan and auto-expire on their own.
+                                Button {
+                                    let fresh = "stashy-dbg-\(UUID().uuidString.prefix(8).lowercased())"
+                                    RemoteLog.topic = fresh
+                                    debugTopic = fresh
+                                } label: {
+                                    Label("New topic", systemImage: "arrow.triangle.2.circlepath")
+                                        .font(.caption)
+                                }
+                            }
                             TextField("stashy-dbg-…", text: $debugTopic)
                                 .autocorrectionDisabled()
                                 .textInputAutocapitalization(.never)
@@ -212,7 +225,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Diagnostics")
                 } footer: {
-                    Text("Streams playback/transcode diagnostics to an ntfy server + topic so they can be read back off-device for troubleshooting. Point \"Log server\" at a self-hosted ntfy (e.g. an Unraid container) to keep the stream private; leave it as https://ntfy.sh to use the public server (the topic is then readable by anyone who knows it — don't log secrets). Off by default. (Telemetry is temporary and will be removed.)")
+                    Text("Streams playback/transcode diagnostics (and screenshots via the floating camera button) to an ntfy server + topic. Point \"Log server\" at a self-hosted ntfy (e.g. an Unraid container) to keep it private; on https://ntfy.sh the topic is readable by anyone who knows it. ntfy has no delete command — messages auto-expire (public: ~12h; attachments ~3h) and \"New topic\" abandons the old channel so it clears itself. To wipe on demand, self-host with a short cache-duration / attachment-expiry-duration. Off by default; telemetry is temporary and will be removed.")
                 }
 
                 // About section
