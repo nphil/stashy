@@ -235,23 +235,32 @@ def build_transcode_cmd(src, dst, codec, target_h, cq, ffmpeg, engine, gpu_decod
     but scale on the CPU (frames land in system memory) before NVENC re-encodes — both heavy codec ops
     stay on the Tesla P40 while dodging the pix_fmt fragility of the fully-on-card scale_cuda filter.
     """
-    # target_h <= 0 → keep the source resolution (Original): omit the scale filter entirely, which is also
-    # the right thing for portrait / non-standard videos (no accidental re-scale).
-    vf = ["-vf", "scale=-2:{0}".format(int(target_h))] if int(target_h) > 0 else []
+    # Video filter chain: optional downscale, then ALWAYS `format=yuv420p`. The explicit format conversion
+    # (8-bit 4:2:0) is what makes hevc_nvenc accept 10-bit HDR iPhone footage — feeding it a 10-bit surface
+    # while it's configured for 8-bit is the classic NVENC "-22 Invalid argument / no packets" init failure.
+    # target_h <= 0 keeps the source resolution (Original — portrait-safe, no re-scale).
+    def _vf(extra):
+        parts = []
+        if int(target_h) > 0:
+            parts.append("scale=-2:{0}".format(int(target_h)))
+        parts.append(extra)
+        return ["-vf", ",".join(parts)]
+
     pre = [ffmpeg, "-y", "-hide_banner"]
     if engine == "hevc_nvenc" and gpu_decode:
-        pre += ["-hwaccel", "cuda"]  # NVDEC decode; frames land in system mem for the CPU scale
+        pre += ["-hwaccel", "cuda"]  # NVDEC decode; frames land in system mem for the CPU scale/format
     cmd = pre + ["-i", src]
     if engine == "libsvtav1":
-        cmd += vf + ["-c:v", "libsvtav1", "-preset", str(av1_preset),
-                     "-crf", str(cq), "-pix_fmt", "yuv420p"]
+        cmd += _vf("format=yuv420p") + ["-c:v", "libsvtav1", "-preset", str(av1_preset),
+                                        "-crf", str(cq), "-pix_fmt", "yuv420p"]
     elif engine == "hevc_nvenc":
-        cmd += vf + ["-c:v", "hevc_nvenc", "-preset", "p5",
-                     "-rc", "vbr", "-cq", str(cq), "-b:v", "0",
-                     "-tag:v", "hvc1", "-pix_fmt", "yuv420p"]
+        # -bf 0: Pascal (Tesla P40) NVENC has no HEVC B-frame support; forcing 0 avoids a config reject.
+        cmd += _vf("format=yuv420p") + ["-c:v", "hevc_nvenc", "-preset", "p5",
+                                        "-rc", "vbr", "-cq", str(cq), "-b:v", "0", "-bf", "0",
+                                        "-tag:v", "hvc1", "-pix_fmt", "yuv420p"]
     else:  # libx265 — CPU HEVC, last-resort fallback only
-        cmd += vf + ["-c:v", "libx265", "-preset", "medium",
-                     "-crf", str(cq), "-tag:v", "hvc1", "-pix_fmt", "yuv420p"]
+        cmd += _vf("format=yuv420p") + ["-c:v", "libx265", "-preset", "medium",
+                                        "-crf", str(cq), "-tag:v", "hvc1", "-pix_fmt", "yuv420p"]
     cmd += ["-c:a", "aac", "-b:a", "160k", "-ac", "2",
             "-movflags", "+faststart",
             # Force the MP4 muxer: the output is written to a `.part` temp name, and ffmpeg can't infer
@@ -346,6 +355,19 @@ def run_transcode(stash, args, settings):
     if not os.path.isfile(src):
         raise RuntimeError("transcode: source file not readable on server: {}".format(src))
     duration = float(scene["files"][0].get("duration") or 0)
+
+    # Probe the source ONCE (no spam) — its pix_fmt / HDR transfer explains NVENC init failures on
+    # 10-bit HDR iPhone footage, and is logged so we can see exactly what we're feeding the encoder.
+    sprobe = ffprobe_streams(src, ffprobe)
+    sv = {}
+    if sprobe:
+        sv = next((s for s in sprobe.get("streams", []) if s.get("codec_type") == "video"), {})
+    src_pix = (sv.get("pix_fmt") or "").lower()
+    src_transfer = (sv.get("color_transfer") or "").lower()
+    src_ten_bit = "10" in src_pix or "p010" in src_pix or "12" in src_pix
+    log_info("Source: {} {}x{} {} transfer={}{}".format(
+        sv.get("codec_name", "?"), sv.get("width", "?"), sv.get("height", "?"),
+        src_pix or "?", src_transfer or "-", " 10-bit" if src_ten_bit else ""))
 
     # Resolve the actual scale height in Python (downscale only, kept even for yuv420p) so the ffmpeg
     # `-vf` is a plain `scale=-2:<int>` — no quotes / no `min(,)` comma to escape. Passing a quoted
