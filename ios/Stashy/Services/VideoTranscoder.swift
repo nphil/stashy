@@ -37,6 +37,15 @@ enum TranscodeQuality: String, CaseIterable, Identifiable, Codable {
         case .high: return 7.0
         }
     }
+    /// Ceiling as a fraction of the SOURCE bitrate — a re-encode must never inflate bitrate (High ≤
+    /// source; Balanced/Small progressively smaller). Mirrors the server plugin's presets.
+    var sourceCapFraction: Double {
+        switch self {
+        case .high: return 1.0
+        case .medium: return 0.6
+        case .low: return 0.35
+        }
+    }
 }
 
 enum TranscodeCodec: String, CaseIterable, Identifiable, Codable {
@@ -115,8 +124,10 @@ final class VideoTranscoder: OnDeviceTranscoder, @unchecked Sendable {
         let fps = nominalFPS > 0 ? Double(nominalFPS) : 30
 
         let size = Self.outputSize(naturalSize: naturalSize, maxDimension: settings.resolution.maxDimension)
+        let sourceBitrate = Int((try? await videoTrack.load(.estimatedDataRate)) ?? 0)
         let bitrate = Self.videoBitrate(width: size.width, height: size.height, fps: fps,
-                                        quality: settings.quality, codec: settings.codec)
+                                        quality: settings.quality, codec: settings.codec,
+                                        sourceBitrate: sourceBitrate)
         onLog("Input: \(Int(abs(naturalSize.width)))×\(Int(abs(naturalSize.height))) @ \(Int(fps.rounded())) fps")
         onLog("Encoder: \(settings.codec.label) → \(size.width)×\(size.height) @ ~\(bitrate / 1000) kbps")
         onLog(String(format: "Duration: %.0fs", max(duration.seconds, 0)))
@@ -299,10 +310,16 @@ final class VideoTranscoder: OnDeviceTranscoder, @unchecked Sendable {
     }
 
     static func videoBitrate(width: Int, height: Int, fps: Double,
-                             quality: TranscodeQuality, codec: TranscodeCodec) -> Int {
+                             quality: TranscodeQuality, codec: TranscodeCodec,
+                             sourceBitrate: Int = 0) -> Int {
         let megapixels = Double(width * height) / 1_000_000
         let mbps = quality.mbpsPerMegapixel * megapixels * (fps / 30) * codec.bitrateFactor
-        let bits = mbps * 1_000_000
+        var bits = mbps * 1_000_000
+        // Cap at a fraction of the source so a re-encode never inflates bitrate (an 8 Mbps source must
+        // not become 20 Mbps). CQ-like sizing still applies below the cap.
+        if sourceBitrate > 0 {
+            bits = min(bits, Double(sourceBitrate) * quality.sourceCapFraction)
+        }
         return max(500_000, Int(bits))
     }
 

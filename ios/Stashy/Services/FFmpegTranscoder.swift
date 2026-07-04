@@ -160,13 +160,15 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
         if fr.num <= 0 || fr.den <= 0 { fr = vInStream.pointee.r_frame_rate }
         if fr.num <= 0 || fr.den <= 0 { fr = AVRational(num: 30, den: 1) }
         let fps = av_q2d(fr)
+        // Cap the preset at a fraction of the source bitrate (High ≤ source) so a re-encode never
+        // inflates bitrate — across codecs too (H.264 → HEVC), not just same-codec.
+        let srcBitrate = vCodecpar.pointee.bit_rate
         var bitrate = VideoTranscoder.videoBitrate(width: outSize.width, height: outSize.height,
                                                    fps: fps > 0 ? fps : 30,
-                                                   quality: settings.quality, codec: settings.codec)
-        // Never spend effort to make the file bigger: cap a same-codec re-encode at the source bitrate.
-        let srcBitrate = vCodecpar.pointee.bit_rate
+                                                   quality: settings.quality, codec: settings.codec,
+                                                   sourceBitrate: srcBitrate > 100_000 ? Int(srcBitrate) : 0)
         if vCodecpar.pointee.codec_id == targetCodecId, srcBitrate > 100_000 {
-            bitrate = min(bitrate, Int(srcBitrate))
+            bitrate = min(bitrate, Int(srcBitrate))   // same-codec: also never exceed exact source
         }
 
         // --- Output MP4 + VideoToolbox encoder ---

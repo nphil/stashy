@@ -86,8 +86,9 @@ final class DownloadItem: Identifiable {
     // MARK: Staging options (chosen on the card before Start; only meaningful while `.staged`)
     /// Download a Stash server-transcoded copy (H.264 at `serverResolution`) instead of the original file.
     var useServerTranscode = false
-    /// Target resolution for a server transcode (H.264 only — Stash can't emit HEVC).
-    var serverResolution: ServerQuality = .p1080
+    /// Target resolution for a server transcode. Defaults to Original (keep source resolution) — the user
+    /// picks 1080p/720p/480p only when they want to downscale.
+    var serverResolution: ServerQuality = .original
     /// Multi-connection (parallel byte-range) vs single connection. Only applies to an ORIGINAL download —
     /// a live server transcode has no size/range support, so it's always single-connection.
     var multiThread = true
