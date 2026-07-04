@@ -103,6 +103,34 @@ core both items reuse.
   scaled-edit / `VTFrameProcessor` (iOS 18+ has a motion-interpolation/optical-flow API worth checking).
   Must stay on-device, respect thermal/battery limits (interpolate only around the current playhead, not
   the whole file), and gate on device capability. Heaviest item here — spike the API options first.
+- **Mini-player / undock the player (owner-requested 2026-07-04).** Let the player detach from the scene
+  screen into a floating, draggable mini-player (à la Apple Podcasts / YouTube PiP) so it keeps playing
+  while the user browses performers, links, other scenes, etc. Would make navigation-away seamless (see
+  below) and enable true picture-in-picture. Needs the player model + engine to outlive `SceneDetailView`
+  — hoist it to an app-level holder (an environment-scoped `NowPlaying` coordinator that owns the single
+  `ScenePlayerModel`) rather than per-screen `@State`, and reuse `AVPictureInPictureController` for system
+  PiP. **Related:** the current "resume where you were on return from a performer/link" is a *safe reload*
+  (teardown + resume-seek), because keeping the engine alive across a `path=[]` pop-to-root would crash on
+  dealloc; the mini-player's app-level model is what makes a *zero-cost* pause/hand-off safe.
+- **★ Zoom-follow / auto-tracking zoom (owner-requested 2026-07-04) — spike needed.** While zoomed into a
+  video, a player tool lets the user **pause, free-draw a region/shape with a finger on the frozen frame,
+  confirm it, and then on play the zoom auto-pans/scales to keep that region framed as it moves** — so the
+  user doesn't have to keep flicking to follow a subject. This is **on-device visual object tracking**
+  driving the existing pinch-zoom pan offset:
+  - **Tracking engine:** Vision `VNTrackObjectRequest` / `VNTrackingRequest` (seeded with the drawn
+    region's bounding box), or the newer object-tracking APIs, run frame-by-frame (or on a sampled
+    cadence) to produce a moving bounding box; smooth it (low-pass / prediction) and map it to the
+    `ZoomablePlayerSurface` pan+scale so the subject stays centred. Free-form shape → use its bounding box
+    (optionally its centroid) for the tracker.
+  - **Sync:** tracking must run against the *displayed* frames (works for every playback mode — direct,
+    remux, on-device transcode, server HLS) via the player's `AVPlayerItemVideoOutput` pixel buffers
+    (already tapped for the live blur), so it's engine-agnostic.
+  - **Constraints:** on-device only, gated on device capability, and — per the hard rule — it must **never
+    delay/stutter playback**: run tracking off the render path (sampled, with prediction between samples),
+    drop to manual pan if it can't keep up, and let the user cancel/redraw. Clarifying Qs to resolve at
+    build time: single region only or multiple? re-acquire automatically if the subject leaves frame &
+    returns, or stop? keep zoom scale fixed or also auto-zoom to the region size? Heaviest CV item on the
+    roadmap — spike Vision tracking accuracy/perf on a real clip first.
 
 1. **Routing brain — capability detection** ✅
    - **Direct play** — H.264 in mp4/mov/m4v → AVPlayer plays the file URL directly.
