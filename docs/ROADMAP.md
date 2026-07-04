@@ -320,6 +320,26 @@ blocks, both first-class iOS APIs:
 
 ## Downloads & offline
 
+- **★ Resumable (checkpointed) on-device transcode — owner-requested 2026-07-04.** Today a transcode is a
+  single-pass whole-file encode whose MP4 index (`moov`) is only written by `av_write_trailer` at the very
+  end, so an interruption leaves an unusable partial and the restart re-runs from 0%. (VideoToolbox is also
+  foreground-only, so backgrounding must stop it regardless — but the *restart-from-0* is the real pain.)
+  Make it resume from where it stopped:
+  - **Approach A (preferred) — fragmented-MP4 output + append.** Write the transcode as a *fragmented* MP4
+    (`frag_keyframe+empty_moov+default_base_moof`, exactly like `FFmpegStreamTranscoder`), so the partial
+    file is valid up to the last complete fragment. Persist a checkpoint = last-muxed media timestamp. On
+    resume, reopen/append, `av_seek_frame` the input to that keyframe, re-init decoder+encoder, and keep
+    muxing fragments with continuous timestamps. Reuses the M-A fragmented-mux code; the final file is a
+    fragmented MP4 (AVPlayer plays it fine). Caveat: encoder settings must be identical across sessions,
+    and appending via libavformat needs care (likely concatenate fragment byte-ranges rather than
+    re-running `write_header`).
+  - **Approach B — segment & concat.** Encode fixed media chunks (e.g. 15–30s) as complete standalone
+    MP4s into a temp dir; persist which segments are done; resume from the next; concat all via the
+    `concat` demuxer / stream-copy remux at the end. Each segment is GOP-aligned (independent encode), so
+    stitching is clean; minor AAC-priming gaps at joins are acceptable for a download.
+  - Either way: persist the checkpoint + settings across launches (so an accidental app-kill resumes too),
+    show a "Resume" affordance, and keep it off the main thread. Pairs with the transcode auto-resume that
+    already re-kicks on foreground — that hook would resume from the checkpoint instead of 0%.
 - **Download videos for offline viewing**, with a choice of source:
   - **Original file** (as-is from Stash). ✅
   - **Stash-transcoded version** (ask the server for a smaller/compatible encode).
