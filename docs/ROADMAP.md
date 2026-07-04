@@ -65,6 +65,28 @@ core both items reuse.
   bar. Applies to **fullscreen only**; the inline compact bar stays as-is. Reuse the existing gear
   (quality), volume, and status-badge components, re-laid-out for the immersive layout. Owner is exacting
   about native feel — match Apple/Netflix animation physics and spacing.
+- **Custom WYSIWYG player-control layout editor (Settings) — owner-requested 2026-07-04.** A Settings
+  entry opens a "custom layout" mode where the user hand-places the on-video controls, with **separate
+  layouts for landscape (fullscreen) and portrait (inline)**. The default ships as the Netflix-style
+  layout above; this lets power users rearrange it (so this item can *supersede / extend* the Netflix
+  rework rather than duplicate it).
+  - **WYSIWYG canvas:** the editor shows a representative **fullscreen still behind the controls** so
+    placement is judged against real framing. Use a **freely-distributable, video-related image** — a
+    **Big Buck Bunny** frame (Blender Foundation, **CC-BY 3.0** — free to use *and* redistribute, bundle
+    the attribution) is a good fit; alternatively a generated gradient/placeholder to avoid any asset
+    licensing entirely.
+  - **Drag from a side palette:** a panel listing every available control — play/pause, rewind & forward
+    (skip ±10s), exit ✕, settings/gear (quality), volume, scrubber/progress bar, playback-speed, stats,
+    and the quality/method status badges. Drag a control onto the canvas to place it; drag an placed one
+    to move or back to the palette to remove.
+  - **Snap-to-grid:** while dragging, **show the grid slots** the control can drop into so everything
+    stays aligned; **button sizes are predetermined per control** (a small set of size classes) so the
+    composed layout always looks clean. Enforce sane constraints (no overlaps; keep mandatory controls
+    like the scrubber present).
+  - **Persistence + render:** store the two per-orientation layouts (e.g. a `PlayerControlLayout` of
+    `{controlID, gridSlot, sizeClass}`); `PlayerControlsView` renders from the saved layout, falling back
+    to the default. Sizeable feature — spike the drag/grid/drop-target interaction and the layout model
+    first; reuse the existing control components as the draggable pieces.
 - **Playback speed control** in the player menu (e.g. 0.25× / 0.5× / 0.75× / 1× / 1.25× / 1.5× / 2×).
   Drive via `AVPlayer.rate` / `AVPlayerItem.audioTimePitchAlgorithm`. Add it to the overlay controls
   (alongside the quality gear).
