@@ -524,16 +524,23 @@ final class DownloadManager {
             networkFails = 0
             let result = update.result
 
-            // Progress: prefer the Job's 0…1, else derive from out_time/duration in the status blob.
+            // Live % comes from the Job (log.progress → Job.progress).
             if let p = update.job?.progress, p >= 0 {
                 item.serverJobProgress = min(1, p)
-            } else if let ot = result?.out_time, let d = result?.duration, d > 0 {
-                item.serverJobProgress = min(1, ot / d)
             }
-            if let r = result, r.status == "running" {
-                item.transcodeStatus = companionStatusLine(r)
-                let stage = r.engine ?? "encoding"
-                if stage != lastStage { lastStage = stage; appendTranscodeLog(item, "Encoding · \(stage)") }
+            // Rich live stats (size/ETA/fps/speed) come from the plugin's SERVED progress file — the
+            // plugin no longer writes them to the scene, so a running transcode fires no Scene.Update
+            // hooks. custom_fields only carries the terminal ready/failed (handled below).
+            if result?.status != "ready", result?.status != "failed" {
+                if let stats = await fetchCompanionProgress(scene, apiKey: apiKey) {
+                    let line = companionStatusLine(stats)
+                    if !line.isEmpty { item.transcodeStatus = line }
+                    let stage = stats.engine ?? "encoding"
+                    if stage != lastStage { lastStage = stage; appendTranscodeLog(item, "Encoding · \(stage)") }
+                    if (update.job?.progress ?? -1) < 0, let ot = stats.out_time, let d = stats.duration, d > 0 {
+                        item.serverJobProgress = min(1, ot / d)
+                    }
+                }
             }
 
             // Success is authoritative from the durable result (ready + a path), regardless of Job state.
@@ -592,6 +599,20 @@ final class DownloadManager {
         item.error = nil
         startConnections(item)                       // → .downloading, multi-connection byte transfer
         fetchSidecar(item, scene: transcodedScene, apiKey: item.apiKey, transcoded: true)
+    }
+
+    /// Fetch the plugin's SERVED live-stats file for a scene over plain HTTP. Returns nil until the plugin
+    /// has written it (or once it's cleared at completion). Keeps live progress off the scene's
+    /// custom_fields entirely, so a running transcode triggers no Scene.Update hooks / queued tasks.
+    private func fetchCompanionProgress(_ scene: StashScene, apiKey: String) async -> TranscodeResult? {
+        let path = "/plugin/\(StashCompanion.pluginID)/assets/cache/scene\(scene.id).progress.json"
+        guard let url = scene.companionFileURL(path: path, apiKey: apiKey) else { return nil }
+        var req = URLRequest(url: url)
+        req.cachePolicy = .reloadIgnoringLocalCacheData   // always read the freshest stats
+        req.timeoutInterval = 8
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return try? JSONDecoder().decode(TranscodeResult.self, from: data)
     }
 
     /// Append a distinct event line to the transcode log box (bounded), mirroring the on-device path.
