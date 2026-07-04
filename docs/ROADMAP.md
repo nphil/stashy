@@ -56,6 +56,32 @@ core both items reuse.
   server-side override the user selects. Wire through `ScenePlayerModel` route override + `Player
   ControlsView` overlay.
 
+### ★ PRIORITY — Player UI rework + playback speed / AI slow-motion (owner-requested 2026-07-04)
+
+- **Netflix-style fullscreen player UI.** Rework the fullscreen controls layout taking the **Netflix
+  iPhone player as the design reference** — the large centred transport cluster (back-10s / play-pause /
+  forward-10s), a clean top bar (title + close), a bottom scrubber with elapsed/remaining, and a small
+  cluster of secondary controls (speed, audio/quality, episodes) rather than everything crammed on one
+  bar. Applies to **fullscreen only**; the inline compact bar stays as-is. Reuse the existing gear
+  (quality), volume, and status-badge components, re-laid-out for the immersive layout. Owner is exacting
+  about native feel — match Apple/Netflix animation physics and spacing.
+- **Playback speed control** in the player menu (e.g. 0.25× / 0.5× / 0.75× / 1× / 1.25× / 1.5× / 2×).
+  Drive via `AVPlayer.rate` / `AVPlayerItem.audioTimePitchAlgorithm`. Add it to the overlay controls
+  (alongside the quality gear).
+- **Slow-motion mode with two audio behaviours:** when playing below 1×, either (a) **mute audio**, or
+  (b) **keep audio at normal (1×) speed/pitch** while the video runs slow — an explicit toggle, since
+  pitch-corrected slowed audio is usually undesirable. (Implementation note: AVFoundation slows audio
+  with the video; "normal-speed audio under slow video" needs decoupling the audio timeline — investigate
+  `AVSampleBufferAudioRenderer` / a separate normal-rate audio pass, or simply mute below a threshold.)
+- **AI / motion-interpolated slow-mo (on-device).** When the source frame rate is too low for smooth
+  slow motion (e.g. slowing 24–30 fps to 0.25× looks choppy/blurry from frame duplication), **synthesise
+  intermediate frames on-device** so the slowed footage looks smooth. Candidate approaches to research:
+  Apple's **Vision / optical-flow** APIs (`VNGenerateOpticalFlowRequest`) to warp between frames, a
+  **Core ML frame-interpolation model** (RIFE/FILM-class, converted to Core ML), or `AVFoundation`'s
+  scaled-edit / `VTFrameProcessor` (iOS 18+ has a motion-interpolation/optical-flow API worth checking).
+  Must stay on-device, respect thermal/battery limits (interpolate only around the current playhead, not
+  the whole file), and gate on device capability. Heaviest item here — spike the API options first.
+
 1. **Routing brain — capability detection** ✅
    - **Direct play** — H.264 in mp4/mov/m4v → AVPlayer plays the file URL directly.
    - **HLS** — everything else (HEVC, H.264-in-MKV, MPEG4-ASP/VC1/VP9/AV1, 4:2:2/4:4:4 HEVC that Apple
