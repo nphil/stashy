@@ -92,19 +92,24 @@ final class RemoteLog: @unchecked Sendable {
                 self.post("=== PREVIOUS SESSION TAIL (recovered) ===\n" + prev, wait: nil)
                 try? FileManager.default.removeItem(at: self.tailFile)
             }
-            // Flush every 6s: ntfy.sh free rate-limits per device IP (~1 request / 5s sustained), so a
-            // faster cadence gets posts dropped (429) and blacks out the stream. One batched post per 6s
-            // stays under the limit. (Transport is ntfy because it's the only HTTPS/443 endpoint readable
-            // back from the agent sandbox — MQTT brokers' wss ports and kvdb.io weren't reachable/usable.)
+            // ntfy.sh free limits (per publishing IP): 250 messages/day, request bucket 60 burst refilling
+            // 1 per 5s, 4096 bytes/message. We flush at most one batched POST per 10s and SKIP empty
+            // flushes, so an idle app sends nothing — the 250/day budget is spent only on real events, not a
+            // fixed heartbeat. Big bursts are split into ≤4096-byte messages; a daily-budget guard backs off
+            // instead of hammering 429s. (Transport is ntfy because it's the only HTTPS/443 endpoint
+            // readable back from the agent sandbox — MQTT wss ports and kvdb.io weren't usable.)
             let t = DispatchSource.makeTimerSource(queue: self.queue)
-            t.schedule(deadline: .now() + 6, repeating: 6)
+            t.schedule(deadline: .now() + 10, repeating: 10)
             t.setEventHandler { [weak self] in self?.flushLocked() }
             t.resume()
             self.timer = t
 
+            // Sample memory every 5s but only *emit* on a meaningful move (≥8 MB) or once a minute — so the
+            // jetsam "climbs then dies" trend is still captured without a constant 5s line that would drain
+            // the daily message budget in ~25 min.
             let m = DispatchSource.makeTimerSource(queue: self.queue)
             m.schedule(deadline: .now() + 5, repeating: 5)
-            m.setEventHandler { RemoteLog.shared.log("mem \(Int(RemoteLog.memoryMB()))MB") }
+            m.setEventHandler { [weak self] in self?.sampleMemory() }
             m.resume()
             self.memTimer = m
         }
@@ -141,16 +146,77 @@ final class RemoteLog: @unchecked Sendable {
         }
     }
 
+    // ntfy.sh caps: 4096 bytes/message and 250 messages/day per publishing IP. Keep a safety margin.
+    private let maxMessageBytes = 3800
+    private let dailyMessageBudget = 248
+    private var sentToday = 0
+    private var sentDayStamp = -1
+    private var budgetWarned = false
+
+    /// Emit a memory line only when it moved enough to matter, or once a minute — so the periodic sampler
+    /// doesn't turn into a fixed message heartbeat that drains the daily budget.
+    private func sampleMemory() {
+        let mb = RemoteLog.memoryMB()
+        let now = Date()
+        guard abs(mb - lastMemLogged) >= 8 || now.timeIntervalSince(lastMemLogAt) >= 60 else { return }
+        lastMemLogged = mb
+        lastMemLogAt = now
+        log("mem \(Int(mb))MB")
+    }
+    private var lastMemLogged = -1000.0
+    private var lastMemLogAt = Date.distantPast
+
+    private func trimBufferKeepingFront() {
+        if buffer.count > 400 { buffer.removeLast(buffer.count - 400) }
+    }
+
     private func flushLocked() {
         // Persist the rolling tail to disk so a hard crash's final moment is recovered next launch.
         if !tail.isEmpty {
             try? tail.joined(separator: "\n").write(to: tailFile, atomically: true, encoding: .utf8)
         }
         guard !buffer.isEmpty else { return }
-        let body = buffer.joined(separator: "\n")
+
+        // Roll the daily message counter over at UTC midnight.
+        let day = Int(Date().timeIntervalSince1970 / 86_400)
+        if day != sentDayStamp { sentDayStamp = day; sentToday = 0; budgetWarned = false }
+
+        // Pack the buffered lines into as few messages as possible, each ≤ the 4096-byte per-message cap.
+        let lines = buffer
         buffer.removeAll()
-        // Resilient post: if the request fails (e.g. a rate-limit 429), re-queue the batch so it's
-        // retried on the next flush instead of being lost.
+        var chunks: [String] = []
+        var current = ""
+        for line in lines {
+            let clamped = RemoteLog.clampToBytes(line, maxMessageBytes)
+            if current.isEmpty {
+                current = clamped
+            } else if current.utf8.count + 1 + clamped.utf8.count <= maxMessageBytes {
+                current += "\n" + clamped
+            } else {
+                chunks.append(current); current = clamped
+            }
+        }
+        if !current.isEmpty { chunks.append(current) }
+
+        for (i, chunk) in chunks.enumerated() {
+            // Daily budget guard: rather than 429-hammer the public server, re-buffer the remainder and
+            // stop for now (it drains on the next UTC day, or immediately on a self-hosted server).
+            if sentToday >= dailyMessageBudget {
+                if !budgetWarned {
+                    budgetWarned = true
+                    tail.append("⚠︎ ntfy daily message budget (\(dailyMessageBudget)) reached — pausing sends")
+                }
+                buffer.insert(contentsOf: chunks[i...], at: 0)
+                trimBufferKeepingFront()
+                return
+            }
+            sentToday += 1
+            postChunk(chunk)
+        }
+    }
+
+    /// POST one ≤4096-byte message; on failure (e.g. 429) refund the budget and re-queue it for next flush.
+    private func postChunk(_ body: String) {
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
         req.httpBody = Data(body.utf8)
@@ -160,10 +226,19 @@ final class RemoteLog: @unchecked Sendable {
             guard error != nil || !(200..<300).contains(code) else { return }
             self?.queue.async {
                 guard let self else { return }
+                self.sentToday = max(0, self.sentToday - 1)   // it didn't actually land
                 self.buffer.insert(body, at: 0)
-                if self.buffer.count > 400 { self.buffer.removeLast(self.buffer.count - 400) }
+                self.trimBufferKeepingFront()
             }
         }.resume()
+    }
+
+    /// Truncate a string to at most `max` UTF-8 bytes without splitting a multi-byte scalar.
+    private static func clampToBytes(_ s: String, _ max: Int) -> String {
+        guard s.utf8.count > max else { return s }
+        var bytes = Array(s.utf8.prefix(max))
+        while let last = bytes.last, last & 0xC0 == 0x80 { bytes.removeLast() }   // back off continuation bytes
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     /// Best-effort synchronous flush — for the memory-warning / uncaught-exception paths, where the
@@ -197,6 +272,13 @@ final class RemoteLog: @unchecked Sendable {
     /// No-op unless logging is enabled. Best-effort; failures are logged, not surfaced.
     func uploadImage(_ data: Data, caption: String) {
         guard RemoteLog.isLoggingEnabled, !data.isEmpty else { return }
+        // ntfy.sh caps attachments at 2 MB (and 200 MB/day, 20 MB/visitor total). The capture path already
+        // downscales under this, but guard here too so an oversized image is dropped with a note rather
+        // than rejected by the server or silently reinterpreted.
+        guard data.count <= 2_000_000 else {
+            log("📷 screenshot \(data.count / 1024) KB exceeds ntfy 2 MB cap — skipped")
+            return
+        }
         let name = "shot-\(Int(Date().timeIntervalSince1970)).jpg"
         var req = URLRequest(url: endpoint)
         req.httpMethod = "PUT"

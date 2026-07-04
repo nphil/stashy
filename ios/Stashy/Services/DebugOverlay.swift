@@ -48,10 +48,27 @@ final class DebugOverlayController {
             .filter { !($0 is DebugOverlayWindow) }
         guard let target = windows.first(where: { $0.isKeyWindow }) ?? windows.first else { return nil }
         let renderer = UIGraphicsImageRenderer(bounds: target.bounds)
-        let image = renderer.image { _ in
+        let full = renderer.image { _ in
             target.drawHierarchy(in: target.bounds, afterScreenUpdates: false)
         }
-        return image.jpegData(compressionQuality: 0.6)
+        // Downscale so the JPEG comfortably clears ntfy.sh's 2 MB attachment cap (a Pro-res phone screen is
+        // ~1206×2622; 1400px longest edge stays sharp enough to read UI while shrinking the file a lot).
+        let maxEdge: CGFloat = 1400
+        let factor = min(1, maxEdge / max(full.size.width, full.size.height))
+        let image: UIImage
+        if factor < 1 {
+            let size = CGSize(width: full.size.width * factor, height: full.size.height * factor)
+            image = UIGraphicsImageRenderer(size: size).image { _ in
+                full.draw(in: CGRect(origin: .zero, size: size))
+            }
+        } else {
+            image = full
+        }
+        // Step JPEG quality down until under ~1.8 MB (leaves headroom below the 2 MB cap).
+        for quality in [0.6, 0.45, 0.3, 0.2] as [CGFloat] {
+            if let data = image.jpegData(compressionQuality: quality), data.count <= 1_800_000 { return data }
+        }
+        return image.jpegData(compressionQuality: 0.15)
     }
 }
 
