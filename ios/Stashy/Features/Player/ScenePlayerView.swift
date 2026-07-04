@@ -112,7 +112,8 @@ struct ScenePlayerView: View {
                     onSingleTap: { toggleControls() },
                     onScrubStart: { hideTask?.cancel(); showControls = true },
                     onScrubEnd: { scheduleHide() },
-                    onSwipeDownDismiss: { if isFullscreen { isFullscreen = false } }
+                    onSwipeDownDismiss: { if isFullscreen { isFullscreen = false } },
+                    cueIndex: { sprites.cueIndex(at: $0) }
                 )
                 .frame(width: surfaceSize.width, height: surfaceSize.height)
 

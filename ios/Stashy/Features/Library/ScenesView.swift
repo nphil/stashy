@@ -76,12 +76,17 @@ struct ScenesView: View {
                     FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
                 }
             }
+            // While the sprite preview is up, hide the tab bar so its dim can darken the whole screen
+            // (OLED-black), not just the content area.
+            .toolbar(previewPresenter.active != nil ? .hidden : .automatic, for: .tabBar)
             .navigationDestination(for: Route.self) { route in
                 RouteDestination(route: route, path: $path)
             }
         }
         .environment(\.scenePreviewPresenter, previewPresenter)
         .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: { path.append(.scene($0)) }) }
+        // Hide the status bar too, so the preview dim goes edge-to-edge black on an OLED screen.
+        .statusBarHidden(previewPresenter.active != nil)
         // Debounced so rapid filter changes coalesce into one reload instead of an overlapping storm.
         .onChange(of: query) { _, _ in
             reloadDebounce?.cancel()

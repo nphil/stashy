@@ -51,6 +51,9 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
     let onScrubStart: () -> Void
     let onScrubEnd: () -> Void
     let onSwipeDownDismiss: () -> Void
+    /// Sprite preview-frame (cue) index for a time — the hold-scrub fires one haptic tick each time it
+    /// changes, matching the scrub bar's feel (fast drag → flurry of taps, slow → one per frame).
+    var cueIndex: (TimeInterval) -> Int = { _ in -1 }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -128,6 +131,7 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
         private let haptic = UIImpactFeedbackGenerator(style: .medium)
         private var scrubStartX: CGFloat = 0
         private var scrubAnchorTime: TimeInterval = 0
+        private var lastCueIndex = -1
 
         init(_ parent: ZoomablePlayerSurface) { self.parent = parent }
 
@@ -190,6 +194,8 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
             switch gr.state {
             case .began:
                 haptic.impactOccurred()
+                Haptics.prepareSelection()
+                lastCueIndex = -1
                 isScrubbing = true
                 scroll.isScrollEnabled = false // don't pan the zoomed video while scrubbing
                 scrubStartX = gr.location(in: scroll).x
@@ -201,6 +207,12 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
                 let span = max(parent.model.duration, 1)
                 let delta = Double((x - scrubStartX) / width) * span
                 parent.scrubTime = max(0, min(parent.model.duration, scrubAnchorTime + delta))
+                // One haptic tick each time the scrub crosses into a new preview frame.
+                let idx = parent.cueIndex(parent.scrubTime)
+                if idx != lastCueIndex {
+                    lastCueIndex = idx
+                    if idx >= 0 { Haptics.selectionTick() }
+                }
             case .ended, .cancelled, .failed:
                 if isScrubbing {
                     parent.model.seek(to: parent.scrubTime)

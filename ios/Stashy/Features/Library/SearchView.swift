@@ -111,6 +111,8 @@ struct SearchView: View {
             .navigationDestination(for: Tag.self) { tag in
                 TagScenesView(tag: tag, path: $path)
             }
+            // Hide the tab bar while the sprite preview is up so its dim covers the whole OLED screen.
+            .toolbar(previewPresenter.active != nil ? .hidden : .automatic, for: .tabBar)
             .onChange(of: viewModel.query) {
                 guard let client = appState.client else { return }
                 viewModel.search(client: client)
@@ -118,6 +120,7 @@ struct SearchView: View {
         }
         .environment(\.scenePreviewPresenter, previewPresenter)
         .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: { path.append(.scene($0)) }) }
+        .statusBarHidden(previewPresenter.active != nil)
     }
 }
 

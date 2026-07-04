@@ -162,6 +162,7 @@ private struct ScenePreviewContainer: View {
     @State private var dragScale: CGFloat = 1
     @State private var pausedProgress: CGFloat = 0
     @State private var dimStart: CGFloat = 0.45
+    @State private var lastScrubStep = -1
     @AppStorage(Privacy.key) private var privacyMode = false
     @GestureState private var touching = false   // Privacy Mode: reveal the sprite while a finger is down
 
@@ -265,9 +266,15 @@ private struct ScenePreviewContainer: View {
                 case .outsidePending:
                     if abs(dx) > 8 || abs(dy) > 8 {
                         drag = abs(dx) >= abs(dy) ? .scrub : .dim
+                        if drag == .scrub { Haptics.prepareSelection(); lastScrubStep = -1 }
                     }
                 case .scrub:
-                    model?.seek(progress: pausedProgress + dx / width)
+                    let target = max(0, min(1, pausedProgress + dx / width))
+                    model?.seek(progress: target)
+                    // The preview is a video (no sprite cues), so quantise the scrub into ~60 steps and
+                    // tick per step — quick drag = a flurry, slow = one tap per step, same feel as the player.
+                    let step = Int(target * 60)
+                    if step != lastScrubStep { lastScrubStep = step; Haptics.selectionTick() }
                 case .dim:
                     dimLevel = min(1, max(0, dimStart + dy / 500))
                 case .none:
