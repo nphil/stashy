@@ -35,19 +35,21 @@ final class LoadEstimator {
     }
 
     /// Record an actual load duration; implausible values are ignored so a stall can't skew the window.
+    /// `record` is called exactly as `isLoading` clears — i.e. as the first frames start playing — so the
+    /// persistence is pushed **off the main thread** to guarantee it never delays playback start.
     func record(tier: PlaybackTier, seconds: Double) {
         guard seconds >= 0.3, seconds <= 30 else { return }
         var s = samples[tier.rawValue] ?? []
         s.append(seconds)
         if s.count > window { s.removeFirst(s.count - window) }
         samples[tier.rawValue] = s
-        persist()
-    }
-
-    private func persist() {
-        var raw: [String: [Double]] = [:]
-        for (i, v) in samples { raw[String(i)] = v }
-        UserDefaults.standard.set(raw, forKey: defaultsKey)
+        let snapshot = samples        // Sendable value copy — nothing main-actor is captured below
+        let key = defaultsKey
+        Task.detached(priority: .utility) {
+            var raw: [String: [Double]] = [:]
+            for (i, v) in snapshot { raw[String(i)] = v }
+            UserDefaults.standard.set(raw, forKey: key)
+        }
     }
 
     /// Reasonable first-load guesses (seconds) before any samples exist; doubled on an expensive link.
