@@ -78,6 +78,10 @@ private struct DownloadPerformerCover: View {
     }
 }
 
+/// The three download sources offered on a staged card: the original file, Stash's built-in live
+/// H.264 transcode, or the Stashy Companion plugin (iPhone-native HEVC/AV1).
+private enum StageSource: Hashable { case original, serverH264, companion }
+
 private struct DownloadCard: View {
     @Bindable var item: DownloadItem
     var onPlay: () -> Void
@@ -123,6 +127,7 @@ private struct DownloadCard: View {
 
                     if item.state == .staged { stagingControls }
                     else if item.transcoding { transcodeBar }
+                    else if item.state == .serverProcessing { serverProcessingBar }
                     else if item.state != .completed {
                         if item.totalBytes > 0 { connectionBar } else { estimateBar }
                     }
@@ -251,6 +256,20 @@ private struct DownloadCard: View {
         .animation(.linear(duration: 0.2), value: item.transcodeProgress)
     }
 
+    /// Determinate accent bar for a companion (plugin) server-side transcode. Unlike a live H.264 stream,
+    /// the plugin reports real `Job.progress`, so we can show an honest percentage here.
+    private var serverProcessingBar: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(themeManager.current.accentColor.opacity(0.18))
+                Capsule().fill(themeManager.current.accentColor)
+                    .frame(width: max(0, geo.size.width * item.serverJobProgress))
+            }
+        }
+        .frame(height: 6)
+        .animation(.linear(duration: 0.3), value: item.serverJobProgress)
+    }
+
     /// Indeterminate bar for a live server transcode: its final size is unknowable up front (Stash sends no
     /// Content-Length), so a % would lie — an earlier estimate sat at 99% while gigabytes kept arriving. A
     /// sliding highlight means "working"; the status line carries the real bytes + speed.
@@ -275,32 +294,78 @@ private struct DownloadCard: View {
 
     /// Options on a staged card, shown before the download starts: Original vs Server transcode, then
     /// either the connection count (original) or the resolution (server). Segmented radios + a menu.
+    /// Which of the three download sources a staged card is set to. Derived from the item's
+    /// `useServerTranscode` / `companionCodec` fields so the model stays minimal.
+    private var stageSource: Binding<StageSource> {
+        Binding(
+            get: {
+                if item.companionCodec != nil { return .companion }
+                return item.useServerTranscode ? .serverH264 : .original
+            },
+            set: { newValue in
+                switch newValue {
+                case .original:   item.useServerTranscode = false; item.companionCodec = nil
+                case .serverH264: item.useServerTranscode = true;  item.companionCodec = nil
+                case .companion:  item.useServerTranscode = false
+                                  if item.companionCodec == nil { item.companionCodec = .hevc }
+                }
+            }
+        )
+    }
+
+    private var companionCodecBinding: Binding<StashCompanion.Codec> {
+        Binding(get: { item.companionCodec ?? .hevc }, set: { item.companionCodec = $0 })
+    }
+
+    private var resolutionRow: some View {
+        HStack(spacing: 6) {
+            Text("Resolution").font(.caption2.weight(.medium)).foregroundStyle(.secondary)
+            Spacer(minLength: 6)
+            Picker("Resolution", selection: $item.serverResolution) {
+                ForEach([ServerQuality.p1080, .p720, .p480, .p240]) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.menu)
+            .tint(themeManager.current.accentColor)
+        }
+    }
+
     private var stagingControls: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Picker("Source", selection: $item.useServerTranscode) {
-                Text("Original").tag(false)
-                Text("Server").tag(true)
+            Picker("Source", selection: stageSource) {
+                Text("Original").tag(StageSource.original)
+                Text("Server").tag(StageSource.serverH264)
+                Text("Companion").tag(StageSource.companion)
             }
             .pickerStyle(.segmented)
 
-            if item.useServerTranscode {
-                HStack(spacing: 6) {
-                    Text("Resolution").font(.caption2.weight(.medium)).foregroundStyle(.secondary)
-                    Spacer(minLength: 6)
-                    Picker("Resolution", selection: $item.serverResolution) {
-                        ForEach([ServerQuality.p1080, .p720, .p480, .p240]) { Text($0.label).tag($0) }
-                    }
-                    .pickerStyle(.menu)
-                    .tint(themeManager.current.accentColor)
-                }
-                Text("H.264 · server does the work · plays natively")
-                    .font(.caption2).foregroundStyle(.tertiary)
-            } else {
+            switch stageSource.wrappedValue {
+            case .original:
                 Picker("Connections", selection: $item.multiThread) {
                     Text("Single").tag(false)
                     Text("Multi-thread").tag(true)
                 }
                 .pickerStyle(.segmented)
+            case .serverH264:
+                resolutionRow
+                Text("H.264 · server does the work · plays natively")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            case .companion:
+                Picker("Codec", selection: companionCodecBinding) {
+                    ForEach(StashCompanion.Codec.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                resolutionRow
+                HStack(spacing: 6) {
+                    Text("Quality").font(.caption2.weight(.medium)).foregroundStyle(.secondary)
+                    Spacer(minLength: 6)
+                    Picker("Quality", selection: $item.companionQuality) {
+                        ForEach(CompanionQuality.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.menu)
+                    .tint(themeManager.current.accentColor)
+                }
+                Text(companionCodecBinding.wrappedValue.blurb)
+                    .font(.caption2).foregroundStyle(.tertiary)
             }
         }
     }
@@ -345,6 +410,9 @@ private struct DownloadCard: View {
                 case .staged:
                     iconButton("arrow.down.to.line", tint: themeManager.current.accentColor) { downloads.beginStaged(item) }
                     iconButton("trash", tint: .red) { downloads.delete(item) }
+                case .serverProcessing:
+                    ProgressView().controlSize(.small)
+                    iconButton("stop.fill", tint: .red) { downloads.stop(item) }
                 case .downloading:
                     iconButton("pause.fill") { downloads.pause(item) }
                     iconButton("stop.fill", tint: .red) { downloads.stop(item) }
@@ -444,7 +512,11 @@ private struct DownloadCard: View {
         }
         switch item.state {
         case .staged:
+            if let codec = item.companionCodec { return "\(codec.label) \(item.serverResolution.label) · ready" }
             return item.useServerTranscode ? "Server \(item.serverResolution.label) · ready" : "Ready to download"
+        case .serverProcessing:
+            let pct = Int(item.serverJobProgress * 100)
+            return item.serverJobProgress > 0 ? "\(item.serverJobStage) \(pct)%" : item.serverJobStage
         case .queued: return "Queued…"
         case .downloading:
             if item.totalBytes == 0 {   // live server transcode: no size is known — show real bytes + speed
@@ -468,6 +540,7 @@ private struct DownloadCard: View {
         switch item.state {
         case .completed: return .green
         case .failed: return .red
+        case .serverProcessing: return themeManager.current.accentColor
         case .waitingForNetwork, .paused, .stopped: return .secondary
         default: return themeManager.current.foregroundColor.opacity(0.85)
         }

@@ -29,6 +29,10 @@ enum DownloadState: Equatable {
     /// Added from the ••• menu but not yet transferring — the user picks options (source, thread count,
     /// server resolution) on the card, then taps Start (`beginStaged`).
     case staged
+    /// The Stashy Companion plugin is transcoding this scene server-side (HEVC/AV1) before any bytes are
+    /// pulled. Drives a determinate bar from `serverJobProgress`; hands off to `.downloading` when the
+    /// plugin reports the file ready.
+    case serverProcessing
     case queued, downloading, paused, waitingForNetwork, merging, completed, failed, stopped
 }
 
@@ -87,6 +91,17 @@ final class DownloadItem: Identifiable {
     /// Multi-connection (parallel byte-range) vs single connection. Only applies to an ORIGINAL download —
     /// a live server transcode has no size/range support, so it's always single-connection.
     var multiThread = true
+
+    // MARK: Companion (server-side plugin) transcode staging
+    /// When set, Start routes through the Stashy Companion plugin to produce an iPhone-native HEVC/AV1
+    /// file, then downloads that. nil = not a companion transcode (original or built-in server H.264).
+    var companionCodec: StashCompanion.Codec? = nil
+    /// Quality preset for a companion transcode.
+    var companionQuality: CompanionQuality = .medium
+    /// Live progress (0…1) of the companion server-side transcode while `.serverProcessing`.
+    var serverJobProgress: Double = 0
+    /// Human status line shown under the bar while the companion job runs.
+    var serverJobStage: String = ""
 
     /// On-device transcode progress (0…1) while `transcoding`; the card shows it in place of the download bar.
     var transcoding = false
@@ -400,6 +415,10 @@ final class DownloadManager {
     func beginStaged(_ item: DownloadItem) {
         guard item.state == .staged, let scene = item.scene else { return }
         let apiKey = item.apiKey
+        if let codec = item.companionCodec {
+            runCompanionTranscode(item, scene: scene, codec: codec)
+            return
+        }
         if item.useServerTranscode {
             guard let url = scene.serverTranscodeDownloadURL(resolution: item.serverResolution, apiKey: apiKey) else {
                 item.error = "Server transcode isn't available for this scene"; return
@@ -420,6 +439,78 @@ final class DownloadManager {
         item.error = nil
         startConnections(item)
         fetchSidecar(item, scene: scene, apiKey: apiKey)
+    }
+
+    /// Drive a Stashy Companion server-side transcode, then hand the finished file to the normal
+    /// byte-download engine. The plugin reports real `Job.progress` (unlike a live H.264 stream), so the
+    /// card shows a determinate bar during `.serverProcessing`; when the plugin records the ready file on
+    /// the scene's custom_fields we build its `/plugin/…/assets/…` URL and download it (Range-capable, so
+    /// multi-connection still applies). Nothing touches the load-bearing transfer path except the final
+    /// `startConnections` hand-off.
+    private func runCompanionTranscode(_ item: DownloadItem, scene: StashScene, codec: StashCompanion.Codec) {
+        guard let serverURL = KeychainService.read("serverURL") else {
+            item.state = .failed; item.error = "Not connected to a Stash server"; return
+        }
+        let companion = StashCompanion(client: StashClient(serverURL: serverURL, apiKey: item.apiKey))
+        let resolution = item.serverResolution
+        let quality = item.companionQuality
+        let sceneID = scene.id
+        let apiKey = item.apiKey
+        item.state = .serverProcessing
+        item.serverJobProgress = 0
+        item.error = nil
+        item.serverJobStage = "Requesting \(codec.label) \(resolution.label)…"
+
+        Task { @MainActor in
+            do {
+                let jobID = try await companion.requestTranscode(
+                    sceneID: sceneID, codec: codec, resolution: resolution, quality: quality)
+                item.serverJobStage = "Server transcoding \(codec.label) \(resolution.label)…"
+                while true {
+                    try await Task.sleep(for: .milliseconds(1500))
+                    // Cancelled / deleted / paused while we were away → stop polling silently.
+                    guard item.state == .serverProcessing else { return }
+                    let job = try await companion.job(jobID)
+                    if let p = job.progress, p >= 0 { item.serverJobProgress = min(1, p) }
+                    switch job.status.uppercased() {
+                    case "FINISHED":
+                        guard let result = try await companion.transcodeResult(sceneID: sceneID),
+                              result.status == "ready", let path = result.path,
+                              let url = scene.companionFileURL(path: path, apiKey: apiKey) else {
+                            item.state = .failed
+                            item.error = "Transcode finished but no output file was found"
+                            return
+                        }
+                        item.serverJobProgress = 1
+                        item.url = url
+                        item.ext = result.container ?? "mp4"
+                        item.codec = result.codec ?? codec.rawValue
+                        if let h = result.resolution { item.height = h }
+                        let size = result.size ?? 0
+                        if size > 0, let dur = scene.files.first?.duration, dur > 0 {
+                            item.bitRate = Int(Double(size) * 8 / dur)   // recompute for the smaller transcoded file
+                        }
+                        let n = (size > 0 && item.multiThread) ? connectionCount : 1
+                        item.rebuildConnections(count: n, totalBytes: size)
+                        item.error = nil
+                        startConnections(item)                       // → .downloading, byte transfer begins
+                        fetchSidecar(item, scene: scene, apiKey: apiKey)
+                        return
+                    case "FAILED", "CANCELLED", "STOPPING":
+                        item.state = .failed
+                        item.error = job.error ?? "Server transcode \(job.status.lowercased())"
+                        return
+                    default:
+                        break                                        // READY / RUNNING → keep polling
+                    }
+                }
+            } catch {
+                if item.state == .serverProcessing {
+                    item.state = .failed
+                    item.error = "Companion plugin: \(error.localizedDescription)"
+                }
+            }
+        }
     }
 
     /// Completed local video file for a scene (used to play a downloaded scene offline / instantly).
@@ -494,6 +585,12 @@ final class DownloadManager {
         launch(item, reset: false)
     }
     func retry(_ item: DownloadItem) {
+        // A companion transcode that failed BEFORE any bytes arrived means the plugin job itself failed —
+        // re-run the plugin rather than trying to byte-download a file that was never produced.
+        if let codec = item.companionCodec, item.receivedBytes == 0, let scene = item.scene {
+            runCompanionTranscode(item, scene: scene, codec: codec)
+            return
+        }
         // stop() (or a prior-launch orphan sweep) may have removed the sidecar. Re-fetch it from the
         // in-memory scene so a completed retry keeps its offline metadata + sprites on the next launch.
         if let scene = item.scene,
@@ -512,6 +609,7 @@ final class DownloadManager {
     }
 
     func delete(_ item: DownloadItem) {
+        item.state = .stopped   // makes any in-flight companion poll loop exit before we drop the item
         cancelTasks(item, produceResumeData: false)
         // Stop any in-flight transcode (and wipe its chunk work dir) so it doesn't keep writing to a file
         // we're about to remove; clear a leftover work dir from an unresumed transcode too.
@@ -889,7 +987,7 @@ final class DownloadManager {
     var downloadsScreenVisible = false
     /// Any download / merge / transcode currently in progress.
     var hasActiveWork: Bool {
-        items.contains { $0.state == .downloading || $0.state == .merging || $0.transcoding }
+        items.contains { $0.state == .downloading || $0.state == .merging || $0.state == .serverProcessing || $0.transcoding }
     }
     /// Keep the screen awake when the user is watching Downloads, or whenever work is happening — an
     /// idle-sleep backgrounds the app, which would pause a foreground-only transcode.
