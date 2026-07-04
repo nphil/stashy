@@ -25,6 +25,14 @@ final class SpriteThumbnails {
         isReady = sprite != nil && !cues.isEmpty
     }
 
+    /// The cue (preview-frame) index covering `time`, or -1 when there are no cues. Cheap — the scrubber
+    /// fires one haptic tick each time this changes, so quick scrubbing feels like a rapid flurry of taps
+    /// and slow scrubbing is one tap per preview frame.
+    func cueIndex(at time: TimeInterval) -> Int {
+        guard !cues.isEmpty else { return -1 }
+        return cues.firstIndex { time >= $0.start && time < $0.end } ?? cues.count - 1
+    }
+
     /// Cropped sprite tile for the cue covering `time` (clamped to the last cue).
     func thumbnail(at time: TimeInterval) -> UIImage? {
         guard let sprite, !cues.isEmpty else { return nil }

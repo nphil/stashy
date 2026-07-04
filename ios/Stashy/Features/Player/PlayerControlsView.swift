@@ -44,18 +44,27 @@ struct PlayerControlsView: View {
                     .ignoresSafeArea()
 
                 if showControls {
-                    // Play/pause centred on the actual video rect. Hidden while loading/buffering — the
-                    // loading donut shows there instead (so the icon never flickers play↔pause on a
-                    // stuttery start).
+                    // Transport row: −10s · play/pause · +10s, centred dead-on the video. Hidden while
+                    // loading/buffering — the loading donut shows there instead (so the icons never flicker
+                    // on a stuttery start). Each button gives haptic feedback.
                     if model.isReady, !model.isLoading {
-                        Button { model.togglePlayPause(); scheduleHide() } label: {
-                            Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
-                                .font(.system(size: 34, weight: .bold))
-                                .foregroundStyle(.white)
-                                .shadow(radius: 4)
+                        HStack(spacing: 34) {
+                            skipButton("gobackward.10") { model.seek(to: max(0, model.currentTime - 10)) }
+                            Button {
+                                Haptics.tap()
+                                model.togglePlayPause(); scheduleHide()
+                            } label: {
+                                Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
+                                    .font(.system(size: 40, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .shadow(radius: 4)
+                                    .frame(width: 64, height: 64)   // stable box so play↔pause doesn't shift the row
+                                    .contentShape(Rectangle())
+                            }
+                            skipButton("goforward.10") { model.seek(to: min(model.duration, model.currentTime + 10)) }
                         }
-                        // Nudged above the video centre so it sits further from the scrubber/bottom bar.
-                        .position(x: videoRect.midX, y: videoRect.midY - min(videoRect.height * 0.14, 64))
+                        // Dead-centre of the video (no upward nudge).
+                        .position(x: videoRect.midX, y: videoRect.midY)
                         .transition(.opacity)
                     }
 
@@ -126,6 +135,23 @@ struct PlayerControlsView: View {
 
     /// Half the fixed width of the quality menu (see `qualityMenu`), used to clamp its pop-up position.
     private static let menuHalfWidth: CGFloat = 89
+
+    /// A ±10s skip button: clean `gobackward.10`/`goforward.10` glyph, a comfortable 60pt hit target, and
+    /// a light haptic tap on press.
+    private func skipButton(_ symbol: String, action: @escaping () -> Void) -> some View {
+        Button {
+            Haptics.tap(soft: true)
+            action()
+            scheduleHide()
+        } label: {
+            Image(systemName: symbol)
+                .font(.system(size: 30, weight: .semibold))
+                .foregroundStyle(.white)
+                .shadow(radius: 4)
+                .frame(width: 60, height: 60)
+                .contentShape(Rectangle())
+        }
+    }
 
     private func controlBar(landscape: Bool) -> some View {
         VStack(spacing: 4) {
@@ -296,6 +322,8 @@ struct ScrubBar: View {
     @Binding var scrubTime: TimeInterval
     let onSeek: (TimeInterval) -> Void
 
+    @State private var lastCueIndex = -1
+
     private let previewWidth: CGFloat = 160
     private let previewHeight: CGFloat = 90
 
@@ -318,13 +346,21 @@ struct ScrubBar: View {
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
+                        if !isScrubbing { Haptics.prepareSelection() }   // drag just began — warm the engine
                         isScrubbing = true
                         let p = max(0, min(1, value.location.x / width))
                         scrubTime = Double(p) * duration
+                        // One haptic tick each time the scrub crosses into a new preview frame.
+                        let idx = sprites.cueIndex(at: scrubTime)
+                        if idx != lastCueIndex {
+                            lastCueIndex = idx
+                            if idx >= 0 { Haptics.selectionTick() }
+                        }
                     }
                     .onEnded { _ in
                         onSeek(scrubTime)
                         isScrubbing = false
+                        lastCueIndex = -1
                     }
             )
             .overlay(alignment: .topLeading) {

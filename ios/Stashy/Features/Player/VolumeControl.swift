@@ -17,6 +17,7 @@ struct VolumeControl: View {
 
     @State private var expanded = false
     @State private var collapseTask: Task<Void, Never>?
+    @State private var lastPct = -1
 
     private var percent: Int { Int((volume * 100).rounded()) }
 
@@ -66,7 +67,10 @@ struct VolumeControl: View {
                     .onChanged { v in
                         // Snap to whole-percent steps so the value moves 0–100 in 1-unit increments.
                         let frac = Double(min(1, max(0, v.location.x / w)))
-                        onChange((frac * 100).rounded() / 100)
+                        let pct = Int((frac * 100).rounded())
+                        onChange(Double(pct) / 100)
+                        // One haptic tick per 1% step — quick drag = rapid taps, slow drag = one per step.
+                        if pct != lastPct { lastPct = pct; Haptics.selectionTick() }
                         onInteract()
                         armCollapse()
                     }
@@ -77,7 +81,7 @@ struct VolumeControl: View {
     private func toggleExpanded() {
         expanded.toggle()
         onInteract()
-        if expanded { armCollapse() } else { collapseTask?.cancel() }
+        if expanded { lastPct = percent; Haptics.prepareSelection(); armCollapse() } else { collapseTask?.cancel() }
     }
 
     /// Auto-collapse back to the icon after a few seconds of no adjustment.
