@@ -736,11 +736,11 @@ def run_update_ffmpeg(settings):
         tag, first, enc.get("hevc_nvenc"), enc.get("libsvtav1"), enc.get("libx265")))
 
 
-def _nvenc_probe(ffmpeg, extra_args):
-    """Try to OPEN hevc_nvenc on a 1-frame synthetic source (no real file needed) with a given parameter
-    set. Returns (ok, reason). Isolates encoder-param/driver problems from the source entirely."""
+def _nvenc_probe(ffmpeg, encoder, extra_args):
+    """Try to OPEN an NVENC encoder on a short synthetic source (no real file). Returns (ok, reason).
+    Surfaces the REAL nvenc/driver reason by filtering OUT ffmpeg's generic wrapper lines."""
     cmd = ([ffmpeg, "-hide_banner", "-loglevel", "verbose", "-f", "lavfi",
-            "-i", "color=c=black:s=1280x720:r=30", "-frames:v", "1", "-c:v", "hevc_nvenc"]
+            "-i", "color=c=black:s=1280x720:r=30", "-frames:v", "5", "-c:v", encoder]
            + extra_args + ["-f", "null", "-"])
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -748,12 +748,27 @@ def _nvenc_probe(ffmpeg, extra_args):
         return False, str(e)
     if r.returncode == 0:
         return True, ""
-    markers = ("nvenc", "driver", "preset", "cuda", "api version", "not support",
-               "invalid", "session", "cannot load", "minimum required")
-    errs = [ln.strip() for ln in r.stderr.splitlines()
-            if ln.strip() and any(m in ln.lower() for m in markers)
-            and "terminating thread" not in ln.lower()]
-    return False, (" / ".join(errs[-3:]) if errs else "rc {}".format(r.returncode))
+    generic = ("task finished with error", "received eof", "could not open encoder before eof",
+               "nothing was written", "conversion failed", "error while opening encoder",
+               "terminating thread")
+    lines = [ln.strip() for ln in r.stderr.splitlines() if ln.strip()]
+    real = [ln for ln in lines if not any(g in ln.lower() for g in generic)
+            and any(m in ln.lower() for m in
+                    ("nvenc", "driver", "device", "cuda", "api", "capab", "not support",
+                     "version", "openencodesession", "initializeencoder", "session", "unsupported"))]
+    return False, (" / ".join(real[-3:]) if real else " / ".join(lines[-2:]) or "rc {}".format(r.returncode))
+
+
+def _nvidia_smi():
+    """GPU name + driver version via nvidia-smi, or None if unavailable."""
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
+                           capture_output=True, text=True, timeout=15)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip().replace("\n", " · ")
+    except (subprocess.SubprocessError, OSError):
+        pass
+    return None
 
 
 def run_selftest(stash, settings):
@@ -781,25 +796,26 @@ def run_selftest(stash, settings):
         if not (enc.get("hevc_nvenc") or enc.get("libx265")):
             ok = False
             log_warn("  no HEVC encoder available (neither hevc_nvenc nor libx265)")
-        # Actually OPEN hevc_nvenc on a synthetic 1-frame source with several recipes — this pinpoints
-        # whether the encoder-open -22 is our param set (preset p5 / vbr+cq / bf) or a driver issue,
-        # WITHOUT needing a real file. The first recipe that reports OK is the one to use.
+        # Isolate WHY nvenc won't open: test h264_nvenc (control — Stash uses it) vs hevc_nvenc on a
+        # synthetic source. h264 OK + hevc FAIL ⇒ HEVC-encode/driver limitation on this GPU; both FAIL
+        # ⇒ this ffmpeg build's nvenc is incompatible with the installed driver.
+        smi = _nvidia_smi()
+        if smi:
+            log_info("GPU: {}".format(smi))
         if enc.get("hevc_nvenc"):
-            recipes = [
-                ("preset p5 · vbr cq · bf0", ["-preset", "p5", "-rc", "vbr", "-cq", "28", "-b:v", "0", "-bf", "0",
-                                              "-pix_fmt", "yuv420p"]),
-                ("constqp qp · bf0",         ["-rc", "constqp", "-qp", "28", "-bf", "0", "-pix_fmt", "yuv420p"]),
-                ("preset medium (old name)", ["-preset", "medium", "-pix_fmt", "yuv420p"]),
-                ("defaults",                 ["-pix_fmt", "yuv420p"]),
-            ]
-            any_ok = False
-            for name, args in recipes:
-                good, why = _nvenc_probe(ffmpeg, args)
-                any_ok = any_ok or good
-                log_info("  nvenc[{}]: {}".format(name, "OK" if good else "FAIL — " + why))
-            if not any_ok:
-                log_warn("  hevc_nvenc cannot open with ANY recipe — likely a driver/GPU issue "
-                         "(libx265 CPU fallback will be used)")
+            h264_ok, h264_why = _nvenc_probe(ffmpeg, "h264_nvenc", ["-pix_fmt", "yuv420p"])
+            hevc_ok, hevc_why = _nvenc_probe(ffmpeg, "hevc_nvenc", ["-pix_fmt", "yuv420p"])
+            log_info("  h264_nvenc (control): {}".format("OK" if h264_ok else "FAIL — " + h264_why))
+            log_info("  hevc_nvenc: {}".format("OK" if hevc_ok else "FAIL — " + hevc_why))
+            if hevc_ok:
+                log_info("  → GPU HEVC works")
+            elif h264_ok:
+                log_warn("  → h264_nvenc opens but hevc_nvenc doesn't: HEVC-encode/driver limit on this "
+                         "GPU. Options: update the NVIDIA driver, or use H.264 on GPU.")
+            else:
+                log_warn("  → NO nvenc opens in this ffmpeg build. Its NVENC likely needs a newer driver "
+                         "than installed. Try ffmpegVersion=system (Stash's own ffmpeg does H.264 nvenc), "
+                         "or an older BtbN build matching your driver.")
     else:
         ok = False
         log_error("ffmpeg FAIL — {} ({})".format(first, ffmpeg))

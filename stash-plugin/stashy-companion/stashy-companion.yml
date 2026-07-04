@@ -9,7 +9,7 @@ description: >-
   codec + HDR stats, and auto-tagging of direct-play-ready scenes — capabilities
   vanilla Stash lacks. Output is served back to the app over Stash's own HTTP
   with real Job progress.
-version: 0.1.11
+version: 0.1.12
 url: https://github.com/nphil/stashy/tree/main/stash-plugin
 exec:
   - python
