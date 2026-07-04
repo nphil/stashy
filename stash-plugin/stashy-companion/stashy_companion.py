@@ -226,7 +226,24 @@ def _out_name(scene_id, codec, height):
     return "scene{}_{}_{}p.mp4".format(scene_id, codec, height)
 
 
-def build_transcode_cmd(src, dst, codec, target_h, cq, ffmpeg, engine, gpu_decode, av1_preset=DEFAULT_AV1_PRESET):
+def _clean_fps(sv):
+    """A sane constant frame rate (as an ffmpeg rational string) from ffprobe stream info, for the NVENC
+    `fps` filter. Prefers avg_frame_rate, then r_frame_rate; rejects 0/degenerate/absurd; default 30."""
+    for key in ("avg_frame_rate", "r_frame_rate"):
+        val = sv.get(key) or ""
+        if "/" in val:
+            try:
+                n, d = val.split("/")
+                n, d = int(n), int(d)
+            except ValueError:
+                continue
+            if n > 0 and d > 0 and 1.0 <= (n / d) <= 1000.0:
+                return val   # keep the exact rational (e.g. 30000/1001 for 29.97)
+    return "30"
+
+
+def build_transcode_cmd(src, dst, codec, target_h, cq, ffmpeg, engine, gpu_decode,
+                        av1_preset=DEFAULT_AV1_PRESET, cfr_fps=None):
     """engine ∈ {"hevc_nvenc","libx265","libsvtav1"}. gpu_decode adds NVDEC.
 
     `target_h` is the already-resolved (downscaled, even) output height, so the `-vf` is a plain
@@ -235,32 +252,33 @@ def build_transcode_cmd(src, dst, codec, target_h, cq, ffmpeg, engine, gpu_decod
     but scale on the CPU (frames land in system memory) before NVENC re-encodes — both heavy codec ops
     stay on the Tesla P40 while dodging the pix_fmt fragility of the fully-on-card scale_cuda filter.
     """
-    # Video filter chain: optional downscale, then ALWAYS `format=yuv420p`. The explicit format conversion
-    # (8-bit 4:2:0) is what makes hevc_nvenc accept 10-bit HDR iPhone footage — feeding it a 10-bit surface
-    # while it's configured for 8-bit is the classic NVENC "-22 Invalid argument / no packets" init failure.
+    # Video filter chain. For NVENC it is: [fps=<clean CFR>], [scale], format=yuv420p.
+    #  - fps: pins a valid constant frame rate so NVENC's init-time rate validation can't be handed a
+    #    0/0 or absurd value from a re-muxed source (the real cause of the -22 "invalid param" open fail).
+    #  - format=yuv420p: explicit 8-bit 4:2:0, so 10-bit sources don't reach the 8-bit encoder.
     # target_h <= 0 keeps the source resolution (Original — portrait-safe, no re-scale).
-    def _vf(extra):
-        parts = []
-        if int(target_h) > 0:
-            parts.append("scale=-2:{0}".format(int(target_h)))
-        parts.append(extra)
-        return ["-vf", ",".join(parts)]
+    scale_f = "scale=-2:{0}".format(int(target_h)) if int(target_h) > 0 else None
+
+    def vf(*filters):
+        chain = [f for f in filters if f]
+        return ["-vf", ",".join(chain)] if chain else []
 
     pre = [ffmpeg, "-y", "-hide_banner"]
     if engine == "hevc_nvenc" and gpu_decode:
         pre += ["-hwaccel", "cuda"]  # NVDEC decode; frames land in system mem for the CPU scale/format
     cmd = pre + ["-i", src]
     if engine == "libsvtav1":
-        cmd += _vf("format=yuv420p") + ["-c:v", "libsvtav1", "-preset", str(av1_preset),
-                                        "-crf", str(cq), "-pix_fmt", "yuv420p"]
+        cmd += vf(scale_f, "format=yuv420p") + ["-c:v", "libsvtav1", "-preset", str(av1_preset),
+                                                "-crf", str(cq), "-pix_fmt", "yuv420p"]
     elif engine == "hevc_nvenc":
+        fps_f = "fps={0}".format(cfr_fps) if cfr_fps else None
         # -bf 0: Pascal (Tesla P40) NVENC has no HEVC B-frame support; forcing 0 avoids a config reject.
-        cmd += _vf("format=yuv420p") + ["-c:v", "hevc_nvenc", "-preset", "p5",
-                                        "-rc", "vbr", "-cq", str(cq), "-b:v", "0", "-bf", "0",
-                                        "-tag:v", "hvc1", "-pix_fmt", "yuv420p"]
+        cmd += vf(fps_f, scale_f, "format=yuv420p") + ["-c:v", "hevc_nvenc", "-preset", "p5",
+                                                       "-rc", "vbr", "-cq", str(cq), "-b:v", "0", "-bf", "0",
+                                                       "-tag:v", "hvc1", "-pix_fmt", "yuv420p"]
     else:  # libx265 — CPU HEVC, last-resort fallback only
-        cmd += _vf("format=yuv420p") + ["-c:v", "libx265", "-preset", "medium",
-                                        "-crf", str(cq), "-tag:v", "hvc1", "-pix_fmt", "yuv420p"]
+        cmd += vf(scale_f, "format=yuv420p") + ["-c:v", "libx265", "-preset", "medium",
+                                                "-crf", str(cq), "-tag:v", "hvc1", "-pix_fmt", "yuv420p"]
     cmd += ["-c:a", "aac", "-b:a", "160k", "-ac", "2",
             "-movflags", "+faststart",
             # Force the MP4 muxer: the output is written to a `.part` temp name, and ffmpeg can't infer
@@ -378,6 +396,11 @@ def run_transcode(stash, args, settings):
         sv.get("codec_name", "?"), sv.get("width", "?"), sv.get("height", "?"),
         src_pix or "?", src_transfer or "-", " 10-bit" if src_ten_bit else "",
         sv.get("r_frame_rate", "?"), sv.get("avg_frame_rate", "?"), sv.get("color_range", "-")))
+    # NVENC hard-validates frame rate at encoder init; ffmpeg opens the encoder lazily from the first
+    # filtered frame, whose framerate can resolve to 0/0 → a PTS time_base (e.g. 1/90000 → absurd fps) →
+    # NV_ENC_ERR_INVALID_PARAM (-22). Software encoders don't check. Fix: pin a clean CFR rate via the
+    # `fps` filter. Use the source's real rate when sane, else a safe default.
+    cfr_fps = _clean_fps(sv)
 
     # Resolve the actual scale height in Python (downscale only, kept even for yuv420p) so the ffmpeg
     # `-vf` is a plain `scale=-2:<int>` — no quotes / no `min(,)` comma to escape. Passing a quoted
@@ -424,7 +447,10 @@ def run_transcode(stash, args, settings):
 
     def _on_status(prog, secs):
         now = time.time()
-        if now - status_state["last"] < 3.0:
+        # ~12s throttle (was 3s): each write is a sceneUpdate, and any Scene.Update.Post hook the user
+        # has installed queues a task per write — a long transcode was flooding the job queue. The app's
+        # live % still comes from Job.progress every ~2s; this side-channel only refreshes the rich stats.
+        if now - status_state["last"] < 12.0:
             return
         status_state["last"] = now
         try:
@@ -459,7 +485,8 @@ def run_transcode(stash, args, settings):
         status_state["last"] = 0.0   # let the first block of a new attempt publish immediately
         log_info("Transcoding scene {} → {} {}p (cq {}, {})".format(scene_id, codec, res_label, cq, label))
         _record_status(stash, scene_id, "running", codec, res_label, label, 0, None)
-        cmd = build_transcode_cmd(src, tmp, codec, target_h, cq, ffmpeg, engine, gpu_decode, av1_preset)
+        cmd = build_transcode_cmd(src, tmp, codec, target_h, cq, ffmpeg, engine, gpu_decode,
+                                  av1_preset, cfr_fps)
         log_debug("ffmpeg: " + " ".join(cmd))
         rc, err_tail = _run_ffmpeg(cmd, duration, on_status=_on_status)
         if rc == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
@@ -709,6 +736,26 @@ def run_update_ffmpeg(settings):
         tag, first, enc.get("hevc_nvenc"), enc.get("libsvtav1"), enc.get("libx265")))
 
 
+def _nvenc_probe(ffmpeg, extra_args):
+    """Try to OPEN hevc_nvenc on a 1-frame synthetic source (no real file needed) with a given parameter
+    set. Returns (ok, reason). Isolates encoder-param/driver problems from the source entirely."""
+    cmd = ([ffmpeg, "-hide_banner", "-loglevel", "verbose", "-f", "lavfi",
+            "-i", "color=c=black:s=1280x720:r=30", "-frames:v", "1", "-c:v", "hevc_nvenc"]
+           + extra_args + ["-f", "null", "-"])
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except (subprocess.SubprocessError, OSError) as e:
+        return False, str(e)
+    if r.returncode == 0:
+        return True, ""
+    markers = ("nvenc", "driver", "preset", "cuda", "api version", "not support",
+               "invalid", "session", "cannot load", "minimum required")
+    errs = [ln.strip() for ln in r.stderr.splitlines()
+            if ln.strip() and any(m in ln.lower() for m in markers)
+            and "terminating thread" not in ln.lower()]
+    return False, (" / ".join(errs[-3:]) if errs else "rc {}".format(r.returncode))
+
+
 def run_selftest(stash, settings):
     """One-shot health check after a Stash upgrade / config change. Reports the ACTIVE ffmpeg version and
     everything the transcode pipeline depends on, then a PASS/FAIL line. A few lines — deliberately no spam."""
@@ -734,6 +781,25 @@ def run_selftest(stash, settings):
         if not (enc.get("hevc_nvenc") or enc.get("libx265")):
             ok = False
             log_warn("  no HEVC encoder available (neither hevc_nvenc nor libx265)")
+        # Actually OPEN hevc_nvenc on a synthetic 1-frame source with several recipes — this pinpoints
+        # whether the encoder-open -22 is our param set (preset p5 / vbr+cq / bf) or a driver issue,
+        # WITHOUT needing a real file. The first recipe that reports OK is the one to use.
+        if enc.get("hevc_nvenc"):
+            recipes = [
+                ("preset p5 · vbr cq · bf0", ["-preset", "p5", "-rc", "vbr", "-cq", "28", "-b:v", "0", "-bf", "0",
+                                              "-pix_fmt", "yuv420p"]),
+                ("constqp qp · bf0",         ["-rc", "constqp", "-qp", "28", "-bf", "0", "-pix_fmt", "yuv420p"]),
+                ("preset medium (old name)", ["-preset", "medium", "-pix_fmt", "yuv420p"]),
+                ("defaults",                 ["-pix_fmt", "yuv420p"]),
+            ]
+            any_ok = False
+            for name, args in recipes:
+                good, why = _nvenc_probe(ffmpeg, args)
+                any_ok = any_ok or good
+                log_info("  nvenc[{}]: {}".format(name, "OK" if good else "FAIL — " + why))
+            if not any_ok:
+                log_warn("  hevc_nvenc cannot open with ANY recipe — likely a driver/GPU issue "
+                         "(libx265 CPU fallback will be used)")
     else:
         ok = False
         log_error("ffmpeg FAIL — {} ({})".format(first, ffmpeg))
