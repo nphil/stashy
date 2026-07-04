@@ -179,15 +179,16 @@ def _out_name(scene_id, codec, height):
     return "scene{}_{}_{}p.mp4".format(scene_id, codec, height)
 
 
-def build_transcode_cmd(src, dst, codec, height, cq, ffmpeg, engine, gpu_decode):
+def build_transcode_cmd(src, dst, codec, target_h, cq, ffmpeg, engine, gpu_decode):
     """engine ∈ {"hevc_nvenc","libx265","libsvtav1"}. gpu_decode adds NVDEC.
 
-    For the NVENC path we NVDEC-decode on the GPU (`-hwaccel cuda`) but let the
-    scale run on the CPU (frames are downloaded to system memory) before
-    NVENC re-encodes — this keeps both heavy codec ops on the Tesla P40 while
-    dodging the pix_fmt fragility of the fully-on-card scale_cuda filter.
+    `target_h` is the already-resolved (downscaled, even) output height, so the `-vf` is a plain
+    `scale=-2:<int>` — no quotes / no `min(,)` (those only work in a shell; passed via argv they'd be
+    literal characters ffmpeg rejects). For the NVENC path we NVDEC-decode on the GPU (`-hwaccel cuda`)
+    but scale on the CPU (frames land in system memory) before NVENC re-encodes — both heavy codec ops
+    stay on the Tesla P40 while dodging the pix_fmt fragility of the fully-on-card scale_cuda filter.
     """
-    scale = "scale=-2:'min({0},ih)'".format(height)  # downscale only, keep aspect, even width
+    scale = "scale=-2:{0}".format(int(target_h))
     pre = [ffmpeg, "-y", "-hide_banner"]
     if engine == "hevc_nvenc" and gpu_decode:
         pre += ["-hwaccel", "cuda"]  # NVDEC decode; frames land in system mem for the CPU scale
@@ -209,21 +210,37 @@ def build_transcode_cmd(src, dst, codec, height, cq, ffmpeg, engine, gpu_decode)
 
 
 def _run_ffmpeg(cmd, duration):
-    """Run one ffmpeg pass, streaming out_time_us → Job.progress. Returns rc."""
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    """Run one ffmpeg pass, streaming out_time_us → Job.progress. Returns (rc, stderr_tail).
+
+    ffmpeg's real error goes to stderr; we capture it to a temp file (rather than DEVNULL, which hid
+    the cause of the first failures) and return its last meaningful line so the job log explains WHY.
+    """
+    import tempfile
+    err = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
     try:
-        for line in proc.stdout:
-            line = line.strip()
-            if line.startswith("out_time_us=") and duration > 0:
-                try:
-                    log_progress(int(line.split("=", 1)[1]) / 1_000_000.0 / duration)
-                except ValueError:
-                    pass
-            elif line.startswith("progress=") and line.endswith("end"):
-                log_progress(1.0)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, text=True)
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if line.startswith("out_time_us=") and duration > 0:
+                    try:
+                        log_progress(int(line.split("=", 1)[1]) / 1_000_000.0 / duration)
+                    except ValueError:
+                        pass
+                elif line.startswith("progress=") and line.endswith("end"):
+                    log_progress(1.0)
+        finally:
+            proc.wait()
+        tail = ""
+        if proc.returncode != 0:
+            err.seek(0)
+            lines = [ln.strip() for ln in err.read().splitlines() if ln.strip()]
+            tail = lines[-1] if lines else ""
+        return proc.returncode, tail
+    except OSError as e:
+        return 127, "could not launch ffmpeg ({}): {}".format(cmd[0], e)
     finally:
-        proc.wait()
-    return proc.returncode
+        err.close()
 
 
 def run_transcode(stash, args, settings):
@@ -247,6 +264,16 @@ def run_transcode(stash, args, settings):
     if not os.path.isfile(src):
         raise RuntimeError("transcode: source file not readable on server: {}".format(src))
     duration = float(scene["files"][0].get("duration") or 0)
+
+    # Resolve the actual scale height in Python (downscale only, kept even for yuv420p) so the ffmpeg
+    # `-vf` is a plain `scale=-2:<int>` — no quotes / no `min(,)` comma to escape. Passing a quoted
+    # expression like scale=-2:'min(1080,ih)' via argv (no shell) makes ffmpeg see the literal quotes
+    # and fail the filtergraph on EVERY encoder.
+    src_h = int(scene["files"][0].get("height") or 0)
+    target_h = min(height, src_h) if src_h > 0 else height
+    target_h -= target_h % 2
+    if target_h < 2:
+        target_h = height
 
     # --- Engine selection: NVENC is the intended default (the user confirmed
     # Stash drives the NVIDIA GPU for H.264, so hevc_nvenc is available). Build
@@ -279,18 +306,23 @@ def run_transcode(stash, args, settings):
         label = "{}{}".format(engine, " +NVDEC" if gpu_decode else "")
         log_info("Transcoding scene {} → {} {}p (cq {}, {})".format(scene_id, codec, height, cq, label))
         _record_status(stash, scene_id, "running", codec, height, label, 0, None)
-        cmd = build_transcode_cmd(src, tmp, codec, height, cq, ffmpeg, engine, gpu_decode)
+        cmd = build_transcode_cmd(src, tmp, codec, target_h, cq, ffmpeg, engine, gpu_decode)
         log_debug("ffmpeg: " + " ".join(cmd))
-        rc = _run_ffmpeg(cmd, duration)
+        rc, err_tail = _run_ffmpeg(cmd, duration)
         if rc == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
             break
         _safe_unlink(tmp)
+        if err_tail:
+            log_warn("ffmpeg ({}) error: {}".format(label, err_tail))
         if idx + 1 < len(attempts):
             log_warn("{} attempt failed (rc {}) — retrying with {}".format(
                 label, rc, attempts[idx + 1][0]))
+    last_err = err_tail if rc != 0 else ""
     if rc != 0 or not os.path.isfile(tmp):
         _record_status(stash, scene_id, "failed", codec, height, eng, 0, None)
-        raise RuntimeError("all transcode attempts failed for scene {} (last rc {})".format(scene_id, rc))
+        detail = " — {}".format(last_err) if last_err else ""
+        raise RuntimeError("all transcode attempts failed for scene {} (last rc {}){}".format(
+            scene_id, rc, detail))
 
     os.replace(tmp, dst)  # atomic — never serve a half-written file
     size = os.path.getsize(dst)
