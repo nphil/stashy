@@ -40,7 +40,11 @@ enum ServerQuality: String, CaseIterable, Identifiable, Hashable {
         case .p240: return "240p"
         }
     }
-    /// Stash `resolution` query value; nil = don't force (Auto = normal routing).
+    /// Stash `resolution` query value; nil = don't force (Auto = normal routing). These are Stash's
+    /// `StreamingResolutionEnum` *identifiers* (verified against stashapp/stash source:
+    /// graphql/schema/types/config.graphql + pkg/models/resolution.go) — the "720p"-style labels are only
+    /// GraphQL doc strings and are NOT accepted by the HTTP `?resolution=` param. Max long-edge px:
+    /// LOW=240, STANDARD=480, STANDARD_HD=720, FULL_HD=1080, ORIGINAL=no resize.
     var stashResolution: String? {
         switch self {
         case .auto: return nil
