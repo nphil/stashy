@@ -314,11 +314,18 @@ def _run_ffmpeg(cmd, duration, on_status=None):
         tail = ""
         if proc.returncode != 0:
             err.seek(0)
-            # Keep the last few meaningful lines — the real cause usually sits ABOVE ffmpeg's generic
-            # "Conversion failed!" trailer, so a single-line tail hides it. Drop pure progress noise.
+            # The REAL cause (e.g. "[hevc_nvenc @ …] InitializeEncoder failed: invalid param (8)") prints
+            # ABOVE ffmpeg's generic trailer lines (Terminating thread / Nothing was written / Conversion
+            # failed!), which would displace it from a plain tail. Capture encoder/init error lines
+            # explicitly, then append the tail for context.
             lines = [ln.strip() for ln in err.read().splitlines()
                      if ln.strip() and not ln.lstrip().startswith(("frame=", "size=", "video:"))]
-            tail = " / ".join(lines[-4:]) if lines else ""
+            markers = ("nvenc", "initializeencoder", "invalid param", "opensession",
+                       "no capable devices", "driver does not support", "hwaccel", "impossible to convert")
+            keyed = [ln for ln in lines if any(m in ln.lower() for m in markers)
+                     and "terminating thread" not in ln.lower()]
+            picked = keyed[-3:] + [ln for ln in lines[-3:] if ln not in keyed[-3:]]
+            tail = " / ".join(picked)
         return proc.returncode, tail
     except OSError as e:
         return 127, "could not launch ffmpeg ({}): {}".format(cmd[0], e)
