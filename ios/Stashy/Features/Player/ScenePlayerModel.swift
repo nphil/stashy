@@ -130,6 +130,10 @@ final class ScenePlayerModel {
     /// One-time resume seek target (set at init); consumed the first time the engine reports ready.
     private let resumeAt: Double
     private var didResumeSeek = false
+    /// Position (seconds) to resume from the next time the engine restarts. Set on teardown so leaving for
+    /// a performer / external link and coming back resumes where you were instead of restarting from 0.
+    /// The model persists across the navigation (SceneDetailView stays in the stack), so this survives.
+    @ObservationIgnored private var pendingResume: Double = 0
 
     /// Begin playback. Idempotent — safe to call on every `onAppear`. For `.localFFmpeg` routes this
     /// first decides (cached) whether Apple can decode the pixel format, so HEVC the device can't decode
@@ -245,10 +249,15 @@ final class ScenePlayerModel {
             if !self.usesAbsoluteTime, duration > 0, self.duration != duration { self.duration = duration }
             if !self.isReady {
                 self.isReady = true
-                // Resume at the remembered position once (quality switch etc.), before releasing the scrubber.
-                if self.resumeAt > 0, !self.didResumeSeek {
+                // Resume point on first ready: a nav-away teardown (pendingResume — set every time we leave
+                // for a performer / external link, so returning resumes instead of restarting from 0), or
+                // the one-time quality-switch resume (resumeAt). Seek once, before releasing the scrubber.
+                let resumeTarget = self.pendingResume > 0 ? self.pendingResume
+                                 : (!self.didResumeSeek ? self.resumeAt : 0)
+                if resumeTarget > 0 {
                     self.didResumeSeek = true
-                    self.seek(to: self.resumeAt)
+                    self.pendingResume = 0
+                    self.seek(to: resumeTarget)
                     return
                 }
             }
@@ -346,6 +355,9 @@ final class ScenePlayerModel {
     /// can't crash on dealloc), and stop the on-device remux + loopback server. Niling the engine lets
     /// `start()` rebuild cleanly if the scene is reopened.
     func stop() {
+        // Remember where we were so a rebuild (returning from a performer / external link) resumes here
+        // rather than restarting from 0. Harmless on a true leave (the model is discarded).
+        if currentTime > 1 { pendingResume = currentTime }
         stopped = true
         startInProgress = false
         watchdog?.cancel()
