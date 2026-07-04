@@ -351,9 +351,15 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
                     lastFpsEmit = now
                     let elapsed = now.timeIntervalSince(startWall)
                     let fpsNow = elapsed > 0 ? Double(frames) / elapsed : 0
-                    // Live status line — replaced in place, NOT appended, so it doesn't flood the box.
-                    onStatus(String(format: "▸ %.0f fps · frame %d · %d%%", fpsNow, frames,
-                                    Int((lastReported >= 0 ? lastReported : 0) * 100)))
+                    let pct = max(0, lastReported)
+                    let speed = elapsed > 0 ? (pct * totalSeconds) / elapsed : 0        // × realtime
+                    let eta = pct > 0.01 ? elapsed * (1 - pct) / pct : 0                 // seconds remaining
+                    let sizeMB = (((try? FileManager.default.attributesOfItem(atPath: outputPath))?[.size]
+                                    as? NSNumber)?.doubleValue ?? 0) / 1_000_000
+                    // One live line, replaced in place (never appended) so it can't flood the box, but
+                    // packed with what's actually happening: rate, progress, realtime factor, ETA, size.
+                    onStatus(String(format: "▸ %.0f fps · %d%% · %.1f× realtime · ETA %@ · %.0f MB · %d frames",
+                                    fpsNow, Int(pct * 100), speed, Self.clock(eta), sizeMB, frames))
                 }
             }
         }
@@ -468,6 +474,13 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
         var buffer = [CChar](repeating: 0, count: 128)
         av_strerror(code, &buffer, 128)
         return String(cString: buffer)
+    }
+
+    /// Format a seconds count as m:ss for the live ETA readout.
+    private static func clock(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds > 0 else { return "—" }
+        let s = Int(seconds.rounded())
+        return String(format: "%d:%02d", s / 60, s % 60)
     }
 }
 
