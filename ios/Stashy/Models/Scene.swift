@@ -199,10 +199,19 @@ extension StashScene {
     /// HLS stream for the scene.
     func serverQualityRoute(quality: ServerQuality, apiKey: String) -> PlaybackRoute? {
         guard let base = sceneStreams.first(where: { $0.isHLS })?.url,
-              var hls = appendingAPIKey(apiKey, to: base) else { return nil }
+              let withKey = appendingAPIKey(apiKey, to: base),
+              var comps = URLComponents(url: withKey, resolvingAgainstBaseURL: false) else { return nil }
+        // Stash's own HLS stream URL already carries `resolution=ORIGINAL`. Appending our choice made a
+        // DUPLICATE (`resolution=ORIGINAL&…&resolution=<pick>`), and Stash's `Form.Get("resolution")`
+        // reads the FIRST value — so the pick was silently ignored and playback stayed at the server's
+        // default. Replace any existing `resolution` with the single chosen one.
+        var items = comps.queryItems ?? []
+        items.removeAll { $0.name == "resolution" }
         if let res = quality.stashResolution {
-            hls.append(queryItems: [URLQueryItem(name: "resolution", value: res)])
+            items.append(URLQueryItem(name: "resolution", value: res))
         }
+        comps.queryItems = items
+        guard let hls = comps.url else { return nil }
         return PlaybackRoute(url: hls, engine: .avPlayer, streamType: "HLS · \(quality.label)",
                              reason: "Manual server quality", duration: files.first?.duration ?? 0)
     }
