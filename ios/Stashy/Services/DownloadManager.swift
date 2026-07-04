@@ -26,6 +26,9 @@ private struct UncheckedSendableBox<T>: @unchecked Sendable {
 /// Lifecycle of a download. `waitingForNetwork` is an automatic pause (connectivity lost) distinct from
 /// a user `paused`; `stopped` items are pruned when the Downloads screen is re-entered.
 enum DownloadState: Equatable {
+    /// Added from the ••• menu but not yet transferring — the user picks options (source, thread count,
+    /// server resolution) on the card, then taps Start (`beginStaged`).
+    case staged
     case queued, downloading, paused, waitingForNetwork, merging, completed, failed, stopped
 }
 
@@ -46,7 +49,9 @@ struct DownloadConnection: Identifiable {
 final class DownloadItem: Identifiable {
     let id: String
     let title: String
-    let url: URL
+    /// The source URL to transfer. `var` because a staged item's URL is only finalised at Start (original
+    /// file vs a server-transcoded `stream.mp4?resolution=…`).
+    var url: URL
     let fileName: String
     // Spec fields are var so an on-device transcode can update them in place once it rewrites the file.
     var ext: String
@@ -74,6 +79,18 @@ final class DownloadItem: Identifiable {
     var error: String?
     var localURL: URL?
 
+    // MARK: Staging options (chosen on the card before Start; only meaningful while `.staged`)
+    /// Download a Stash server-transcoded copy (H.264 at `serverResolution`) instead of the original file.
+    var useServerTranscode = false
+    /// Target resolution for a server transcode (H.264 only — Stash can't emit HEVC).
+    var serverResolution: ServerQuality = .p1080
+    /// Multi-connection (parallel byte-range) vs single connection. Only applies to an ORIGINAL download —
+    /// a live server transcode has no size/range support, so it's always single-connection.
+    var multiThread = true
+    /// Estimated final byte size for a server transcode (no Content-Length is known up front), used only to
+    /// drive a rolling %-estimate bar. 0 = unknown.
+    var estimatedTotal: Int64 = 0
+
     /// On-device transcode progress (0…1) while `transcoding`; the card shows it in place of the download bar.
     var transcoding = false
     var transcodeProgress: Double = 0
@@ -94,7 +111,13 @@ final class DownloadItem: Identifiable {
     @ObservationIgnored var lastSampleBytes: Int64 = 0
     @ObservationIgnored var lastSampleTime = Date()
 
-    var progress: Double { totalBytes > 0 ? min(1, Double(receivedBytes) / Double(totalBytes)) : 0 }
+    var progress: Double {
+        if totalBytes > 0 { return min(1, Double(receivedBytes) / Double(totalBytes)) }
+        // Unknown size (live server transcode): show progress against the estimate, capped below 100% so it
+        // doesn't sit at "done" before the stream actually closes.
+        if estimatedTotal > 0 { return min(0.99, Double(receivedBytes) / Double(estimatedTotal)) }
+        return 0
+    }
 
     var resolutionLabel: String? { height.map { "\($0)p" } }
     var codecLabel: String? { codec?.uppercased() }
@@ -142,6 +165,19 @@ final class DownloadItem: Identifiable {
         let n = max(1, connectionCount)
         let chunk = totalBytes / Int64(n)
         self.connections = (0..<n).map { i in
+            let isLast = i == n - 1
+            let total = totalBytes > 0 ? (isLast ? totalBytes - chunk * Int64(n - 1) : chunk) : 0
+            return DownloadConnection(id: i, color: DownloadConnection.palette[i % DownloadConnection.palette.count], total: total)
+        }
+    }
+
+    /// Rebuild the connection segments for the source/thread-count chosen at Start (a staged item's real
+    /// URL, total size, and connection count aren't known until then). Mirrors the `init` split.
+    func rebuildConnections(count: Int, totalBytes: Int64) {
+        self.totalBytes = totalBytes
+        let n = max(1, count)
+        let chunk = totalBytes / Int64(n)
+        connections = (0..<n).map { i in
             let isLast = i == n - 1
             let total = totalBytes > 0 ? (isLast ? totalBytes - chunk * Int64(n - 1) : chunk) : 0
             return DownloadConnection(id: i, color: DownloadConnection.palette[i % DownloadConnection.palette.count], total: total)
@@ -346,6 +382,64 @@ final class DownloadManager {
         fetchSidecar(item, scene: scene, apiKey: apiKey)
     }
 
+    /// Add a scene to the Downloads list WITHOUT starting the transfer. The card then shows staging options
+    /// (source, thread count, server resolution); the user taps Start → `beginStaged`. Ephemeral: no sidecar
+    /// is written until the transfer begins, so an unstarted staged item simply doesn't persist across a
+    /// relaunch (nothing to clean up).
+    func stage(scene: StashScene, apiKey: String) {
+        guard !items.contains(where: { $0.id == scene.id }) else { return }
+        guard let url = scene.directFileURL(apiKey: apiKey) else { return }
+        let file = scene.files.first
+        let base = ((file?.basename ?? scene.title ?? "video") as NSString).deletingPathExtension
+        let ext = scene.fileContainer.isEmpty ? "mp4" : scene.fileContainer
+        let item = DownloadItem(
+            id: scene.id, title: scene.title ?? base, url: url,
+            fileName: base, ext: ext, codec: file?.video_codec,
+            width: file?.width, height: file?.height, bitRate: file?.bit_rate,
+            totalBytes: Int64(file?.size ?? 0), connectionCount: 1, scene: scene, apiKey: apiKey
+        )
+        item.state = .staged
+        items.insert(item, at: 0)
+    }
+
+    /// Start a staged download with the options chosen on the card: the original file (multi/single-thread)
+    /// or a server-transcoded H.264 copy at the chosen resolution (always single-connection — a live Stash
+    /// transcode has no Content-Length / byte-range support). Finalises the URL + connection segments,
+    /// writes the sidecar, and begins transferring.
+    func beginStaged(_ item: DownloadItem) {
+        guard item.state == .staged, let scene = item.scene else { return }
+        let apiKey = item.apiKey
+        if item.useServerTranscode {
+            guard let url = scene.serverTranscodeDownloadURL(resolution: item.serverResolution, apiKey: apiKey) else {
+                item.error = "Server transcode isn't available for this scene"; return
+            }
+            item.url = url
+            item.ext = "mp4"                                    // Stash server transcode is H.264/AAC MP4
+            item.rebuildConnections(count: 1, totalBytes: 0)    // unknown size → single connection, plain GET
+            let dur = scene.files.first?.duration ?? 0
+            let mbps: Double
+            switch item.serverResolution {
+            case .p1080: mbps = 5;   case .p720: mbps = 3
+            case .p480:  mbps = 1.5; case .p240: mbps = 0.6
+            default:     mbps = 4
+            }
+            item.estimatedTotal = dur > 0 ? Int64(dur * mbps * 1_000_000 / 8) : 0
+        } else {
+            guard let url = scene.directFileURL(apiKey: apiKey) else {
+                item.error = "This scene has no direct file URL"; return
+            }
+            item.url = url
+            item.ext = scene.fileContainer.isEmpty ? "mp4" : scene.fileContainer
+            let total = Int64(scene.files.first?.size ?? 0)
+            let n = (total > 0 && item.multiThread) ? connectionCount : 1
+            item.rebuildConnections(count: n, totalBytes: total)
+            item.estimatedTotal = 0
+        }
+        item.error = nil
+        startConnections(item)
+        fetchSidecar(item, scene: scene, apiKey: apiKey)
+    }
+
     /// Completed local video file for a scene (used to play a downloaded scene offline / instantly).
     func localFile(sceneID: String) -> URL? {
         if let item = items.first(where: { $0.id == sceneID }), item.state == .completed { return item.localURL }
@@ -378,8 +472,11 @@ final class DownloadManager {
         let thumbURL = scene.thumbnailURL(apiKey: apiKey)
         let spriteURL = scene.spriteURL(apiKey: apiKey)
         let vttURL = scene.vttURL(apiKey: apiKey)
-        // Sidecar JSON (scene + apiKey) written synchronously — it's tiny.
-        if let data = try? JSONEncoder().encode(Sidecar(scene: scene, apiKey: apiKey, transcoded: false)) {
+        // Sidecar JSON (scene + apiKey + the exact download source) written synchronously — it's tiny.
+        if let data = try? JSONEncoder().encode(Sidecar(
+            scene: scene, apiKey: apiKey, transcoded: false,
+            downloadURL: item.url.absoluteString, connectionCount: item.connections.count,
+            serverTranscode: item.useServerTranscode, downloadExt: item.ext)) {
             try? data.write(to: meta.appendingPathComponent("\(id).json"), options: .atomic)
         }
         Task.detached(priority: .background) {
@@ -396,7 +493,18 @@ final class DownloadManager {
     }
 
     // `transcoded` is optional so sidecars written before this field existed still decode (absent → nil).
-    private struct Sidecar: Codable { let scene: StashScene; let apiKey: String; let transcoded: Bool? }
+    // The download-source fields are persisted so an interrupted download reconstructs with the EXACT URL +
+    // connection count (critical for a server-transcode download — re-deriving the original file URL would
+    // resume a partial transcode against the wrong source). All optional → older sidecars still decode.
+    private struct Sidecar: Codable {
+        let scene: StashScene
+        let apiKey: String
+        let transcoded: Bool?
+        var downloadURL: String? = nil
+        var connectionCount: Int? = nil
+        var serverTranscode: Bool? = nil
+        var downloadExt: String? = nil
+    }
 
     func pause(_ item: DownloadItem) { suspend(item, auto: false) }
     func resume(_ item: DownloadItem) {
@@ -963,6 +1071,7 @@ final class DownloadManager {
                 if ok {
                     item.localURL = dest
                     if item.totalBytes > 0 { item.receivedBytes = item.totalBytes }
+                    else { item.totalBytes = item.receivedBytes }   // unknown-size (server transcode): record the real size now
                     for i in item.connections.indices { item.connections[i].received = item.connections[i].total }
                     item.state = .completed
                     self.clearActive(item.id)
@@ -1132,14 +1241,20 @@ final class DownloadManager {
             let id = url.deletingPathExtension().lastPathComponent
             if items.contains(where: { $0.id == id }) { continue }        // already loaded (completed)
             guard FileManager.default.fileExists(atPath: activeURL(id).path) else { continue }  // not active
-            guard let sidecar = try? JSONDecoder().decode(Sidecar.self, from: Data(contentsOf: url)),
-                  let fileURL = sidecar.scene.directFileURL(apiKey: sidecar.apiKey) else { continue }
+            guard let sidecar = try? JSONDecoder().decode(Sidecar.self, from: Data(contentsOf: url)) else { continue }
             let scene = sidecar.scene
             let file = scene.files.first
-            let total = Int64(file?.size ?? 0)
-            let n = total > 0 ? connectionCount : 1
+            // Prefer the persisted download source (correct for a server-transcode download); fall back to
+            // the original file URL for sidecars written before this field existed.
+            let fileURL: URL
+            if let stored = sidecar.downloadURL, let u = URL(string: stored) { fileURL = u }
+            else if let u = scene.directFileURL(apiKey: sidecar.apiKey) { fileURL = u }
+            else { continue }
+            let isServer = sidecar.serverTranscode ?? false
+            let total = isServer ? 0 : Int64(file?.size ?? 0)     // server transcode has no known size
+            let n = sidecar.connectionCount ?? (total > 0 ? connectionCount : 1)
             let base = ((file?.basename ?? scene.title ?? "video") as NSString).deletingPathExtension
-            let ext = scene.fileContainer.isEmpty ? "mp4" : scene.fileContainer
+            let ext = sidecar.downloadExt ?? (scene.fileContainer.isEmpty ? "mp4" : scene.fileContainer)
             let thumb = metaDir.appendingPathComponent("\(id)-thumb.jpg")
             let item = DownloadItem(
                 id: id, title: scene.title ?? base, url: fileURL,

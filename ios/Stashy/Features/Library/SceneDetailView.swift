@@ -157,7 +157,9 @@ struct SceneDetailView: View {
 
                     PopupMenu(vertical: true, actions: [
                         PopupMenuAction(title: "Download Video", systemImage: "arrow.down.circle") {
-                            downloads.start(scene: fullScene ?? scene, apiKey: apiKey)
+                            // Stage it (don't start) — the Downloads card lets you pick source / threads /
+                            // server resolution, then Start.
+                            downloads.stage(scene: fullScene ?? scene, apiKey: apiKey)
                             path.append(.downloads)
                         },
                         PopupMenuAction(title: "Delete Scene", systemImage: "trash", isDestructive: true) {

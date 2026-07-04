@@ -230,6 +230,25 @@ extension StashScene {
                              reason: "Manual server quality", duration: files.first?.duration ?? 0)
     }
 
+    /// Progressive server-transcoded **download** URL: Stash's `/scene/{id}/stream.mp4?resolution=…`, a live
+    /// H.264/AAC MP4 (iPhone-native). Derived from the HLS stream URL by swapping the `.m3u8` path suffix
+    /// for `.mp4`. Stash's live transcode is H.264-only (no HEVC) and has no per-request quality knob — only
+    /// resolution — so `ServerQuality` here selects resolution only. Returns nil if no HLS stream is known.
+    func serverTranscodeDownloadURL(resolution: ServerQuality, apiKey: String) -> URL? {
+        guard let base = sceneStreams.first(where: { $0.isHLS })?.url,
+              let withKey = appendingAPIKey(apiKey, to: base),
+              var comps = URLComponents(url: withKey, resolvingAgainstBaseURL: false),
+              comps.path.hasSuffix(".m3u8") else { return nil }
+        comps.path = String(comps.path.dropLast(5)) + ".mp4"   // "stream.m3u8" → "stream.mp4"
+        var items = comps.queryItems ?? []
+        items.removeAll { $0.name == "resolution" }
+        if let res = resolution.stashResolution {
+            items.append(URLQueryItem(name: "resolution", value: res))
+        }
+        comps.queryItems = items
+        return comps.url
+    }
+
     /// The direct (non-HLS/DASH) file stream URL — the actual media file the FFmpeg pipeline reads,
     /// used by the demux probe and (later) the on-device remux/transcode path.
     func directFileURL(apiKey: String) -> URL? {

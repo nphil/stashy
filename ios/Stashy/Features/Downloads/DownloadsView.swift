@@ -121,8 +121,11 @@ private struct DownloadCard: View {
                         }
                     }
 
-                    if item.transcoding { transcodeBar }
-                    else if item.state != .completed { connectionBar }
+                    if item.state == .staged { stagingControls }
+                    else if item.transcoding { transcodeBar }
+                    else if item.state != .completed {
+                        if item.totalBytes > 0 { connectionBar } else { estimateBar }
+                    }
                     transcodeLogBox
 
                     HStack(alignment: .center, spacing: 10) {
@@ -248,6 +251,52 @@ private struct DownloadCard: View {
         .animation(.linear(duration: 0.2), value: item.transcodeProgress)
     }
 
+    /// Rolling-estimate bar for an unknown-size (live server transcode) download — fills against the size
+    /// estimate; bytes/speed in the status line carry the real numbers.
+    private var estimateBar: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(themeManager.current.accentColor.opacity(0.18))
+                Capsule().fill(themeManager.current.accentColor)
+                    .frame(width: max(0, geo.size.width * item.progress))
+            }
+        }
+        .frame(height: 6)
+        .animation(.linear(duration: 0.2), value: item.receivedBytes)
+    }
+
+    /// Options on a staged card, shown before the download starts: Original vs Server transcode, then
+    /// either the connection count (original) or the resolution (server). Segmented radios + a menu.
+    private var stagingControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("Source", selection: $item.useServerTranscode) {
+                Text("Original").tag(false)
+                Text("Server").tag(true)
+            }
+            .pickerStyle(.segmented)
+
+            if item.useServerTranscode {
+                HStack(spacing: 6) {
+                    Text("Resolution").font(.caption2.weight(.medium)).foregroundStyle(.secondary)
+                    Spacer(minLength: 6)
+                    Picker("Resolution", selection: $item.serverResolution) {
+                        ForEach([ServerQuality.p1080, .p720, .p480, .p240]) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.menu)
+                    .tint(themeManager.current.accentColor)
+                }
+                Text("H.264 · server does the work · plays natively")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            } else {
+                Picker("Connections", selection: $item.multiThread) {
+                    Text("Single").tag(false)
+                    Text("Multi-thread").tag(true)
+                }
+                .pickerStyle(.segmented)
+            }
+        }
+    }
+
     /// Transcode diagnostics box: append-only event lines (decode path HW/SW, encoder, audio, done) with
     /// the single live status line (fps) pinned under them and updated in place. Shown while transcoding
     /// and afterwards while you stay on the screen; DownloadsView wipes it on disappear. Grows the card
@@ -285,6 +334,9 @@ private struct DownloadCard: View {
                 iconButton("xmark", tint: .red) { downloads.cancelTranscode(item) }
             } else {
                 switch item.state {
+                case .staged:
+                    iconButton("arrow.down.to.line", tint: themeManager.current.accentColor) { downloads.beginStaged(item) }
+                    iconButton("trash", tint: .red) { downloads.delete(item) }
                 case .downloading:
                     iconButton("pause.fill") { downloads.pause(item) }
                     iconButton("stop.fill", tint: .red) { downloads.stop(item) }
@@ -383,8 +435,15 @@ private struct DownloadCard: View {
             return "Transcoding… \(pct)%"
         }
         switch item.state {
+        case .staged:
+            return item.useServerTranscode ? "Server \(item.serverResolution.label) · ready" : "Ready to download"
         case .queued: return "Queued…"
         case .downloading:
+            if item.totalBytes == 0 {   // live server transcode: no % — show bytes received (+ speed, ~est)
+                let got = ByteCountFormatter.string(fromByteCount: item.receivedBytes, countStyle: .file)
+                let est = item.estimatedTotal > 0 ? " · ~\(Int(item.progress * 100))%" : ""
+                return item.speedLabel.isEmpty ? "\(got)\(est)" : "\(got) · \(item.speedLabel)\(est)"
+            }
             let pct = Int(item.progress * 100)
             let extra = [item.speedLabel, item.etaLabel].filter { !$0.isEmpty }.joined(separator: " · ")
             return extra.isEmpty ? "\(pct)%" : "\(pct)%  ·  \(extra)"
