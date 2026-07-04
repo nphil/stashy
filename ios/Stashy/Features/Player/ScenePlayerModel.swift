@@ -97,14 +97,23 @@ final class ScenePlayerModel {
     /// building the engine here (which creates an AVPlayer, activates the audio session, and starts
     /// playback) spun up multiple overlapping players — duplicate audio that kept playing after pause.
     /// The engine is created exactly once in `start()`, from `.onAppear`.
-    init(route: PlaybackRoute) {
+    /// `startAt` > 0 resumes playback at that timestamp once the new engine is ready — used to keep the
+    /// exact position when the source is rebuilt (e.g. switching server-transcode quality via the gear).
+    init(route: PlaybackRoute, startAt: Double = 0) {
         self.route = route
+        self.resumeAt = max(0, startAt)
         // Seed the scrubber's duration from Stash metadata. The local-HLS path is a growing EVENT
         // playlist (no ENDLIST until the remux finishes), so AVPlayer reports an *indefinite* duration
         // while playing — without this the scrubber would have nothing to map a swipe onto and seeking
         // would appear dead. Direct play / Stash VOD HLS overwrite this with the engine's real value.
         self.duration = max(0, route.duration)
+        // Show the scrubber at the resume point immediately so it doesn't flash 0:00 before the seek lands.
+        self.currentTime = self.resumeAt
     }
+
+    /// One-time resume seek target (set at init); consumed the first time the engine reports ready.
+    private let resumeAt: Double
+    private var didResumeSeek = false
 
     /// Begin playback. Idempotent — safe to call on every `onAppear`. For `.localFFmpeg` routes this
     /// first decides (cached) whether Apple can decode the pixel format, so HEVC the device can't decode
@@ -217,7 +226,15 @@ final class ScenePlayerModel {
             self.localStream?.updatePlayhead(current)   // lets the remux pace production to the playhead
             if current > 0 { self.watchdog?.cancel() }   // real frames are flowing — disarm the stall watchdog
             if !self.usesAbsoluteTime, duration > 0, self.duration != duration { self.duration = duration }
-            if !self.isReady { self.isReady = true }
+            if !self.isReady {
+                self.isReady = true
+                // Resume at the remembered position once (quality switch etc.), before releasing the scrubber.
+                if self.resumeAt > 0, !self.didResumeSeek {
+                    self.didResumeSeek = true
+                    self.seek(to: self.resumeAt)
+                    return
+                }
+            }
             // Hold the scrubber at a just-issued seek target until the player reaches it (no pop-back).
             // Tolerance exceeds AVPlayer's ±1s seek tolerance; the deadline guards a stall short of target.
             if let target = self.seekTarget {

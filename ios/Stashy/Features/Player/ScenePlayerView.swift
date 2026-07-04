@@ -14,6 +14,8 @@ struct ScenePlayerView: View {
     var safeArea: EdgeInsets = EdgeInsets()
     @Binding var isFullscreen: Bool
     @Binding var quality: ServerQuality
+    /// Written by the controls just before a quality switch so the rebuilt player resumes at this second.
+    @Binding var resumeTime: Double
     var onBack: (() -> Void)?
     @Environment(\.imageCache) private var imageCache
     @Environment(DownloadManager.self) private var downloads
@@ -31,14 +33,16 @@ struct ScenePlayerView: View {
     @State private var scrubTime: TimeInterval = 0
     @State private var hideTask: Task<Void, Never>?
 
-    init(scene: StashScene, apiKey: String, route: PlaybackRoute, safeArea: EdgeInsets = EdgeInsets(), isFullscreen: Binding<Bool>, quality: Binding<ServerQuality>, onBack: (() -> Void)? = nil) {
+    init(scene: StashScene, apiKey: String, route: PlaybackRoute, safeArea: EdgeInsets = EdgeInsets(), isFullscreen: Binding<Bool>, quality: Binding<ServerQuality>, resumeTime: Binding<Double>, onBack: (() -> Void)? = nil) {
         self.scene = scene
         self.apiKey = apiKey
         self.safeArea = safeArea
         _isFullscreen = isFullscreen
         _quality = quality
+        _resumeTime = resumeTime
         self.onBack = onBack
-        _model = State(initialValue: ScenePlayerModel(route: route))
+        // Seed the (rebuilt) model with the position captured just before the source changed.
+        _model = State(initialValue: ScenePlayerModel(route: route, startAt: resumeTime.wrappedValue))
     }
 
     /// The video's display aspect. Prefer the *actual* decoded size reported by the player (correct
@@ -143,6 +147,7 @@ struct ScenePlayerView: View {
                     isScrubbing: $isScrubbing,
                     scrubTime: $scrubTime,
                     quality: $quality,
+                    resumeTime: $resumeTime,
                     videoRect: videoRect,
                     safeArea: safe,
                     spritePreviewTopLeading: false,   // always anchor the scrub preview above the bar

@@ -10,6 +10,7 @@ struct SceneDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var isFullscreen = false
     @State private var quality: ServerQuality = .auto   // gear-menu manual server-transcode override
+    @State private var resumeAt: Double = 0             // position carried across a quality switch
     @State private var confirmDelete = false
     /// The scene list query slims performers to id+name to keep the payload small. Once the detail
     /// screen appears we re-fetch this one scene's full performer profiles (rating, urls, tags…) for
@@ -67,6 +68,7 @@ struct SceneDetailView: View {
                                 safeArea: geo.safeAreaInsets,
                                 isFullscreen: $isFullscreen,
                                 quality: $quality,
+                                resumeTime: $resumeAt,
                                 onBack: { dismiss() }
                             )
                             // Rebuild the player (and its ScenePlayerModel, whose route is a `let` set once at

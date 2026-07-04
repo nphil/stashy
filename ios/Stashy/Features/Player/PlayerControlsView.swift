@@ -12,6 +12,8 @@ struct PlayerControlsView: View {
     @Binding var scrubTime: TimeInterval
     /// Manual server-transcode quality (gear menu, M-B). Changing it re-routes to the Stash HLS stream.
     @Binding var quality: ServerQuality
+    /// Captured right before a quality switch so the rebuilt player resumes at the exact position.
+    @Binding var resumeTime: Double
     @State private var showQuality = false
     /// The rectangle the video actually occupies (in the controls' coordinate space) — used to centre
     /// the play/pause control and anchor the bottom bar on the real video, not the full player frame.
@@ -164,6 +166,8 @@ struct PlayerControlsView: View {
                 .padding(.horizontal, 14).padding(.top, 11).padding(.bottom, 5)
             ForEach(ServerQuality.allCases) { q in
                 Button {
+                    // Remember exactly where we are so the rebuilt player resumes here, not from 0.
+                    resumeTime = isScrubbing ? scrubTime : model.currentTime
                     quality = q
                     withAnimation(.easeOut(duration: 0.15)) { showQuality = false }
                 } label: {
