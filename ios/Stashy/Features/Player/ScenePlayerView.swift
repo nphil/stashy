@@ -13,6 +13,7 @@ struct ScenePlayerView: View {
     /// (top edge) to reserve the status-bar strip for the blurred backdrop inline.
     var safeArea: EdgeInsets = EdgeInsets()
     @Binding var isFullscreen: Bool
+    @Binding var quality: ServerQuality
     var onBack: (() -> Void)?
     @Environment(\.imageCache) private var imageCache
     @Environment(DownloadManager.self) private var downloads
@@ -30,11 +31,12 @@ struct ScenePlayerView: View {
     @State private var scrubTime: TimeInterval = 0
     @State private var hideTask: Task<Void, Never>?
 
-    init(scene: StashScene, apiKey: String, route: PlaybackRoute, safeArea: EdgeInsets = EdgeInsets(), isFullscreen: Binding<Bool>, onBack: (() -> Void)? = nil) {
+    init(scene: StashScene, apiKey: String, route: PlaybackRoute, safeArea: EdgeInsets = EdgeInsets(), isFullscreen: Binding<Bool>, quality: Binding<ServerQuality>, onBack: (() -> Void)? = nil) {
         self.scene = scene
         self.apiKey = apiKey
         self.safeArea = safeArea
         _isFullscreen = isFullscreen
+        _quality = quality
         self.onBack = onBack
         _model = State(initialValue: ScenePlayerModel(route: route))
     }
@@ -140,6 +142,7 @@ struct ScenePlayerView: View {
                     showStats: $showStats,
                     isScrubbing: $isScrubbing,
                     scrubTime: $scrubTime,
+                    quality: $quality,
                     videoRect: videoRect,
                     safeArea: safe,
                     spritePreviewTopLeading: false,   // always anchor the scrub preview above the bar

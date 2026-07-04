@@ -9,6 +9,7 @@ struct SceneDetailView: View {
     @Environment(DownloadManager.self) private var downloads
     @Environment(\.dismiss) private var dismiss
     @State private var isFullscreen = false
+    @State private var quality: ServerQuality = .auto   // gear-menu manual server-transcode override
     @State private var confirmDelete = false
     /// The scene list query slims performers to id+name to keep the payload small. Once the detail
     /// screen appears we re-fetch this one scene's full performer profiles (rating, urls, tags…) for
@@ -19,6 +20,12 @@ struct SceneDetailView: View {
     private var performers: [Performer] { (fullScene ?? scene).performers }
 
     private var route: PlaybackRoute? {
+        // Manual server-quality override (gear menu) wins over everything — force the Stash HLS transcode
+        // at the chosen resolution.
+        if quality != .auto, let client = appState.client,
+           let q = scene.serverQualityRoute(quality: quality, apiKey: client.apiKey) {
+            return q
+        }
         // Prefer a completed download: play the local file offline. Route it through the same codec/
         // container capability check as the server stream, so a downloaded HEVC / foreign-container file
         // goes through the on-device remux (of the local file) instead of a bare AVPlayer that can't
@@ -59,6 +66,7 @@ struct SceneDetailView: View {
                                 route: route,
                                 safeArea: geo.safeAreaInsets,
                                 isFullscreen: $isFullscreen,
+                                quality: $quality,
                                 onBack: { dismiss() }
                             )
                             // Rebuild the player (and its ScenePlayerModel, whose route is a `let` set once at

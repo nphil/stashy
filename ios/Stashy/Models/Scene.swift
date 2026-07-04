@@ -194,6 +194,19 @@ extension StashScene {
                              reason: "Offline (codec may need transcode)", fallbackURL: hlsURL)
     }
 
+    /// Manual **server-side** transcode at a chosen resolution — the M-B "gear" override, forcing the
+    /// Stash HLS stream (a cellular / limited-bandwidth escape hatch). Returns nil if the server has no
+    /// HLS stream for the scene.
+    func serverQualityRoute(quality: ServerQuality, apiKey: String) -> PlaybackRoute? {
+        guard let base = sceneStreams.first(where: { $0.isHLS })?.url,
+              var hls = appendingAPIKey(apiKey, to: base) else { return nil }
+        if let res = quality.stashResolution {
+            hls.append(queryItems: [URLQueryItem(name: "resolution", value: res)])
+        }
+        return PlaybackRoute(url: hls, engine: .avPlayer, streamType: "HLS · \(quality.label)",
+                             reason: "Manual server quality", duration: files.first?.duration ?? 0)
+    }
+
     /// The direct (non-HLS/DASH) file stream URL — the actual media file the FFmpeg pipeline reads,
     /// used by the demux probe and (later) the on-device remux/transcode path.
     func directFileURL(apiKey: String) -> URL? {
