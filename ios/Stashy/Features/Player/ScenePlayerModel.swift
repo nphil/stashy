@@ -28,6 +28,10 @@ final class ScenePlayerModel {
     /// The actual decoded video aspect (w/h), once the player reports a presentation size. Drives
     /// layout/orientation when the server's file metadata is missing or wrong.
     var videoAspect: CGFloat?
+    /// The actual decoded frame size the player is rendering (NOT the source file's metadata). This is the
+    /// honest "what am I really watching" gauge — e.g. it drops to 1280×720 when a server transcode
+    /// downscales, so the Stats overlay can prove whether a manual quality switch actually took effect.
+    var presentationSize: CGSize = .zero
     /// Muted state, mirrored from the engine. Starts muted unless on a private audio route; the user's
     /// choice is preserved across a seek-by-reinit engine swap.
     var isMuted = false
@@ -269,6 +273,7 @@ final class ScenePlayerModel {
             guard let self, size.width > 0, size.height > 0 else { return }
             let aspect = size.width / size.height
             if self.videoAspect != aspect { self.videoAspect = aspect }
+            if self.presentationSize != size { self.presentationSize = size }
         }
         engine.onFailed = { [weak self] error in self?.fallbackToHLS(error: error) }
         return engine
@@ -316,6 +321,7 @@ final class ScenePlayerModel {
         loadingProgress = nil
         seekTarget = nil
         videoAspect = nil
+        presentationSize = .zero
         currentTime = 0
         engine = makeEngine(url: fallback)
         isPlaying = true
@@ -397,6 +403,7 @@ final class ScenePlayerModel {
         loadingStage = "Seeking…"
         loadingProgress = nil
         videoAspect = nil
+        presentationSize = .zero
         do {
             let stream = LocalRemuxStream(source: route.url, duration: route.duration, startTime: time)
             let url = try stream.start()
@@ -417,6 +424,16 @@ final class ScenePlayerModel {
             StatLine(label: "Decode", value: engine?.decodeDescription ?? "—"),
             StatLine(label: "Stream", value: streamType),
             StatLine(label: "Routing", value: routingReason),
+            // The honest "what is actually on screen" gauge — the real decoded frame size, distinct from
+            // the source file's metadata below. If a manual quality switch worked, this drops (e.g. to
+            // 1280×720); if the server ignored `resolution=`, it stays at the source size.
+            StatLine(label: "Playing", value: presentationSize.width > 0
+                     ? "\(Int(presentationSize.width))×\(Int(presentationSize.height))"
+                     : "—"),
+            // The exact URL being played, apikey redacted — so a manual server-quality switch can be
+            // verified: the `resolution=…` query param must be present and byte-for-byte one of
+            // LOW / STANDARD / STANDARD_HD / FULL_HD / FOUR_K / ORIGINAL (Stash matches it case-sensitively).
+            StatLine(label: "URL", value: Self.redactedURL(route.url)),
         ]
         if let lastError { playback.append(StatLine(label: "Error", value: lastError)) }
         sections.append(StatSection(title: "Playback", lines: playback))
@@ -466,5 +483,19 @@ final class ScenePlayerModel {
         }
 
         return PlaybackStats(sections: sections)
+    }
+
+    /// A stream URL with any `apikey`/`api_key` value replaced by "…", so the Stats overlay can show
+    /// exactly which URL (and its `resolution=` query) is playing without leaking the credential in a
+    /// shared screenshot.
+    static func redactedURL(_ url: URL) -> String {
+        guard var comps = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url.absoluteString }
+        if var items = comps.queryItems {
+            for i in items.indices where items[i].name.lowercased() == "apikey" || items[i].name.lowercased() == "api_key" {
+                items[i].value = "…"
+            }
+            comps.queryItems = items
+        }
+        return comps.string ?? url.absoluteString
     }
 }
