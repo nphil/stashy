@@ -1,0 +1,61 @@
+# Stashy Companion — backend plugin for the Stashy iOS app.
+# Plugin ID is this file's basename: "stashy-companion".
+# Install: Stash → Settings → Plugins → Add Source, paste the index.yml URL
+# from stash-plugin/README.md, then install "Stashy Companion".
+name: Stashy Companion
+description: >-
+  Companion backend for the Stashy iOS app. Adds iPhone-native HEVC/AV1
+  transcoding (GPU hevc_nvenc / CPU libx265 / CPU SVT-AV1), ffprobe-based
+  codec + HDR stats, and auto-tagging of direct-play-ready scenes — capabilities
+  vanilla Stash lacks. Output is served back to the app over Stash's own HTTP
+  with real Job progress.
+version: 0.1.0
+url: https://github.com/nphil/stashy/tree/main/stash-plugin
+exec:
+  - python
+  - "{pluginDir}/stashy_companion.py"
+interface: raw
+errLog: warn
+
+# Static file serving: files written to <pluginDir>/cache/ are exposed at
+# /plugin/stashy-companion/assets/cache/<file> (Range-capable, path-jailed).
+# The transcode task records the exact path on the source scene's custom_fields.
+ui:
+  assets:
+    /cache: cache
+
+settings:
+  encoder:
+    displayName: HEVC encoder
+    description: "hevc_nvenc (NVIDIA GPU — e.g. Tesla P40) or libx265 (CPU). Auto-falls back to libx265 if nvenc is unavailable in ffmpeg."
+    type: STRING
+  allowAV1:
+    displayName: Allow AV1 (SVT-AV1, CPU)
+    description: "Permit AV1 output when the app requests it. CPU-only (Pascal GPUs cannot encode AV1); smaller files, much slower."
+    type: BOOLEAN
+  cacheCapGB:
+    displayName: Transcode cache cap (GB)
+    description: "Trim the companion transcode cache to this size (least-recently-used first). 0 = unlimited."
+    type: NUMBER
+  ffmpegPath:
+    displayName: ffmpeg directory override
+    description: "Absolute path to the directory containing ffmpeg/ffprobe. Leave blank to use PATH / Stash's bundled ffmpeg. Point this at an NVENC-enabled ffmpeg build for GPU HEVC."
+    type: STRING
+
+tasks:
+  - name: Transcode for iPhone
+    description: "Transcode one scene to an iPhone-native MP4 and serve it back to the app. Args (from runPluginTask): scene_id, codec (hevc|av1), resolution (1080|720|480|240), quality (high|medium|low). Usually invoked by the Stashy app."
+    defaultArgs:
+      mode: transcode
+  - name: Library Codec Report
+    description: "ffprobe every scene; record codec / profile / pixel-format / HDR / direct-play info into each scene's custom_fields and log an aggregate summary."
+    defaultArgs:
+      mode: stats
+  - name: Tag iPhone-Ready Scenes
+    description: "Auto-tag scenes Stashy:Direct-Play / Needs-Transcode / HDR / 10-bit / HEVC / AV1 so the app and Stash UI can filter by playability."
+    defaultArgs:
+      mode: tag
+  - name: Purge Transcode Cache
+    description: "Delete the companion HEVC/AV1 cache (or trim it to the size cap if one is set)."
+    defaultArgs:
+      mode: purge

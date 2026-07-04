@@ -1,0 +1,17 @@
+# Stashy plugin source index (stashapp/stash package format).
+# Add this file's raw URL as a Plugin Source in Stash:
+#   Settings → Plugins → Available Plugins → Add Source
+#   Name: Stashy   URL: https://raw.githubusercontent.com/nphil/stashy/main/stash-plugin/index.yml
+# `path` is resolved relative to this index's URL, so stashy-companion.zip must
+# sit next to this file. `sha256` must match the zip byte-for-byte or Stash
+# aborts the install (rebuild the zip and update this hash together).
+- id: stashy-companion
+  name: Stashy Companion
+  metadata:
+    description: >-
+      iPhone-native HEVC/AV1 transcoding (NVENC/CPU), ffprobe codec + HDR stats,
+      and direct-play auto-tagging for the Stashy iOS app.
+  version: 0.1.0
+  date: 2026-07-04 00:00:00
+  path: stashy-companion.zip
+  sha256: 1f894c3cce8f8d997d17c514b2eb6dcf35326681ce3d52cca2ab3635ad62e960

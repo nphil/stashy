@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths-ignore:
       - 'android/**'
+      - 'stash-plugin/**'
       - '.github/workflows/android.yml'
       - '**/*.md'
   workflow_dispatch:
