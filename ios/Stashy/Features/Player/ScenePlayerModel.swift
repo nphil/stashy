@@ -32,10 +32,13 @@ final class ScenePlayerModel {
     /// honest "what am I really watching" gauge — e.g. it drops to 1280×720 when a server transcode
     /// downscales, so the Stats overlay can prove whether a manual quality switch actually took effect.
     var presentationSize: CGSize = .zero
-    /// Muted state, mirrored from the engine. Starts muted unless on a private audio route; the user's
-    /// choice is preserved across a seek-by-reinit engine swap.
-    var isMuted = false
-    @ObservationIgnored private var didAdoptMute = false
+    /// Linear playback volume 0…1. Every scene starts silent (0); the volume control raises it, and the
+    /// level carries across engine swaps (quality switch / seek-reinit / fallback).
+    var volume: Double = 0
+    /// Convenience for the UI: silent when the volume is (effectively) zero.
+    var isMuted: Bool { volume <= 0.001 }
+    /// The last non-zero level, so a tap-to-mute can restore the previous volume.
+    @ObservationIgnored private var lastNonZeroVolume: Double = 1
     /// True once playback has run to the end (player parked there). The next play() restarts from 0.
     @ObservationIgnored private var reachedEnd = false
 
@@ -221,9 +224,9 @@ final class ScenePlayerModel {
     /// Build an AVPlayer engine for `url` and wire its callbacks into this facade.
     private func makeEngine(url: URL) -> PlaybackEngine {
         let engine: PlaybackEngine = AVPlaybackEngine(url: url)
-        // First engine: adopt its route-based default (muted unless headphones). Later engines (a
-        // seek-by-reinit swap): carry the user's current choice so a far seek doesn't re-mute.
-        if didAdoptMute { engine.isMuted = isMuted } else { isMuted = engine.isMuted; didAdoptMute = true }
+        // Every engine (the initial one and any seek-reinit / quality / fallback swap) inherits the
+        // current volume — which starts at 0, so playback always begins silent until the user raises it.
+        engine.volume = Float(volume)
         engine.onTime = { [weak self] current, duration in
             guard let self else { return }
             let absolute = self.usesAbsoluteTime ? self.timeOffset + current : current
@@ -353,11 +356,16 @@ final class ScenePlayerModel {
     func pause() { engine?.pause() }
     func togglePlayPause() { isPlaying ? pause() : play() }
 
-    func toggleMute() {
-        let muted = !isMuted
-        engine?.isMuted = muted
-        isMuted = muted
+    /// Set the linear volume 0…1 (from the volume slider); applies to the live engine immediately.
+    func setVolume(_ v: Double) {
+        let clamped = min(1, max(0, v))
+        if clamped > 0 { lastNonZeroVolume = clamped }
+        volume = clamped
+        engine?.volume = Float(clamped)
     }
+
+    /// Tap-to-mute: drop to 0, or restore the previous level.
+    func toggleMute() { setVolume(volume > 0.001 ? 0 : lastNonZeroVolume) }
 
     func seek(to time: TimeInterval) {
         reachedEnd = false   // any seek means we're no longer parked at EOF

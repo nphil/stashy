@@ -129,15 +129,6 @@ struct PlayerControlsView: View {
 
     private var controlBar: some View {
         VStack(spacing: 4) {
-            // Status badges sit right on top of the scrubber: what quality is playing (resolution +
-            // codec) and how much work it costs (direct → remux → on-device → server, colour-coded).
-            HStack(spacing: 0) {
-                PlayerStatusBadges(scene: scene, presentationSize: model.presentationSize,
-                                   tier: model.playbackTier)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 2)
-
             ScrubBar(
                 duration: model.duration,
                 currentTime: model.currentTime,
@@ -148,6 +139,15 @@ struct PlayerControlsView: View {
                 onSeek: { model.seek(to: $0); scheduleHide() }
             )
 
+            // Quality + method badges sit cleanly *underneath* the scrubber (in the control chrome,
+            // never over the video / seek bar), left-aligned.
+            HStack(spacing: 0) {
+                PlayerStatusBadges(scene: scene, presentationSize: model.presentationSize,
+                                   tier: model.playbackTier)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 2)
+
             // Bigger glyphs on 44pt hit targets, generously spaced, so the controls are easy to hit
             // without accidental neighbours. The gear sits on the right, between the duration and the
             // fullscreen toggle, so its quality menu pops up from that corner.
@@ -155,10 +155,8 @@ struct PlayerControlsView: View {
                 Text(Self.timeString(isScrubbing ? scrubTime : model.currentTime))
                     .font(.footnote.weight(.medium).monospacedDigit())
                     .frame(minWidth: 52, alignment: .leading)
-                Button { model.toggleMute() } label: {
-                    Image(systemName: model.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                        .modifier(ControlIcon())
-                }
+                VolumeControl(volume: model.volume, isMuted: model.isMuted,
+                              onChange: { model.setVolume($0) }, onInteract: { scheduleHide() })
                 // Debug Stats toggle — fullscreen only (no clutter in the inline app view).
                 if isFullscreen {
                     Button { showStats.toggle() } label: {
@@ -237,7 +235,7 @@ struct PlayerControlsView: View {
 
 /// Shared styling for the bottom-bar icon buttons: a legible glyph on a 44pt square hit target so
 /// neighbouring controls don't collect accidental taps.
-private struct ControlIcon: ViewModifier {
+struct ControlIcon: ViewModifier {
     func body(content: Content) -> some View {
         content
             .font(.system(size: 18, weight: .semibold))

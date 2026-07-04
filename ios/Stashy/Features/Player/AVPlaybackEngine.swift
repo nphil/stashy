@@ -75,9 +75,11 @@ final class AVPlaybackEngine: PlaybackEngine {
         item.preferredForwardBufferDuration = 15
         player = AVPlayer(playerItem: item)
         player.automaticallyWaitsToMinimizeStalling = true
-        // Start muted unless the user is on a private route (headphones/AirPods/Bluetooth), so sound
-        // never unexpectedly plays through the phone speaker. The mute button can override this.
-        player.isMuted = !Self.privateAudioRouteActive
+        // Always start silent (volume 0), regardless of audio route — the owner wants every video to
+        // begin muted. `isMuted` stays false so that when the volume control raises `volume`, sound
+        // actually comes through (a muted player would ignore the volume).
+        player.volume = 0
+        player.isMuted = false
         hostView.player = player
         blurBackdrop.configure(output: videoOutput)
 
@@ -206,6 +208,11 @@ final class AVPlaybackEngine: PlaybackEngine {
     var isMuted: Bool {
         get { player.isMuted }
         set { player.isMuted = newValue }
+    }
+
+    var volume: Float {
+        get { player.volume }
+        set { player.volume = newValue; if newValue > 0 { player.isMuted = false } }
     }
 
     /// True when audio is routed somewhere private (wired headphones, AirPods / other Bluetooth, USB or

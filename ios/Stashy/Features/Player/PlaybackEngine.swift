@@ -35,9 +35,14 @@ protocol PlaybackEngine: AnyObject {
     /// play() restarts from the beginning instead of no-opping at the end.
     var onEnded: (() -> Void)? { get set }
 
-    /// Muted state. Starts muted unless a private audio route (headphones / AirPods / other Bluetooth)
-    /// is connected, so audio never blasts out of the phone speaker unexpectedly.
+    /// Muted state. Kept for callers that just want on/off; the volume slider drives loudness via
+    /// `volume` instead.
     var isMuted: Bool { get set }
+
+    /// Linear playback volume 0…1, applied to the player. 0 = silent. Every scene starts at 0 (the app
+    /// always begins muted); the volume control raises it. Separate from `isMuted` so a raised volume
+    /// actually takes effect.
+    var volume: Float { get set }
 
     func play()
     func pause()
