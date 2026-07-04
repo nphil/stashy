@@ -356,13 +356,20 @@ final class ScenePlayerModel {
     func pause() { engine?.pause() }
     func togglePlayPause() { isPlaying ? pause() : play() }
 
-    /// Set the linear volume 0…1 (from the volume slider); applies to the live engine immediately.
+    /// Set the linear volume (from the volume slider); applies to the live engine immediately.
+    /// Quantised to whole-percent steps so the control is a true 0–100 in-1-increments scale.
     func setVolume(_ v: Double) {
-        let clamped = min(1, max(0, v))
+        let clamped = (min(1, max(0, v)) * 100).rounded() / 100
         if clamped > 0 { lastNonZeroVolume = clamped }
         volume = clamped
         engine?.volume = Float(clamped)
     }
+
+    /// The current volume as a whole 0–100 percentage (for the readout / stepper).
+    var volumePercent: Int { Int((volume * 100).rounded()) }
+
+    /// Nudge the volume by ±1 percent (for tap-to-step fine control).
+    func stepVolume(_ delta: Int) { setVolume(Double(volumePercent + delta) / 100) }
 
     /// Tap-to-mute: drop to 0, or restore the previous level.
     func toggleMute() { setVolume(volume > 0.001 ? 0 : lastNonZeroVolume) }
