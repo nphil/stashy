@@ -12,32 +12,48 @@ extension View {
         background(color, in: RoundedRectangle(cornerRadius: detailCardCorner, style: .continuous))
     }
 
-    /// Fade the leading/top and trailing/bottom edges of a scrollable region so content dissolves into the
-    /// card instead of hard-cutting — a consistent "immersive scroll" look for every scrollable card (now
-    /// and future). Apply to the `ScrollView`. `length` is the fade depth in points.
-    func scrollEdgeFade(_ axis: Axis = .vertical, length: CGFloat = 16) -> some View {
-        mask(ScrollEdgeFadeMask(axis: axis, length: length))
+    /// Immersive scroll: fade a vertical `ScrollView`'s top/bottom edges so content dissolves into the card
+    /// instead of hard-cutting — but only where there's actually off-screen content. At the very top there's
+    /// no top fade; it ramps in as you scroll away, and the bottom fade disappears once you reach the end.
+    /// If the content fits (not scrollable), no fade at all. Apply to the `ScrollView`.
+    func scrollEdgeFade(length: CGFloat = 22) -> some View {
+        modifier(ScrollEdgeFade(length: length))
     }
 }
 
-/// Alpha mask: transparent at the two edges (fade), opaque in the middle. Drives `scrollEdgeFade`.
-private struct ScrollEdgeFadeMask: View {
-    let axis: Axis
+private struct ScrollFadeMetrics: Equatable { var top: CGFloat; var bottom: CGFloat }
+
+/// Tracks scroll position vs content/container size and drives a dynamic top/bottom alpha fade.
+private struct ScrollEdgeFade: ViewModifier {
     let length: CGFloat
-    var body: some View {
-        if axis == .vertical {
-            VStack(spacing: 0) {
-                LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom).frame(height: length)
-                Rectangle().fill(.black)
-                LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom).frame(height: length)
+    @State private var top: CGFloat = 0      // 0 = no top fade (at the top edge), 1 = fully faded
+    @State private var bottom: CGFloat = 0
+
+    func body(content: Content) -> some View {
+        content
+            .onScrollGeometryChange(for: ScrollFadeMetrics.self) { geo in
+                let offset = geo.contentOffset.y + geo.contentInsets.top
+                let maxOffset = geo.contentSize.height + geo.contentInsets.top + geo.contentInsets.bottom
+                    - geo.containerSize.height
+                let scrollable = maxOffset > 1
+                return ScrollFadeMetrics(
+                    top: scrollable ? min(1, max(0, offset / length)) : 0,
+                    bottom: scrollable ? min(1, max(0, (maxOffset - offset) / length)) : 0
+                )
+            } action: { _, m in
+                top = m.top
+                bottom = m.bottom
             }
-        } else {
-            HStack(spacing: 0) {
-                LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing).frame(width: length)
-                Rectangle().fill(.black)
-                LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing).frame(width: length)
-            }
-        }
+            .mask(
+                VStack(spacing: 0) {
+                    // Edge alpha is 1 (visible) when at that edge, ramping to 0 as you scroll past it.
+                    LinearGradient(colors: [.black.opacity(1 - top), .black], startPoint: .top, endPoint: .bottom)
+                        .frame(height: length)
+                    Rectangle().fill(.black)
+                    LinearGradient(colors: [.black, .black.opacity(1 - bottom)], startPoint: .top, endPoint: .bottom)
+                        .frame(height: length)
+                }
+            )
     }
 }
 
