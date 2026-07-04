@@ -12,10 +12,11 @@ struct VolumeControl: View {
     let onChange: (Double) -> Void
     /// Keep the controls from auto-hiding while the user is adjusting volume.
     let onInteract: () -> Void
+    /// Width of the expanded slider track. Wider in landscape fullscreen (lots of room), 54 elsewhere.
+    var trackWidth: CGFloat = 54
 
     @State private var expanded = false
     @State private var collapseTask: Task<Void, Never>?
-    private let trackWidth: CGFloat = 54
 
     private var percent: Int { Int((volume * 100).rounded()) }
 

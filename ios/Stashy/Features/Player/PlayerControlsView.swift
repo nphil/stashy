@@ -63,7 +63,7 @@ struct PlayerControlsView: View {
                     // the video rect can push it off-screen if the rect is briefly mis-sized (e.g. a video
                     // whose true aspect arrives late, as some MPEG4/AVI files do). Inline: follow the bottom
                     // edge of the fitted video box (the device bottom inset there belongs to the tab bar).
-                    controlBar
+                    controlBar(landscape: proxy.size.width > proxy.size.height)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                         .padding(.bottom, isFullscreen ? safeArea.bottom : max(proxy.size.height - videoRect.maxY, 0))
                         .padding(.leading, isFullscreen ? safeArea.leading : 0)
@@ -127,7 +127,7 @@ struct PlayerControlsView: View {
     /// Half the fixed width of the quality menu (see `qualityMenu`), used to clamp its pop-up position.
     private static let menuHalfWidth: CGFloat = 89
 
-    private var controlBar: some View {
+    private func controlBar(landscape: Bool) -> some View {
         VStack(spacing: 4) {
             ScrubBar(
                 duration: model.duration,
@@ -139,17 +139,16 @@ struct PlayerControlsView: View {
                 onSeek: { model.seek(to: $0); scheduleHide() }
             )
 
-            // One control row: elapsed · quality + method badges · volume ‖ duration · gear · fullscreen.
-            // The volume expands rightward into the flexible middle gap, so it never pushes or covers the
-            // badges. Times and badges are fixed-size (never truncate) and kept compact to fit one line.
+            // One control row: elapsed · quality + method badges · stats ‖ volume (last on the left) ‖
+            // duration · gear · fullscreen. Volume is the final left-hand control and expands rightward
+            // into the flexible middle gap, so it never pushes or covers anything; in landscape fullscreen
+            // there's far more room, so the track is ~2× wider. Times/badges are fixed-size (never truncate).
             HStack(spacing: 6) {
                 Text(Self.timeString(isScrubbing ? scrubTime : model.currentTime))
                     .font(.caption2.weight(.semibold).monospacedDigit())
                     .fixedSize()
                 PlayerStatusBadges(scene: scene, presentationSize: model.presentationSize,
                                    tier: model.playbackTier)
-                VolumeControl(volume: model.volume, isMuted: model.isMuted,
-                              onChange: { model.setVolume($0) }, onInteract: { scheduleHide() })
                 // Debug Stats toggle — fullscreen only (no clutter in the inline app view).
                 if isFullscreen {
                     Button { showStats.toggle() } label: {
@@ -157,6 +156,10 @@ struct PlayerControlsView: View {
                             .modifier(ControlIcon())
                     }
                 }
+                // Volume: last item on the left. Wider expanded track in landscape fullscreen.
+                VolumeControl(volume: model.volume, isMuted: model.isMuted,
+                              onChange: { model.setVolume($0) }, onInteract: { scheduleHide() },
+                              trackWidth: (isFullscreen && landscape) ? 120 : 54)
                 Spacer(minLength: 6)
                 Text(Self.timeString(model.duration))
                     .font(.caption2.weight(.semibold).monospacedDigit())
