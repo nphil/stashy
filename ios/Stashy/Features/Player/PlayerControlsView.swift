@@ -139,22 +139,15 @@ struct PlayerControlsView: View {
                 onSeek: { model.seek(to: $0); scheduleHide() }
             )
 
-            // Quality + method badges sit cleanly *underneath* the scrubber (in the control chrome,
-            // never over the video / seek bar), left-aligned.
-            HStack(spacing: 0) {
+            // One control row: elapsed · quality + method badges · volume ‖ duration · gear · fullscreen.
+            // The volume expands rightward into the flexible middle gap, so it never pushes or covers the
+            // badges. Times and badges are fixed-size (never truncate) and kept compact to fit one line.
+            HStack(spacing: 6) {
+                Text(Self.timeString(isScrubbing ? scrubTime : model.currentTime))
+                    .font(.caption2.weight(.semibold).monospacedDigit())
+                    .fixedSize()
                 PlayerStatusBadges(scene: scene, presentationSize: model.presentationSize,
                                    tier: model.playbackTier)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 2)
-
-            // Bigger glyphs on 44pt hit targets, generously spaced, so the controls are easy to hit
-            // without accidental neighbours. The gear sits on the right, between the duration and the
-            // fullscreen toggle, so its quality menu pops up from that corner.
-            HStack(spacing: 4) {
-                Text(Self.timeString(isScrubbing ? scrubTime : model.currentTime))
-                    .font(.footnote.weight(.medium).monospacedDigit())
-                    .frame(minWidth: 52, alignment: .leading)
                 VolumeControl(volume: model.volume, isMuted: model.isMuted,
                               onChange: { model.setVolume($0) }, onInteract: { scheduleHide() })
                 // Debug Stats toggle — fullscreen only (no clutter in the inline app view).
@@ -164,9 +157,10 @@ struct PlayerControlsView: View {
                             .modifier(ControlIcon())
                     }
                 }
-                Spacer(minLength: 4)
+                Spacer(minLength: 6)
                 Text(Self.timeString(model.duration))
-                    .font(.footnote.weight(.medium).monospacedDigit())
+                    .font(.caption2.weight(.semibold).monospacedDigit())
+                    .fixedSize()
                 // Server-quality gear (M-B): pick a manual server-transcode resolution. Its frame is
                 // published so the quality menu can pop up directly above it.
                 Button { withAnimation(.easeOut(duration: 0.15)) { showQuality.toggle() }; scheduleHide() } label: {

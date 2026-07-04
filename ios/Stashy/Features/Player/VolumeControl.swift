@@ -1,9 +1,9 @@
 import SwiftUI
 
 /// The player's volume control: a speaker button that expands *inline* — rightward, in the same row, no
-/// popup — into a one-finger horizontal slider with a live **0–100** readout. The value is a whole-percent
-/// scale (0–100 in 1-unit steps): the drag snaps to integers and the number shows the exact level.
-/// Dragging to the far left mutes; the speaker glyph reflects the level. Every scene starts silent.
+/// popup — into a one-finger horizontal slider with the live **0–100** value overlaid on the track (so it
+/// adds no extra width). Dragging to the far left mutes; the speaker glyph reflects the level. The value
+/// is a whole-percent scale (0–100 in 1-unit steps). Every scene starts silent.
 struct VolumeControl: View {
     /// Current linear volume 0…1 (owned by the model; already quantised to whole percent).
     let volume: Double
@@ -15,19 +15,17 @@ struct VolumeControl: View {
 
     @State private var expanded = false
     @State private var collapseTask: Task<Void, Never>?
-    private let trackWidth: CGFloat = 100
-    private let readoutWidth: CGFloat = 30
+    private let trackWidth: CGFloat = 54
 
     private var percent: Int { Int((volume * 100).rounded()) }
-    private var panelWidth: CGFloat { trackWidth + 6 + readoutWidth }
 
     var body: some View {
         HStack(spacing: 6) {
             Button { toggleExpanded() } label: {
                 Image(systemName: icon).modifier(ControlIcon())
             }
-            panel
-                .frame(width: expanded ? panelWidth : 0, height: 44)
+            slider
+                .frame(width: expanded ? trackWidth : 0, height: 44)
                 .opacity(expanded ? 1 : 0)
                 .clipped()
                 .allowsHitTesting(expanded)
@@ -42,17 +40,6 @@ struct VolumeControl: View {
         return "speaker.wave.3.fill"
     }
 
-    private var panel: some View {
-        HStack(spacing: 6) {
-            slider.frame(width: trackWidth)
-            Text("\(percent)")
-                .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                .foregroundStyle(.white)
-                .frame(width: readoutWidth, alignment: .trailing)
-        }
-        .frame(width: panelWidth, height: 44)   // fixed intrinsic width so the clip matches the animation
-    }
-
     private var slider: some View {
         GeometryReader { geo in
             let w = max(geo.size.width, 1)
@@ -65,6 +52,13 @@ struct VolumeControl: View {
                     .offset(x: min(max(w * fill - 7, 0), w - 14))
             }
             .frame(maxHeight: .infinity)
+            // Live 0–100 value overlaid at the top of the track (adds no horizontal width).
+            .overlay(alignment: .top) {
+                Text("\(percent)")
+                    .font(.system(size: 9, weight: .bold).monospacedDigit())
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.55), radius: 1)
+            }
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)

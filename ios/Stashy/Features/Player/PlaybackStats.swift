@@ -71,7 +71,7 @@ enum PlaybackTier: Int {
         switch self {
         case .direct: return "Direct"
         case .remux: return "Remux"
-        case .localTranscode: return "On-device"
+        case .localTranscode: return "Local"   // on-device transcode — short label to fit the control row
         case .server: return "Server"
         }
     }

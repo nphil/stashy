@@ -49,41 +49,44 @@ enum PlaybackBadgeStyle {
     }
 }
 
-/// The two-pill status row shown just above the scrubber.
+/// The two status pills (quality + method), compact enough to share the single control row with the
+/// time, volume and transport buttons. Fixed-size so text never truncates; kept short so nothing spills.
 struct PlayerStatusBadges: View {
     let scene: StashScene
     let presentationSize: CGSize
     let tier: PlaybackTier
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 4) {
             qualityBadge
             methodBadge
         }
-        .shadow(color: .black.opacity(0.45), radius: 2, y: 1)
+        .lineLimit(1)
+        .fixedSize()
+        .shadow(color: .black.opacity(0.45), radius: 1.5, y: 1)
     }
 
     private var qualityBadge: some View {
         let q = PlaybackBadgeStyle.quality(presentationSize: presentationSize, scene: scene)
-        return HStack(spacing: 5) {
+        return HStack(spacing: 4) {
             Text(q.label).foregroundStyle(q.color)
             if let codec = PlaybackBadgeStyle.codec(scene.codecLabel) {
-                Text(codec).foregroundStyle(.white.opacity(0.85))
+                Text(codec).foregroundStyle(.white.opacity(0.82))
             }
         }
-        .font(.system(size: 11, weight: .bold))
-        .padding(.horizontal, 8).padding(.vertical, 3)
+        .font(.system(size: 10, weight: .bold))
+        .padding(.horizontal, 6).padding(.vertical, 2)
         .background(.black.opacity(0.38), in: Capsule())
         .overlay(Capsule().strokeBorder(q.color.opacity(0.55), lineWidth: 0.75))
     }
 
     private var methodBadge: some View {
-        HStack(spacing: 4) {
-            Image(systemName: tier.symbol).font(.system(size: 9, weight: .black))
-            Text(tier.label).font(.system(size: 11, weight: .bold))
+        HStack(spacing: 3) {
+            Image(systemName: tier.symbol).font(.system(size: 8.5, weight: .black))
+            Text(tier.label).font(.system(size: 10, weight: .bold))
         }
         .foregroundStyle(tier.color)
-        .padding(.horizontal, 8).padding(.vertical, 3)
+        .padding(.horizontal, 6).padding(.vertical, 2)
         .background(tier.color.opacity(0.16), in: Capsule())
         .overlay(Capsule().strokeBorder(tier.color.opacity(0.5), lineWidth: 0.75))
     }
