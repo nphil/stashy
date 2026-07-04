@@ -9,7 +9,7 @@ description: >-
   codec + HDR stats, and auto-tagging of direct-play-ready scenes — capabilities
   vanilla Stash lacks. Output is served back to the app over Stash's own HTTP
   with real Job progress.
-version: 0.1.14
+version: 0.1.15
 url: https://github.com/nphil/stashy/tree/main/stash-plugin
 exec:
   - python
@@ -32,6 +32,10 @@ settings:
   allowAV1:
     displayName: Allow AV1 (SVT-AV1, CPU)
     description: "Permit AV1 output when the app requests it. CPU-only (Pascal GPUs cannot encode AV1); smaller files, much slower."
+    type: BOOLEAN
+  preserveHDR:
+    displayName: Preserve HDR (10-bit)
+    description: "Keep HDR10 / HLG sources as true 10-bit HDR (hevc_nvenc Main10 + BT.2020 color tags) so they display as HDR on an iPhone, instead of down-converting to 8-bit SDR. Dolby Vision is mapped to its HDR10/HLG base layer (NVENC can't emit DV); DV Profile 5 (no compatible base) falls back to SDR. Default on."
     type: BOOLEAN
   cacheCapGB:
     displayName: Transcode cache cap (GB)

@@ -273,21 +273,55 @@ def _clean_fps(sv):
     return "30"
 
 
+def _detect_hdr(sv, preserve):
+    """Decide the HDR-preserving mode for a source video stream (ffprobe dict):
+      'pq'  → HDR10 (SMPTE ST 2084)   'hlg' → Hybrid Log-Gamma   None → SDR / can't preserve.
+    hevc_nvenc can't emit Dolby Vision, so DV is mapped to its base layer's compatibility (HDR10/HLG),
+    or SDR when there's no usable base (Profile 5). Verified fields (NVIDIA matrix + Apple HDR spec)."""
+    if not preserve:
+        return None
+    for sd in (sv.get("side_data_list") or []):
+        is_dovi = "dovi" in (sd.get("side_data_type") or "").lower() or sd.get("dv_profile") is not None
+        if is_dovi:
+            compat = sd.get("dv_bl_signal_compatibility_id")
+            if compat == 4:
+                return "hlg"   # iPhone-default DV 8.4 → HLG-compatible base layer
+            if compat == 1:
+                return "pq"    # DV 7 / 8.1 → HDR10-compatible base layer
+            return None        # Profile 5 / SDR-compat base → no recoverable HDR on NVENC
+    pix = (sv.get("pix_fmt") or "").lower()
+    ten_bit = any(t in pix for t in ("10", "12", "p010", "p016"))
+    transfer = (sv.get("color_transfer") or "").lower()
+    if not ten_bit:
+        return None
+    if transfer == "smpte2084":
+        return "pq"
+    if transfer == "arib-std-b67":
+        return "hlg"
+    return None
+
+
 def build_transcode_cmd(src, dst, codec, target_h, cq, ffmpeg, engine, gpu_decode,
-                        av1_preset=DEFAULT_AV1_PRESET, cfr_fps=None):
-    """engine ∈ {"hevc_nvenc","libx265","libsvtav1"}. gpu_decode adds NVDEC.
+                        av1_preset=DEFAULT_AV1_PRESET, cfr_fps=None, hdr=None):
+    """engine ∈ {"hevc_nvenc","libx265","libsvtav1"}. gpu_decode adds NVDEC. hdr ∈ {None,"pq","hlg"}.
 
     `target_h` is the already-resolved (downscaled, even) output height, so the `-vf` is a plain
-    `scale=-2:<int>` — no quotes / no `min(,)` (those only work in a shell; passed via argv they'd be
-    literal characters ffmpeg rejects). For the NVENC path we NVDEC-decode on the GPU (`-hwaccel cuda`)
-    but scale on the CPU (frames land in system memory) before NVENC re-encodes — both heavy codec ops
-    stay on the Tesla P40 while dodging the pix_fmt fragility of the fully-on-card scale_cuda filter.
+    `scale=-2:<int>`. For the NVENC path we NVDEC-decode on the GPU (`-hwaccel cuda`) but scale/format on
+    the CPU (frames land in system memory) before NVENC re-encodes.
+
+    HDR (hdr != None): keep 10-bit and carry BT.2020 + PQ/HLG color tags so the output displays as HDR
+    (verified: NVENC Main10 emits these into the HEVC VUI + MP4 colr atom; mastering SEI auto-passes on
+    SDK 13.0). SDR (hdr None): force 8-bit yuv420p.
     """
-    # Video filter chain. For NVENC it is: [fps=<clean CFR>], [scale], format=yuv420p.
-    #  - fps: pins a valid constant frame rate so NVENC's init-time rate validation can't be handed a
-    #    0/0 or absurd value from a re-muxed source (the real cause of the -22 "invalid param" open fail).
-    #  - format=yuv420p: explicit 8-bit 4:2:0, so 10-bit sources don't reach the 8-bit encoder.
-    # target_h <= 0 keeps the source resolution (Original — portrait-safe, no re-scale).
+    ten_bit = hdr in ("pq", "hlg")
+    trc = {"pq": "smpte2084", "hlg": "arib-std-b67"}.get(hdr)
+    # nvenc's native 10-bit pixel format is p010le; the software encoders want planar yuv420p10le.
+    pix = ("p010le" if engine == "hevc_nvenc" else "yuv420p10le") if ten_bit else "yuv420p"
+    fmt_f = "format={0}".format(pix)
+    color_args = (["-color_primaries", "bt2020", "-color_trc", trc,
+                   "-colorspace", "bt2020nc", "-color_range", "tv"] if ten_bit else [])
+    main10 = ["-profile:v", "main10"] if (ten_bit and engine in ("hevc_nvenc", "libx265")) else []
+
     scale_f = "scale=-2:{0}".format(int(target_h)) if int(target_h) > 0 else None
 
     def vf(*filters):
@@ -299,17 +333,17 @@ def build_transcode_cmd(src, dst, codec, target_h, cq, ffmpeg, engine, gpu_decod
         pre += ["-hwaccel", "cuda"]  # NVDEC decode; frames land in system mem for the CPU scale/format
     cmd = pre + ["-i", src]
     if engine == "libsvtav1":
-        cmd += vf(scale_f, "format=yuv420p") + ["-c:v", "libsvtav1", "-preset", str(av1_preset),
-                                                "-crf", str(cq), "-pix_fmt", "yuv420p"]
+        cmd += vf(scale_f, fmt_f) + ["-c:v", "libsvtav1", "-preset", str(av1_preset),
+                                     "-crf", str(cq), "-pix_fmt", pix] + color_args
     elif engine == "hevc_nvenc":
         fps_f = "fps={0}".format(cfr_fps) if cfr_fps else None
         # -bf 0: Pascal (Tesla P40) NVENC has no HEVC B-frame support; forcing 0 avoids a config reject.
-        cmd += vf(fps_f, scale_f, "format=yuv420p") + ["-c:v", "hevc_nvenc", "-preset", "p5",
-                                                       "-rc", "vbr", "-cq", str(cq), "-b:v", "0", "-bf", "0",
-                                                       "-tag:v", "hvc1", "-pix_fmt", "yuv420p"]
+        cmd += vf(fps_f, scale_f, fmt_f) + ["-c:v", "hevc_nvenc", "-preset", "p5",
+                                            "-rc", "vbr", "-cq", str(cq), "-b:v", "0", "-bf", "0"] \
+            + main10 + ["-tag:v", "hvc1", "-pix_fmt", pix] + color_args
     else:  # libx265 — CPU HEVC, last-resort fallback only
-        cmd += vf(scale_f, "format=yuv420p") + ["-c:v", "libx265", "-preset", "medium",
-                                                "-crf", str(cq), "-tag:v", "hvc1", "-pix_fmt", "yuv420p"]
+        cmd += vf(scale_f, fmt_f) + ["-c:v", "libx265", "-preset", "medium", "-crf", str(cq)] \
+            + main10 + ["-tag:v", "hvc1", "-pix_fmt", pix] + color_args
     cmd += ["-c:a", "aac", "-b:a", "160k", "-ac", "2",
             "-movflags", "+faststart",
             # Force the MP4 muxer: the output is written to a `.part` temp name, and ffmpeg can't infer
@@ -437,6 +471,14 @@ def run_transcode(stash, args, settings):
     # `fps` filter. Use the source's real rate when sane, else a safe default.
     cfr_fps = _clean_fps(sv)
 
+    # HDR preservation: keep HDR10/HLG sources as true 10-bit HDR (Main10 + BT.2020) instead of an 8-bit
+    # down-convert, so they display as HDR on iPhone. Only for HEVC/AV1 (not h264); default on.
+    preserve = settings.get("preserveHDR")
+    preserve = True if preserve is None else bool(preserve)
+    hdr = _detect_hdr(sv, preserve) if codec in ("hevc", "av1") else None
+    if hdr:
+        log_info("HDR: preserving {} (10-bit Main10, BT.2020)".format(hdr.upper()))
+
     # Resolve the actual scale height in Python (downscale only, kept even for yuv420p) so the ffmpeg
     # `-vf` is a plain `scale=-2:<int>` — no quotes / no `min(,)` comma to escape. Passing a quoted
     # expression like scale=-2:'min(1080,ih)' via argv (no shell) makes ffmpeg see the literal quotes
@@ -522,7 +564,7 @@ def run_transcode(stash, args, settings):
                                         "codec": codec, "resolution": res_label, "engine": label})
         ff = ffmpeg_hw if engine == "hevc_nvenc" else ffmpeg   # NVENC → driver-safe build; SW → main
         cmd = build_transcode_cmd(src, tmp, codec, target_h, cq, ff, engine, gpu_decode,
-                                  av1_preset, cfr_fps)
+                                  av1_preset, cfr_fps, hdr)
         log_debug("ffmpeg: " + " ".join(cmd))
         rc, err_tail = _run_ffmpeg(cmd, duration, on_status=_on_status)
         if rc == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
