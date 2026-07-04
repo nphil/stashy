@@ -68,42 +68,45 @@ struct SocialsCard: View {
     let links: [SocialLink]
     @Environment(ThemeManager.self) private var themeManager
 
-    private let rowHeight: CGFloat = 34
-    private let headerHeight: CGFloat = 24
-
     var body: some View {
-        GeometryReader { geo in
-            let available = geo.size.height - headerHeight - 20
-            let fit = max(1, Int(available / rowHeight))
-            VStack(alignment: .leading, spacing: 6) {
-                Label("Links", systemImage: "link")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Links", systemImage: "link")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
 
-                if links.isEmpty {
-                    Text("No links")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                } else {
-                    ForEach(links.prefix(fit), id: \.url) { link in
-                        Link(destination: link.url) {
-                            Label(link.label, systemImage: link.symbol)
-                                .font(.caption.weight(.medium))
-                                .lineLimit(1)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                                .glassEffect(.regular.tint(themeManager.current.accentColor), in: Capsule())
+            if links.isEmpty {
+                Text("No links")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                Spacer(minLength: 0)
+            } else {
+                // Scroll rather than squeezing a fixed number of rows into the card height. The old
+                // fit-count math under-counted the row spacing, so more rows were shown than fit and the
+                // VStack compressed them until they OVERLAPPED — leaving only the last link hit-testable
+                // (why "the links didn't work" / "only the last one is clickable"). A ScrollView keeps every
+                // row its natural height (no overlap → all tappable) and lets every link be reached.
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(links.enumerated()), id: \.offset) { _, link in
+                            Link(destination: link.url) {
+                                Label(link.label, systemImage: link.symbol)
+                                    .font(.caption.weight(.medium))
+                                    .lineLimit(1)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .glassEffect(.regular.tint(themeManager.current.accentColor), in: Capsule())
+                                    .contentShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
-                Spacer(minLength: 0)
             }
-            .padding(10)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .detailCardBackground(themeManager.current.surfaceColor)
         }
+        .padding(10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .detailCardBackground(themeManager.current.surfaceColor)
     }
 }
 
