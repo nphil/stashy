@@ -15,6 +15,11 @@ struct PlayerControlsView: View {
     /// Captured right before a quality switch so the rebuilt player resumes at the exact position.
     @Binding var resumeTime: Double
     @State private var showQuality = false
+    /// Live frame of the gear button (in the "playerControls" space) so the quality menu can pop up
+    /// directly above it instead of floating off in a corner.
+    @State private var gearFrame: CGRect = .zero
+    /// Measured height of the quality menu, so it can be centred a fixed gap above the gear.
+    @State private var menuHeight: CGFloat = 0
     /// The rectangle the video actually occupies (in the controls' coordinate space) — used to centre
     /// the play/pause control and anchor the bottom bar on the real video, not the full player frame.
     var videoRect: CGRect = .zero
@@ -79,16 +84,21 @@ struct PlayerControlsView: View {
                     }
                 }
 
-                // Server-quality gear menu (M-B) — a translucent panel over the video near the gear.
+                // Server-quality gear menu (M-B) — a translucent panel that pops up directly above the
+                // gear button (its measured frame), clamped so it never runs off-screen.
                 if showQuality {
                     Color.black.opacity(0.001)
                         .contentShape(Rectangle())
                         .ignoresSafeArea()
-                        .onTapGesture { showQuality = false }
+                        .onTapGesture { withAnimation(.easeOut(duration: 0.15)) { showQuality = false } }
                     qualityMenu
-                        .padding(.trailing, (isFullscreen ? safeArea.trailing : 0) + 16)
-                        .padding(.bottom, (isFullscreen ? safeArea.bottom : max(proxy.size.height - videoRect.maxY, 0)) + 92)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { menuHeight = $0 }
+                        .position(
+                            x: min(max(gearFrame.midX, Self.menuHalfWidth + safeArea.leading + 8),
+                                   proxy.size.width - Self.menuHalfWidth - safeArea.trailing - 8),
+                            y: max(gearFrame.minY - 12 - menuHeight / 2,
+                                   menuHeight / 2 + safeArea.top + 8)
+                        )
                         .transition(.opacity)
                 }
 
@@ -106,10 +116,14 @@ struct PlayerControlsView: View {
                 }
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
+            .coordinateSpace(name: "playerControls")
         }
         .animation(.easeInOut(duration: 0.2), value: showControls)
         .onAppear { scheduleHide() }
     }
+
+    /// Half the fixed width of the quality menu (see `qualityMenu`), used to clamp its pop-up position.
+    private static let menuHalfWidth: CGFloat = 89
 
     private var controlBar: some View {
         VStack(spacing: 4) {
@@ -123,35 +137,45 @@ struct PlayerControlsView: View {
                 onSeek: { model.seek(to: $0); scheduleHide() }
             )
 
-            HStack(spacing: 14) {
+            // Bigger glyphs on 44pt hit targets, generously spaced, so the mute/stats/gear/fullscreen
+            // controls are easy to hit without accidental neighbours.
+            HStack(spacing: 4) {
                 Text(Self.timeString(isScrubbing ? scrubTime : model.currentTime))
+                    .font(.footnote.weight(.medium).monospacedDigit())
+                    .frame(minWidth: 52, alignment: .leading)
                 Button { model.toggleMute() } label: {
                     Image(systemName: model.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        .modifier(ControlIcon())
                 }
                 // Debug Stats toggle — fullscreen only (no clutter in the inline app view).
                 if isFullscreen {
                     Button { showStats.toggle() } label: {
                         Image(systemName: showStats ? "chart.bar.doc.horizontal.fill" : "chart.bar.doc.horizontal")
+                            .modifier(ControlIcon())
                     }
                 }
-                // Server-quality gear (M-B): pick a manual server-transcode resolution.
+                // Server-quality gear (M-B): pick a manual server-transcode resolution. Its frame is
+                // published so the quality menu can pop up directly above it.
                 Button { withAnimation(.easeOut(duration: 0.15)) { showQuality.toggle() }; scheduleHide() } label: {
                     Image(systemName: quality == .auto ? "gearshape" : "gearshape.fill")
+                        .modifier(ControlIcon())
                 }
-                Spacer()
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("playerControls")) } action: { gearFrame = $0 }
+                Spacer(minLength: 4)
                 Text(Self.timeString(model.duration))
+                    .font(.footnote.weight(.medium).monospacedDigit())
                 Button { isFullscreen.toggle() } label: {
                     Image(systemName: isFullscreen
                           ? "arrow.down.right.and.arrow.up.left"
                           : "arrow.up.left.and.arrow.down.right")
+                        .modifier(ControlIcon())
                 }
             }
-            .font(.caption.weight(.medium))
             .foregroundStyle(.white)
         }
-        .padding(.horizontal, 14)
-        .padding(.bottom, 10)
-        .padding(.top, 24)
+        .padding(.horizontal, 10)
+        .padding(.bottom, 6)
+        .padding(.top, 20)
         .background(
             LinearGradient(colors: [.clear, .black.opacity(0.7)], startPoint: .top, endPoint: .bottom)
         )
@@ -196,6 +220,17 @@ struct PlayerControlsView: View {
         let total = Int(t)
         let h = total / 3600, m = total % 3600 / 60, s = total % 60
         return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
+    }
+}
+
+/// Shared styling for the bottom-bar icon buttons: a legible glyph on a 44pt square hit target so
+/// neighbouring controls don't collect accidental taps.
+private struct ControlIcon: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .font(.system(size: 18, weight: .semibold))
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
     }
 }
 

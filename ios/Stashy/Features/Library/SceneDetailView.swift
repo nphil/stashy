@@ -98,6 +98,10 @@ struct SceneDetailView: View {
         .navigationBarBackButtonHidden(true)
         .statusBarHidden(isFullscreen)
         .background(EnableSwipeBack()) // keep edge-swipe back even with the nav bar hidden
+        // Restore portrait when the whole detail screen goes away (back / swipe-back / open performer).
+        // This lives here — not in ScenePlayerView — because the player is rebuilt on every quality
+        // switch (`.id(route.url)`); resetting orientation there would kick fullscreen back to portrait.
+        .onDisappear { OrientationController.lock(.portrait) }
         .task(id: scene.id) {
             guard let client = appState.client else { return }
             fullScene = try? await client.findScene(id: scene.id)

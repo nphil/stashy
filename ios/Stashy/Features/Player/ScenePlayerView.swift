@@ -208,9 +208,11 @@ struct ScenePlayerView: View {
             model.start()
         }
         .onDisappear {
-            OrientationController.lock(.portrait)
             hideTask?.cancel()
             // Leaving the scene: stop playback so audio can't keep running in the background.
+            // NOTE: no orientation reset here — this view is rebuilt (`.id(route.url)`) on every
+            // quality switch, and resetting to portrait here would kick fullscreen landscape back to
+            // portrait mid-switch. Restoring portrait on a real exit is owned by SceneDetailView.
             model.stop()
         }
     }
