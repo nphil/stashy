@@ -76,8 +76,18 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   checklist; plus playback engineering learnings.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **~v1.0.15x** (M-A stage 3, commit `7c7d0ae`) — verify the newest release/IPA size each
-  push (CI Build step swallows exit codes; only a published release proves compile).
+- Latest release: **v1.0.162** (debug-logging system, commit `bfa52fc`, IPA ~7.83 MB) — verify the newest
+  release/IPA size each push (CI Build step swallows exit codes; only a published release proves compile).
+- **Debug logging system shipped** (`Services/RemoteLog.swift` + `Services/DebugOverlay.swift`): ntfy
+  server URL + topic are now **configurable** (Settings → Diagnostics; point at a self-hosted Unraid ntfy
+  for privacy, default public `ntfy.sh`). `RemoteLog.event(tag, fields)` = compact structured one-liners.
+  Transcode/remux/playback paths now stream stage diagnostics (`⚙︎ transcode-in/frame1/out`,
+  `⚙︎ remux-header-FAIL/out`, `▶︎ video size=…`) to debug the HEVC-won't-play-native +
+  video-disappeared-after-transcode bugs. **App-wide floating camera button** (own passthrough UIWindow,
+  excluded from its own shot) → `RemoteLog.uploadImage` PUTs a screenshot as an ntfy attachment; assistant
+  fetches the hosted URL (public server only). **ntfy has NO delete API** — "New topic" rotates to a burner
+  channel; auto-expiry (public ~12h msgs / ~3h attachments) or short self-hosted retention is the cleanup.
+  Still off by default; still the tech-debt item to remove before wider release.
 - **M-B shipped**: player gear → custom quality menu forcing Stash HLS at a resolution. The `?resolution=`
   bug is fixed — Stash's HLS URL already carries `resolution=ORIGINAL`, so `serverQualityRoute` now
   *replaces* it (a duplicate param made Stash read the first = ORIGINAL). Enum values LOW/STANDARD/
