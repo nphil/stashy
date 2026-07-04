@@ -223,6 +223,7 @@ final class FFmpegRemuxer: @unchecked Sendable {
         var copied: [String] = []
         var outIndex = 0
         var videoInputIndex = -1
+        var colorNote = "—"   // HDR/bit-depth of the video stream, for the diagnostic stream
         for i in 0..<nbStreams {
             guard let inStream = input!.pointee.streams[i], let inPar = inStream.pointee.codecpar else { continue }
             let type = inPar.pointee.codec_type
@@ -233,7 +234,20 @@ final class FFmpegRemuxer: @unchecked Sendable {
             // Without this, HEVC-in-MKV → MP4 typically fails with "tag not found".
             outStream.pointee.codecpar.pointee.codec_tag = 0
             streamMapping[i] = outIndex
-            if type == AVMEDIA_TYPE_VIDEO, videoInputIndex < 0 { videoInputIndex = i }
+            if type == AVMEDIA_TYPE_VIDEO, videoInputIndex < 0 {
+                videoInputIndex = i
+                // Transfer function → HDR class (PQ = HDR10/HDR10+, HLG = broadcast HDR); pixel format
+                // carries bit depth (p010/yuv420p10 = 10-bit). A stream copy preserves all of this, so the
+                // remuxed MP4 keeps its HDR — AVPlayerLayer then renders it in EDR on an HDR display.
+                let trc = inPar.pointee.color_trc
+                let hdr: String
+                if trc == AVCOL_TRC_SMPTE2084 { hdr = "HDR-PQ" }
+                else if trc == AVCOL_TRC_ARIB_STD_B67 { hdr = "HDR-HLG" }
+                else if trc == AVCOL_TRC_BT709 || trc == AVCOL_TRC_UNSPECIFIED { hdr = "SDR" }
+                else { hdr = "trc\(trc.rawValue)" }
+                let pix = av_get_pix_fmt_name(AVPixelFormat(rawValue: inPar.pointee.format)).map { String(cString: $0) } ?? "?"
+                colorNote = "\(hdr)/\(pix)"
+            }
             outIndex += 1
             let name = String(cString: avcodec_get_name(inPar.pointee.codec_id))
             copied.append(type == AVMEDIA_TYPE_VIDEO
@@ -346,7 +360,7 @@ final class FFmpegRemuxer: @unchecked Sendable {
         }
         let status = interrupted ? "timed out (partial)" : reachedEOF ? "EOF" : "capped"
         RemoteLog.shared.event("⚙︎ remux-out", [
-            ("status", status), ("streams", copied.joined(separator: "/")),
+            ("status", status), ("color", colorNote), ("streams", copied.joined(separator: "/")),
             ("header", headerBytes), ("bytes", bytesWritten), ("packets", packetCount)
         ])
         return """

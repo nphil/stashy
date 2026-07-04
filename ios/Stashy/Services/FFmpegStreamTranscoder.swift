@@ -193,9 +193,17 @@ final class FFmpegStreamTranscoder: @unchecked Sendable {
         // and whether the VideoToolbox HW decoder actually attached vs. falling back to software.
         let container = input?.pointee.iformat.map { String(cString: $0.pointee.name) } ?? "?"
         let srcPix = av_get_pix_fmt_name(AVPixelFormat(rawValue: vCodecpar.pointee.format)).map { String(cString: $0) } ?? "?"
+        // NB: this tier re-encodes to 8-bit H.264, so an HDR source is tonemapped down to SDR here — logging
+        // the source transfer function makes that loss visible (only exotic codecs Apple can't decode hit
+        // this path; native HDR HEVC direct-plays/remuxes and keeps its HDR).
+        let srcHDR: String
+        let srcTrc = vCodecpar.pointee.color_trc
+        if srcTrc == AVCOL_TRC_SMPTE2084 { srcHDR = "HDR-PQ→SDR" }
+        else if srcTrc == AVCOL_TRC_ARIB_STD_B67 { srcHDR = "HDR-HLG→SDR" }
+        else { srcHDR = "SDR" }
         RemoteLog.shared.event("⚙︎ transcode-in", [
             ("codec", srcName), ("container", container), ("src", "\(srcW)×\(srcH)"),
-            ("pix", srcPix), ("hwdec", hwDeviceCtx != nil ? "vt" : "sw"),
+            ("pix", srcPix), ("hdr", srcHDR), ("hwdec", hwDeviceCtx != nil ? "vt" : "sw"),
             ("out", "\(outSize.width)×\(outSize.height)"), ("fps", String(format: "%.1f", fps)),
             ("kbps", bitrate / 1000), ("audio", audioNote), ("start", Int(startTime))
         ])
