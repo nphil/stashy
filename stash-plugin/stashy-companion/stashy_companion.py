@@ -52,20 +52,28 @@ BIN_DIR = os.path.join(PLUGIN_DIR, "bin")   # optional self-downloaded modern ff
 CACHE_URL_PREFIX = f"/plugin/{PLUGIN_ID}/assets/cache"
 CUSTOM_FIELD_KEY = "stashy_transcode"  # where we record the app-facing result
 
-# BtbN static builds: modern ffmpeg with libsvtav1 (SVT-AV1 3.x) + nvenc + libx265, self-contained.
-# Versions are PINNED by release tag (not the rolling `latest`) so an upstream regression can't reach the
-# server until you choose to switch. Multiple versions coexist under bin/<tag>/; `bin/active` names the one
-# in use. Switch via the `ffmpegVersion` setting + the Install/Switch task (re-download only if missing).
+# DUAL ffmpeg builds — because the NVENC driver requirement and the software-encoder speed both matter,
+# but pull in opposite directions on an EOL GPU:
+#   • "software/main" build (ffmpegVersion, default BtbN `latest`) — used for libsvtav1 (SVT-AV1 3.x
+#     speedups) + libx265 + ffprobe. Driver-irrelevant.
+#   • "hardware" build (ffmpegHwVersion, default `jellyfin`) — used ONLY for hevc_nvenc. jellyfin-ffmpeg
+#     targets a broad, OLDER NVENC API (driver ≥520) so it works on EOL cards (e.g. Tesla P40 @ 580),
+#     whereas BtbN git-master needs driver ≥610.
+# Multiple versions coexist under bin/<tag>/ (each with a .ffdir pointer to where its ffmpeg actually is,
+# since builds differ: BtbN = single static binary, jellyfin = binary + bundled lib/). bin/active and
+# bin/active_hw name the selected ones.
 FFMPEG_ASSET = "ffmpeg-master-latest-linux64-gpl.tar.xz"
-# Default to BtbN's rolling `latest` tag — it NEVER 404s (dated autobuild tags are pruned within days).
-# To pin: set ffmpegVersion to a specific tag and install it while it's still published; the local copy
-# under bin/<tag>/ is kept forever, so it stays available even after BtbN prunes the remote tag.
-DEFAULT_FFMPEG_TAG = "latest"
-ACTIVE_FILE = os.path.join(BIN_DIR, "active")      # text file: the active tag (or "system")
+DEFAULT_FFMPEG_TAG = "latest"       # software/main build (BtbN rolling — never 404s)
+DEFAULT_HW_TAG = "jellyfin"         # NVENC build (jellyfin-ffmpeg, driver ≥520 — works on EOL GPUs)
+JELLYFIN_VERSION = "7.1.4-3"        # pinned stable jellyfin-ffmpeg (durable; not pruned)
 DEFAULT_AV1_PRESET = 8   # SVT-AV1 preset (0 slow/best … 10 fast). 8 ≈ x265 medium; 6 ≈ x265 slow.
 
 
 def _ffmpeg_url(tag):
+    if tag == "jellyfin":
+        return ("https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v{v}/"
+                "jellyfin-ffmpeg_{v}_portable_linux64-gpl.tar.xz").format(v=JELLYFIN_VERSION)
+    # Any other tag → BtbN (rolling `latest` or a specific autobuild-YYYY-... tag).
     return "https://github.com/BtbN/FFmpeg-Builds/releases/download/{}/{}".format(tag, FFMPEG_ASSET)
 
 
@@ -73,18 +81,34 @@ def _version_dir(tag):
     return os.path.join(BIN_DIR, tag)
 
 
-def _active_tag():
+def _active_file(hw):
+    return os.path.join(BIN_DIR, "active_hw" if hw else "active")
+
+
+def _active_tag(hw=False):
     try:
-        with open(ACTIVE_FILE) as f:
+        with open(_active_file(hw)) as f:
             return f.read().strip()
     except OSError:
         return ""
 
 
-def _set_active(tag):
+def _set_active(tag, hw=False):
     os.makedirs(BIN_DIR, exist_ok=True)
-    with open(ACTIVE_FILE, "w") as f:
+    with open(_active_file(hw), "w") as f:
         f.write(tag)
+
+
+def _tag_ffdir(tag):
+    """Directory holding a tag's ffmpeg/ffprobe (recorded at install time), or None. System/absent → None."""
+    if not tag or tag in ("system", "none", "path"):
+        return None
+    try:
+        with open(os.path.join(_version_dir(tag), ".ffdir")) as f:
+            d = f.read().strip()
+    except OSError:
+        return None
+    return d if os.path.isfile(os.path.join(d, "ffmpeg")) else None
 
 # ----------------------------------------------------------------------------
 # Stash control-protocol logging (stderr). Each line: \x01 <level> \x02 <msg>.
@@ -146,13 +170,20 @@ class Stash:
 # ----------------------------------------------------------------------------
 # ffmpeg / ffprobe helpers.
 # ----------------------------------------------------------------------------
-def _bin(name, override_dir):
-    # 1) the active pinned build the plugin downloaded into bin/<tag>/ (unless set to "system").
-    tag = _active_tag()
-    if tag and tag not in ("system", "none", "path"):
-        cand = os.path.join(_version_dir(tag), name)
+def _bin(name, override_dir, hw=False):
+    # 1) the active installed build (hw = NVENC build, else software/main), via its .ffdir pointer.
+    d = _tag_ffdir(_active_tag(hw))
+    if d:
+        cand = os.path.join(d, name)
         if os.path.isfile(cand) and os.access(cand, os.X_OK):
             return cand
+    # 1b) a hardware lookup with no hw build set → fall back to the main build.
+    if hw:
+        d = _tag_ffdir(_active_tag(False))
+        if d:
+            cand = os.path.join(d, name)
+            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                return cand
     # 2) a legacy flat bin/<name> from an earlier plugin version.
     flat = os.path.join(BIN_DIR, name)
     if os.path.isfile(flat) and os.access(flat, os.X_OK):
@@ -367,8 +398,9 @@ def run_transcode(stash, args, settings):
         av1_preset = DEFAULT_AV1_PRESET
     av1_preset = max(0, min(10, av1_preset))
 
-    ffmpeg = _bin("ffmpeg", settings.get("ffmpegPath"))
-    ffprobe = _bin("ffprobe", settings.get("ffmpegPath"))
+    ffmpeg = _bin("ffmpeg", settings.get("ffmpegPath"), hw=False)     # software: libsvtav1 / libx265
+    ffmpeg_hw = _bin("ffmpeg", settings.get("ffmpegPath"), hw=True)   # hardware: hevc_nvenc (driver-safe)
+    ffprobe = _bin("ffprobe", settings.get("ffmpegPath"), hw=False)
 
     if codec == "av1" and not settings.get("allowAV1", False):
         raise RuntimeError("AV1 requested but disabled in plugin settings")
@@ -427,7 +459,7 @@ def run_transcode(stash, args, settings):
         attempts = [("libsvtav1", False)]
     elif force_cpu:
         attempts = [("libx265", False)]
-    elif encoder_available(ffmpeg, "hevc_nvenc"):
+    elif encoder_available(ffmpeg_hw, "hevc_nvenc"):
         # 1) GPU decode + GPU encode  2) CPU decode + GPU encode  3) CPU x265.
         attempts = [("hevc_nvenc", True), ("hevc_nvenc", False), ("libx265", False)]
     else:
@@ -485,7 +517,8 @@ def run_transcode(stash, args, settings):
         status_state["last"] = 0.0   # let the first block of a new attempt publish immediately
         log_info("Transcoding scene {} → {} {}p (cq {}, {})".format(scene_id, codec, res_label, cq, label))
         _record_status(stash, scene_id, "running", codec, res_label, label, 0, None)
-        cmd = build_transcode_cmd(src, tmp, codec, target_h, cq, ffmpeg, engine, gpu_decode,
+        ff = ffmpeg_hw if engine == "hevc_nvenc" else ffmpeg   # NVENC → driver-safe build; SW → main
+        cmd = build_transcode_cmd(src, tmp, codec, target_h, cq, ff, engine, gpu_decode,
                                   av1_preset, cfr_fps)
         log_debug("ffmpeg: " + " ".join(cmd))
         rc, err_tail = _run_ffmpeg(cmd, duration, on_status=_on_status)
@@ -654,34 +687,18 @@ def _ffmpeg_summary(ff):
         return "won't run: {}".format(e), {}
 
 
-def run_update_ffmpeg(settings):
+def _download_and_extract(tag, url, sha_expect):
+    """Download `url`, extract the WHOLE tree into bin/<tag>/x, locate ffmpeg+ffprobe wherever they are
+    (BtbN = single static binary in bin/; jellyfin = binary + bundled lib/ beside it), and record the
+    directory in bin/<tag>/.ffdir. Returns (version_line, encoders_dict). Raises on any failure."""
     import hashlib
+    import shutil
     import tarfile
 
-    tag = (settings.get("ffmpegVersion") or DEFAULT_FFMPEG_TAG).strip()
-    if tag in ("system", "none", "path", ""):
-        _set_active("system")
-        log_info("ffmpeg set to SYSTEM (override dir / PATH / Stash bundled). Active pinned build cleared.")
-        return
-
     vdir = _version_dir(tag)
-    ff = os.path.join(vdir, "ffmpeg")
-
-    # Already downloaded → just switch to it (instant, no re-download).
-    if os.path.isfile(ff) and os.access(ff, os.X_OK):
-        _set_active(tag)
-        first, enc = _ffmpeg_summary(ff)
-        log_progress(1.0)
-        log_info("Switched to ffmpeg {} — {} · nvenc={} svtav1={}".format(
-            tag, first, enc.get("hevc_nvenc"), enc.get("libsvtav1")))
-        return
-
-    url = (settings.get("ffmpegDownloadURL") or _ffmpeg_url(tag)).strip()
-    sha_expect = (settings.get("ffmpegSha256") or "").strip().lower()
     os.makedirs(vdir, exist_ok=True)
-    archive = os.path.join(vdir, "_download.tar.xz")
-    log_info("Downloading ffmpeg {} from {}".format(tag, url))
-
+    archive = os.path.join(vdir, "_dl.tar.xz")
+    log_info("Downloading {} from {}".format(tag, url))
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "stashy-companion"})
         with urllib.request.urlopen(req, timeout=600) as r:
@@ -696,44 +713,86 @@ def run_update_ffmpeg(settings):
                     hasher.update(chunk)
                     got += len(chunk)
                     if total > 0:
-                        log_progress(0.9 * got / total)   # reserve last 10% for extract+verify
+                        log_progress(0.9 * got / total)
     except (urllib.error.URLError, OSError) as e:
         _safe_unlink(archive)
-        raise RuntimeError("ffmpeg download failed (tag {} may have been pruned — try 'latest' or a newer "
-                           "tag): {}".format(tag, e))
+        raise RuntimeError("download failed for {} ({}): {}".format(tag, url, e))
 
-    digest = hasher.hexdigest()
-    if sha_expect and digest != sha_expect:
+    if sha_expect and hasher.hexdigest() != sha_expect:
         _safe_unlink(archive)
-        raise RuntimeError("sha256 mismatch: expected {} got {}".format(sha_expect, digest))
-    log_info("Downloaded {} bytes (sha256 {})".format(got, digest[:16]))
+        raise RuntimeError("sha256 mismatch for {}: expected {} got {}".format(tag, sha_expect, hasher.hexdigest()))
 
-    log_info("Extracting ffmpeg + ffprobe…")
-    extracted = 0
+    extract_dir = os.path.join(vdir, "x")
+    shutil.rmtree(extract_dir, ignore_errors=True)
+    os.makedirs(extract_dir)
     try:
         with tarfile.open(archive, "r:xz") as tar:
-            for m in tar.getmembers():
-                base = os.path.basename(m.name)
-                if m.isfile() and base in ("ffmpeg", "ffprobe"):
-                    m.name = base   # flatten into vdir (also neutralises any path traversal)
-                    tar.extract(m, vdir)
-                    os.chmod(os.path.join(vdir, base), 0o755)
-                    extracted += 1
+            try:
+                tar.extractall(extract_dir, filter="data")   # 3.12+ safe extraction
+            except TypeError:
+                tar.extractall(extract_dir)                   # older Python (no filter arg)
     except (tarfile.TarError, OSError) as e:
-        raise RuntimeError("could not extract ffmpeg archive: {}".format(e))
+        raise RuntimeError("could not extract {}: {}".format(tag, e))
     finally:
         _safe_unlink(archive)
 
-    if extracted < 2:
-        raise RuntimeError("archive did not contain both ffmpeg and ffprobe")
+    ff = ffp = None
+    for root, _dirs, files in os.walk(extract_dir):
+        if not ff and "ffmpeg" in files:
+            ff = os.path.join(root, "ffmpeg")
+        if not ffp and "ffprobe" in files:
+            ffp = os.path.join(root, "ffprobe")
+    if not ff or not ffp:
+        raise RuntimeError("{} archive did not contain both ffmpeg and ffprobe".format(tag))
+    os.chmod(ff, 0o755)
+    os.chmod(ffp, 0o755)
+    ffdir = os.path.dirname(ff)
+    if os.path.dirname(ffp) != ffdir:   # keep ffprobe beside ffmpeg (both builds ship them together)
+        try:
+            os.symlink(ffp, os.path.join(ffdir, "ffprobe"))
+        except OSError:
+            shutil.copy2(ffp, os.path.join(ffdir, "ffprobe"))
+    with open(os.path.join(vdir, ".ffdir"), "w") as f:
+        f.write(ffdir)
 
     first, enc = _ffmpeg_summary(ff)
     if not enc:
-        raise RuntimeError("downloaded ffmpeg {} won't run: {}".format(tag, first))
-    _set_active(tag)
+        raise RuntimeError("{} won't run (missing libs?): {}".format(tag, first))
+    return first, enc
+
+
+def _install_or_switch(tag, hw, label, url_override="", sha_expect=""):
+    """Activate `tag` for the main (hw=False) or NVENC (hw=True) slot — instant if already installed, else
+    download+extract. `system` clears the slot to fall back to PATH / override / Stash's ffmpeg."""
+    if tag in ("system", "none", "path", ""):
+        _set_active("system", hw)
+        log_info("{}: SYSTEM ffmpeg (PATH / override / Stash bundled)".format(label))
+        return
+    if _tag_ffdir(tag):   # already installed → instant switch
+        _set_active(tag, hw)
+        first, enc = _ffmpeg_summary(os.path.join(_tag_ffdir(tag), "ffmpeg"))
+        log_info("{}: switched to {} — {} · nvenc={} svtav1={}".format(
+            label, tag, first, enc.get("hevc_nvenc"), enc.get("libsvtav1")))
+        return
+    first, enc = _download_and_extract(tag, url_override or _ffmpeg_url(tag), sha_expect)
+    _set_active(tag, hw)
     log_progress(1.0)
-    log_info("ffmpeg {} installed + active — {} · nvenc={} svtav1={} x265={}".format(
-        tag, first, enc.get("hevc_nvenc"), enc.get("libsvtav1"), enc.get("libx265")))
+    log_info("{}: installed + active {} — {} · nvenc={} svtav1={} x265={}".format(
+        label, tag, first, enc.get("hevc_nvenc"), enc.get("libsvtav1"), enc.get("libx265")))
+
+
+def run_update_ffmpeg(settings):
+    main_tag = (settings.get("ffmpegVersion") or DEFAULT_FFMPEG_TAG).strip()
+    hw_tag = (settings.get("ffmpegHwVersion") or DEFAULT_HW_TAG).strip()
+    # Main/software build (AV1 + x265 + ffprobe): honours the advanced URL/sha overrides.
+    _install_or_switch(main_tag, hw=False, label="software",
+                       url_override=(settings.get("ffmpegDownloadURL") or "").strip(),
+                       sha_expect=(settings.get("ffmpegSha256") or "").strip().lower())
+    # NVENC build: same as main unless a distinct hw version is set (default jellyfin for old drivers).
+    if hw_tag and hw_tag != main_tag:
+        _install_or_switch(hw_tag, hw=True, label="hardware (NVENC)")
+    else:
+        _set_active(main_tag if main_tag not in ("system", "none", "path", "") else "system", hw=True)
 
 
 def _nvenc_probe(ffmpeg, encoder, extra_args):
@@ -785,48 +844,53 @@ def run_selftest(stash, settings):
         ok = False
         log_error("GraphQL FAIL — {}".format(e))
 
-    ffmpeg = _bin("ffmpeg", settings.get("ffmpegPath"))
-    active = _active_tag() or "(system)"
+    override = settings.get("ffmpegPath")
+    ffmpeg = _bin("ffmpeg", override, hw=False)
+    ffmpeg_hw = _bin("ffmpeg", override, hw=True)
     first, enc = _ffmpeg_summary(ffmpeg)
     if enc:
-        log_info("ffmpeg [{}] {}".format(active, first))
-        log_info("  path {}".format(ffmpeg))
-        log_info("  encoders: hevc_nvenc={} libsvtav1={} libx265={}".format(
-            enc.get("hevc_nvenc"), enc.get("libsvtav1"), enc.get("libx265")))
-        if not (enc.get("hevc_nvenc") or enc.get("libx265")):
-            ok = False
-            log_warn("  no HEVC encoder available (neither hevc_nvenc nor libx265)")
-        # Isolate WHY nvenc won't open: test h264_nvenc (control — Stash uses it) vs hevc_nvenc on a
-        # synthetic source. h264 OK + hevc FAIL ⇒ HEVC-encode/driver limitation on this GPU; both FAIL
-        # ⇒ this ffmpeg build's nvenc is incompatible with the installed driver.
-        smi = _nvidia_smi()
-        if smi:
-            log_info("GPU: {}".format(smi))
-        if enc.get("hevc_nvenc"):
-            h264_ok, h264_why = _nvenc_probe(ffmpeg, "h264_nvenc", ["-pix_fmt", "yuv420p"])
-            hevc_ok, hevc_why = _nvenc_probe(ffmpeg, "hevc_nvenc", ["-pix_fmt", "yuv420p"])
+        log_info("ffmpeg (software) [{}] {}".format(_active_tag(False) or "system", first))
+        log_info("  encoders: libsvtav1={} libx265={}".format(enc.get("libsvtav1"), enc.get("libx265")))
+        if not enc.get("libx265"):
+            log_warn("  software HEVC (libx265) missing — the CPU fallback won't work")
+    else:
+        ok = False
+        log_error("ffmpeg (software) FAIL — {} ({})".format(first, ffmpeg))
+
+    # Hardware build + NVENC capability. h264_nvenc is a control (Stash uses it); comparing the two + the
+    # driver version pinpoints a driver-vs-API mismatch. Probe runs on the HARDWARE build actually used.
+    smi = _nvidia_smi()
+    if smi:
+        log_info("GPU: {}".format(smi))
+    hw_first, hw_enc = _ffmpeg_summary(ffmpeg_hw)
+    if hw_enc:
+        log_info("ffmpeg (NVENC) [{}] {}".format(_active_tag(True) or "system", hw_first))
+        if hw_enc.get("hevc_nvenc"):
+            h264_ok, h264_why = _nvenc_probe(ffmpeg_hw, "h264_nvenc", ["-pix_fmt", "yuv420p"])
+            hevc_ok, hevc_why = _nvenc_probe(ffmpeg_hw, "hevc_nvenc", ["-pix_fmt", "yuv420p"])
             log_info("  h264_nvenc (control): {}".format("OK" if h264_ok else "FAIL — " + h264_why))
             log_info("  hevc_nvenc: {}".format("OK" if hevc_ok else "FAIL — " + hevc_why))
             if hevc_ok:
                 log_info("  → GPU HEVC works")
             elif h264_ok:
-                log_warn("  → h264_nvenc opens but hevc_nvenc doesn't: HEVC-encode/driver limit on this "
-                         "GPU. Options: update the NVIDIA driver, or use H.264 on GPU.")
+                log_warn("  → h264_nvenc opens but hevc_nvenc doesn't: HEVC/driver limit on this GPU.")
             else:
-                log_warn("  → NO nvenc opens in this ffmpeg build. Its NVENC likely needs a newer driver "
-                         "than installed. Try ffmpegVersion=system (Stash's own ffmpeg does H.264 nvenc), "
-                         "or an older BtbN build matching your driver.")
+                log_warn("  → NVENC won't open on this build/driver. Set ffmpegHwVersion=jellyfin (built "
+                         "for driver ≥520) and run Install / Switch ffmpeg.")
+        else:
+            log_info("  (this build has no hevc_nvenc; CPU encoders will be used)")
     else:
-        ok = False
-        log_error("ffmpeg FAIL — {} ({})".format(first, ffmpeg))
+        log_warn("NVENC build FAIL — {}".format(hw_first))
 
     installed = []
     if os.path.isfile(os.path.join(BIN_DIR, "ffmpeg")):
-        installed.append("bin/ffmpeg (legacy flat build)")
+        installed.append("legacy-flat")
     if os.path.isdir(BIN_DIR):
         for n in sorted(os.listdir(BIN_DIR)):
-            if os.path.isfile(os.path.join(BIN_DIR, n, "ffmpeg")):
-                installed.append(n + (" *active" if n == _active_tag() else ""))
+            if _tag_ffdir(n):
+                marks = "".join(m for m, on in ((" *sw", n == _active_tag(False)),
+                                                (" *hw", n == _active_tag(True))) if on)
+                installed.append(n + marks)
     log_info("installed builds: {}".format(", ".join(installed) or "(none — using system ffmpeg)"))
 
     try:

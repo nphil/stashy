@@ -68,21 +68,24 @@ Settings → Plugins → **Reload Plugins**.
 | ffmpeg sha256 | string | — | Advanced: verify the download tarball against this hash. |
 | ffmpeg download URL | string | — | Advanced: override the exact tarball URL. |
 
-### Managing ffmpeg (version pinning + switching)
+### Managing ffmpeg (dual build: software + NVENC)
 
-AV1 has no GPU encoder on Pascal cards (Tesla P40), so it runs on the CPU and is inherently slow. For
-speed, **HEVC via NVENC is far faster** and plays natively on iPhone — reserve AV1 for when file size
-matters and you can wait. Two levers:
+NVENC's required driver API and the software encoders' speed pull in opposite directions on older GPUs,
+so the plugin keeps **two** ffmpeg builds and uses each where it's best:
 
-1. **AV1 speed preset** — raising it is the biggest win (preset 8 is ~2–3× faster than 6).
-2. **A modern, pinned ffmpeg** — the bundled build carries SVT-AV1 3.x (~15–25% faster than older
-   versions) plus a newer nvenc, and is **version-pinned** so an upstream regression can't reach you until
-   you choose to switch:
-   - Set **ffmpeg version** to a BtbN tag (default is a pinned one), `latest`, or `system`.
-   - Run **Install / Switch ffmpeg** — downloads it (or switches instantly if already installed). Multiple
-     versions coexist under `bin/<tag>/`; `system` falls back to Stash's own ffmpeg.
-   - Run **Self-Test** any time to see the **active version** + encoders, GraphQL health, installed builds,
-     and cache/serving — a one-shot PASS/FAIL you should run after any Stash upgrade.
+- **ffmpeg version (software / AV1)** — CPU encoders (SVT-AV1, x265) + ffprobe. Driver-irrelevant, so
+  keep it modern for AV1 speed. Default **`latest`** (BtbN rolling, SVT-AV1 3.x).
+- **ffmpeg version (NVENC / hardware)** — GPU `hevc_nvenc` only. Must match your NVIDIA driver's NVENC
+  API. Default **`jellyfin`** (jellyfin-ffmpeg, works with driver ≥520 — right for older/EOL cards like
+  the **Tesla P40**). `latest` (BtbN) needs driver ≥610.
+
+Set either, then run **Install / Switch ffmpeg** (downloads what's missing; switching between installed
+builds is instant). Set a value to `system` to use PATH / Stash's ffmpeg; set both equal to use one build
+for everything. **Self-Test** shows both active versions, the GPU + driver, and a live `hevc_nvenc: OK/FAIL`
+probe — run it after any Stash or driver change.
+
+AV1 is CPU-only (Pascal has no AV1 encoder), so the **AV1 speed preset** (default 8; higher = faster) is
+its main knob. For speed overall, HEVC-on-GPU is far faster than CPU AV1 and plays natively on iPhone.
 
 ## Encoder ladder (HEVC)
 
