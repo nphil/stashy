@@ -426,7 +426,7 @@ final class DownloadManager {
         // Stop any in-flight transcode (and wipe its chunk work dir) so it doesn't keep writing to a file
         // we're about to remove; clear a leftover work dir from an unresumed transcode too.
         if item.transcoding { cancelTranscode(item) }
-        else { try? FileManager.default.removeItem(at: transcodeWorkDir(item.id)) }
+        else { discardWorkDir(item.id) }
         if let local = item.localURL { try? FileManager.default.removeItem(at: local) }
         cleanupParts(item.id)
         cleanupMeta(item.id)
@@ -466,7 +466,9 @@ final class DownloadManager {
             guard let item = items.first(where: { $0.id == id }),
                   let data = try? Data(contentsOf: dir.appendingPathComponent("settings.json")),
                   let settings = try? JSONDecoder().decode(VideoTranscoder.Settings.self, from: data) else {
-                if items.first(where: { $0.id == id }) == nil { try? FileManager.default.removeItem(at: dir) }
+                // Orphaned (download gone), a leftover ".trash-*", or corrupt settings → reclaim off-thread
+                // so it can't linger forever or stall launch.
+                Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: dir) }
                 continue
             }
             guard item.state == .completed, !item.transcoding else { continue }
@@ -483,6 +485,19 @@ final class DownloadManager {
             .appendingPathComponent(id, isDirectory: true)
     }
 
+    /// Discard a transcode work dir without blocking the main actor: rename it aside instantly (freeing the
+    /// path for an immediate re-transcode, and avoiding a race where an async delete could hit a fresh dir),
+    /// then delete the possibly-large chunk contents in the background. Stray `.trash-*` dirs are reclaimed
+    /// at launch by `resumeInterruptedTranscodes()`.
+    private func discardWorkDir(_ id: String) {
+        let dir = transcodeWorkDir(id)
+        guard FileManager.default.fileExists(atPath: dir.path) else { return }
+        let trash = dir.deletingLastPathComponent()
+            .appendingPathComponent(".trash-\(id)-\(UUID().uuidString)", isDirectory: true)
+        let target = (try? FileManager.default.moveItem(at: dir, to: trash)) != nil ? trash : dir
+        Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: target) }
+    }
+
     /// Re-encode a completed download in place to the chosen resolution/quality/codec (hardware
     /// VideoToolbox), replacing the offline file with the smaller/normalised copy on success.
     func transcode(_ item: DownloadItem, settings: VideoTranscoder.Settings) {
@@ -495,16 +510,50 @@ final class DownloadManager {
         item.error = nil
         let id = item.id
         transcodeSettingsInFlight[id] = settings   // remembered so backgrounding can auto-resume it
-        // Resumable engine: it chunks the re-encode into a persistent work dir, so an interrupted transcode
-        // (backgrounded, or the app killed) continues from the last committed chunk instead of restarting.
-        // Persist the settings there too, so even a cold relaunch can resume. Universal (H.264/HEVC/exotic)
-        // via FFmpeg + VideoToolbox — replaces the old AVFoundation/FFmpeg split.
-        let workDir = transcodeWorkDir(id)
-        try? FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
-        if let data = try? JSONEncoder().encode(settings) {
-            try? data.write(to: workDir.appendingPathComponent("settings.json"), options: .atomic)
+
+        // Engine routing (see the transcode-speed analysis):
+        //  • same codec + same size → FFmpegTranscoder does a near-instant lossless stream copy (incl.
+        //    hev1→hvc1), so chunked re-encoding would be pointlessly slow and lossy;
+        //  • short clip → the old fast engine (AVFoundation for native H.264, else FFmpeg) — checkpointing
+        //    is pointless for a job that finishes in seconds, and AVFoundation avoids the FFmpeg GPU
+        //    round-trip;
+        //  • otherwise → the resumable chunked engine (survives background/kill).
+        // Missing codec/size metadata falls through to the RESUMABLE path (a nil/unknown source is assumed
+        // possibly-huge), so an unknown-but-large file never silently loses resumability. The resumable
+        // engine also self-checks the stream-copy case, so a metadata-driven misroute is self-corrected.
+        let srcCodec = (item.codec ?? "").lowercased()
+        let sameCodec = settings.codec == .hevc
+            ? (srcCodec.contains("hevc") || srcCodec.contains("h265") || srcCodec.contains("hvc"))
+            : (srcCodec.contains("h264") || srcCodec.contains("avc"))
+        let longEdge = max(item.width ?? 0, item.height ?? 0)
+        let keepsSize: Bool = {
+            guard let cap = settings.resolution.maxDimension else { return true }   // "Original" keeps size
+            return longEdge > 0 && longEdge <= cap
+        }()
+        let duration = item.scene?.files.first?.duration ?? 0
+        let streamCopyCase = sameCodec && keepsSize
+        let shortEnough = duration > 0 && duration < 90
+
+        let transcoder: any OnDeviceTranscoder
+        if streamCopyCase {
+            discardWorkDir(id)                       // no resume needed; drop any stale chunks off-thread
+            transcoder = FFmpegTranscoder()
+        } else if shortEnough {
+            discardWorkDir(id)
+            let native = Self.avNativeContainers.contains(src.pathExtension.lowercased())
+            let isH264 = srcCodec.contains("h264") || srcCodec.contains("avc")
+            transcoder = (native && isH264) ? VideoTranscoder() : FFmpegTranscoder()
+        } else {
+            // Resumable: chunk the re-encode into a persistent work dir so an interrupted transcode
+            // (backgrounded, or the app killed) continues from the last committed chunk. Settings are
+            // persisted there so even a cold relaunch can resume.
+            let workDir = transcodeWorkDir(id)
+            try? FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+            if let data = try? JSONEncoder().encode(settings) {
+                try? data.write(to: workDir.appendingPathComponent("settings.json"), options: .atomic)
+            }
+            transcoder = FFmpegResumableTranscoder(workDir: workDir)
         }
-        let transcoder: any OnDeviceTranscoder = FFmpegResumableTranscoder(workDir: workDir)
         transcoders[id] = transcoder
         let gen = (transcodeGen[id] ?? 0) + 1
         transcodeGen[id] = gen
@@ -570,7 +619,7 @@ final class DownloadManager {
         item.transcodeStatus = ""
         try? FileManager.default.removeItem(
             at: FileManager.default.temporaryDirectory.appendingPathComponent("\(id).transcode.mp4"))
-        if !preserveResume { try? FileManager.default.removeItem(at: transcodeWorkDir(id)) }
+        if !preserveResume { discardWorkDir(id) }
     }
 
     /// Wipe the diagnostics box for any item that isn't actively transcoding — called when the Downloads
@@ -591,6 +640,9 @@ final class DownloadManager {
         if let message { item.error = message }
         transcoders[id] = nil
         transcodeSettingsInFlight[id] = nil
+        // A real failure (message != nil) must not auto-retry forever at every launch — drop its work dir.
+        // A cancellation (message == nil, from backgrounding) keeps it so enterForeground can resume.
+        if message != nil { discardWorkDir(id) }
     }
 
     private func transcodeFinished(id: String, gen: Int, output: URL, src: URL, settings: VideoTranscoder.Settings) {
@@ -612,6 +664,9 @@ final class DownloadManager {
                 try fm.moveItem(at: output, to: finalURL)
             }
             if src.path != finalURL.path { try? fm.removeItem(at: src) }
+            // Drop the chunk work dir now the final file is committed — shrinks the crash window in which
+            // resumeInterruptedTranscodes() could re-process an already-finished item.
+            discardWorkDir(id)
         } catch {
             // Move/replace failed before the original was touched — the offline copy is intact and still
             // playable, so keep the item .completed and just surface that the transcode didn't save.
@@ -654,7 +709,6 @@ final class DownloadManager {
             }
         }
         transcoders[id] = nil
-        try? FileManager.default.removeItem(at: transcodeWorkDir(id))   // chunks no longer needed
     }
 
     // MARK: - Launch / suspend

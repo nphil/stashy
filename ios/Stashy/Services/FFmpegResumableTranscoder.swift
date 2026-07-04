@@ -102,6 +102,13 @@ final class FFmpegResumableTranscoder: OnDeviceTranscoder, @unchecked Sendable {
                          onLog: @escaping @Sendable (String) -> Void,
                          onStatus: @escaping @Sendable (String) -> Void) throws {
         try? FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+        // Self-correct a routing miss: if no re-encode is actually needed (target codec == source codec and
+        // the size is unchanged), stream-copy straight to the output — chunked re-encoding would be slow and
+        // lossy. This mirrors FFmpegTranscoder's shortcut, so an unknown-metadata upstream route still lands
+        // on the fast path.
+        if try streamCopyIfPossible(inputPath: inputPath, outputPath: outputPath, settings: settings, onLog: onLog) {
+            onProgress(1); onStatus(""); return
+        }
         let plan = try buildOrLoadPlan(inputPath: inputPath, settings: settings, onLog: onLog)
         let total = plan.chunks.count
         let committedAtStart = (0..<total).filter { FileManager.default.fileExists(atPath: chunkURL($0).path) }.count
@@ -124,6 +131,79 @@ final class FFmpegResumableTranscoder: OnDeviceTranscoder, @unchecked Sendable {
         try finalize(inputPath: inputPath, outputPath: outputPath, plan: plan, settings: settings, onLog: onLog)
         onProgress(1)
         onStatus("")
+    }
+
+    /// If no real re-encode is needed (target codec == source codec AND output size == source size),
+    /// stream-copy the source (video + copyable audio) straight to `outputPath` and return true. Returns
+    /// false when a genuine re-encode is required (the chunked path then handles it). Near-instant + lossless.
+    private func streamCopyIfPossible(inputPath: String, outputPath: String,
+                                      settings: VideoTranscoder.Settings,
+                                      onLog: @escaping @Sendable (String) -> Void) throws -> Bool {
+        var inFmt = avformat_alloc_context()
+        guard inFmt != nil else { return false }
+        let opaque = Unmanaged.passUnretained(self).toOpaque()
+        inFmt!.pointee.interrupt_callback.callback = resumableInterrupt
+        inFmt!.pointee.interrupt_callback.opaque = opaque
+        guard avformat_open_input(&inFmt, inputPath, nil, nil) >= 0, let input = inFmt else { return false }
+        defer { var p: UnsafeMutablePointer<AVFormatContext>? = input; avformat_close_input(&p) }
+        guard avformat_find_stream_info(input, nil) >= 0 else { return false }
+
+        let vIdx = av_find_best_stream(input, AVMEDIA_TYPE_VIDEO, -1, -1, nil, 0)
+        guard vIdx >= 0, let vInStream = input.pointee.streams[Int(vIdx)],
+              let vpar = vInStream.pointee.codecpar else { return false }
+        let srcW = Int(vpar.pointee.width), srcH = Int(vpar.pointee.height)
+        let outSize = VideoTranscoder.outputSize(naturalSize: CGSize(width: srcW, height: srcH),
+                                                 maxDimension: settings.resolution.maxDimension)
+        let targetCodecId = settings.codec == .hevc ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264
+        guard vpar.pointee.codec_id == targetCodecId, outSize.width == srcW, outSize.height == srcH else {
+            return false   // genuine re-encode → let the chunked path handle it
+        }
+
+        // Copyable audio (else video-only).
+        var aIdx = -1
+        let aBest = av_find_best_stream(input, AVMEDIA_TYPE_AUDIO, -1, -1, nil, 0)
+        if aBest >= 0, let s = input.pointee.streams[Int(aBest)] {
+            let name = String(cString: avcodec_get_name(s.pointee.codecpar.pointee.codec_id))
+            if Self.copyableAudio.contains(name) { aIdx = Int(aBest) }
+        }
+
+        var outFmtOpt: UnsafeMutablePointer<AVFormatContext>?
+        guard avformat_alloc_output_context2(&outFmtOpt, nil, "mp4", outputPath) >= 0,
+              let outFmt = outFmtOpt else { return false }
+        defer {
+            if outFmt.pointee.pb != nil { avio_closep(&outFmt.pointee.pb) }
+            avformat_free_context(outFmt)
+        }
+        var outStreams: [Int: UnsafeMutablePointer<AVStream>] = [:]
+        for inIdx in [Int(vIdx), aIdx] where inIdx >= 0 {
+            guard let inStream = input.pointee.streams[inIdx],
+                  let outStream = avformat_new_stream(outFmt, nil),
+                  avcodec_parameters_copy(outStream.pointee.codecpar, inStream.pointee.codecpar) >= 0 else { return false }
+            // HEVC must be tagged hvc1 for AVPlayer; other codecs let the muxer pick (avc1/mp4a).
+            outStream.pointee.codecpar.pointee.codec_tag =
+                outStream.pointee.codecpar.pointee.codec_id == AV_CODEC_ID_HEVC ? Self.hvc1Tag : 0
+            outStreams[inIdx] = outStream
+        }
+        guard avio_open(&outFmt.pointee.pb, outputPath, avioFlagWrite) >= 0,
+              avformat_write_header(outFmt, nil) >= 0 else { return false }
+
+        let pkt = av_packet_alloc()
+        defer { var p: UnsafeMutablePointer<AVPacket>? = pkt; av_packet_free(&p) }
+        while !isCancelled {
+            if av_read_frame(input, pkt) < 0 { break }
+            let inIdx = Int(pkt!.pointee.stream_index)
+            guard let outStream = outStreams[inIdx], let inStream = input.pointee.streams[inIdx] else {
+                av_packet_unref(pkt); continue
+            }
+            av_packet_rescale_ts(pkt, inStream.pointee.time_base, outStream.pointee.time_base)
+            pkt!.pointee.stream_index = outStream.pointee.index
+            pkt!.pointee.pos = -1
+            if av_interleaved_write_frame(outFmt, pkt) < 0 { throw TranscodeError.ffmpeg("copy write") }
+        }
+        if isCancelled { throw CancellationError() }
+        guard av_write_trailer(outFmt) >= 0 else { throw TranscodeError.ffmpeg("copy trailer") }
+        onLog("Same codec & size → stream copy (no re-encode)")
+        return true
     }
 
     // MARK: - Plan build (keyframe scan)
