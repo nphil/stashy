@@ -386,6 +386,9 @@ def run_transcode(stash, args, settings):
     scene_id = str(args.get("scene_id") or args.get("sceneId") or "").strip()
     if not scene_id:
         raise RuntimeError("transcode: missing scene_id in args")
+    # Mark running ASAP so a re-transcode's poll can't briefly read a STALE "ready" from a previous run
+    # (and grab the old file). This is the 1st of exactly two custom_fields writes per transcode.
+    _write_status(stash, scene_id, {"status": "running"})
     codec = (args.get("codec") or "hevc").lower()
     resolution_arg = str(args.get("resolution") or "1080").lower()
     is_original = resolution_arg in ("original", "orig", "source", "0")
@@ -473,16 +476,15 @@ def run_transcode(stash, args, settings):
     dst = os.path.join(CACHE_DIR, out_name)
     tmp = dst + ".part"
 
-    # Throttled rich-status side-channel: the app reads custom_fields for live size/ETA/fps/speed while
-    # the job runs (findJob only carries a bare 0..1). Written at most every ~3s → not spam.
+    # Live rich stats (size/ETA/fps/speed) go to a SERVED FILE the app polls over HTTP — NOT to
+    # custom_fields — so a running transcode never fires sceneUpdate/Scene.Update hooks (which were
+    # queuing "sync" tasks). custom_fields is written exactly TWICE per transcode: the early "running"
+    # marker above, and the terminal result at the end.
     status_state = {"last": 0.0, "label": attempts[0][0]}
 
     def _on_status(prog, secs):
         now = time.time()
-        # ~12s throttle (was 3s): each write is a sceneUpdate, and any Scene.Update.Post hook the user
-        # has installed queues a task per write — a long transcode was flooding the job queue. The app's
-        # live % still comes from Job.progress every ~2s; this side-channel only refreshes the rich stats.
-        if now - status_state["last"] < 12.0:
+        if now - status_state["last"] < 2.0:   # file writes are cheap (no GraphQL) → refresh often
             return
         status_state["last"] = now
         try:
@@ -500,7 +502,7 @@ def run_transcode(stash, args, settings):
         pct = (secs / duration) if duration > 0 else 0.0
         eta = int((duration - secs) / speed) if speed > 0 and duration > secs else None
         size_est = int(cur_size / pct) if pct > 0.02 and cur_size > 0 else None
-        _write_status(stash, scene_id, {
+        _write_progress_file(scene_id, {
             "status": "running", "stage": "encoding", "codec": codec, "resolution": res_label,
             "engine": status_state["label"], "progress": round(pct, 4),
             "out_time": round(secs, 1), "duration": round(duration, 1),
@@ -516,7 +518,8 @@ def run_transcode(stash, args, settings):
         status_state["label"] = label
         status_state["last"] = 0.0   # let the first block of a new attempt publish immediately
         log_info("Transcoding scene {} → {} {}p (cq {}, {})".format(scene_id, codec, res_label, cq, label))
-        _record_status(stash, scene_id, "running", codec, res_label, label, 0, None)
+        _write_progress_file(scene_id, {"status": "running", "stage": "starting",
+                                        "codec": codec, "resolution": res_label, "engine": label})
         ff = ffmpeg_hw if engine == "hevc_nvenc" else ffmpeg   # NVENC → driver-safe build; SW → main
         cmd = build_transcode_cmd(src, tmp, codec, target_h, cq, ff, engine, gpu_decode,
                                   av1_preset, cfr_fps)
@@ -532,7 +535,8 @@ def run_transcode(stash, args, settings):
                 label, rc, attempts[idx + 1][0]))
     last_err = err_tail if rc != 0 else ""
     if rc != 0 or not os.path.isfile(tmp):
-        _record_status(stash, scene_id, "failed", codec, height, eng, 0, None)
+        _record_status(stash, scene_id, "failed", codec, height, eng, 0, None)  # terminal write
+        _clear_progress_file(scene_id)
         detail = " — {}".format(last_err) if last_err else ""
         raise RuntimeError("all transcode attempts failed for scene {} (last rc {}){}".format(
             scene_id, rc, detail))
@@ -578,7 +582,8 @@ def run_transcode(stash, args, settings):
         "status": "ready",
     }
     _write_sidecar(out_name, result)
-    set_custom_field(stash, scene_id, CUSTOM_FIELD_KEY, json.dumps(result))
+    set_custom_field(stash, scene_id, CUSTOM_FIELD_KEY, json.dumps(result))  # terminal write (2nd of 2)
+    _clear_progress_file(scene_id)
     enforce_cache_cap(settings)
     log_progress(1.0)
     return result
@@ -608,6 +613,29 @@ def _write_sidecar(out_name, result):
             json.dump(result, fh)
     except OSError:
         pass
+
+
+def _progress_path(scene_id):
+    return os.path.join(CACHE_DIR, "scene{}.progress.json".format(scene_id))
+
+
+def _write_progress_file(scene_id, blob):
+    """Write live transcode stats to a SERVED file (/plugin/.../assets/cache/scene<id>.progress.json) the
+    app polls over HTTP. Filesystem-only → no sceneUpdate, no Scene.Update hooks, no queued tasks. Atomic."""
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        blob = dict(blob)
+        blob.setdefault("updated", int(time.time()))
+        tmp = _progress_path(scene_id) + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(blob, fh)
+        os.replace(tmp, _progress_path(scene_id))
+    except OSError:
+        pass
+
+
+def _clear_progress_file(scene_id):
+    _safe_unlink(_progress_path(scene_id))
 
 
 def _safe_unlink(path):
