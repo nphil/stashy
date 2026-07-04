@@ -70,7 +70,7 @@ struct VolumeControl: View {
                 DragGesture(minimumDistance: 0)
                     .onChanged { v in
                         // Snap to whole-percent steps so the value moves 0–100 in 1-unit increments.
-                        let frac = min(1, max(0, v.location.x / w))
+                        let frac = Double(min(1, max(0, v.location.x / w)))
                         onChange((frac * 100).rounded() / 100)
                         onInteract()
                         armCollapse()
