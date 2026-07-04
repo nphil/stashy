@@ -76,20 +76,28 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   checklist; plus playback engineering learnings.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.125** (universal FFmpeg transcoder for exotic containers, commit `71678d2`) —
-  confirmed green, 8.01 MB (grew +240 KB as libswscale/avcodec-encode linked in).
-- New: `FFmpegTranscoder` (Services/) — libavformat demux → FFmpeg decode → libswscale NV12 →
-  VideoToolbox h264/hevc encode → MP4; audio COPY for AAC/AC3/EAC3/MP3/ALAC, else `.audioUnsupported`
-  (Opus/Vorbis → AAC re-encode is the planned follow-up). `OnDeviceTranscoder` protocol picks it vs the
-  AVFoundation `VideoTranscoder` by container (native mp4/m4v/mov → AVFoundation; else FFmpeg).
-- Awaiting on-device verification (owner tests each build): transcoding a downloaded **MKV/WebM** HEVC/
-  H.264 now produces a playable MP4 (video re-encode + audio copy); Opus/Vorbis audio shows the clear
-  `.audioUnsupported` error; the Downloaded/Transcoded chips sit on one line; earlier: downloaded HEVC
-  plays offline, visible transcode errors, bg download continues suspended, offline sprites scrub.
-- Next milestone (owner-approved, see ROADMAP): **M-A** on-device *streaming* transcode tier (remux →
-  on-device transcode → server fallback, resolution-gated + auto-fallback) and **M-B** player-overlay
-  gear button → manual **server-side** quality menu (cellular escape hatch). Build on the shipped
-  `FFmpegTranscoder` encode core after device verification.
-- Next candidates: reconcile the OUTSTANDING punch list; **Live Activity / Dynamic Island** (riskiest
-  downloads item — a new Widget Extension target changes the IPA structure for a sideloaded app;
-  isolate it in its own commit).
+- Latest release: **~v1.0.15x** (M-A stage 3, commit `7c7d0ae`) — verify the newest release/IPA size each
+  push (CI Build step swallows exit codes; only a published release proves compile).
+- **M-B shipped**: player gear → custom quality menu forcing Stash HLS at a resolution. The `?resolution=`
+  bug is fixed — Stash's HLS URL already carries `resolution=ORIGINAL`, so `serverQualityRoute` now
+  *replaces* it (a duplicate param made Stash read the first = ORIGINAL). Enum values LOW/STANDARD/
+  STANDARD_HD/FULL_HD/ORIGINAL verified against stashapp/stash source. Quality switch resumes at the exact
+  position (client-side seek; `start=` doesn't work on the HLS manifest).
+- **M-A shipped (video path; awaiting device verification)**: on-device *streaming* transcode tier.
+  `FFmpegStreamTranscoder` (Services/) = read-ahead range-request AVIO + pacing + seek-by-reinit (from
+  `FFmpegRemuxer`) + HW decode→libswscale→`h264_videotoolbox`→**fragmented MP4** (global-header init seg);
+  `LocalTranscodeStream` wraps it over the loopback like `LocalRemuxStream`. Routing (`Scene.playbackRoute`)
+  sends the "Apple can't decode at all" bucket (VP9/software-AV1/exotic) ≤1080p to it with the Stash HLS as
+  `fallbackURL` (`armWatchdog` auto-recovers); heavier 4K → server. Audio: **copy** when MP4-muxable, else
+  **dropped** — **Stage 1b (Opus/Vorbis → AAC re-encode via libswresample) is the remaining M-A piece**.
+- **Player UX this session** (all shipped): intelligent loading donut (per-mode `LoadEstimator` rolling
+  average + saturating curve, % inside ring); inline expanding **volume slider** 0–100 (starts muted);
+  quality+method **status badges** on one control row; gear moved right; resume-from-position on return
+  from performer/link (safe reload, not a live pause — pop-to-root would crash a kept-alive engine);
+  transcode box rich live line + **auto-pause/resume on background/foreground**; **keep-screen-awake** on
+  Downloads/active work; social-links overlap bug fixed (ScrollView) + unified `SocialLink.list`; performer
+  ••• menu vertical.
+- Next candidates: **M-A Stage 1b** (AAC audio); **resumable/checkpointed transcode** (fragmented-MP4
+  append — owner wants it, see ROADMAP Downloads); Netflix fullscreen UI / playback-speed / WYSIWYG layout
+  editor / mini-player-PiP / AI zoom-follow (all in ROADMAP); **remove RemoteLog telemetry** before wider
+  release (the one open tech-debt item).
