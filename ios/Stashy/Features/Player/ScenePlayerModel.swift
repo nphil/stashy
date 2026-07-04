@@ -485,6 +485,19 @@ final class ScenePlayerModel {
         return PlaybackStats(sections: sections)
     }
 
+    /// The playback cost tier for the badge on the overlay — derived from the route + whether we fell
+    /// back. Server (Stash HLS, manual quality, or a fallback) is the costliest; a plain local file is
+    /// direct; `.localFFmpeg` is a cheap remux unless its stream type says it's a re-encode (M-A).
+    var playbackTier: PlaybackTier {
+        if didFallback { return .server }
+        switch route.engine {
+        case .avPlayer:
+            return streamType.localizedCaseInsensitiveContains("hls") ? .server : .direct
+        case .localFFmpeg:
+            return streamType.localizedCaseInsensitiveContains("transcode") ? .localTranscode : .remux
+        }
+    }
+
     /// A stream URL with any `apikey`/`api_key` value replaced by "…", so the Stats overlay can show
     /// exactly which URL (and its `resolution=` query) is playing without leaking the credential in a
     /// shared screenshot.

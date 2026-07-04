@@ -5,6 +5,8 @@ import SwiftUI
 struct PlayerControlsView: View {
     let model: ScenePlayerModel
     let sprites: SpriteThumbnails
+    /// The scene, for the quality/codec status badge (resolution + codec of what's playing).
+    let scene: StashScene
     @Binding var isFullscreen: Bool
     @Binding var showControls: Bool
     @Binding var showStats: Bool
@@ -127,6 +129,15 @@ struct PlayerControlsView: View {
 
     private var controlBar: some View {
         VStack(spacing: 4) {
+            // Status badges sit right on top of the scrubber: what quality is playing (resolution +
+            // codec) and how much work it costs (direct → remux → on-device → server, colour-coded).
+            HStack(spacing: 0) {
+                PlayerStatusBadges(scene: scene, presentationSize: model.presentationSize,
+                                   tier: model.playbackTier)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 2)
+
             ScrubBar(
                 duration: model.duration,
                 currentTime: model.currentTime,
@@ -137,8 +148,9 @@ struct PlayerControlsView: View {
                 onSeek: { model.seek(to: $0); scheduleHide() }
             )
 
-            // Bigger glyphs on 44pt hit targets, generously spaced, so the mute/stats/gear/fullscreen
-            // controls are easy to hit without accidental neighbours.
+            // Bigger glyphs on 44pt hit targets, generously spaced, so the controls are easy to hit
+            // without accidental neighbours. The gear sits on the right, between the duration and the
+            // fullscreen toggle, so its quality menu pops up from that corner.
             HStack(spacing: 4) {
                 Text(Self.timeString(isScrubbing ? scrubTime : model.currentTime))
                     .font(.footnote.weight(.medium).monospacedDigit())
@@ -154,6 +166,9 @@ struct PlayerControlsView: View {
                             .modifier(ControlIcon())
                     }
                 }
+                Spacer(minLength: 4)
+                Text(Self.timeString(model.duration))
+                    .font(.footnote.weight(.medium).monospacedDigit())
                 // Server-quality gear (M-B): pick a manual server-transcode resolution. Its frame is
                 // published so the quality menu can pop up directly above it.
                 Button { withAnimation(.easeOut(duration: 0.15)) { showQuality.toggle() }; scheduleHide() } label: {
@@ -161,9 +176,6 @@ struct PlayerControlsView: View {
                         .modifier(ControlIcon())
                 }
                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("playerControls")) } action: { gearFrame = $0 }
-                Spacer(minLength: 4)
-                Text(Self.timeString(model.duration))
-                    .font(.footnote.weight(.medium).monospacedDigit())
                 Button { isFullscreen.toggle() } label: {
                     Image(systemName: isFullscreen
                           ? "arrow.down.right.and.arrow.up.left"

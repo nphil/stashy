@@ -141,6 +141,7 @@ struct ScenePlayerView: View {
                 PlayerControlsView(
                     model: model,
                     sprites: sprites,
+                    scene: scene,
                     isFullscreen: $isFullscreen,
                     showControls: $showControls,
                     showStats: $showStats,

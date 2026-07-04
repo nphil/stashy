@@ -57,6 +57,35 @@ enum ServerQuality: String, CaseIterable, Identifiable, Hashable {
     }
 }
 
+/// How much work — and *whose* — is going into getting the current scene on screen, ordered best→worst.
+/// Surfaced as a colour-coded badge on the player so it's obvious at a glance whether we're on the cheap
+/// native path or leaning on the server (a workstation whose compute we treat as the last resort). The
+/// SwiftUI `color` lives in an extension in `PlaybackBadges.swift` to keep this file SwiftUI-free.
+enum PlaybackTier: Int {
+    case direct           // AVPlayer plays the file as-is — no conversion anywhere (least work)
+    case remux            // on-device container rewrite (cheap; no re-encode)
+    case localTranscode   // on-device VideoToolbox re-encode (heavier, but stays on the phone)
+    case server           // Stash server transcodes live — most costly (server compute)
+
+    var label: String {
+        switch self {
+        case .direct: return "Direct"
+        case .remux: return "Remux"
+        case .localTranscode: return "On-device"
+        case .server: return "Server"
+        }
+    }
+    /// SF Symbol depicting the mechanism.
+    var symbol: String {
+        switch self {
+        case .direct: return "bolt.fill"           // instant, no work
+        case .remux: return "shippingbox.fill"     // repackage the container
+        case .localTranscode: return "cpu.fill"    // the phone's chip does the work
+        case .server: return "server.rack"         // the server does the work
+        }
+    }
+}
+
 // MARK: - Stats model
 
 /// A single key/value row in the Stats overlay. `id` is STABLE (the label by default) so a row whose
