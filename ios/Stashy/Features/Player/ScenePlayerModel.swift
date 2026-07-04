@@ -405,16 +405,17 @@ final class ScenePlayerModel {
     private func tickLoadingProgress() {
         guard let loadStart else { return }
         let elapsed = Date().timeIntervalSince(loadStart)
-        let e = max(0.3, expectedLoad)
-        let cap = 0.98
-        let knee = 0.9   // fill reached at exactly the expected time
+        // Per-mode shaping applied to the real learned time — fast local modes fill ahead of real time,
+        // server transcode fills near real time with a brisk tail. See LoadCurveParams.
+        let p = LoadCurveParams.forTier(loadTier)
+        let e = max(0.3, expectedLoad / p.pace)
         let timeCurve: Double
         if elapsed <= e {
-            timeCurve = knee * (elapsed / e)                                  // steady fill → 0.9 at expected
+            timeCurve = p.knee * (elapsed / e)                                            // steady fill → knee
         } else {
-            timeCurve = knee + (cap - knee) * (1 - exp(-(elapsed - e) / e))   // ease 0.9 → cap on overrun
+            timeCurve = p.knee + (p.cap - p.knee) * (1 - exp(-(elapsed - e) / (e * p.tailFrac)))  // brisk tail
         }
-        let display = min(cap, max(bufferFraction, timeCurve))
+        let display = min(p.cap, max(bufferFraction, timeCurve))
         if loadingProgress != display { loadingProgress = display }
     }
 

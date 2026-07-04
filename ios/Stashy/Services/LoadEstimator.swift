@@ -63,6 +63,29 @@ final class LoadEstimator {
     }
 }
 
+/// Per-mode shaping for the loading-donut curve — applied *on top of* the real, learned `expected` time
+/// so the fill rate is tuned to how each mode actually behaves, not a single made-up curve:
+/// - **Fast local modes (direct / remux)** fill *ahead* of real time (`pace` > 1) so the ring is
+///   near-full almost immediately — a sub-second local seek shouldn't crawl.
+/// - **Slow modes (server transcode)** fill close to real time but with a **brisk tail** so when the
+///   server takes a beat longer than expected, the ring keeps climbing toward ~99% (reads as "finishing")
+///   instead of sitting flat at the knee and then snapping.
+struct LoadCurveParams {
+    let knee: Double      // fill fraction reached at the (paced) expected time
+    let cap: Double       // asymptote held until the real ready-snap to 100%
+    let tailFrac: Double  // overrun ease time-constant, as a fraction of the paced expected
+    let pace: Double      // > 1 fills faster than real elapsed (snappier); 1 = real time
+
+    static func forTier(_ tier: PlaybackTier) -> LoadCurveParams {
+        switch tier {
+        case .direct:         return .init(knee: 0.96, cap: 0.995, tailFrac: 0.35, pace: 1.7)
+        case .remux:          return .init(knee: 0.95, cap: 0.995, tailFrac: 0.40, pace: 1.5)
+        case .localTranscode: return .init(knee: 0.90, cap: 0.99,  tailFrac: 0.50, pace: 1.1)
+        case .server:         return .init(knee: 0.90, cap: 0.99,  tailFrac: 0.35, pace: 1.05)
+        }
+    }
+}
+
 /// Minimal shared reachability: tracks whether the current network path is expensive (cellular / hotspot)
 /// or constrained, so the first load-time guess can be slower on a metered link. Event-driven (no
 /// polling), one monitor for the whole app — negligible overhead.
