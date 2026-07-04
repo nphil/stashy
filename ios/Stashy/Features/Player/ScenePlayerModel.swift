@@ -394,15 +394,27 @@ final class ScenePlayerModel {
         loadingProgress = 1
     }
 
-    /// Donut fill = the real buffer signal OR a saturating time curve (whichever is further), capped just
-    /// below full until playback is genuinely ready — so it neither sits at 0 during a server transcode
-    /// nor snaps straight to 100%. The curve slows as it climbs, so an over-long load keeps creeping.
+    /// Donut fill = the real buffer signal OR a time estimate (whichever is further), capped just below
+    /// full until playback is genuinely ready.
+    ///
+    /// The estimate tracks **fraction of the expected load time**: it fills roughly linearly to ~0.9 by
+    /// the expected completion (so when the video is ready around that time, the ring is near-full and the
+    /// snap to 100% is small), then eases toward a cap for over-long loads so it keeps creeping without
+    /// ever hitting 100% early. (The previous `elapsed/(elapsed+k)` shape mathematically maxed at ~0.57 at
+    /// the expected time — hence the ring consistently stalling around half while the video was ready.)
     private func tickLoadingProgress() {
         guard let loadStart else { return }
         let elapsed = Date().timeIntervalSince(loadStart)
-        let e = max(0.25, expectedLoad)
-        let timeCurve = 0.97 * elapsed / (elapsed + e * 0.7)
-        let display = min(0.985, max(bufferFraction, timeCurve))
+        let e = max(0.3, expectedLoad)
+        let cap = 0.98
+        let knee = 0.9   // fill reached at exactly the expected time
+        let timeCurve: Double
+        if elapsed <= e {
+            timeCurve = knee * (elapsed / e)                                  // steady fill → 0.9 at expected
+        } else {
+            timeCurve = knee + (cap - knee) * (1 - exp(-(elapsed - e) / e))   // ease 0.9 → cap on overrun
+        }
+        let display = min(cap, max(bufferFraction, timeCurve))
         if loadingProgress != display { loadingProgress = display }
     }
 

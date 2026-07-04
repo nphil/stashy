@@ -54,12 +54,12 @@ final class LoadEstimator {
     private static func seedDefault(tier: PlaybackTier, expensive: Bool) -> Double {
         let base: Double
         switch tier {
-        case .direct:         base = 0.5   // native file — near-instant on LAN
-        case .remux:          base = 1.6   // on-device container rewrite of the first GOP
-        case .localTranscode: base = 3.0   // on-device re-encode spin-up
-        case .server:         base = 2.6   // server transcode + first segment over the network
+        case .direct:         base = 0.4   // native file — near-instant on LAN
+        case .remux:          base = 1.2   // on-device container rewrite of the first GOP
+        case .localTranscode: base = 2.2   // on-device re-encode spin-up
+        case .server:         base = 1.8   // server transcode + first segment over the network
         }
-        return expensive ? base * 2.2 : base
+        return expensive ? base * 2.0 : base
     }
 }
 
