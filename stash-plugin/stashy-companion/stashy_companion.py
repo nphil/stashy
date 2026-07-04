@@ -372,9 +372,12 @@ def run_transcode(stash, args, settings):
     src_pix = (sv.get("pix_fmt") or "").lower()
     src_transfer = (sv.get("color_transfer") or "").lower()
     src_ten_bit = "10" in src_pix or "p010" in src_pix or "12" in src_pix
-    log_info("Source: {} {}x{} {} transfer={}{}".format(
+    # fps metadata matters: NVENC validates frameRateNum/Den at init and rejects garbage (0/0, 90k/1,
+    # 1000fps VFR web rips) with INVALID_PARAM, while libx265/SVT-AV1 don't care — log both rates.
+    log_info("Source: {} {}x{} {} transfer={}{} r_fps={} avg_fps={} range={}".format(
         sv.get("codec_name", "?"), sv.get("width", "?"), sv.get("height", "?"),
-        src_pix or "?", src_transfer or "-", " 10-bit" if src_ten_bit else ""))
+        src_pix or "?", src_transfer or "-", " 10-bit" if src_ten_bit else "",
+        sv.get("r_frame_rate", "?"), sv.get("avg_frame_rate", "?"), sv.get("color_range", "-")))
 
     # Resolve the actual scale height in Python (downscale only, kept even for yuv420p) so the ffmpeg
     # `-vf` is a plain `scale=-2:<int>` — no quotes / no `min(,)` comma to escape. Passing a quoted
