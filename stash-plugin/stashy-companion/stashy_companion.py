@@ -57,7 +57,10 @@ CUSTOM_FIELD_KEY = "stashy_transcode"  # where we record the app-facing result
 # server until you choose to switch. Multiple versions coexist under bin/<tag>/; `bin/active` names the one
 # in use. Switch via the `ffmpegVersion` setting + the Install/Switch task (re-download only if missing).
 FFMPEG_ASSET = "ffmpeg-master-latest-linux64-gpl.tar.xz"
-PINNED_FFMPEG_TAG = "autobuild-2026-07-03-13-21"   # the default pinned build
+# Default to BtbN's rolling `latest` tag — it NEVER 404s (dated autobuild tags are pruned within days).
+# To pin: set ffmpegVersion to a specific tag and install it while it's still published; the local copy
+# under bin/<tag>/ is kept forever, so it stays available even after BtbN prunes the remote tag.
+DEFAULT_FFMPEG_TAG = "latest"
 ACTIVE_FILE = os.path.join(BIN_DIR, "active")      # text file: the active tag (or "system")
 DEFAULT_AV1_PRESET = 8   # SVT-AV1 preset (0 slow/best … 10 fast). 8 ≈ x265 medium; 6 ≈ x265 slow.
 
@@ -302,8 +305,11 @@ def _run_ffmpeg(cmd, duration, on_status=None):
         tail = ""
         if proc.returncode != 0:
             err.seek(0)
-            lines = [ln.strip() for ln in err.read().splitlines() if ln.strip()]
-            tail = lines[-1] if lines else ""
+            # Keep the last few meaningful lines — the real cause usually sits ABOVE ffmpeg's generic
+            # "Conversion failed!" trailer, so a single-line tail hides it. Drop pure progress noise.
+            lines = [ln.strip() for ln in err.read().splitlines()
+                     if ln.strip() and not ln.lstrip().startswith(("frame=", "size=", "video:"))]
+            tail = " / ".join(lines[-4:]) if lines else ""
         return proc.returncode, tail
     except OSError as e:
         return 127, "could not launch ffmpeg ({}): {}".format(cmd[0], e)
@@ -593,7 +599,7 @@ def run_update_ffmpeg(settings):
     import hashlib
     import tarfile
 
-    tag = (settings.get("ffmpegVersion") or PINNED_FFMPEG_TAG).strip()
+    tag = (settings.get("ffmpegVersion") or DEFAULT_FFMPEG_TAG).strip()
     if tag in ("system", "none", "path", ""):
         _set_active("system")
         log_info("ffmpeg set to SYSTEM (override dir / PATH / Stash bundled). Active pinned build cleared.")
@@ -701,10 +707,12 @@ def run_selftest(stash, settings):
         log_error("ffmpeg FAIL — {} ({})".format(first, ffmpeg))
 
     installed = []
+    if os.path.isfile(os.path.join(BIN_DIR, "ffmpeg")):
+        installed.append("bin/ffmpeg (legacy flat build)")
     if os.path.isdir(BIN_DIR):
         for n in sorted(os.listdir(BIN_DIR)):
             if os.path.isfile(os.path.join(BIN_DIR, n, "ffmpeg")):
-                installed.append(n + (" *" if n == _active_tag() else ""))
+                installed.append(n + (" *active" if n == _active_tag() else ""))
     log_info("installed builds: {}".format(", ".join(installed) or "(none — using system ffmpeg)"))
 
     try:

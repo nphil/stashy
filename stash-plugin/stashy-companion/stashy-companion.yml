@@ -9,7 +9,7 @@ description: >-
   codec + HDR stats, and auto-tagging of direct-play-ready scenes — capabilities
   vanilla Stash lacks. Output is served back to the app over Stash's own HTTP
   with real Job progress.
-version: 0.1.6
+version: 0.1.7
 url: https://github.com/nphil/stashy/tree/main/stash-plugin
 exec:
   - python
@@ -47,7 +47,7 @@ settings:
     type: NUMBER
   ffmpegVersion:
     displayName: ffmpeg version
-    description: "Which pinned ffmpeg build to use. A BtbN release tag e.g. autobuild-2026-07-03-13-21 (default, PINNED), or 'latest' for the rolling build, or 'system' to use PATH / the override dir. Change this then run 'Install / Switch ffmpeg'. Builds are cached, so switching between installed versions is instant. Run 'Self-Test' to see the active version."
+    description: "Which ffmpeg build to use: 'latest' (default — BtbN rolling build, always available), a specific BtbN tag e.g. autobuild-2026-07-03-13-21 (to PIN — download it while it's still published; the local copy is kept forever even after BtbN prunes the remote tag), or 'system' to use PATH / the override dir. Change this then run 'Install / Switch ffmpeg'. Installed builds are cached, so switching between them is instant. Run 'Self-Test' to see the active version."
     type: STRING
   ffmpegSha256:
     displayName: ffmpeg sha256 (advanced)
