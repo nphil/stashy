@@ -9,7 +9,7 @@ description: >-
   codec + HDR stats, and auto-tagging of direct-play-ready scenes — capabilities
   vanilla Stash lacks. Output is served back to the app over Stash's own HTTP
   with real Job progress.
-version: 0.1.5
+version: 0.1.6
 url: https://github.com/nphil/stashy/tree/main/stash-plugin
 exec:
   - python
@@ -39,20 +39,32 @@ settings:
     type: NUMBER
   ffmpegPath:
     displayName: ffmpeg directory override
-    description: "Absolute path to the directory containing ffmpeg/ffprobe. Leave blank to use PATH / Stash's bundled ffmpeg. Point this at an NVENC-enabled ffmpeg build for GPU HEVC. (A build downloaded via 'Update Bundled ffmpeg' takes priority over this.)"
+    description: "Absolute path to the directory containing ffmpeg/ffprobe. Leave blank to use PATH / Stash's bundled ffmpeg. Point this at an NVENC-enabled ffmpeg build for GPU HEVC. (A pinned build installed via 'Install / Switch ffmpeg' takes priority over this.)"
     type: STRING
   av1Preset:
     displayName: AV1 speed preset (0–10)
     description: "SVT-AV1 preset: higher = much faster, slightly larger. 8 ≈ x265 medium (default), 6 = slower/smaller, 10 = fastest. AV1 is CPU-only, so this is the main speed knob."
     type: NUMBER
+  ffmpegVersion:
+    displayName: ffmpeg version
+    description: "Which pinned ffmpeg build to use. A BtbN release tag e.g. autobuild-2026-07-03-13-21 (default, PINNED), or 'latest' for the rolling build, or 'system' to use PATH / the override dir. Change this then run 'Install / Switch ffmpeg'. Builds are cached, so switching between installed versions is instant. Run 'Self-Test' to see the active version."
+    type: STRING
+  ffmpegSha256:
+    displayName: ffmpeg sha256 (advanced)
+    description: "Optional: expected sha256 of the download tarball for the version above. If set, the install aborts on mismatch. Leave blank to skip (the binary is still run-verified regardless)."
+    type: STRING
   ffmpegDownloadURL:
     displayName: ffmpeg download URL (advanced)
-    description: "Override the static-ffmpeg tarball the 'Update Bundled ffmpeg' task fetches. Leave blank for the default BtbN linux64 gpl master build (SVT-AV1 3.x + nvenc)."
+    description: "Override the exact tarball URL the install task fetches (ignores the version tag). Leave blank to use the pinned BtbN linux64 gpl build for the selected version."
     type: STRING
 
 tasks:
-  - name: Update Bundled ffmpeg
-    description: "Download a modern static ffmpeg (SVT-AV1 3.x + nvenc) into the plugin and use it for all jobs — faster AV1 encoding than many Stash images' bundled ffmpeg. Run once; re-run to update."
+  - name: Self-Test
+    description: "Health check: report the ACTIVE ffmpeg version + encoders, GraphQL reachability, installed builds, and cache/serving — a PASS/FAIL summary. Run after a Stash upgrade to confirm nothing broke."
+    defaultArgs:
+      mode: selftest
+  - name: Install / Switch ffmpeg
+    description: "Install (or instantly switch to, if already downloaded) the pinned ffmpeg build named in the 'ffmpeg version' setting — a modern static build with SVT-AV1 3.x + nvenc. Multiple versions coexist; set 'system' to fall back to Stash's ffmpeg."
     defaultArgs:
       mode: update_ffmpeg
   - name: Transcode for iPhone

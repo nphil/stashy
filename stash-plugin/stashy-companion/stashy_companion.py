@@ -52,11 +52,36 @@ BIN_DIR = os.path.join(PLUGIN_DIR, "bin")   # optional self-downloaded modern ff
 CACHE_URL_PREFIX = f"/plugin/{PLUGIN_ID}/assets/cache"
 CUSTOM_FIELD_KEY = "stashy_transcode"  # where we record the app-facing result
 
-# BtbN static build: modern ffmpeg with libsvtav1 (SVT-AV1 3.x) + nvenc + libx265, self-contained.
-# The `latest` release tag tracks git-master autobuilds. Overridable via the ffmpegDownloadURL setting.
-FFMPEG_DOWNLOAD_URL = ("https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
-                       "ffmpeg-master-latest-linux64-gpl.tar.xz")
+# BtbN static builds: modern ffmpeg with libsvtav1 (SVT-AV1 3.x) + nvenc + libx265, self-contained.
+# Versions are PINNED by release tag (not the rolling `latest`) so an upstream regression can't reach the
+# server until you choose to switch. Multiple versions coexist under bin/<tag>/; `bin/active` names the one
+# in use. Switch via the `ffmpegVersion` setting + the Install/Switch task (re-download only if missing).
+FFMPEG_ASSET = "ffmpeg-master-latest-linux64-gpl.tar.xz"
+PINNED_FFMPEG_TAG = "autobuild-2026-07-03-13-21"   # the default pinned build
+ACTIVE_FILE = os.path.join(BIN_DIR, "active")      # text file: the active tag (or "system")
 DEFAULT_AV1_PRESET = 8   # SVT-AV1 preset (0 slow/best … 10 fast). 8 ≈ x265 medium; 6 ≈ x265 slow.
+
+
+def _ffmpeg_url(tag):
+    return "https://github.com/BtbN/FFmpeg-Builds/releases/download/{}/{}".format(tag, FFMPEG_ASSET)
+
+
+def _version_dir(tag):
+    return os.path.join(BIN_DIR, tag)
+
+
+def _active_tag():
+    try:
+        with open(ACTIVE_FILE) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _set_active(tag):
+    os.makedirs(BIN_DIR, exist_ok=True)
+    with open(ACTIVE_FILE, "w") as f:
+        f.write(tag)
 
 # ----------------------------------------------------------------------------
 # Stash control-protocol logging (stderr). Each line: \x01 <level> \x02 <msg>.
@@ -119,16 +144,22 @@ class Stash:
 # ffmpeg / ffprobe helpers.
 # ----------------------------------------------------------------------------
 def _bin(name, override_dir):
-    # 1) a modern build the plugin downloaded into its own bin/ (see the Update ffmpeg task).
-    local = os.path.join(BIN_DIR, name)
-    if os.path.isfile(local) and os.access(local, os.X_OK):
-        return local
-    # 2) a user-provided directory (Settings → ffmpeg directory override).
+    # 1) the active pinned build the plugin downloaded into bin/<tag>/ (unless set to "system").
+    tag = _active_tag()
+    if tag and tag not in ("system", "none", "path"):
+        cand = os.path.join(_version_dir(tag), name)
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    # 2) a legacy flat bin/<name> from an earlier plugin version.
+    flat = os.path.join(BIN_DIR, name)
+    if os.path.isfile(flat) and os.access(flat, os.X_OK):
+        return flat
+    # 3) a user-provided directory (Settings → ffmpeg directory override).
     if override_dir:
         cand = os.path.join(override_dir, name)
         if os.path.isfile(cand) or os.path.isfile(cand + ".exe"):
             return cand
-    # 3) fall back to PATH / Stash's bundled ffmpeg.
+    # 4) fall back to PATH / Stash's bundled ffmpeg.
     return name
 
 
@@ -542,37 +573,75 @@ def run_purge(settings):
 
 
 # ----------------------------------------------------------------------------
-# Self-download a modern static ffmpeg (BtbN build): SVT-AV1 3.x is markedly faster
-# than the 1.x that ships with many Stash images, and this build also carries a newer
-# nvenc + libx265. Once present in bin/, `_bin()` prefers it for all jobs. Opt-in
-# (user runs this task); no third-party Python needed — stdlib urllib + tarfile(xz).
+# ffmpeg version management: download + PIN + switch between BtbN static builds
+# (SVT-AV1 3.x + nvenc + libx265), self-contained. Builds coexist under bin/<tag>/;
+# switching is instant when a version is already present. Opt-in; stdlib only.
 # ----------------------------------------------------------------------------
+def _ffmpeg_summary(ff):
+    """(first `-version` line, {encoder: bool}) for a given ffmpeg binary, or (error, {})."""
+    try:
+        ver = subprocess.run([ff, "-hide_banner", "-version"], capture_output=True, text=True, timeout=30)
+        first = (ver.stdout.splitlines() or ["?"])[0]
+        enc = subprocess.run([ff, "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=30).stdout
+        return first, {"hevc_nvenc": "hevc_nvenc" in enc, "libsvtav1": "libsvtav1" in enc,
+                       "libx265": "libx265" in enc}
+    except (subprocess.SubprocessError, OSError) as e:
+        return "won't run: {}".format(e), {}
+
+
 def run_update_ffmpeg(settings):
-    import shutil
+    import hashlib
     import tarfile
 
-    url = (settings.get("ffmpegDownloadURL") or FFMPEG_DOWNLOAD_URL).strip()
-    os.makedirs(BIN_DIR, exist_ok=True)
-    archive = os.path.join(BIN_DIR, "_download.tar.xz")
-    log_info("Downloading ffmpeg from {}".format(url))
+    tag = (settings.get("ffmpegVersion") or PINNED_FFMPEG_TAG).strip()
+    if tag in ("system", "none", "path", ""):
+        _set_active("system")
+        log_info("ffmpeg set to SYSTEM (override dir / PATH / Stash bundled). Active pinned build cleared.")
+        return
+
+    vdir = _version_dir(tag)
+    ff = os.path.join(vdir, "ffmpeg")
+
+    # Already downloaded → just switch to it (instant, no re-download).
+    if os.path.isfile(ff) and os.access(ff, os.X_OK):
+        _set_active(tag)
+        first, enc = _ffmpeg_summary(ff)
+        log_progress(1.0)
+        log_info("Switched to ffmpeg {} — {} · nvenc={} svtav1={}".format(
+            tag, first, enc.get("hevc_nvenc"), enc.get("libsvtav1")))
+        return
+
+    url = (settings.get("ffmpegDownloadURL") or _ffmpeg_url(tag)).strip()
+    sha_expect = (settings.get("ffmpegSha256") or "").strip().lower()
+    os.makedirs(vdir, exist_ok=True)
+    archive = os.path.join(vdir, "_download.tar.xz")
+    log_info("Downloading ffmpeg {} from {}".format(tag, url))
 
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "stashy-companion"})
         with urllib.request.urlopen(req, timeout=600) as r:
             total = int(r.headers.get("Content-Length") or 0)
-            got = 0
+            got, hasher = 0, hashlib.sha256()
             with open(archive, "wb") as f:
                 while True:
                     chunk = r.read(1 << 20)
                     if not chunk:
                         break
                     f.write(chunk)
+                    hasher.update(chunk)
                     got += len(chunk)
                     if total > 0:
                         log_progress(0.9 * got / total)   # reserve last 10% for extract+verify
     except (urllib.error.URLError, OSError) as e:
         _safe_unlink(archive)
-        raise RuntimeError("ffmpeg download failed: {}".format(e))
+        raise RuntimeError("ffmpeg download failed (tag {} may have been pruned — try 'latest' or a newer "
+                           "tag): {}".format(tag, e))
+
+    digest = hasher.hexdigest()
+    if sha_expect and digest != sha_expect:
+        _safe_unlink(archive)
+        raise RuntimeError("sha256 mismatch: expected {} got {}".format(sha_expect, digest))
+    log_info("Downloaded {} bytes (sha256 {})".format(got, digest[:16]))
 
     log_info("Extracting ffmpeg + ffprobe…")
     extracted = 0
@@ -581,9 +650,9 @@ def run_update_ffmpeg(settings):
             for m in tar.getmembers():
                 base = os.path.basename(m.name)
                 if m.isfile() and base in ("ffmpeg", "ffprobe"):
-                    m.name = base   # flatten into BIN_DIR (also neutralises any path traversal)
-                    tar.extract(m, BIN_DIR)
-                    os.chmod(os.path.join(BIN_DIR, base), 0o755)
+                    m.name = base   # flatten into vdir (also neutralises any path traversal)
+                    tar.extract(m, vdir)
+                    os.chmod(os.path.join(vdir, base), 0o755)
                     extracted += 1
     except (tarfile.TarError, OSError) as e:
         raise RuntimeError("could not extract ffmpeg archive: {}".format(e))
@@ -593,18 +662,64 @@ def run_update_ffmpeg(settings):
     if extracted < 2:
         raise RuntimeError("archive did not contain both ffmpeg and ffprobe")
 
-    ff = os.path.join(BIN_DIR, "ffmpeg")
-    try:
-        ver = subprocess.run([ff, "-hide_banner", "-version"],
-                             capture_output=True, text=True, timeout=30)
-        first = (ver.stdout.splitlines() or ["?"])[0]
-        enc = subprocess.run([ff, "-hide_banner", "-encoders"],
-                             capture_output=True, text=True, timeout=30).stdout
-    except (subprocess.SubprocessError, OSError) as e:
-        raise RuntimeError("downloaded ffmpeg won't run (missing libs?): {}".format(e))
+    first, enc = _ffmpeg_summary(ff)
+    if not enc:
+        raise RuntimeError("downloaded ffmpeg {} won't run: {}".format(tag, first))
+    _set_active(tag)
     log_progress(1.0)
-    log_info("ffmpeg ready in plugin bin/: {} · libsvtav1={} · hevc_nvenc={} — now used for all jobs".format(
-        first, "libsvtav1" in enc, "hevc_nvenc" in enc))
+    log_info("ffmpeg {} installed + active — {} · nvenc={} svtav1={} x265={}".format(
+        tag, first, enc.get("hevc_nvenc"), enc.get("libsvtav1"), enc.get("libx265")))
+
+
+def run_selftest(stash, settings):
+    """One-shot health check after a Stash upgrade / config change. Reports the ACTIVE ffmpeg version and
+    everything the transcode pipeline depends on, then a PASS/FAIL line. A few lines — deliberately no spam."""
+    ok = True
+    log_info("── Stashy Companion self-test ──")
+    log_info("Python {}".format(sys.version.split()[0]))
+
+    try:
+        v = stash.call("query { version { version } }")
+        log_info("GraphQL OK — Stash {}".format((v.get("version") or {}).get("version", "?")))
+    except Exception as e:
+        ok = False
+        log_error("GraphQL FAIL — {}".format(e))
+
+    ffmpeg = _bin("ffmpeg", settings.get("ffmpegPath"))
+    active = _active_tag() or "(system)"
+    first, enc = _ffmpeg_summary(ffmpeg)
+    if enc:
+        log_info("ffmpeg [{}] {}".format(active, first))
+        log_info("  path {}".format(ffmpeg))
+        log_info("  encoders: hevc_nvenc={} libsvtav1={} libx265={}".format(
+            enc.get("hevc_nvenc"), enc.get("libsvtav1"), enc.get("libx265")))
+        if not (enc.get("hevc_nvenc") or enc.get("libx265")):
+            ok = False
+            log_warn("  no HEVC encoder available (neither hevc_nvenc nor libx265)")
+    else:
+        ok = False
+        log_error("ffmpeg FAIL — {} ({})".format(first, ffmpeg))
+
+    installed = []
+    if os.path.isdir(BIN_DIR):
+        for n in sorted(os.listdir(BIN_DIR)):
+            if os.path.isfile(os.path.join(BIN_DIR, n, "ffmpeg")):
+                installed.append(n + (" *" if n == _active_tag() else ""))
+    log_info("installed builds: {}".format(", ".join(installed) or "(none — using system ffmpeg)"))
+
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        probe = os.path.join(CACHE_DIR, ".selftest")
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.remove(probe)
+        log_info("cache dir writable — served at {}".format(CACHE_URL_PREFIX))
+    except OSError as e:
+        ok = False
+        log_error("cache dir FAIL — {}".format(e))
+
+    log_progress(1.0)
+    log_info("── self-test {} ──".format("PASSED" if ok else "FAILED (see above)"))
 
 
 # ----------------------------------------------------------------------------
@@ -798,6 +913,8 @@ def main():
             run_purge(settings)
         elif mode == "update_ffmpeg":
             run_update_ffmpeg(settings)
+        elif mode == "selftest":
+            run_selftest(stash, settings)
         else:
             raise RuntimeError("unknown mode: {}".format(mode))
     except Exception as e:

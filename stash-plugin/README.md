@@ -64,19 +64,25 @@ Settings → Plugins → **Reload Plugins**.
 | AV1 speed preset (0–10) | number | `8` | SVT-AV1 preset — the main AV1 speed knob. Higher = much faster / slightly larger. 6 = slower/smaller, 10 = fastest. |
 | Transcode cache cap (GB) | number | `0` | LRU-trim the served cache; 0 = unlimited. |
 | ffmpeg directory override | string | — | Absolute dir holding an NVENC-enabled ffmpeg/ffprobe. |
-| ffmpeg download URL | string | — | Advanced: override the static-ffmpeg tarball the update task fetches. |
+| ffmpeg version | string | pinned tag | Which pinned build to use: a BtbN tag, `latest`, or `system`. |
+| ffmpeg sha256 | string | — | Advanced: verify the download tarball against this hash. |
+| ffmpeg download URL | string | — | Advanced: override the exact tarball URL. |
 
-### Faster AV1 (CPU) encoding
+### Managing ffmpeg (version pinning + switching)
 
-AV1 has no GPU encoder on Pascal cards (Tesla P40), so it runs on the CPU and is inherently slow.
-Two levers, both here:
+AV1 has no GPU encoder on Pascal cards (Tesla P40), so it runs on the CPU and is inherently slow. For
+speed, **HEVC via NVENC is far faster** and plays natively on iPhone — reserve AV1 for when file size
+matters and you can wait. Two levers:
 
-1. **AV1 speed preset** — raising it is the biggest win (preset 8 is ~2–3× faster than 6). For getting
-   videos onto an iPhone, **HEVC via NVENC is far faster** and plays natively; reserve AV1 for when file
-   size matters and you can wait.
-2. **Update Bundled ffmpeg** (task) — downloads a modern static ffmpeg (SVT-AV1 3.x, ~15–25% faster than
-   older versions, plus a newer nvenc) into the plugin's `bin/` and uses it for all jobs automatically.
-   Run it once from Settings → Tasks; re-run to update.
+1. **AV1 speed preset** — raising it is the biggest win (preset 8 is ~2–3× faster than 6).
+2. **A modern, pinned ffmpeg** — the bundled build carries SVT-AV1 3.x (~15–25% faster than older
+   versions) plus a newer nvenc, and is **version-pinned** so an upstream regression can't reach you until
+   you choose to switch:
+   - Set **ffmpeg version** to a BtbN tag (default is a pinned one), `latest`, or `system`.
+   - Run **Install / Switch ffmpeg** — downloads it (or switches instantly if already installed). Multiple
+     versions coexist under `bin/<tag>/`; `system` falls back to Stash's own ffmpeg.
+   - Run **Self-Test** any time to see the **active version** + encoders, GraphQL health, installed builds,
+     and cache/serving — a one-shot PASS/FAIL you should run after any Stash upgrade.
 
 ## Encoder ladder (HEVC)
 
