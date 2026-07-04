@@ -439,6 +439,11 @@ final class DownloadManager {
     /// which detaches the (possibly wedged) job: its late completion is ignored because its captured
     /// generation no longer matches.
     @ObservationIgnored private var transcodeGen: [String: Int] = [:]
+    /// Settings of the currently-running transcode per item, so a background-interrupted transcode can be
+    /// auto-restarted on return (VideoToolbox is foreground-only and has no mid-stream checkpoint).
+    @ObservationIgnored private var transcodeSettingsInFlight: [String: VideoTranscoder.Settings] = [:]
+    /// Items whose transcode was paused by backgrounding and should auto-resume when we return.
+    @ObservationIgnored private var transcodeResumeOnForeground: [String: VideoTranscoder.Settings] = [:]
 
     /// Containers Apple's `AVAssetReader` can demux natively — everything else (MKV/WebM/AVI/…) has to go
     /// through the FFmpeg transcoder.
@@ -454,6 +459,7 @@ final class DownloadManager {
         item.transcodeLog = ""
         item.transcodeStatus = ""
         item.error = nil
+        transcodeSettingsInFlight[item.id] = settings   // remembered so backgrounding can auto-resume it
         // Pick the engine. Apple's AVFoundation transcoder is fast and proven, but ONLY for plain H.264
         // in a native container — it chokes on HEVC even inside an MP4 (hev1 tag / 4:2:2 / 10-bit), which
         // is the "cannot decode" the user hit. Everything else — HEVC in any container, and all exotic
@@ -519,6 +525,7 @@ final class DownloadManager {
         let id = item.id
         transcoders[id]?.cancel()
         transcoders[id] = nil
+        transcodeSettingsInFlight[id] = nil
         transcodeGen[id] = (transcodeGen[id] ?? 0) + 1
         item.transcoding = false
         item.transcodeProgress = 0
@@ -545,9 +552,11 @@ final class DownloadManager {
         item.transcodeTargetLabel = nil
         if let message { item.error = message }
         transcoders[id] = nil
+        transcodeSettingsInFlight[id] = nil
     }
 
     private func transcodeFinished(id: String, gen: Int, output: URL, src: URL, settings: VideoTranscoder.Settings) {
+        transcodeSettingsInFlight[id] = nil
         guard transcodeGen[id] == gen, let item = items.first(where: { $0.id == id }) else {
             try? FileManager.default.removeItem(at: output)   // detached/cancelled job — drop its temp output
             return
@@ -708,12 +717,13 @@ final class DownloadManager {
         guard !inBackground else { return }
         inBackground = true
         // On-device transcode uses the VideoToolbox hardware engine, which iOS denies to a backgrounded
-        // app — the encode call would wedge (the "stuck at N%" the user hit). Stop any running transcode
-        // cleanly now and tell the user why, so the card is recoverable instead of frozen. (There's no
-        // mid-stream checkpoint to resume from, so this is a stop, not a true pause — restart re-runs it.)
+        // app — the encode call would wedge. Stop any running transcode cleanly now, but remember its
+        // settings so it AUTO-RESUMES when we return (no scary "keep Stashy open" error, no manual tap).
+        // There's no mid-stream checkpoint, so the resume re-runs the transcode — but it's automatic.
         for item in items where item.transcoding {
+            if let settings = transcodeSettingsInFlight[item.id] { transcodeResumeOnForeground[item.id] = settings }
             cancelTranscode(item)
-            item.error = "Transcoding paused — keep Stashy open (it needs the foreground). Tap transcode to restart."
+            item.transcodeStatus = "Paused — resumes automatically when you reopen Stashy"
         }
         for item in items where item.state == .downloading { handoff(item, toBackground: true) }
         // Hold a short assertion so the resume-data cancellations finish and the background tasks actually
@@ -731,6 +741,14 @@ final class DownloadManager {
         guard inBackground else { return }
         inBackground = false
         for item in items where item.state == .downloading { handoff(item, toBackground: false) }
+        // Auto-resume transcodes that were paused by backgrounding — no manual tap needed.
+        let resumes = transcodeResumeOnForeground
+        transcodeResumeOnForeground.removeAll()
+        for (id, settings) in resumes {
+            guard let item = items.first(where: { $0.id == id }), item.state == .completed, !item.transcoding else { continue }
+            item.error = nil
+            transcode(item, settings: settings)
+        }
     }
 
     private func endHandoffAssertion() {
