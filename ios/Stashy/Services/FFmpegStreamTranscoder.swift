@@ -178,14 +178,15 @@ final class FFmpegStreamTranscoder: @unchecked Sendable {
         let bitrate = VideoTranscoder.videoBitrate(width: outSize.width, height: outSize.height,
                                                    fps: fps, quality: quality, codec: .h264)
 
-        // --- Audio: copy when MP4-muxable, else drop (Stage 1a; AAC re-encode is Stage 1b) ---
-        var aInStream: UnsafeMutablePointer<AVStream>?
+        // --- Audio: copy when MP4-muxable, else re-encode to AAC (Stage 1b) ---
+        var aInStream: UnsafeMutablePointer<AVStream>?       // set when the source audio is copied as-is
+        var aReencodeStream: UnsafeMutablePointer<AVStream>? // set when it needs decode → AAC re-encode
         let aIdx = av_find_best_stream(input, AVMEDIA_TYPE_AUDIO, -1, -1, nil, 0)
         var audioNote = "no audio"
         if aIdx >= 0, let s = input!.pointee.streams[Int(aIdx)], let apar = s.pointee.codecpar {
             let name = String(cString: avcodec_get_name(apar.pointee.codec_id))
             if Self.copyableAudio.contains(name) { aInStream = s; audioNote = "audio \(name) (copy)" }
-            else { audioNote = "audio \(name) dropped (AAC re-encode pending)" }
+            else { aReencodeStream = s; audioNote = "audio \(name) → aac" }
         }
 
         // Stage diagnostic: exactly what came in and how we're decoding it. This is the line that tells us
@@ -256,6 +257,17 @@ final class FFmpegStreamTranscoder: @unchecked Sendable {
                 aOutStream = s
             }
         }
+
+        // Stage 1b: for a non-copyable source track, spin up the decode→AAC re-encode pipeline (it creates
+        // its own output stream on `outFmt`, so this must happen before write_header). Freed before the
+        // output context (defers run LIFO; cleanupOutput was registered earlier).
+        var audioReencoder: FFmpegAudioReencoder?
+        if aOutStream == nil, let aReencodeStream {
+            let globalHeader = outFmt.pointee.oformat.pointee.flags & avfmtGlobalHeader != 0
+            audioReencoder = FFmpegAudioReencoder(inStream: aReencodeStream, outFmt: outFmt, globalHeader: globalHeader)
+            audioNote = audioReencoder.map { "audio \($0.label)" } ?? (audioNote + " (init failed)")
+        }
+        defer { audioReencoder?.free() }
 
         var options: OpaquePointer?
         av_dict_set(&options, "movflags", "frag_keyframe+empty_moov+default_base_moof", 0)
@@ -409,14 +421,18 @@ final class FFmpegStreamTranscoder: @unchecked Sendable {
                 pkt!.pointee.stream_index = aOutStream.pointee.index
                 pkt!.pointee.pos = -1
                 _ = av_interleaved_write_frame(outFmt, pkt)
+            } else if let audioReencoder, inIdx == Int(aIdx) {
+                // Non-copyable source audio → decode + AAC re-encode into its own output stream.
+                audioReencoder.process(pkt)
             }
             av_packet_unref(pkt)
         }
 
         let aborted = isAborted
         if !aborted, !encError {
-            _ = decodeAndEncode(nil)   // flush decoder
-            _ = drainEncoder(nil)      // flush encoder
+            _ = decodeAndEncode(nil)   // flush video decoder
+            _ = drainEncoder(nil)      // flush video encoder
+            audioReencoder?.flush()    // drain resampler + AAC encoder tail before the trailer
             _ = av_write_trailer(outFmt)
         }
         let status = aborted ? "aborted" : encError ? "encode error" : "done"
