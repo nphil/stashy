@@ -11,7 +11,7 @@
     description: >-
       iPhone-native HEVC/AV1 transcoding (NVENC/CPU), ffprobe codec + HDR stats,
       and direct-play auto-tagging for the Stashy iOS app.
-  version: 0.1.1
-  date: 2026-07-04 16:20:00
+  version: 0.1.2
+  date: 2026-07-04 16:40:00
   path: stashy-companion.zip
-  sha256: da0199dbd94d8d8b34bc3daf3217ca5ab8cb8dd8a00c4be49dd8167879db4c02
+  sha256: 4ca280b1cf78a7e294633a895625e3a9347de025e6f44fb65ad77b561e933326

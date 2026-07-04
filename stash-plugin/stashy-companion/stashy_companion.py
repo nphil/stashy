@@ -205,6 +205,10 @@ def build_transcode_cmd(src, dst, codec, target_h, cq, ffmpeg, engine, gpu_decod
                 "-crf", str(cq), "-tag:v", "hvc1", "-pix_fmt", "yuv420p"]
     cmd += ["-c:a", "aac", "-b:a", "160k", "-ac", "2",
             "-movflags", "+faststart",
+            # Force the MP4 muxer: the output is written to a `.part` temp name, and ffmpeg can't infer
+            # a format from that extension ("Error opening output files: Invalid argument"). -f mp4 makes
+            # the container explicit regardless of the temp filename.
+            "-f", "mp4",
             "-progress", "pipe:1", "-nostats", dst]
     return cmd
 
