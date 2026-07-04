@@ -330,14 +330,40 @@ def run_transcode(stash, args, settings):
 
     os.replace(tmp, dst)  # atomic — never serve a half-written file
     size = os.path.getsize(dst)
-    log_info("Done: {} ({:.1f} MB)".format(out_name, size / 1e6))
+
+    # Probe the ACTUAL output once (not a spam loop) so we report — and hand the app — the real codec /
+    # dimensions / bitrate of the file we produced, rather than what was requested. This also makes it
+    # obvious in the log whether NVENC actually emitted HEVC.
+    out_codec, out_audio, out_w, out_h, out_bitrate = codec, None, None, height, None
+    probe = ffprobe_streams(dst, ffprobe)
+    if probe:
+        v = next((s for s in probe.get("streams", []) if s.get("codec_type") == "video"), {})
+        a = next((s for s in probe.get("streams", []) if s.get("codec_type") == "audio"), {})
+        out_codec = (v.get("codec_name") or codec).lower()
+        out_audio = (a.get("codec_name") or None)
+        out_w = int(v.get("width") or 0) or None
+        out_h = int(v.get("height") or 0) or target_h
+        try:
+            out_bitrate = int(probe.get("format", {}).get("bit_rate") or 0) or None
+        except (TypeError, ValueError):
+            out_bitrate = None
+    if not out_bitrate and duration > 0:
+        out_bitrate = int(size * 8 / duration)
+    log_info("Done: {} — {} {}x{} @ {} ({:.0f} MB)".format(
+        out_name, out_codec, out_w or "?", out_h or "?",
+        "{:.1f} Mbps".format(out_bitrate / 1e6) if out_bitrate else "?", size / 1e6))
 
     result = {
         "path": "{}/{}".format(CACHE_URL_PREFIX, out_name),
         "size": size,
-        "codec": codec,
+        "codec": out_codec,           # ACTUAL codec (hevc/av1/h264) from ffprobe, not the request
         "container": "mp4",
-        "resolution": height,
+        "resolution": out_h or height,
+        "video_codec": out_codec,
+        "audio_codec": out_audio,
+        "width": out_w,
+        "height": out_h or height,
+        "bitrate": out_bitrate,
         "source_scene": scene_id,
         "created": int(time.time()),
         "status": "ready",
