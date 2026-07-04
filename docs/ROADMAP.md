@@ -342,7 +342,27 @@ blocks, both first-class iOS APIs:
     already re-kicks on foreground — that hook would resume from the checkpoint instead of 0%.
 - **Download videos for offline viewing**, with a choice of source:
   - **Original file** (as-is from Stash). ✅
-  - **Stash-transcoded version** (ask the server for a smaller/compatible encode).
+  - **Stash-transcoded version** (ask the server for a smaller/compatible encode). Shipping now as an
+    **H.264 server-resolution download** via `/scene/{id}/stream.mp4?resolution=…` (staged on the Downloads
+    screen: Original+thread-count vs a server resolution). Confirmed against stashapp/stash source: the
+    built-in stream API is **H.264-only, resolution-only, quality fixed by server config** — `libx265` is
+    in the code but dead/unwired, and there's no per-request codec/quality param.
+  - **★ Stash plugin for server-side HEVC + AV1 transcode-for-download (owner-requested 2026-07-04).** To
+    offer real HEVC/AV1 downloads (smaller files, offload the phone), write a **Stash plugin** that runs its
+    own ffmpeg and exposes a "transcode this scene for download" task the app triggers + polls:
+    - **HEVC via GPU (NVENC).** Reuse the CUDA/NVENC Stash already has — `hevc_nvenc` on the owner's
+      **Tesla P40 (Pascal)**, which has NVENC HEVC. Output **iPhone-native `hvc1`-tagged HEVC in MP4**
+      (`-tag:v hvc1`, yuv420p) so it direct-plays with no on-device remux.
+    - **AV1 via CPU.** The P40 predates NVENC AV1 (needs Ada/RTX 40), so AV1 encode is CPU — **SVT-AV1**
+      or libaom; slow, so offer it as an explicit "small, slow" option.
+    - **Progress + logs come free.** A plugin runs as a Stash **Job**, so `jobQueue`/`findJob`/`jobsSubscribe`
+      expose a real `progress: Float` %, and the plugin can emit `Progress`/`Info` log lines the app tails
+      via the GraphQL `logs` subscription — the structured server-side progress the built-in live-transcode
+      stream can't give. App flow: trigger via GraphQL `runPluginTask`, poll the job for %, then download the
+      produced **static** file (real Content-Length → range/multi-thread download).
+    - Delivers the full codec/quality matrix the built-in API can't (1080/720/… × HEVC/AV1/H.264 × quality),
+      all server-side — the proper answer to "why can't the server give me HEVC." Supersedes on-device
+      transcode for owners who'd rather spend server GPU than phone battery.
   - **On-device transcode on the fly** (reuse the FFmpeg engine to produce a smaller/compatible file
     locally). ✅ H.264/HEVC (VideoToolbox) with resolution + quality presets.
 - **Downloaded Videos management screen** — list/manage offline videos (size, source, delete, play
