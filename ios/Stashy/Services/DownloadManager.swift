@@ -484,17 +484,31 @@ final class DownloadManager {
                         item.serverJobProgress = 1
                         item.url = url
                         item.ext = result.container ?? "mp4"
-                        item.codec = result.codec ?? codec.rawValue
-                        if let h = result.resolution { item.height = h }
+                        // Use the ACTUAL probed specs the plugin reported (it ffprobed its own output),
+                        // so what we show/persist is what the file really is — not what was requested.
+                        item.codec = result.video_codec ?? result.codec ?? codec.rawValue
+                        if let w = result.width { item.width = w }
+                        if let h = result.height ?? result.resolution { item.height = h }
                         let size = result.size ?? 0
-                        if size > 0, let dur = scene.files.first?.duration, dur > 0 {
-                            item.bitRate = Int(Double(size) * 8 / dur)   // recompute for the smaller transcoded file
+                        if let br = result.bitrate {
+                            item.bitRate = br
+                        } else if size > 0, let dur = scene.files.first?.duration, dur > 0 {
+                            item.bitRate = Int(Double(size) * 8 / dur)
                         }
+                        item.wasTranscoded = true
+                        // Rewrite the persisted scene to match the transcoded file so the download badge,
+                        // the player detail row, and the stats overlay all read HEVC/1080p/new-size instead
+                        // of the original server metadata — and so it survives relaunch (loadCompleted
+                        // re-derives specs from this sidecar).
+                        let transcodedScene = scene.replacingPrimaryFileSpecs(
+                            container: item.ext, codec: item.codec, width: item.width, height: item.height,
+                            bitRate: item.bitRate, size: size > 0 ? Int(size) : nil)
+                        item.scene = transcodedScene
                         let n = (size > 0 && item.multiThread) ? connectionCount : 1
                         item.rebuildConnections(count: n, totalBytes: size)
                         item.error = nil
                         startConnections(item)                       // → .downloading, byte transfer begins
-                        fetchSidecar(item, scene: scene, apiKey: apiKey)
+                        fetchSidecar(item, scene: transcodedScene, apiKey: apiKey, transcoded: true)
                         return
                     case "FAILED", "CANCELLED", "STOPPING":
                         item.state = .failed
@@ -539,7 +553,7 @@ final class DownloadManager {
 
     /// Best-effort download of the poster + sprite sheet + WebVTT alongside the video, and a Codable
     /// sidecar of the scene so the card and offline playback survive relaunch.
-    private func fetchSidecar(_ item: DownloadItem, scene: StashScene, apiKey: String) {
+    private func fetchSidecar(_ item: DownloadItem, scene: StashScene, apiKey: String, transcoded: Bool = false) {
         let meta = metaDir
         let id = scene.id
         let thumbURL = scene.thumbnailURL(apiKey: apiKey)
@@ -547,7 +561,7 @@ final class DownloadManager {
         let vttURL = scene.vttURL(apiKey: apiKey)
         // Sidecar JSON (scene + apiKey + the exact download source) written synchronously — it's tiny.
         if let data = try? JSONEncoder().encode(Sidecar(
-            scene: scene, apiKey: apiKey, transcoded: false,
+            scene: scene, apiKey: apiKey, transcoded: transcoded,
             downloadURL: item.url.absoluteString, connectionCount: item.connections.count,
             serverTranscode: item.useServerTranscode, downloadExt: item.ext)) {
             try? data.write(to: meta.appendingPathComponent("\(id).json"), options: .atomic)

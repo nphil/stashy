@@ -121,14 +121,21 @@ struct CompanionJob: Decodable, Sendable {
     let error: String?
 }
 
-/// Decoded from the JSON string the plugin stores in `custom_fields.stashy_transcode`.
+/// Decoded from the JSON string the plugin stores in `custom_fields.stashy_transcode`. The plugin
+/// ffprobes its own output, so `video_codec`/`width`/`height`/`bitrate` are the ACTUAL specs of the
+/// produced file — use these to display/persist what the file really is, not what was requested.
 struct TranscodeResult: Decodable, Sendable {
     let path: String?         // "/plugin/stashy-companion/assets/cache/…mp4" — nil until ready
     let size: Int64?
-    let codec: String?
+    let codec: String?        // actual video codec (== video_codec; kept for the badge)
     let resolution: Int?
     let container: String?
     let status: String?       // "running" | "ready" | "failed"
+    let video_codec: String?
+    let audio_codec: String?
+    let width: Int?
+    let height: Int?
+    let bitrate: Int?
 }
 
 // MARK: - GraphQL request/response envelopes
