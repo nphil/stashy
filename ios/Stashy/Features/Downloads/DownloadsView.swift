@@ -349,8 +349,13 @@ private struct DownloadCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 HStack(spacing: 6) {
-                    statusChip("Downloaded", color: .green)
-                    if item.wasTranscoded { statusChip("Transcoded", color: themeManager.current.accentColor) }
+                    // Icon-only status badges (no text → nothing to truncate in the width-tight row): green
+                    // = downloaded offline, pink/accent = on-device transcoded. SF Symbols are vector, so
+                    // they stay crisp at any size.
+                    statusBadge("arrow.down.circle.fill", color: .green, label: "Downloaded")
+                    if item.wasTranscoded {
+                        statusBadge("wand.and.stars", color: themeManager.current.accentColor, label: "Transcoded")
+                    }
                 }
             }
         } else {
@@ -362,14 +367,13 @@ private struct DownloadCard: View {
         }
     }
 
-    private func statusChip(_ text: String, color: Color) -> some View {
-        Text(text)
-            .font(.system(size: 9, weight: .bold))   // both chips: identical size + weight (no per-chip scaling)
+    private func statusBadge(_ symbol: String, color: Color, label: String) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 15, weight: .semibold))
             .foregroundStyle(color)
-            .lineLimit(1)
-            .padding(.horizontal, 9)
-            .frame(height: 32)                        // match the 32pt wand/delete circles so they line up
+            .frame(width: 32, height: 32)             // square badge, same height as the wand/delete circles
             .background(color.opacity(0.15), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .accessibilityLabel(label)
     }
 
     private var statusText: String {
