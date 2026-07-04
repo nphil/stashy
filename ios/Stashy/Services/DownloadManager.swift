@@ -100,8 +100,9 @@ final class DownloadItem: Identifiable {
     var companionQuality: CompanionQuality = .medium
     /// Live progress (0…1) of the companion server-side transcode while `.serverProcessing`.
     var serverJobProgress: Double = 0
-    /// Human status line shown under the bar while the companion job runs.
-    var serverJobStage: String = ""
+    /// Stash Job id of the running companion transcode — persisted so monitoring reconnects after an app
+    /// switch / kill / crash, and so a cancel can stop the right job.
+    var companionJobID: String?
 
     /// On-device transcode progress (0…1) while `transcoding`; the card shows it in place of the download bar.
     var transcoding = false
@@ -441,12 +442,12 @@ final class DownloadManager {
         fetchSidecar(item, scene: scene, apiKey: apiKey)
     }
 
-    /// Drive a Stashy Companion server-side transcode, then hand the finished file to the normal
-    /// byte-download engine. The plugin reports real `Job.progress` (unlike a live H.264 stream), so the
-    /// card shows a determinate bar during `.serverProcessing`; when the plugin records the ready file on
-    /// the scene's custom_fields we build its `/plugin/…/assets/…` URL and download it (Range-capable, so
-    /// multi-connection still applies). Nothing touches the load-bearing transfer path except the final
-    /// `startConnections` hand-off.
+    /// Kick off a Stashy Companion server-side transcode (HEVC/AV1 via the plugin's modern ffmpeg), then
+    /// monitor it and hand the finished file to the normal byte-download engine. Robust across app
+    /// switch/kill/crash: the job runs server-side, and we persist its id + params in a sidecar so a
+    /// relaunch reconnects to the SAME job (or picks up its finished output). Rich live stats (size/ETA/
+    /// fps/speed) flow through the scene's custom_fields into the same log box the on-device transcode
+    /// uses. Nothing touches the load-bearing transfer path except the final `startConnections` hand-off.
     private func runCompanionTranscode(_ item: DownloadItem, scene: StashScene, codec: StashCompanion.Codec) {
         guard let serverURL = KeychainService.read("serverURL") else {
             item.state = .failed; item.error = "Not connected to a Stash server"; return
@@ -455,76 +456,181 @@ final class DownloadManager {
         let resolution = item.serverResolution
         let quality = item.companionQuality
         let sceneID = scene.id
-        let apiKey = item.apiKey
         item.state = .serverProcessing
         item.serverJobProgress = 0
         item.error = nil
-        item.serverJobStage = "Requesting \(codec.label) \(resolution.label)…"
+        item.transcodeLog = ""
+        item.transcodeStatus = ""
+        item.transcodeTargetLabel = "\(codec.label) \(resolution.label)"
+        appendTranscodeLog(item, "Requesting \(codec.label) \(resolution.label) transcode…")
+        markActive(item.id)   // so a relaunch resurrects this item and reconnects
 
         Task { @MainActor in
             do {
                 let jobID = try await companion.requestTranscode(
                     sceneID: sceneID, codec: codec, resolution: resolution, quality: quality)
-                item.serverJobStage = "Server transcoding \(codec.label) \(resolution.label)…"
-                while true {
-                    try await Task.sleep(for: .milliseconds(1500))
-                    // Cancelled / deleted / paused while we were away → stop polling silently.
-                    guard item.state == .serverProcessing else { return }
-                    let job = try await companion.job(jobID)
-                    if let p = job.progress, p >= 0 { item.serverJobProgress = min(1, p) }
-                    switch job.status.uppercased() {
-                    case "FINISHED":
-                        guard let result = try await companion.transcodeResult(sceneID: sceneID),
-                              result.status == "ready", let path = result.path,
-                              let url = scene.companionFileURL(path: path, apiKey: apiKey) else {
-                            item.state = .failed
-                            item.error = "Transcode finished but no output file was found"
-                            return
-                        }
-                        item.serverJobProgress = 1
-                        item.url = url
-                        item.ext = result.container ?? "mp4"
-                        // Use the ACTUAL probed specs the plugin reported (it ffprobed its own output),
-                        // so what we show/persist is what the file really is — not what was requested.
-                        item.codec = result.video_codec ?? result.codec ?? codec.rawValue
-                        if let w = result.width { item.width = w }
-                        if let h = result.height ?? result.resolution { item.height = h }
-                        let size = result.size ?? 0
-                        if let br = result.bitrate {
-                            item.bitRate = br
-                        } else if size > 0, let dur = scene.files.first?.duration, dur > 0 {
-                            item.bitRate = Int(Double(size) * 8 / dur)
-                        }
-                        item.wasTranscoded = true
-                        // Rewrite the persisted scene to match the transcoded file so the download badge,
-                        // the player detail row, and the stats overlay all read HEVC/1080p/new-size instead
-                        // of the original server metadata — and so it survives relaunch (loadCompleted
-                        // re-derives specs from this sidecar).
-                        let transcodedScene = scene.replacingPrimaryFileSpecs(
-                            container: item.ext, codec: item.codec, width: item.width, height: item.height,
-                            bitRate: item.bitRate, size: size > 0 ? Int(size) : nil)
-                        item.scene = transcodedScene
-                        let n = (size > 0 && item.multiThread) ? connectionCount : 1
-                        item.rebuildConnections(count: n, totalBytes: size)
-                        item.error = nil
-                        startConnections(item)                       // → .downloading, byte transfer begins
-                        fetchSidecar(item, scene: transcodedScene, apiKey: apiKey, transcoded: true)
-                        return
-                    case "FAILED", "CANCELLED", "STOPPING":
-                        item.state = .failed
-                        item.error = job.error ?? "Server transcode \(job.status.lowercased())"
-                        return
-                    default:
-                        break                                        // READY / RUNNING → keep polling
-                    }
-                }
+                item.companionJobID = jobID
+                appendTranscodeLog(item, "Server transcoding on \(serverHostLabel(serverURL))…")
+                persistServerSidecar(item, scene: scene, codec: codec)
+                await monitorCompanionJob(item, scene: scene, jobID: jobID, codec: codec, companion: companion)
             } catch {
                 if item.state == .serverProcessing {
                     item.state = .failed
                     item.error = "Companion plugin: \(error.localizedDescription)"
+                    clearActive(item.id)
                 }
             }
         }
+    }
+
+    /// Re-attach to a companion transcode after a relaunch (called from `loadInterrupted` for a sidecar
+    /// that was mid-transcode). The Stash job kept running while we were gone; reconnect by its persisted id.
+    private func reconnectCompanionTranscode(_ item: DownloadItem, scene: StashScene, jobID: String,
+                                             codec: StashCompanion.Codec) {
+        guard let serverURL = KeychainService.read("serverURL") else { return }
+        let companion = StashCompanion(client: StashClient(serverURL: serverURL, apiKey: item.apiKey))
+        item.companionJobID = jobID
+        item.state = .serverProcessing
+        item.transcodeTargetLabel = "\(codec.label) \(item.serverResolution.label)"
+        appendTranscodeLog(item, "Reconnecting to server transcode…")
+        Task { @MainActor in
+            await monitorCompanionJob(item, scene: scene, jobID: jobID, codec: codec, companion: companion)
+        }
+    }
+
+    /// Poll a companion job (one combined request/tick) until it produces a file (→ download) or fails.
+    /// Terminal state is decided by the durable custom_fields result, so this survives Stash GC'ing the
+    /// Job and survives our own app being killed and relaunched.
+    private func monitorCompanionJob(_ item: DownloadItem, scene: StashScene, jobID: String,
+                                     codec: StashCompanion.Codec, companion: StashCompanion) async {
+        let apiKey = item.apiKey
+        var lastStage = ""
+        var networkFails = 0     // consecutive poll exceptions (offline / server down)
+        var doneMisses = 0       // consecutive polls where the job is gone but no ready result yet
+        while true {
+            try? await Task.sleep(for: .milliseconds(1800))
+            guard item.state == .serverProcessing else { return }   // cancelled / deleted / paused
+            let update: CompanionUpdate
+            do {
+                update = try await companion.poll(jobID: jobID, sceneID: scene.id)
+            } catch {
+                networkFails += 1
+                if networkFails > 40 {   // ~72s of continuous failures → give up (offline / server down)
+                    item.state = .failed; item.error = "Lost contact with the server transcode"
+                    clearActive(item.id); return
+                }
+                continue   // transient network blip — keep trying
+            }
+            networkFails = 0
+            let result = update.result
+
+            // Progress: prefer the Job's 0…1, else derive from out_time/duration in the status blob.
+            if let p = update.job?.progress, p >= 0 {
+                item.serverJobProgress = min(1, p)
+            } else if let ot = result?.out_time, let d = result?.duration, d > 0 {
+                item.serverJobProgress = min(1, ot / d)
+            }
+            if let r = result, r.status == "running" {
+                item.transcodeStatus = companionStatusLine(r)
+                let stage = r.engine ?? "encoding"
+                if stage != lastStage { lastStage = stage; appendTranscodeLog(item, "Encoding · \(stage)") }
+            }
+
+            // Success is authoritative from the durable result (ready + a path), regardless of Job state.
+            if let r = result, r.status == "ready", let path = r.path,
+               let url = scene.companionFileURL(path: path, apiKey: apiKey) {
+                finishCompanionTranscode(item, scene: scene, result: r, url: url, codec: codec)
+                return
+            }
+            if result?.status == "failed" || update.job?.status.uppercased() == "FAILED"
+                || update.job?.status.uppercased() == "CANCELLED" {
+                item.state = .failed
+                item.error = update.job?.error ?? "Server transcode failed"
+                clearActive(item.id); return
+            }
+            // Job gone/finished but no ready result — tolerate a brief write race, then fail.
+            let jobDone = update.job == nil || update.job?.status.uppercased() == "FINISHED"
+            if jobDone && result?.status != "running" {
+                doneMisses += 1
+                if doneMisses > 6 {
+                    item.state = .failed
+                    item.error = "Server transcode ended without producing a file"
+                    clearActive(item.id); return
+                }
+            } else {
+                doneMisses = 0
+            }
+        }
+    }
+
+    /// The transcode is done: adopt the plugin's ffprobed specs, rewrite the scene/sidecar so everything
+    /// reflects the real file, and hand off to the byte-download engine.
+    private func finishCompanionTranscode(_ item: DownloadItem, scene: StashScene, result: TranscodeResult,
+                                          url: URL, codec: StashCompanion.Codec) {
+        item.serverJobProgress = 1
+        item.companionJobID = nil
+        item.url = url
+        item.ext = result.container ?? "mp4"
+        item.codec = result.video_codec ?? result.codec ?? codec.rawValue
+        if let w = result.width { item.width = w }
+        if let h = result.height ?? result.resolution { item.height = h }
+        let size = result.size ?? 0
+        if let br = result.bitrate {
+            item.bitRate = br
+        } else if size > 0, let dur = scene.files.first?.duration, dur > 0 {
+            item.bitRate = Int(Double(size) * 8 / dur)
+        }
+        item.wasTranscoded = true
+        appendTranscodeLog(item, "Transcode complete → downloading \(item.codec?.uppercased() ?? "")")
+        item.transcodeStatus = ""
+        let transcodedScene = scene.replacingPrimaryFileSpecs(
+            container: item.ext, codec: item.codec, width: item.width, height: item.height,
+            bitRate: item.bitRate, size: size > 0 ? Int(size) : nil)
+        item.scene = transcodedScene
+        let n = (size > 0 && item.multiThread) ? connectionCount : 1
+        item.rebuildConnections(count: n, totalBytes: size)
+        item.error = nil
+        startConnections(item)                       // → .downloading, multi-connection byte transfer
+        fetchSidecar(item, scene: transcodedScene, apiKey: item.apiKey, transcoded: true)
+    }
+
+    /// Append a distinct event line to the transcode log box (bounded), mirroring the on-device path.
+    private func appendTranscodeLog(_ item: DownloadItem, _ line: String) {
+        var log = item.transcodeLog + line + "\n"
+        if log.count > 4000 { log = String(log.suffix(4000)) }
+        item.transcodeLog = log
+    }
+
+    /// One-line live status from the plugin's rich status blob: "34% · 5.9× · 142 fps · ~700 MB · 5m left".
+    private func companionStatusLine(_ r: TranscodeResult) -> String {
+        var parts: [String] = []
+        if let p = r.progress { parts.append("\(Int(p * 100))%") }
+        if let s = r.speed, s > 0 { parts.append(String(format: "%.1f×", s)) }
+        if let f = r.fps, f > 0 { parts.append("\(Int(f)) fps") }
+        if let est = r.size_estimate, est > 0 {
+            parts.append("~" + ByteCountFormatter.string(fromByteCount: est, countStyle: .file))
+        } else if let sz = r.size, sz > 0 {
+            parts.append(ByteCountFormatter.string(fromByteCount: sz, countStyle: .file))
+        }
+        if let e = r.eta, e > 0 {
+            let m = e / 60, s = e % 60
+            parts.append(m > 0 ? "\(m)m \(s)s left" : "\(s)s left")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Persist the running companion job so a relaunch can reconnect to it (see `loadInterrupted`).
+    private func persistServerSidecar(_ item: DownloadItem, scene: StashScene, codec: StashCompanion.Codec) {
+        guard let data = try? JSONEncoder().encode(Sidecar(
+            scene: scene, apiKey: item.apiKey, transcoded: false,
+            serverProcessing: true, companionJobID: item.companionJobID,
+            companionCodec: codec.rawValue, companionResolution: item.serverResolution.rawValue,
+            companionQuality: item.companionQuality.rawValue)) else { return }
+        try? data.write(to: metaDir.appendingPathComponent("\(item.id).json"), options: .atomic)
+    }
+
+    private func serverHostLabel(_ serverURL: String) -> String {
+        URLComponents(string: serverURL)?.host ?? "server"
     }
 
     /// Completed local video file for a scene (used to play a downloaded scene offline / instantly).
@@ -591,6 +697,13 @@ final class DownloadManager {
         var connectionCount: Int? = nil
         var serverTranscode: Bool? = nil
         var downloadExt: String? = nil
+        // Companion server-transcode reconnection: written while the plugin job runs so a relaunch can
+        // re-attach to the SAME job (or pick up its finished output) instead of losing it. All optional.
+        var serverProcessing: Bool? = nil
+        var companionJobID: String? = nil
+        var companionCodec: String? = nil
+        var companionResolution: String? = nil
+        var companionQuality: String? = nil
     }
 
     func pause(_ item: DownloadItem) { suspend(item, auto: false) }
@@ -828,7 +941,7 @@ final class DownloadManager {
     /// screen goes away, so a finished transcode's log shows while you're on the screen but is gone if you
     /// leave and come back. An in-flight transcode keeps its log/status.
     func clearFinishedTranscodeLogs() {
-        for item in items where !item.transcoding {
+        for item in items where !item.transcoding && item.state != .serverProcessing {
             item.transcodeLog = ""
             item.transcodeStatus = ""
         }
@@ -1337,6 +1450,27 @@ final class DownloadManager {
             guard FileManager.default.fileExists(atPath: activeURL(id).path) else { continue }  // not active
             guard let sidecar = try? JSONDecoder().decode(Sidecar.self, from: Data(contentsOf: url)) else { continue }
             let scene = sidecar.scene
+            // A companion transcode that was in-flight when we were killed: the Stash job kept running.
+            // Rebuild the item in .serverProcessing and reconnect to the SAME job by its persisted id.
+            if sidecar.serverProcessing == true, let jobID = sidecar.companionJobID {
+                let codec = StashCompanion.Codec(rawValue: sidecar.companionCodec ?? "hevc") ?? .hevc
+                let f = scene.files.first
+                let base = ((f?.basename ?? scene.title ?? "video") as NSString).deletingPathExtension
+                let item = DownloadItem(
+                    id: id, title: scene.title ?? base, url: scene.directFileURL(apiKey: sidecar.apiKey) ?? url,
+                    fileName: base, ext: "mp4", codec: f?.video_codec, width: f?.width, height: f?.height,
+                    bitRate: f?.bit_rate, totalBytes: 0, connectionCount: 1, scene: scene, apiKey: sidecar.apiKey,
+                    localThumb: {
+                        let t = metaDir.appendingPathComponent("\(id)-thumb.jpg")
+                        return FileManager.default.fileExists(atPath: t.path) ? t : nil
+                    }())
+                item.companionCodec = codec
+                item.serverResolution = ServerQuality(rawValue: sidecar.companionResolution ?? "p1080") ?? .p1080
+                item.companionQuality = CompanionQuality(rawValue: sidecar.companionQuality ?? "medium") ?? .medium
+                items.append(item)
+                reconnectCompanionTranscode(item, scene: scene, jobID: jobID, codec: codec)
+                continue
+            }
             let file = scene.files.first
             // Prefer the persisted download source (correct for a server-transcode download); fall back to
             // the original file URL for sidecars written before this field existed.

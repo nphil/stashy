@@ -78,9 +78,9 @@ private struct DownloadPerformerCover: View {
     }
 }
 
-/// The three download sources offered on a staged card: the original file, Stash's built-in live
-/// H.264 transcode, or the Stashy Companion plugin (iPhone-native HEVC/AV1).
-private enum StageSource: Hashable { case original, serverH264, companion }
+/// The two download sources offered on a staged card: the original file, or a Server Transcode (always
+/// the Stashy Companion plugin pipeline — iPhone-native HEVC/AV1 via its modern ffmpeg).
+private enum StageSource: Hashable { case original, serverTranscode }
 
 private struct DownloadCard: View {
     @Bindable var item: DownloadItem
@@ -292,22 +292,16 @@ private struct DownloadCard: View {
         .frame(height: 6)
     }
 
-    /// Options on a staged card, shown before the download starts: Original vs Server transcode, then
-    /// either the connection count (original) or the resolution (server). Segmented radios + a menu.
-    /// Which of the three download sources a staged card is set to. Derived from the item's
-    /// `useServerTranscode` / `companionCodec` fields so the model stays minimal.
+    /// Staged card options before the download starts. Two sources: the Original file (single/multi-thread)
+    /// or a Server Transcode — always the Stashy Companion plugin pipeline (HEVC/AV1 via its modern ffmpeg).
     private var stageSource: Binding<StageSource> {
         Binding(
-            get: {
-                if item.companionCodec != nil { return .companion }
-                return item.useServerTranscode ? .serverH264 : .original
-            },
+            get: { item.companionCodec != nil ? .serverTranscode : .original },
             set: { newValue in
                 switch newValue {
-                case .original:   item.useServerTranscode = false; item.companionCodec = nil
-                case .serverH264: item.useServerTranscode = true;  item.companionCodec = nil
-                case .companion:  item.useServerTranscode = false
-                                  if item.companionCodec == nil { item.companionCodec = .hevc }
+                case .original:        item.companionCodec = nil; item.useServerTranscode = false
+                case .serverTranscode: item.useServerTranscode = false
+                                       if item.companionCodec == nil { item.companionCodec = .hevc }
                 }
             }
         )
@@ -317,12 +311,14 @@ private struct DownloadCard: View {
         Binding(get: { item.companionCodec ?? .hevc }, set: { item.companionCodec = $0 })
     }
 
+    /// Resolution choices for a server transcode: Original (keep source — portrait-safe) + the standard
+    /// download sizes. 240p is streaming-only, so it's intentionally not offered for downloads.
     private var resolutionRow: some View {
         HStack(spacing: 6) {
             Text("Resolution").font(.caption2.weight(.medium)).foregroundStyle(.secondary)
             Spacer(minLength: 6)
             Picker("Resolution", selection: $item.serverResolution) {
-                ForEach([ServerQuality.p1080, .p720, .p480, .p240]) { Text($0.label).tag($0) }
+                ForEach([ServerQuality.original, .p1080, .p720, .p480]) { Text($0.label).tag($0) }
             }
             .pickerStyle(.menu)
             .tint(themeManager.current.accentColor)
@@ -333,8 +329,7 @@ private struct DownloadCard: View {
         VStack(alignment: .leading, spacing: 8) {
             Picker("Source", selection: stageSource) {
                 Text("Original").tag(StageSource.original)
-                Text("Server").tag(StageSource.serverH264)
-                Text("Companion").tag(StageSource.companion)
+                Text("Server Transcode").tag(StageSource.serverTranscode)
             }
             .pickerStyle(.segmented)
 
@@ -345,11 +340,7 @@ private struct DownloadCard: View {
                     Text("Multi-thread").tag(true)
                 }
                 .pickerStyle(.segmented)
-            case .serverH264:
-                resolutionRow
-                Text("H.264 · server does the work · plays natively")
-                    .font(.caption2).foregroundStyle(.tertiary)
-            case .companion:
+            case .serverTranscode:
                 Picker("Codec", selection: companionCodecBinding) {
                     ForEach(StashCompanion.Codec.allCases) { Text($0.label).tag($0) }
                 }
@@ -364,8 +355,10 @@ private struct DownloadCard: View {
                     .pickerStyle(.menu)
                     .tint(themeManager.current.accentColor)
                 }
-                Text(companionCodecBinding.wrappedValue.blurb)
+                // Compact one-liner (no wrap): the live size/ETA estimate shows in the log box once running.
+                Text("→ \(companionCodecBinding.wrappedValue.label) · \(item.serverResolution.label)")
                     .font(.caption2).foregroundStyle(.tertiary)
+                    .lineLimit(1)
             }
         }
     }
@@ -512,11 +505,11 @@ private struct DownloadCard: View {
         }
         switch item.state {
         case .staged:
-            if let codec = item.companionCodec { return "\(codec.label) \(item.serverResolution.label) · ready" }
-            return item.useServerTranscode ? "Server \(item.serverResolution.label) · ready" : "Ready to download"
+            return item.companionCodec != nil ? "Ready to transcode" : "Ready to download"
         case .serverProcessing:
             let pct = Int(item.serverJobProgress * 100)
-            return item.serverJobProgress > 0 ? "\(item.serverJobStage) \(pct)%" : item.serverJobStage
+            if let target = item.transcodeTargetLabel { return "Transcoding → \(target) · \(pct)%" }
+            return "Server transcoding · \(pct)%"
         case .queued: return "Queued…"
         case .downloading:
             if item.totalBytes == 0 {   // live server transcode: no size is known — show real bytes + speed

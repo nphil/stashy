@@ -89,7 +89,25 @@ struct StashCompanion: Sendable {
     func transcodeResult(sceneID: String) async throws -> TranscodeResult? {
         let gql = "query SceneCF($id: ID!) { findScene(id: $id) { custom_fields } }"
         let resp: SceneCustomFieldsResponse = try await client.query(gql, variables: IDVar(id: sceneID))
-        guard let raw = resp.findScene?.custom_fields[Self.transcodeField]?.stringValue,
+        return Self.decodeResult(resp.findScene?.custom_fields)
+    }
+
+    /// One round trip for live monitoring: the Job's status/progress AND the scene's custom_fields status
+    /// blob. Combined so a poll is a single request (no extra load). Tolerates a nil Job (GC'd/gone) — the
+    /// custom_fields result is what actually decides completion, so monitoring survives an app kill/restart.
+    func poll(jobID: String, sceneID: String) async throws -> CompanionUpdate {
+        let gql = """
+        query Poll($jid: ID!, $sid: ID!) {
+          findJob(input: { id: $jid }) { id status progress error }
+          findScene(id: $sid) { custom_fields }
+        }
+        """
+        let resp: PollResponse = try await client.query(gql, variables: PollVars(jid: jobID, sid: sceneID))
+        return CompanionUpdate(job: resp.findJob, result: Self.decodeResult(resp.findScene?.custom_fields))
+    }
+
+    private static func decodeResult(_ fields: [String: JSONValue]?) -> TranscodeResult? {
+        guard let raw = fields?[Self.transcodeField]?.stringValue,
               let data = raw.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(TranscodeResult.self, from: data)
     }
@@ -136,6 +154,24 @@ struct TranscodeResult: Decodable, Sendable {
     let width: Int?
     let height: Int?
     let bitrate: Int?
+    // Live fields written ~every 3s while status == "running" (the app's rich-stats side-channel):
+    let stage: String?
+    let engine: String?
+    let progress: Double?
+    let out_time: Double?
+    let duration: Double?
+    let speed: Double?
+    let fps: Double?
+    let eta: Int?
+    let size_estimate: Int64?
+}
+
+/// One poll snapshot: the Job's live status/progress plus whatever the plugin last wrote to the scene's
+/// custom_fields. `result` is the durable source of truth (survives an app kill); `job` is the live
+/// enhancement and may be nil once Stash has GC'd a finished job.
+struct CompanionUpdate: Sendable {
+    let job: CompanionJob?
+    let result: TranscodeResult?
 }
 
 // MARK: - GraphQL request/response envelopes
@@ -149,6 +185,12 @@ private struct RunPluginTaskResponse: Decodable, Sendable { let runPluginTask: S
 
 private struct IDVar: Encodable, Sendable { let id: String }
 private struct FindJobResponse: Decodable, Sendable { let findJob: CompanionJob? }
+
+private struct PollVars: Encodable, Sendable { let jid: String; let sid: String }
+private struct PollResponse: Decodable, Sendable {
+    let findJob: CompanionJob?
+    let findScene: SceneCustomFields?
+}
 
 private struct SceneCustomFieldsResponse: Decodable, Sendable { let findScene: SceneCustomFields? }
 private struct SceneCustomFields: Decodable, Sendable { let custom_fields: [String: JSONValue] }
