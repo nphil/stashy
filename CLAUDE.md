@@ -76,8 +76,23 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   checklist; plus playback engineering learnings.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.162** (debug-logging system, commit `bfa52fc`, IPA ~7.83 MB) — verify the newest
-  release/IPA size each push (CI Build step swallows exit codes; only a published release proves compile).
+- Latest release: **v1.0.175** (server-transcode indeterminate progress bar, commit `afa5d21`, IPA ~8.30 MB)
+  — verify the newest release/IPA size each push (CI Build step swallows exit codes; only a published
+  release proves compile).
+- **Stashy Companion plugin shipped** (`stash-plugin/` — its OWN top-level folder, sibling to `ios/`):
+  a stashapp/stash plugin (`interface: raw`, zero-dep Python) that adds what vanilla Stash can't — **GPU
+  HEVC (hevc_nvenc, Tesla P40) / CPU AV1 (SVT-AV1) transcode**, ffprobe codec+HDR stats, direct-play
+  auto-tagging. Delivery mechanism (researched from real Stash source): plugin writes the iPhone-native
+  MP4 into its served `cache/` dir (`/plugin/stashy-companion/assets/…`, Range-capable) and records the
+  download path on the SOURCE scene's `custom_fields.stashy_transcode`; the app polls `findJob` for real
+  `Job.progress`. Encoder ladder: NVDEC+NVENC → CPU-decode+NVENC → libx265. Install = add
+  `raw.githubusercontent.com/nphil/stashy/main/stash-plugin/index.yml` as a Plugin Source (zip+sha256
+  committed). CI `paths-ignore` now skips `stash-plugin/**` so plugin-only commits don't build the app.
+- **App↔plugin foundation shipped** (extensible — more plugin features will hang off this): `Services/
+  StashCompanion.swift` = the one typed gateway (`runPluginTask` / `findJob` / `custom_fields`); Downloads
+  staging gained a 3rd source **Companion** (HEVC/AV1 + resolution + quality) → new `.serverProcessing`
+  DownloadState drives a *determinate* bar from live `Job.progress`, then hands the finished file to the
+  normal (Range-capable, multi-connection) byte-download engine. Load-bearing transfer path untouched.
 - **Debug logging system shipped** (`Services/RemoteLog.swift` + `Services/DebugOverlay.swift`): ntfy
   server URL + topic are now **configurable** (Settings → Diagnostics; point at a self-hosted Unraid ntfy
   for privacy, default public `ntfy.sh`). `RemoteLog.event(tag, fields)` = compact structured one-liners.
