@@ -11,6 +11,34 @@ extension View {
     func detailCardBackground(_ color: Color) -> some View {
         background(color, in: RoundedRectangle(cornerRadius: detailCardCorner, style: .continuous))
     }
+
+    /// Fade the leading/top and trailing/bottom edges of a scrollable region so content dissolves into the
+    /// card instead of hard-cutting — a consistent "immersive scroll" look for every scrollable card (now
+    /// and future). Apply to the `ScrollView`. `length` is the fade depth in points.
+    func scrollEdgeFade(_ axis: Axis = .vertical, length: CGFloat = 16) -> some View {
+        mask(ScrollEdgeFadeMask(axis: axis, length: length))
+    }
+}
+
+/// Alpha mask: transparent at the two edges (fade), opaque in the middle. Drives `scrollEdgeFade`.
+private struct ScrollEdgeFadeMask: View {
+    let axis: Axis
+    let length: CGFloat
+    var body: some View {
+        if axis == .vertical {
+            VStack(spacing: 0) {
+                LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom).frame(height: length)
+                Rectangle().fill(.black)
+                LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom).frame(height: length)
+            }
+        } else {
+            HStack(spacing: 0) {
+                LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing).frame(width: length)
+                Rectangle().fill(.black)
+                LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing).frame(width: length)
+            }
+        }
+    }
 }
 
 // MARK: - Tags card
@@ -37,7 +65,7 @@ struct TagsCard: View {
                     .foregroundStyle(.tertiary)
                 Spacer(minLength: 0)
             } else {
-                ScrollView(showsIndicators: true) {
+                ScrollView(showsIndicators: false) {
                     FlowLayout(spacing: 6) {
                         ForEach(ranked) { tag in
                             Button { router.openScenes(tag: tag) } label: {
@@ -51,7 +79,9 @@ struct TagsCard: View {
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 2)
                 }
+                .scrollEdgeFade()
             }
         }
         .padding(12)
@@ -101,7 +131,9 @@ struct SocialsCard: View {
                             .buttonStyle(.plain)
                         }
                     }
+                    .padding(.vertical, 2)
                 }
+                .scrollEdgeFade()
             }
         }
         .padding(10)

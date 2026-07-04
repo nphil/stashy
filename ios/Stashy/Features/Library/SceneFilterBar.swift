@@ -84,6 +84,7 @@ struct SceneFilterBar: View {
 struct TagPickerSheet: View {
     @Binding var selected: [Tag]
     @Environment(AppState.self) private var appState
+    @Environment(ThemeManager.self) private var themeManager
     @Environment(\.dismiss) private var dismiss
     @State private var searchText = ""
     @State private var results: [Tag] = []
@@ -91,34 +92,32 @@ struct TagPickerSheet: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                if !selected.isEmpty {
-                    Section("Selected") {
-                        ForEach(selected) { tag in
-                            Button { remove(tag) } label: {
-                                HStack {
-                                    Text(tag.name).foregroundStyle(.primary)
-                                    Spacer()
-                                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.tint)
-                                }
-                            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if !selected.isEmpty {
+                        sectionHeader("Selected")
+                        FlowLayout(spacing: 8) {
+                            ForEach(selected) { tag in tagChip(tag, isSelected: true) { remove(tag) } }
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    let available = results.filter { !selected.contains($0) }
+                    sectionHeader(searchText.isEmpty ? "Popular tags" : "Results")
+                    if available.isEmpty {
+                        Text("No tags found").font(.subheadline).foregroundStyle(.secondary)
+                    } else {
+                        FlowLayout(spacing: 8) {
+                            ForEach(available) { tag in tagChip(tag, isSelected: false) { add(tag) } }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                Section(searchText.isEmpty ? "Tags" : "Results") {
-                    ForEach(results.filter { !selected.contains($0) }) { tag in
-                        Button { add(tag) } label: {
-                            Text(tag.name).foregroundStyle(.primary)
-                        }
-                    }
-                    if results.isEmpty {
-                        Text("No tags found").foregroundStyle(.secondary)
-                    }
-                }
+                .padding(16)
             }
-            .searchable(text: $searchText, prompt: "Search tags")
+            .scrollEdgeFade()
             .navigationTitle("Filter by Tags")
             .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $searchText, prompt: "Search tags")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     if !selected.isEmpty { Button("Clear") { selected = [] } }
@@ -142,6 +141,32 @@ struct TagPickerSheet: View {
                 }
             }
         }
+        // Compact half-sheet with selectable chips (not a full-screen list) — cleaner + smaller, and
+        // avoids the popover-teardown landmine that a dropdown anchored in the scrolling filter bar hits.
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+
+    private func sectionHeader(_ text: String) -> some View {
+        Text(text.uppercased())
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.secondary)
+    }
+
+    private func tagChip(_ tag: Tag, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Text(tag.name)
+                Image(systemName: isSelected ? "xmark.circle.fill" : "plus")
+                    .font(.caption2)
+                    .opacity(isSelected ? 1 : 0.55)
+            }
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(isSelected ? Color.white : themeManager.current.foregroundColor)
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(isSelected ? themeManager.current.accentColor : themeManager.current.surfaceColor, in: Capsule())
+        }
+        .buttonStyle(.plain)
     }
 
     private func runSearch(_ q: String) async {
