@@ -201,21 +201,23 @@ def build_transcode_cmd(src, dst, codec, target_h, cq, ffmpeg, engine, gpu_decod
     but scale on the CPU (frames land in system memory) before NVENC re-encodes — both heavy codec ops
     stay on the Tesla P40 while dodging the pix_fmt fragility of the fully-on-card scale_cuda filter.
     """
-    scale = "scale=-2:{0}".format(int(target_h))
+    # target_h <= 0 → keep the source resolution (Original): omit the scale filter entirely, which is also
+    # the right thing for portrait / non-standard videos (no accidental re-scale).
+    vf = ["-vf", "scale=-2:{0}".format(int(target_h))] if int(target_h) > 0 else []
     pre = [ffmpeg, "-y", "-hide_banner"]
     if engine == "hevc_nvenc" and gpu_decode:
         pre += ["-hwaccel", "cuda"]  # NVDEC decode; frames land in system mem for the CPU scale
     cmd = pre + ["-i", src]
     if engine == "libsvtav1":
-        cmd += ["-vf", scale, "-c:v", "libsvtav1", "-preset", str(av1_preset),
-                "-crf", str(cq), "-pix_fmt", "yuv420p"]
+        cmd += vf + ["-c:v", "libsvtav1", "-preset", str(av1_preset),
+                     "-crf", str(cq), "-pix_fmt", "yuv420p"]
     elif engine == "hevc_nvenc":
-        cmd += ["-vf", scale, "-c:v", "hevc_nvenc", "-preset", "p5",
-                "-rc", "vbr", "-cq", str(cq), "-b:v", "0",
-                "-tag:v", "hvc1", "-pix_fmt", "yuv420p"]
+        cmd += vf + ["-c:v", "hevc_nvenc", "-preset", "p5",
+                     "-rc", "vbr", "-cq", str(cq), "-b:v", "0",
+                     "-tag:v", "hvc1", "-pix_fmt", "yuv420p"]
     else:  # libx265 — CPU HEVC, last-resort fallback only
-        cmd += ["-vf", scale, "-c:v", "libx265", "-preset", "medium",
-                "-crf", str(cq), "-tag:v", "hvc1", "-pix_fmt", "yuv420p"]
+        cmd += vf + ["-c:v", "libx265", "-preset", "medium",
+                     "-crf", str(cq), "-tag:v", "hvc1", "-pix_fmt", "yuv420p"]
     cmd += ["-c:a", "aac", "-b:a", "160k", "-ac", "2",
             "-movflags", "+faststart",
             # Force the MP4 muxer: the output is written to a `.part` temp name, and ffmpeg can't infer
@@ -226,26 +228,44 @@ def build_transcode_cmd(src, dst, codec, target_h, cq, ffmpeg, engine, gpu_decod
     return cmd
 
 
-def _run_ffmpeg(cmd, duration):
+def _run_ffmpeg(cmd, duration, on_status=None):
     """Run one ffmpeg pass, streaming out_time_us → Job.progress. Returns (rc, stderr_tail).
+
+    `on_status(prog_dict, out_seconds)` is called once per -progress block (roughly 1×/sec) with the
+    parsed frame/fps/total_size/speed/out_time_us fields — the caller throttles it into a rich
+    custom_fields side-channel the app reads for live size/ETA/fps (no log spam).
 
     ffmpeg's real error goes to stderr; we capture it to a temp file (rather than DEVNULL, which hid
     the cause of the first failures) and return its last meaningful line so the job log explains WHY.
     """
     import tempfile
     err = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
+    prog = {}
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, text=True)
         try:
+            # ffmpeg -progress emits key=value lines in blocks terminated by a `progress=` line.
             for line in proc.stdout:
                 line = line.strip()
-                if line.startswith("out_time_us=") and duration > 0:
+                key, sep, val = line.partition("=")
+                if not sep:
+                    continue
+                prog[key] = val
+                if key == "progress":  # end of a block → update % and the rich side-channel
+                    secs = 0.0
                     try:
-                        log_progress(int(line.split("=", 1)[1]) / 1_000_000.0 / duration)
+                        secs = int(prog.get("out_time_us") or 0) / 1_000_000.0
                     except ValueError:
                         pass
-                elif line.startswith("progress=") and line.endswith("end"):
-                    log_progress(1.0)
+                    if duration > 0 and secs > 0:
+                        log_progress(secs / duration)
+                    if on_status is not None:
+                        try:
+                            on_status(prog, secs)
+                        except Exception:
+                            pass
+                    if val == "end":
+                        log_progress(1.0)
         finally:
             proc.wait()
         tail = ""
@@ -265,7 +285,9 @@ def run_transcode(stash, args, settings):
     if not scene_id:
         raise RuntimeError("transcode: missing scene_id in args")
     codec = (args.get("codec") or "hevc").lower()
-    height = RES_HEIGHTS.get(str(args.get("resolution") or "1080").lower(), 1080)
+    resolution_arg = str(args.get("resolution") or "1080").lower()
+    is_original = resolution_arg in ("original", "orig", "source", "0")
+    height = RES_HEIGHTS.get(resolution_arg, 1080)
     cq = QUALITY_CQ.get(str(args.get("quality") or "medium").lower(), 28)
     # SVT-AV1 preset (speed↔size). Configurable; higher = much faster. AV1-only.
     try:
@@ -293,10 +315,15 @@ def run_transcode(stash, args, settings):
     # expression like scale=-2:'min(1080,ih)' via argv (no shell) makes ffmpeg see the literal quotes
     # and fail the filtergraph on EVERY encoder.
     src_h = int(scene["files"][0].get("height") or 0)
-    target_h = min(height, src_h) if src_h > 0 else height
-    target_h -= target_h % 2
-    if target_h < 2:
-        target_h = height
+    if is_original:
+        target_h = 0                     # 0 → no scaling filter: keep source resolution (portrait-safe)
+        res_label = src_h or "orig"
+    else:
+        target_h = min(height, src_h) if src_h > 0 else height
+        target_h -= target_h % 2
+        if target_h < 2:
+            target_h = height
+        res_label = target_h
 
     # --- Engine selection: NVENC is the intended default (the user confirmed
     # Stash drives the NVIDIA GPU for H.264, so hevc_nvenc is available). Build
@@ -318,20 +345,54 @@ def run_transcode(stash, args, settings):
         attempts = [("libx265", False)]
 
     os.makedirs(CACHE_DIR, exist_ok=True)
-    out_name = _out_name(scene_id, codec, height)
+    out_name = _out_name(scene_id, codec, res_label)
     dst = os.path.join(CACHE_DIR, out_name)
     tmp = dst + ".part"
+
+    # Throttled rich-status side-channel: the app reads custom_fields for live size/ETA/fps/speed while
+    # the job runs (findJob only carries a bare 0..1). Written at most every ~3s → not spam.
+    status_state = {"last": 0.0, "label": attempts[0][0]}
+
+    def _on_status(prog, secs):
+        now = time.time()
+        if now - status_state["last"] < 3.0:
+            return
+        status_state["last"] = now
+        try:
+            speed = float((prog.get("speed") or "0x").rstrip("x").strip() or 0)
+        except ValueError:
+            speed = 0.0
+        try:
+            fps = float(prog.get("fps") or 0)
+        except ValueError:
+            fps = 0.0
+        try:
+            cur_size = int(prog.get("total_size") or 0)
+        except ValueError:
+            cur_size = 0
+        pct = (secs / duration) if duration > 0 else 0.0
+        eta = int((duration - secs) / speed) if speed > 0 and duration > secs else None
+        size_est = int(cur_size / pct) if pct > 0.02 and cur_size > 0 else None
+        _write_status(stash, scene_id, {
+            "status": "running", "stage": "encoding", "codec": codec, "resolution": res_label,
+            "engine": status_state["label"], "progress": round(pct, 4),
+            "out_time": round(secs, 1), "duration": round(duration, 1),
+            "speed": round(speed, 2), "fps": round(fps, 1),
+            "size": cur_size, "size_estimate": size_est, "eta": eta,
+        })
 
     rc = -1
     eng = attempts[0][0]
     for idx, (engine, gpu_decode) in enumerate(attempts):
         eng = engine
         label = "{}{}".format(engine, " +NVDEC" if gpu_decode else "")
-        log_info("Transcoding scene {} → {} {}p (cq {}, {})".format(scene_id, codec, height, cq, label))
-        _record_status(stash, scene_id, "running", codec, height, label, 0, None)
+        status_state["label"] = label
+        status_state["last"] = 0.0   # let the first block of a new attempt publish immediately
+        log_info("Transcoding scene {} → {} {}p (cq {}, {})".format(scene_id, codec, res_label, cq, label))
+        _record_status(stash, scene_id, "running", codec, res_label, label, 0, None)
         cmd = build_transcode_cmd(src, tmp, codec, target_h, cq, ffmpeg, engine, gpu_decode, av1_preset)
         log_debug("ffmpeg: " + " ".join(cmd))
-        rc, err_tail = _run_ffmpeg(cmd, duration)
+        rc, err_tail = _run_ffmpeg(cmd, duration, on_status=_on_status)
         if rc == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
             break
         _safe_unlink(tmp)
@@ -395,12 +456,20 @@ def run_transcode(stash, args, settings):
 
 
 def _record_status(stash, scene_id, status, codec, height, eng, size, path):
+    _write_status(stash, scene_id, {
+        "status": status, "codec": codec, "resolution": height,
+        "engine": eng, "size": size, "path": path,
+    })
+
+
+def _write_status(stash, scene_id, blob):
+    """Best-effort write of a status blob to the source scene's custom_fields (the app's live
+    side-channel). Always stamps `updated`; never raises — status must not fail the job."""
     try:
-        set_custom_field(stash, scene_id, CUSTOM_FIELD_KEY, json.dumps({
-            "status": status, "codec": codec, "resolution": height,
-            "engine": eng, "size": size, "path": path, "updated": int(time.time()),
-        }))
-    except Exception as e:  # status is best-effort; don't fail the job over it
+        blob = dict(blob)
+        blob.setdefault("updated", int(time.time()))
+        set_custom_field(stash, scene_id, CUSTOM_FIELD_KEY, json.dumps(blob))
+    except Exception as e:
         log_debug("status write failed: {}".format(e))
 
 
