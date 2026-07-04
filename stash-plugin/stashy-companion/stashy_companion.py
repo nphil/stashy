@@ -250,7 +250,27 @@ def set_custom_field(stash, scene_id, key, value):
 # ----------------------------------------------------------------------------
 RES_HEIGHTS = {"2160": 2160, "1080": 1080, "720": 720, "480": 480, "240": 240,
                "p2160": 2160, "p1080": 1080, "p720": 720, "p480": 480, "p240": 240}
-QUALITY_CQ = {"high": 24, "medium": 28, "med": 28, "standard": 28, "low": 32}
+# preset → (cq/crf, bitrate-cap fraction of SOURCE). HEVC/AV1 are more efficient than most sources
+# (usually H.264), so CQ already lands well under source; the cap GUARANTEES the output never exceeds
+# a source-relative ceiling — "High" ≤ source, Balanced/Small progressively smaller.
+QUALITY_PRESETS = {
+    "high": (24, 1.00), "medium": (28, 0.60), "med": (28, 0.60), "standard": (28, 0.60),
+    "balanced": (28, 0.60), "low": (32, 0.35), "small": (32, 0.35),
+}
+
+
+def _src_bitrate(sprobe, sv, scene_file):
+    """Best source VIDEO bitrate (bps): stream bit_rate → container bit_rate → Stash's stored bit_rate."""
+    candidates = [sv.get("bit_rate"), (sprobe or {}).get("format", {}).get("bit_rate"),
+                  (scene_file or {}).get("bit_rate")]
+    for v in candidates:
+        try:
+            b = int(v)
+        except (TypeError, ValueError):
+            continue
+        if b > 0:
+            return b
+    return 0
 
 
 def _out_name(scene_id, codec, height):
@@ -302,7 +322,7 @@ def _detect_hdr(sv, preserve):
 
 
 def build_transcode_cmd(src, dst, codec, target_h, cq, ffmpeg, engine, gpu_decode,
-                        av1_preset=DEFAULT_AV1_PRESET, cfr_fps=None, hdr=None):
+                        av1_preset=DEFAULT_AV1_PRESET, cfr_fps=None, hdr=None, maxrate=0):
     """engine ∈ {"hevc_nvenc","libx265","libsvtav1"}. gpu_decode adds NVDEC. hdr ∈ {None,"pq","hlg"}.
 
     `target_h` is the already-resolved (downscaled, even) output height, so the `-vf` is a plain
@@ -315,6 +335,9 @@ def build_transcode_cmd(src, dst, codec, target_h, cq, ffmpeg, engine, gpu_decod
     """
     ten_bit = hdr in ("pq", "hlg")
     trc = {"pq": "smpte2084", "hlg": "arib-std-b67"}.get(hdr)
+    # Capped quality: keep CQ/CRF for quality but bound the peak bitrate (VBV) at the source ceiling.
+    cap = (["-maxrate", str(int(maxrate)), "-bufsize", str(int(maxrate) * 2)] if maxrate and maxrate > 0
+           else [])
     # nvenc's native 10-bit pixel format is p010le; the software encoders want planar yuv420p10le.
     pix = ("p010le" if engine == "hevc_nvenc" else "yuv420p10le") if ten_bit else "yuv420p"
     fmt_f = "format={0}".format(pix)
@@ -334,16 +357,16 @@ def build_transcode_cmd(src, dst, codec, target_h, cq, ffmpeg, engine, gpu_decod
     cmd = pre + ["-i", src]
     if engine == "libsvtav1":
         cmd += vf(scale_f, fmt_f) + ["-c:v", "libsvtav1", "-preset", str(av1_preset),
-                                     "-crf", str(cq), "-pix_fmt", pix] + color_args
+                                     "-crf", str(cq), "-pix_fmt", pix] + cap + color_args
     elif engine == "hevc_nvenc":
         fps_f = "fps={0}".format(cfr_fps) if cfr_fps else None
         # -bf 0: Pascal (Tesla P40) NVENC has no HEVC B-frame support; forcing 0 avoids a config reject.
         cmd += vf(fps_f, scale_f, fmt_f) + ["-c:v", "hevc_nvenc", "-preset", "p5",
                                             "-rc", "vbr", "-cq", str(cq), "-b:v", "0", "-bf", "0"] \
-            + main10 + ["-tag:v", "hvc1", "-pix_fmt", pix] + color_args
+            + cap + main10 + ["-tag:v", "hvc1", "-pix_fmt", pix] + color_args
     else:  # libx265 — CPU HEVC, last-resort fallback only
         cmd += vf(scale_f, fmt_f) + ["-c:v", "libx265", "-preset", "medium", "-crf", str(cq)] \
-            + main10 + ["-tag:v", "hvc1", "-pix_fmt", pix] + color_args
+            + cap + main10 + ["-tag:v", "hvc1", "-pix_fmt", pix] + color_args
     cmd += ["-c:a", "aac", "-b:a", "160k", "-ac", "2",
             "-movflags", "+faststart",
             # Force the MP4 muxer: the output is written to a `.part` temp name, and ffmpeg can't infer
@@ -427,7 +450,7 @@ def run_transcode(stash, args, settings):
     resolution_arg = str(args.get("resolution") or "1080").lower()
     is_original = resolution_arg in ("original", "orig", "source", "0")
     height = RES_HEIGHTS.get(resolution_arg, 1080)
-    cq = QUALITY_CQ.get(str(args.get("quality") or "medium").lower(), 28)
+    cq, cap_frac = QUALITY_PRESETS.get(str(args.get("quality") or "medium").lower(), (28, 0.60))
     # SVT-AV1 preset (speed↔size). Configurable; higher = much faster. AV1-only.
     try:
         av1_preset = int(float(settings.get("av1Preset") or DEFAULT_AV1_PRESET))
@@ -478,6 +501,14 @@ def run_transcode(stash, args, settings):
     hdr = _detect_hdr(sv, preserve) if codec in ("hevc", "av1") else None
     if hdr:
         log_info("HDR: preserving {} (10-bit Main10, BT.2020)".format(hdr.upper()))
+
+    # Bitrate ceiling from the SOURCE so a preset never inflates bitrate (e.g. an 8 Mbps source must not
+    # become 20 Mbps). CQ still drives quality; -maxrate just caps the peak at a source-relative ceiling.
+    src_vbr = _src_bitrate(sprobe, sv, scene["files"][0])
+    maxrate = int(src_vbr * cap_frac) if src_vbr > 0 else 0
+    if maxrate:
+        log_info("Bitrate cap {:.1f} Mbps ({}% of source {:.1f} Mbps)".format(
+            maxrate / 1e6, int(cap_frac * 100), src_vbr / 1e6))
 
     # Resolve the actual scale height in Python (downscale only, kept even for yuv420p) so the ffmpeg
     # `-vf` is a plain `scale=-2:<int>` — no quotes / no `min(,)` comma to escape. Passing a quoted
@@ -564,7 +595,7 @@ def run_transcode(stash, args, settings):
                                         "codec": codec, "resolution": res_label, "engine": label})
         ff = ffmpeg_hw if engine == "hevc_nvenc" else ffmpeg   # NVENC → driver-safe build; SW → main
         cmd = build_transcode_cmd(src, tmp, codec, target_h, cq, ff, engine, gpu_decode,
-                                  av1_preset, cfr_fps, hdr)
+                                  av1_preset, cfr_fps, hdr, maxrate)
         log_debug("ffmpeg: " + " ".join(cmd))
         rc, err_tail = _run_ffmpeg(cmd, duration, on_status=_on_status)
         if rc == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
