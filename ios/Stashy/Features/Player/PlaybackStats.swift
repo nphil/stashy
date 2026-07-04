@@ -23,6 +23,11 @@ struct PlaybackRoute {
     /// Media duration (seconds) from Stash metadata — lets the local-HLS index compute the final
     /// segment's EXTINF without decoding the whole file. 0 when unknown.
     var duration: Double = 0
+    /// For a `.localFFmpeg` route: true = on-device streaming *transcode* (re-encode via
+    /// `LocalTranscodeStream`) rather than a stream-copy remux. (Roadmap M-A.)
+    var onDeviceTranscode: Bool = false
+    /// Longest-edge cap for that transcode (nil = keep source size); used to gate on-device to ≤1080p.
+    var transcodeMaxDimension: Int? = nil
 }
 
 /// Manual server-side transcode quality (the player's gear menu / M-B). `.auto` = normal routing

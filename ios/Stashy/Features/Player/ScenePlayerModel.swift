@@ -157,6 +157,12 @@ final class ScenePlayerModel {
     }
 
     private func beginLocalFFmpeg() {
+        // M-A: a re-encode route (VP9 / software-AV1 / exotic) streams through the on-device transcoder
+        // rather than the stream-copy remux. No pixel-format probe needed — the transcoder decodes anything.
+        if route.onDeviceTranscode {
+            buildTranscode()
+            return
+        }
         let key = route.url.path
         loadingStage = "Reading video…"
         // A downloaded local file: remux straight away. The pixel-format probe below uses FFmpegSource,
@@ -203,6 +209,23 @@ final class ScenePlayerModel {
             if engine != nil { armWatchdog() }
         } catch {
             buildFallback(reason: "HLS (fallback)")
+        }
+    }
+
+    /// On-device streaming transcode → loopback HLS (roadmap M-A). Falls back to the Stash server HLS if
+    /// the loopback can't bind, and — via the watchdog — if the transcode can't produce frames in time.
+    private func buildTranscode() {
+        guard !stopped else { return }
+        do {
+            loadingStage = "Transcoding on device…"
+            let stream = LocalTranscodeStream(source: route.url, duration: route.duration,
+                                              maxDimension: route.transcodeMaxDimension)
+            let url = try stream.start()
+            activeStreamType = "On-device transcode"
+            adopt(makeEngine(url: url), stream: stream)
+            if engine != nil { armWatchdog() }   // auto-fall back to server HLS if no frames arrive in time
+        } catch {
+            buildFallback(reason: "HLS (on-device transcode unavailable)")
         }
     }
 
@@ -506,7 +529,12 @@ final class ScenePlayerModel {
         videoAspect = nil
         presentationSize = .zero
         do {
-            let stream = LocalRemuxStream(source: route.url, duration: route.duration, startTime: time)
+            // Rebuild the same kind of local stream this route uses (transcode vs remux), seeked to the
+            // target keyframe — seek-by-reinit keeps one continuous mux so playback stays smooth.
+            let stream: any LocalPlaybackStream = route.onDeviceTranscode
+                ? LocalTranscodeStream(source: route.url, duration: route.duration, startTime: time,
+                                       maxDimension: route.transcodeMaxDimension)
+                : LocalRemuxStream(source: route.url, duration: route.duration, startTime: time)
             let url = try stream.start()
             adopt(makeEngine(url: url), stream: stream)
             if engine != nil { armWatchdog() }
