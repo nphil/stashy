@@ -9,7 +9,7 @@ description: >-
   codec + HDR stats, and auto-tagging of direct-play-ready scenes — capabilities
   vanilla Stash lacks. Output is served back to the app over Stash's own HTTP
   with real Job progress.
-version: 0.1.3
+version: 0.1.4
 url: https://github.com/nphil/stashy/tree/main/stash-plugin
 exec:
   - python
@@ -39,10 +39,22 @@ settings:
     type: NUMBER
   ffmpegPath:
     displayName: ffmpeg directory override
-    description: "Absolute path to the directory containing ffmpeg/ffprobe. Leave blank to use PATH / Stash's bundled ffmpeg. Point this at an NVENC-enabled ffmpeg build for GPU HEVC."
+    description: "Absolute path to the directory containing ffmpeg/ffprobe. Leave blank to use PATH / Stash's bundled ffmpeg. Point this at an NVENC-enabled ffmpeg build for GPU HEVC. (A build downloaded via 'Update Bundled ffmpeg' takes priority over this.)"
+    type: STRING
+  av1Preset:
+    displayName: AV1 speed preset (0–10)
+    description: "SVT-AV1 preset: higher = much faster, slightly larger. 8 ≈ x265 medium (default), 6 = slower/smaller, 10 = fastest. AV1 is CPU-only, so this is the main speed knob."
+    type: NUMBER
+  ffmpegDownloadURL:
+    displayName: ffmpeg download URL (advanced)
+    description: "Override the static-ffmpeg tarball the 'Update Bundled ffmpeg' task fetches. Leave blank for the default BtbN linux64 gpl master build (SVT-AV1 3.x + nvenc)."
     type: STRING
 
 tasks:
+  - name: Update Bundled ffmpeg
+    description: "Download a modern static ffmpeg (SVT-AV1 3.x + nvenc) into the plugin and use it for all jobs — faster AV1 encoding than many Stash images' bundled ffmpeg. Run once; re-run to update."
+    defaultArgs:
+      mode: update_ffmpeg
   - name: Transcode for iPhone
     description: "Transcode one scene to an iPhone-native MP4 and serve it back to the app. Args (from runPluginTask): scene_id, codec (hevc|av1), resolution (1080|720|480|240), quality (high|medium|low). Usually invoked by the Stashy app."
     defaultArgs:

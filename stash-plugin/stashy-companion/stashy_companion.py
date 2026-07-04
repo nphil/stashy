@@ -47,9 +47,16 @@ import urllib.request
 PLUGIN_ID = "stashy-companion"
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(PLUGIN_DIR, "cache")
+BIN_DIR = os.path.join(PLUGIN_DIR, "bin")   # optional self-downloaded modern ffmpeg/ffprobe live here
 # Served at /plugin/{PLUGIN_ID}/assets/cache/<file> (see ui.assets in the .yml).
 CACHE_URL_PREFIX = f"/plugin/{PLUGIN_ID}/assets/cache"
 CUSTOM_FIELD_KEY = "stashy_transcode"  # where we record the app-facing result
+
+# BtbN static build: modern ffmpeg with libsvtav1 (SVT-AV1 3.x) + nvenc + libx265, self-contained.
+# The `latest` release tag tracks git-master autobuilds. Overridable via the ffmpegDownloadURL setting.
+FFMPEG_DOWNLOAD_URL = ("https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
+                       "ffmpeg-master-latest-linux64-gpl.tar.xz")
+DEFAULT_AV1_PRESET = 8   # SVT-AV1 preset (0 slow/best … 10 fast). 8 ≈ x265 medium; 6 ≈ x265 slow.
 
 # ----------------------------------------------------------------------------
 # Stash control-protocol logging (stderr). Each line: \x01 <level> \x02 <msg>.
@@ -112,11 +119,17 @@ class Stash:
 # ffmpeg / ffprobe helpers.
 # ----------------------------------------------------------------------------
 def _bin(name, override_dir):
+    # 1) a modern build the plugin downloaded into its own bin/ (see the Update ffmpeg task).
+    local = os.path.join(BIN_DIR, name)
+    if os.path.isfile(local) and os.access(local, os.X_OK):
+        return local
+    # 2) a user-provided directory (Settings → ffmpeg directory override).
     if override_dir:
         cand = os.path.join(override_dir, name)
         if os.path.isfile(cand) or os.path.isfile(cand + ".exe"):
             return cand
-    return name  # rely on PATH / Stash's bundled ffmpeg
+    # 3) fall back to PATH / Stash's bundled ffmpeg.
+    return name
 
 
 def ffprobe_streams(path, ffprobe):
@@ -179,7 +192,7 @@ def _out_name(scene_id, codec, height):
     return "scene{}_{}_{}p.mp4".format(scene_id, codec, height)
 
 
-def build_transcode_cmd(src, dst, codec, target_h, cq, ffmpeg, engine, gpu_decode):
+def build_transcode_cmd(src, dst, codec, target_h, cq, ffmpeg, engine, gpu_decode, av1_preset=DEFAULT_AV1_PRESET):
     """engine ∈ {"hevc_nvenc","libx265","libsvtav1"}. gpu_decode adds NVDEC.
 
     `target_h` is the already-resolved (downscaled, even) output height, so the `-vf` is a plain
@@ -194,7 +207,7 @@ def build_transcode_cmd(src, dst, codec, target_h, cq, ffmpeg, engine, gpu_decod
         pre += ["-hwaccel", "cuda"]  # NVDEC decode; frames land in system mem for the CPU scale
     cmd = pre + ["-i", src]
     if engine == "libsvtav1":
-        cmd += ["-vf", scale, "-c:v", "libsvtav1", "-preset", "6",
+        cmd += ["-vf", scale, "-c:v", "libsvtav1", "-preset", str(av1_preset),
                 "-crf", str(cq), "-pix_fmt", "yuv420p"]
     elif engine == "hevc_nvenc":
         cmd += ["-vf", scale, "-c:v", "hevc_nvenc", "-preset", "p5",
@@ -254,6 +267,12 @@ def run_transcode(stash, args, settings):
     codec = (args.get("codec") or "hevc").lower()
     height = RES_HEIGHTS.get(str(args.get("resolution") or "1080").lower(), 1080)
     cq = QUALITY_CQ.get(str(args.get("quality") or "medium").lower(), 28)
+    # SVT-AV1 preset (speed↔size). Configurable; higher = much faster. AV1-only.
+    try:
+        av1_preset = int(float(settings.get("av1Preset") or DEFAULT_AV1_PRESET))
+    except (TypeError, ValueError):
+        av1_preset = DEFAULT_AV1_PRESET
+    av1_preset = max(0, min(10, av1_preset))
 
     ffmpeg = _bin("ffmpeg", settings.get("ffmpegPath"))
     ffprobe = _bin("ffprobe", settings.get("ffmpegPath"))
@@ -310,7 +329,7 @@ def run_transcode(stash, args, settings):
         label = "{}{}".format(engine, " +NVDEC" if gpu_decode else "")
         log_info("Transcoding scene {} → {} {}p (cq {}, {})".format(scene_id, codec, height, cq, label))
         _record_status(stash, scene_id, "running", codec, height, label, 0, None)
-        cmd = build_transcode_cmd(src, tmp, codec, target_h, cq, ffmpeg, engine, gpu_decode)
+        cmd = build_transcode_cmd(src, tmp, codec, target_h, cq, ffmpeg, engine, gpu_decode, av1_preset)
         log_debug("ffmpeg: " + " ".join(cmd))
         rc, err_tail = _run_ffmpeg(cmd, duration)
         if rc == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
@@ -451,6 +470,72 @@ def run_purge(settings):
         except OSError:
             pass
     log_info("cache purged ({} files)".format(removed))
+
+
+# ----------------------------------------------------------------------------
+# Self-download a modern static ffmpeg (BtbN build): SVT-AV1 3.x is markedly faster
+# than the 1.x that ships with many Stash images, and this build also carries a newer
+# nvenc + libx265. Once present in bin/, `_bin()` prefers it for all jobs. Opt-in
+# (user runs this task); no third-party Python needed — stdlib urllib + tarfile(xz).
+# ----------------------------------------------------------------------------
+def run_update_ffmpeg(settings):
+    import shutil
+    import tarfile
+
+    url = (settings.get("ffmpegDownloadURL") or FFMPEG_DOWNLOAD_URL).strip()
+    os.makedirs(BIN_DIR, exist_ok=True)
+    archive = os.path.join(BIN_DIR, "_download.tar.xz")
+    log_info("Downloading ffmpeg from {}".format(url))
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "stashy-companion"})
+        with urllib.request.urlopen(req, timeout=600) as r:
+            total = int(r.headers.get("Content-Length") or 0)
+            got = 0
+            with open(archive, "wb") as f:
+                while True:
+                    chunk = r.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    got += len(chunk)
+                    if total > 0:
+                        log_progress(0.9 * got / total)   # reserve last 10% for extract+verify
+    except (urllib.error.URLError, OSError) as e:
+        _safe_unlink(archive)
+        raise RuntimeError("ffmpeg download failed: {}".format(e))
+
+    log_info("Extracting ffmpeg + ffprobe…")
+    extracted = 0
+    try:
+        with tarfile.open(archive, "r:xz") as tar:
+            for m in tar.getmembers():
+                base = os.path.basename(m.name)
+                if m.isfile() and base in ("ffmpeg", "ffprobe"):
+                    m.name = base   # flatten into BIN_DIR (also neutralises any path traversal)
+                    tar.extract(m, BIN_DIR)
+                    os.chmod(os.path.join(BIN_DIR, base), 0o755)
+                    extracted += 1
+    except (tarfile.TarError, OSError) as e:
+        raise RuntimeError("could not extract ffmpeg archive: {}".format(e))
+    finally:
+        _safe_unlink(archive)
+
+    if extracted < 2:
+        raise RuntimeError("archive did not contain both ffmpeg and ffprobe")
+
+    ff = os.path.join(BIN_DIR, "ffmpeg")
+    try:
+        ver = subprocess.run([ff, "-hide_banner", "-version"],
+                             capture_output=True, text=True, timeout=30)
+        first = (ver.stdout.splitlines() or ["?"])[0]
+        enc = subprocess.run([ff, "-hide_banner", "-encoders"],
+                             capture_output=True, text=True, timeout=30).stdout
+    except (subprocess.SubprocessError, OSError) as e:
+        raise RuntimeError("downloaded ffmpeg won't run (missing libs?): {}".format(e))
+    log_progress(1.0)
+    log_info("ffmpeg ready in plugin bin/: {} · libsvtav1={} · hevc_nvenc={} — now used for all jobs".format(
+        first, "libsvtav1" in enc, "hevc_nvenc" in enc))
 
 
 # ----------------------------------------------------------------------------
@@ -642,6 +727,8 @@ def main():
             run_stats(stash, settings, do_tag=True)
         elif mode == "purge":
             run_purge(settings)
+        elif mode == "update_ffmpeg":
+            run_update_ffmpeg(settings)
         else:
             raise RuntimeError("unknown mode: {}".format(mode))
     except Exception as e:
