@@ -99,7 +99,8 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   `LocalTranscodeStream` wraps it over the loopback like `LocalRemuxStream`. Routing (`Scene.playbackRoute`)
   sends the "Apple can't decode at all" bucket (VP9/software-AV1/exotic) ≤1080p to it with the Stash HLS as
   `fallbackURL` (`armWatchdog` auto-recovers); heavier 4K → server. Audio: **copy** when MP4-muxable, else
-  **dropped** — **Stage 1b (Opus/Vorbis → AAC re-encode via libswresample) is the remaining M-A piece**.
+  **AAC re-encode** (Stage 1b shipped — `FFmpegAudioReencoder`: decode → libswresample → AVAudioFifo →
+  native `aac` encoder, global-header init seg, sample-counter PTS). **M-A is complete (video + audio).**
 - **Player UX this session** (all shipped): intelligent loading donut (per-mode `LoadEstimator` rolling
   average + saturating curve, % inside ring); inline expanding **volume slider** 0–100 (starts muted);
   quality+method **status badges** on one control row; gear moved right; resume-from-position on return
@@ -107,7 +108,8 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   transcode box rich live line + **auto-pause/resume on background/foreground**; **keep-screen-awake** on
   Downloads/active work; social-links overlap bug fixed (ScrollView) + unified `SocialLink.list`; performer
   ••• menu vertical.
-- Next candidates: **M-A Stage 1b** (AAC audio); **resumable/checkpointed transcode** (fragmented-MP4
-  append — owner wants it, see ROADMAP Downloads); Netflix fullscreen UI / playback-speed / WYSIWYG layout
-  editor / mini-player-PiP / AI zoom-follow (all in ROADMAP); **remove RemoteLog telemetry** before wider
-  release (the one open tech-debt item).
+- Next candidates: **resumable/checkpointed transcode** (fragmented-MP4 append — owner wants it, see
+  ROADMAP Downloads); Netflix fullscreen UI / playback-speed / WYSIWYG layout editor / mini-player-PiP /
+  AI zoom-follow (all in ROADMAP); **remove RemoteLog telemetry** before wider release (tech-debt).
+  Also open: **HEVC-won't-play-native + video-disappeared-after-transcode** bug hunt — diagnostics wired
+  (`⚙︎ transcode-in/frame1/out`, `remux-header-FAIL/out`, `▶︎ video`, `color=HDR-…`), awaiting a device repro.
