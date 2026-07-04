@@ -117,6 +117,9 @@ final class VideoTranscoder: OnDeviceTranscoder, @unchecked Sendable {
         let size = Self.outputSize(naturalSize: naturalSize, maxDimension: settings.resolution.maxDimension)
         let bitrate = Self.videoBitrate(width: size.width, height: size.height, fps: fps,
                                         quality: settings.quality, codec: settings.codec)
+        onLog("Input: \(Int(abs(naturalSize.width)))×\(Int(abs(naturalSize.height))) @ \(Int(fps.rounded())) fps")
+        onLog("Encoder: \(settings.codec.label) → \(size.width)×\(size.height) @ ~\(bitrate / 1000) kbps")
+        onLog(String(format: "Duration: %.0fs", max(duration.seconds, 0)))
 
         guard let reader = try? AVAssetReader(asset: asset) else { throw TranscodeError.unreadable }
         try? FileManager.default.removeItem(at: output)
@@ -180,7 +183,8 @@ final class VideoTranscoder: OnDeviceTranscoder, @unchecked Sendable {
             let v = UncheckedTranscodeBox((videoIn, videoOut))
             group.addTask { [weak self] in
                 guard let self else { return }
-                try await self.pump(v.value.0, v.value.1, totalSeconds: totalSeconds, onProgress: onProgress)
+                try await self.pump(v.value.0, v.value.1, totalSeconds: totalSeconds, onProgress: onProgress,
+                                    onStatus: onStatus, outputURL: output)
             }
             if let audioIn, let audioOut {
                 let a = UncheckedTranscodeBox((audioIn, audioOut))
@@ -200,11 +204,16 @@ final class VideoTranscoder: OnDeviceTranscoder, @unchecked Sendable {
         if reader.status == .failed { throw reader.error ?? TranscodeError.readFailed }
         await writer.finishWriting()
         guard writer.status == .completed else { throw writer.error ?? TranscodeError.writeFailed }
+        onStatus("")   // clear the live line
+        let mb = (((try? FileManager.default.attributesOfItem(atPath: output.path))?[.size] as? NSNumber)?.doubleValue ?? 0) / 1_000_000
+        onLog(String(format: "Done: %.0f MB", mb))
     }
 
     /// Drain one reader track into one writer input, appending samples whenever the input is ready.
+    /// `onStatus`/`outputURL` are passed only for the video track, to emit the live diagnostics line.
     private func pump(_ input: AVAssetWriterInput, _ output: AVAssetReaderTrackOutput,
-                      totalSeconds: Double, onProgress: (@Sendable (Double) -> Void)?) async throws {
+                      totalSeconds: Double, onProgress: (@Sendable (Double) -> Void)?,
+                      onStatus: (@Sendable (String) -> Void)? = nil, outputURL: URL? = nil) async throws {
         let box = UncheckedTranscodeBox((input, output))
         let queue = DispatchQueue(label: "stashy.transcode.pump")
         // Throttle state. The `requestMediaDataWhenReady` block is @Sendable, so it can't capture and
@@ -215,6 +224,9 @@ final class VideoTranscoder: OnDeviceTranscoder, @unchecked Sendable {
         final class ProgressThrottle: @unchecked Sendable {
             var lastProgress: Double = -1
             var lastTime = Date.distantPast
+            var frames = 0
+            let startWall = Date()
+            var lastStatus = Date.distantPast
         }
         let throttle = ProgressThrottle()
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
@@ -223,8 +235,8 @@ final class VideoTranscoder: OnDeviceTranscoder, @unchecked Sendable {
                 while input.isReadyForMoreMediaData {
                     if self?.isCancelled == true { input.markAsFinished(); cont.resume(); return }
                     if let sample = output.copyNextSampleBuffer() {
+                        let t = CMSampleBufferGetPresentationTimeStamp(sample).seconds
                         if let onProgress {
-                            let t = CMSampleBufferGetPresentationTimeStamp(sample).seconds
                             if t.isFinite, t >= 0 {
                                 let p = min(1, t / totalSeconds)
                                 let now = Date()
@@ -233,6 +245,24 @@ final class VideoTranscoder: OnDeviceTranscoder, @unchecked Sendable {
                                     throttle.lastTime = now
                                     onProgress(p)
                                 }
+                            }
+                        }
+                        // Live diagnostics line for the video track — one line, replaced in place (~2 Hz).
+                        if let onStatus {
+                            throttle.frames += 1
+                            let now = Date()
+                            if now.timeIntervalSince(throttle.lastStatus) >= 0.5 {
+                                throttle.lastStatus = now
+                                let elapsed = now.timeIntervalSince(throttle.startWall)
+                                let pct = totalSeconds > 0 && t.isFinite ? min(1, max(0, t / totalSeconds)) : 0
+                                let fpsNow = elapsed > 0 ? Double(throttle.frames) / elapsed : 0
+                                let speed = elapsed > 0 ? (pct * totalSeconds) / elapsed : 0
+                                let eta = pct > 0.01 ? elapsed * (1 - pct) / pct : 0
+                                let sizeMB = outputURL.flatMap {
+                                    (((try? FileManager.default.attributesOfItem(atPath: $0.path))?[.size] as? NSNumber)?.doubleValue)
+                                }.map { $0 / 1_000_000 } ?? 0
+                                onStatus(String(format: "▸ %.0f fps · %d%% · %.1f× realtime · ETA %@ · %.0f MB · %d frames",
+                                                fpsNow, Int(pct * 100), speed, Self.clock(eta), sizeMB, throttle.frames))
                             }
                         }
                         if !input.append(sample) {
@@ -274,6 +304,13 @@ final class VideoTranscoder: OnDeviceTranscoder, @unchecked Sendable {
         let mbps = quality.mbpsPerMegapixel * megapixels * (fps / 30) * codec.bitrateFactor
         let bits = mbps * 1_000_000
         return max(500_000, Int(bits))
+    }
+
+    /// Format a seconds count as m:ss for the live ETA readout.
+    static func clock(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds > 0 else { return "—" }
+        let s = Int(seconds.rounded())
+        return String(format: "%d:%02d", s / 60, s % 60)
     }
 }
 
