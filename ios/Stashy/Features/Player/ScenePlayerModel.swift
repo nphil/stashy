@@ -425,15 +425,17 @@ final class ScenePlayerModel {
         // Live loopback/index/remux state while the local-HLS path is actually playing (so we can see
         // produced bytes climb + which byte ranges AVPlayer is fetching, esp. during scrubbing).
         if let live = localStream?.diagnostics(), !live.isEmpty {
-            sections.append(StatSection(title: "Loopback (live)", lines: live.map {
-                StatLine(label: "·", value: $0)
+            // Cap + stable positional ids: keep the last handful and update them in place instead of an
+            // ever-growing scroll of request lines.
+            sections.append(StatSection(title: "Loopback (live)", lines: Array(live.suffix(12)).enumerated().map {
+                StatLine("looplive\($0.offset)", label: "·", value: $0.element)
             }))
         }
 
         // Loopback request log captured at fallback — diagnoses what AVPlayer asked the remux server for.
         if !loopbackLog.isEmpty {
-            sections.append(StatSection(title: "Loopback", lines: loopbackLog.map {
-                StatLine(label: "·", value: $0)
+            sections.append(StatSection(title: "Loopback", lines: Array(loopbackLog.suffix(12)).enumerated().map {
+                StatLine("looplog\($0.offset)", label: "·", value: $0.element)
             }))
         }
 

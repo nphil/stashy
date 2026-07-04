@@ -10,6 +10,9 @@ struct PlayerControlsView: View {
     @Binding var showStats: Bool
     @Binding var isScrubbing: Bool
     @Binding var scrubTime: TimeInterval
+    /// Manual server-transcode quality (gear menu, M-B). Changing it re-routes to the Stash HLS stream.
+    @Binding var quality: ServerQuality
+    @State private var showQuality = false
     /// The rectangle the video actually occupies (in the controls' coordinate space) — used to centre
     /// the play/pause control and anchor the bottom bar on the real video, not the full player frame.
     var videoRect: CGRect = .zero
@@ -42,7 +45,8 @@ struct PlayerControlsView: View {
                                 .foregroundStyle(.white)
                                 .shadow(radius: 4)
                         }
-                        .position(x: videoRect.midX, y: videoRect.midY)
+                        // Nudged above the video centre so it sits further from the scrubber/bottom bar.
+                        .position(x: videoRect.midX, y: videoRect.midY - min(videoRect.height * 0.14, 64))
                         .transition(.opacity)
                     }
 
@@ -71,6 +75,19 @@ struct PlayerControlsView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         .transition(.opacity)
                     }
+                }
+
+                // Server-quality gear menu (M-B) — a translucent panel over the video near the gear.
+                if showQuality {
+                    Color.black.opacity(0.001)
+                        .contentShape(Rectangle())
+                        .ignoresSafeArea()
+                        .onTapGesture { showQuality = false }
+                    qualityMenu
+                        .padding(.trailing, (isFullscreen ? safeArea.trailing : 0) + 16)
+                        .padding(.bottom, (isFullscreen ? safeArea.bottom : max(proxy.size.height - videoRect.maxY, 0)) + 92)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                        .transition(.opacity)
                 }
 
                 // Portrait-fullscreen scrub preview, pinned top-left (shows whenever scrubbing).
@@ -115,6 +132,10 @@ struct PlayerControlsView: View {
                         Image(systemName: showStats ? "chart.bar.doc.horizontal.fill" : "chart.bar.doc.horizontal")
                     }
                 }
+                // Server-quality gear (M-B): pick a manual server-transcode resolution.
+                Button { withAnimation(.easeOut(duration: 0.15)) { showQuality.toggle() }; scheduleHide() } label: {
+                    Image(systemName: quality == .auto ? "gearshape" : "gearshape.fill")
+                }
                 Spacer()
                 Text(Self.timeString(model.duration))
                 Button { isFullscreen.toggle() } label: {
@@ -132,6 +153,38 @@ struct PlayerControlsView: View {
         .background(
             LinearGradient(colors: [.clear, .black.opacity(0.7)], startPoint: .top, endPoint: .bottom)
         )
+    }
+
+    /// Custom translucent quality picker that blends with the video behind it but stays legible.
+    private var qualityMenu: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Server Quality")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.6))
+                .padding(.horizontal, 14).padding(.top, 11).padding(.bottom, 5)
+            ForEach(ServerQuality.allCases) { q in
+                Button {
+                    quality = q
+                    withAnimation(.easeOut(duration: 0.15)) { showQuality = false }
+                } label: {
+                    HStack(spacing: 8) {
+                        Text(q.label)
+                        Spacer(minLength: 12)
+                        if q == quality { Image(systemName: "checkmark").font(.caption.weight(.bold)) }
+                    }
+                    .font(.subheadline.weight(q == quality ? .semibold : .regular))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .frame(width: 178)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(.white.opacity(0.15), lineWidth: 1))
+        .shadow(color: .black.opacity(0.5), radius: 16, y: 6)
+        .environment(\.colorScheme, .dark)   // keep the material dark/legible over video
     }
 
     static func timeString(_ t: TimeInterval) -> String {

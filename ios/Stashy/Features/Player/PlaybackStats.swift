@@ -25,18 +25,53 @@ struct PlaybackRoute {
     var duration: Double = 0
 }
 
-// MARK: - Stats model
-
-/// A single key/value row in the Stats overlay.
-struct StatLine: Identifiable {
-    let id = UUID()
-    let label: String
-    let value: String
+/// Manual server-side transcode quality (the player's gear menu / M-B). `.auto` = normal routing
+/// (direct/remux/etc.); the rest force the Stash HLS transcode at that resolution.
+enum ServerQuality: String, CaseIterable, Identifiable, Hashable {
+    case auto, original, p1080, p720, p480, p240
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .auto: return "Auto"
+        case .original: return "Original"
+        case .p1080: return "1080p"
+        case .p720: return "720p"
+        case .p480: return "480p"
+        case .p240: return "240p"
+        }
+    }
+    /// Stash `resolution` query value; nil = don't force (Auto = normal routing).
+    var stashResolution: String? {
+        switch self {
+        case .auto: return nil
+        case .original: return "ORIGINAL"
+        case .p1080: return "FULL_HD"
+        case .p720: return "STANDARD_HD"
+        case .p480: return "STANDARD"
+        case .p240: return "LOW"
+        }
+    }
 }
 
-/// A titled group of stat rows (e.g. "Playback", "Media", "Network", "Transcode").
+// MARK: - Stats model
+
+/// A single key/value row in the Stats overlay. `id` is STABLE (the label by default) so a row whose
+/// value changes each second updates in place instead of being re-created — otherwise a per-second UUID
+/// made SwiftUI churn every row and the panel read like a growing spam list.
+struct StatLine: Identifiable {
+    let id: String
+    let label: String
+    let value: String
+    init(_ id: String? = nil, label: String, value: String) {
+        self.id = id ?? label
+        self.label = label
+        self.value = value
+    }
+}
+
+/// A titled group of stat rows (e.g. "Playback", "Media", "Network", "Transcode"). Identified by title.
 struct StatSection: Identifiable {
-    let id = UUID()
+    var id: String { title }
     let title: String
     let lines: [StatLine]
 }
