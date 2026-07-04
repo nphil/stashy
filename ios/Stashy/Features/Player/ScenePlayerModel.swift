@@ -15,10 +15,10 @@ final class ScenePlayerModel {
     var currentTime: TimeInterval = 0
     var duration: TimeInterval = 0
     var isPlaying = false
-    var isReady = false
+    var isReady = false { didSet { if isReady != oldValue { syncLoadEstimate() } } }
     /// True while the player is waiting on data (start-up or a rebuffer) — drives the loading donut
     /// instead of a play/pause icon that flickers as the transport state toggles.
-    var isBuffering = false
+    var isBuffering = false { didSet { if isBuffering != oldValue { syncLoadEstimate() } } }
     /// Short, human label for the current load stage (e.g. "Connecting…", "Remuxing on device…").
     var loadingStage = "Connecting…"
     /// Start-up buffer fill (0…1) for the donut; nil = indeterminate (pre-buffer stages).
@@ -71,6 +71,15 @@ final class ScenePlayerModel {
     /// Guards re-entrant starts, and discards an engine built after the scene was already left.
     @ObservationIgnored private var startInProgress = false
     @ObservationIgnored private var stopped = false
+
+    // Loading-donut estimate: blend the real buffer fill with a time-based curve paced by a learned
+    // per-tier average, so the ring never sits at 0 (server transcode) nor snaps 0→100.
+    @ObservationIgnored private var bufferFraction: Double = 0     // real buffer signal from the engine
+    @ObservationIgnored private var loadStart: Date?              // wall-clock start of this load episode
+    @ObservationIgnored private var expectedLoad: Double = 1      // learned expected seconds for the curve
+    @ObservationIgnored private var loadTier: PlaybackTier = .direct
+    @ObservationIgnored private var loadTicker: Task<Void, Never>?
+    @ObservationIgnored private var wasLoading = false
     /// Overrides the displayed stream label after a fallback / transcode decision.
     var activeStreamType: String?
     /// Last engine failure reason (AVPlayer error / watchdog), surfaced in Stats for diagnosis.
@@ -140,6 +149,7 @@ final class ScenePlayerModel {
         case .localFFmpeg:
             beginLocalFFmpeg()
         }
+        syncLoadEstimate()   // kick the loading-donut estimate for the initial load (isReady already false)
     }
 
     private func beginLocalFFmpeg() {
@@ -265,7 +275,9 @@ final class ScenePlayerModel {
         }
         engine.onLoadProgress = { [weak self] progress in
             guard let self else { return }
-            if self.loadingProgress != progress { self.loadingProgress = progress }
+            // Feed the real buffer signal into the estimate; the ticker owns `loadingProgress` so the
+            // donut blends this with the time curve (never stuck at 0, never a raw 0→100 snap).
+            self.bufferFraction = progress
         }
         engine.onEnded = { [weak self] in
             guard let self else { return }
@@ -337,12 +349,61 @@ final class ScenePlayerModel {
         stopped = true
         startInProgress = false
         watchdog?.cancel()
+        loadTicker?.cancel(); loadTicker = nil
+        loadStart = nil
+        wasLoading = false
         engine?.teardown()
         engine = nil
         localStream?.stop()
         localStream = nil
         timeOffset = 0
         seekTarget = nil
+    }
+
+    // MARK: - Loading-donut estimate
+
+    /// Detect the edge of the loading state (`!isReady || isBuffering`) and start/stop the estimate.
+    private func syncLoadEstimate() {
+        let loading = isLoading
+        if loading, !wasLoading { beginLoadEstimate() }
+        else if !loading, wasLoading { finishLoadEstimate() }
+        wasLoading = loading
+    }
+
+    private func beginLoadEstimate() {
+        loadStart = Date()
+        loadTier = playbackTier
+        expectedLoad = LoadEstimator.shared.expected(for: loadTier)
+        bufferFraction = 0
+        tickLoadingProgress()
+        loadTicker?.cancel()
+        loadTicker = Task { @MainActor [weak self] in
+            while let self, self.isLoading, !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(90))
+                self.tickLoadingProgress()
+            }
+        }
+    }
+
+    private func finishLoadEstimate() {
+        loadTicker?.cancel(); loadTicker = nil
+        if let loadStart {
+            LoadEstimator.shared.record(tier: loadTier, seconds: Date().timeIntervalSince(loadStart))
+        }
+        loadStart = nil
+        loadingProgress = 1
+    }
+
+    /// Donut fill = the real buffer signal OR a saturating time curve (whichever is further), capped just
+    /// below full until playback is genuinely ready — so it neither sits at 0 during a server transcode
+    /// nor snaps straight to 100%. The curve slows as it climbs, so an over-long load keeps creeping.
+    private func tickLoadingProgress() {
+        guard let loadStart else { return }
+        let elapsed = Date().timeIntervalSince(loadStart)
+        let e = max(0.25, expectedLoad)
+        let timeCurve = 0.97 * elapsed / (elapsed + e * 0.7)
+        let display = min(0.985, max(bufferFraction, timeCurve))
+        if loadingProgress != display { loadingProgress = display }
     }
 
     func play() {

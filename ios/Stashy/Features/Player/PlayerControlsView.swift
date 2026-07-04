@@ -252,12 +252,17 @@ struct VideoLoadingIndicator: View {
             ZStack {
                 Circle().stroke(.white.opacity(0.16), lineWidth: 4)
                 if let progress {
-                    // Determinate: a static ring whose fill grows clockwise from the top with the buffer.
+                    // Determinate: a static ring whose fill grows clockwise from the top with the
+                    // (estimate-blended) load progress, with the live percentage inside it.
                     Circle()
                         .trim(from: 0, to: CGFloat(max(0.02, min(1, progress))))
                         .stroke(.white.opacity(0.9), style: StrokeStyle(lineWidth: 4, lineCap: .round))
                         .rotationEffect(.degrees(-90))
-                        .animation(.easeInOut(duration: 0.3), value: progress)
+                        .animation(.easeInOut(duration: 0.25), value: progress)
+                    Text("\(Int((max(0, min(1, progress)) * 100).rounded()))%")
+                        .font(.system(size: 15, weight: .bold).monospacedDigit())
+                        .foregroundStyle(.white)
+                        .contentTransition(.numericText())
                 } else {
                     // Indeterminate (pre-buffer stages): a short arc that spins until progress is known.
                     Circle()
@@ -267,7 +272,7 @@ struct VideoLoadingIndicator: View {
                         .animation(.linear(duration: 1.1).repeatForever(autoreverses: false), value: spin)
                 }
             }
-            .frame(width: 48, height: 48)
+            .frame(width: 62, height: 62)
 
             Text(message)
                 .font(.system(size: 12, weight: .regular))
