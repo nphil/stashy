@@ -728,11 +728,23 @@ final class DownloadManager {
     }
 
     func stop(_ item: DownloadItem) {
+        cancelCompanionJob(item)   // if a server transcode is still running, tell Stash to stop it
         cancelTasks(item, produceResumeData: false)
         item.state = .stopped
         cleanupParts(item.id)
         cleanupMeta(item.id)   // reclaim the sidecar/thumb/sprite/vtt now; retry() re-heals if resumed
         clearActive(item.id)
+    }
+
+    /// Tell Stash to stop the running companion transcode job so cancelling in the app actually frees the
+    /// server's GPU/CPU (otherwise the plugin keeps encoding an output nobody will download). Fire-and-
+    /// forget; a no-op once the transcode has finished (jobID cleared) or if we're not connected.
+    private func cancelCompanionJob(_ item: DownloadItem) {
+        guard let jobID = item.companionJobID,
+              let serverURL = KeychainService.read("serverURL") else { return }
+        item.companionJobID = nil
+        let companion = StashCompanion(client: StashClient(serverURL: serverURL, apiKey: item.apiKey))
+        Task { try? await companion.stopJob(jobID) }
     }
 
     func delete(_ item: DownloadItem) {

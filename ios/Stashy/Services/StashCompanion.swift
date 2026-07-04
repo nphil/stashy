@@ -58,6 +58,15 @@ struct StashCompanion: Sendable {
         return resp.runPluginTask
     }
 
+    /// Ask Stash to stop a running job (the actual server-side transcode), so cancelling in the app frees
+    /// the GPU/CPU instead of leaving the plugin churning. Best-effort — a already-finished job is a no-op.
+    @discardableResult
+    func stopJob(_ id: String) async throws -> Bool {
+        let resp: StopJobResponse = try await client.query(
+            "mutation StopJob($id: ID!) { stopJob(job_id: $id) }", variables: IDVar(id: id))
+        return resp.stopJob ?? false
+    }
+
     /// Live status + progress (0…1, or nil when indeterminate) for a running job.
     func job(_ id: String) async throws -> CompanionJob {
         let gql = "query FindJob($id: ID!) { findJob(input: { id: $id }) { id status progress error } }"
@@ -185,6 +194,7 @@ private struct RunPluginTaskResponse: Decodable, Sendable { let runPluginTask: S
 
 private struct IDVar: Encodable, Sendable { let id: String }
 private struct FindJobResponse: Decodable, Sendable { let findJob: CompanionJob? }
+private struct StopJobResponse: Decodable, Sendable { let stopJob: Bool? }
 
 private struct PollVars: Encodable, Sendable { let jid: String; let sid: String }
 private struct PollResponse: Decodable, Sendable {
