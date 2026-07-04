@@ -136,9 +136,13 @@ final class FFmpegResumableTranscoder: OnDeviceTranscoder, @unchecked Sendable {
            existing.version == 1, existing.settingsKey == key, !existing.chunks.isEmpty {
             return existing   // resume the exact same plan
         }
-        // A settings change (or first run) invalidates any prior work.
-        try? FileManager.default.removeItem(at: workDir)
+        // A settings change (or first run) invalidates the prior plan + chunks. Keep any other files (the
+        // caller's settings.json, used for relaunch-resume) — only drop the plan and chunk_*.mp4.
         try? FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+        try? FileManager.default.removeItem(at: planURL)
+        if let files = try? FileManager.default.contentsOfDirectory(at: workDir, includingPropertiesForKeys: nil) {
+            for f in files where f.lastPathComponent.hasPrefix("chunk_") { try? FileManager.default.removeItem(at: f) }
+        }
 
         var inFmt = avformat_alloc_context()
         guard inFmt != nil else { throw TranscodeError.unreadable }

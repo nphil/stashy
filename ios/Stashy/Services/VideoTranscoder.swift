@@ -1,7 +1,7 @@
 import AVFoundation
 
 /// Target long-edge resolution for an on-device transcode. `original` keeps the source dimensions.
-enum TranscodeResolution: String, CaseIterable, Identifiable {
+enum TranscodeResolution: String, CaseIterable, Identifiable, Codable {
     case original, uhd2160, fhd1080, hd720, sd480
     var id: String { rawValue }
     var label: String {
@@ -25,7 +25,7 @@ enum TranscodeResolution: String, CaseIterable, Identifiable {
     }
 }
 
-enum TranscodeQuality: String, CaseIterable, Identifiable {
+enum TranscodeQuality: String, CaseIterable, Identifiable, Codable {
     case low, medium, high
     var id: String { rawValue }
     var label: String { rawValue.capitalized }
@@ -39,7 +39,7 @@ enum TranscodeQuality: String, CaseIterable, Identifiable {
     }
 }
 
-enum TranscodeCodec: String, CaseIterable, Identifiable {
+enum TranscodeCodec: String, CaseIterable, Identifiable, Codable {
     case hevc, h264
     var id: String { rawValue }
     var label: String { self == .hevc ? "HEVC" : "H.264" }
@@ -82,7 +82,7 @@ final class VideoTranscoder: OnDeviceTranscoder, @unchecked Sendable {
         }
     }
 
-    struct Settings {
+    struct Settings: Codable {
         var resolution: TranscodeResolution
         var quality: TranscodeQuality
         var codec: TranscodeCodec

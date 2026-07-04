@@ -314,6 +314,7 @@ final class DownloadManager {
 
         loadCompleted()
         loadInterrupted()      // rebuild in-flight items from sidecars so relaunch callbacks find them
+        resumeInterruptedTranscodes()   // continue a transcode the app was killed mid-way through
         sweepOrphanedMeta()    // reclaim sidecars left by stopped/abandoned/crashed downloads
         finalizeReadyItems()   // any item whose parts are all present already → assemble now
         reconnectTasks()       // re-attach to still-running tasks on both sessions
@@ -422,6 +423,10 @@ final class DownloadManager {
 
     func delete(_ item: DownloadItem) {
         cancelTasks(item, produceResumeData: false)
+        // Stop any in-flight transcode (and wipe its chunk work dir) so it doesn't keep writing to a file
+        // we're about to remove; clear a leftover work dir from an unresumed transcode too.
+        if item.transcoding { cancelTranscode(item) }
+        else { try? FileManager.default.removeItem(at: transcodeWorkDir(item.id)) }
         if let local = item.localURL { try? FileManager.default.removeItem(at: local) }
         cleanupParts(item.id)
         cleanupMeta(item.id)
@@ -449,6 +454,35 @@ final class DownloadManager {
     /// through the FFmpeg transcoder.
     private static let avNativeContainers: Set<String> = ["mp4", "m4v", "mov"]
 
+    /// After a relaunch, pick up any transcode the app was killed mid-way through (its chunk work dir +
+    /// settings.json survived on disk). Resume immediately when foregrounded; otherwise defer to
+    /// `enterForeground` — VideoToolbox is foreground-only. Orphan work dirs (download since deleted) are
+    /// reclaimed.
+    private func resumeInterruptedTranscodes() {
+        let root = downloadsDir.deletingLastPathComponent().appendingPathComponent("TranscodeWork", isDirectory: true)
+        guard let dirs = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return }
+        for dir in dirs {
+            let id = dir.lastPathComponent
+            guard let item = items.first(where: { $0.id == id }),
+                  let data = try? Data(contentsOf: dir.appendingPathComponent("settings.json")),
+                  let settings = try? JSONDecoder().decode(VideoTranscoder.Settings.self, from: data) else {
+                if items.first(where: { $0.id == id }) == nil { try? FileManager.default.removeItem(at: dir) }
+                continue
+            }
+            guard item.state == .completed, !item.transcoding else { continue }
+            if inBackground { transcodeResumeOnForeground[id] = settings }
+            else { transcode(item, settings: settings) }
+        }
+    }
+
+    /// Stable per-item directory (Application Support, survives backgrounding/relaunch) holding the
+    /// resumable transcode's `plan.json` + `chunk_NNNN.mp4` + `settings.json`.
+    private func transcodeWorkDir(_ id: String) -> URL {
+        downloadsDir.deletingLastPathComponent()
+            .appendingPathComponent("TranscodeWork", isDirectory: true)
+            .appendingPathComponent(id, isDirectory: true)
+    }
+
     /// Re-encode a completed download in place to the chosen resolution/quality/codec (hardware
     /// VideoToolbox), replacing the offline file with the smaller/normalised copy on success.
     func transcode(_ item: DownloadItem, settings: VideoTranscoder.Settings) {
@@ -459,18 +493,19 @@ final class DownloadManager {
         item.transcodeLog = ""
         item.transcodeStatus = ""
         item.error = nil
-        transcodeSettingsInFlight[item.id] = settings   // remembered so backgrounding can auto-resume it
-        // Pick the engine. Apple's AVFoundation transcoder is fast and proven, but ONLY for plain H.264
-        // in a native container — it chokes on HEVC even inside an MP4 (hev1 tag / 4:2:2 / 10-bit), which
-        // is the "cannot decode" the user hit. Everything else — HEVC in any container, and all exotic
-        // containers (MKV/WebM/AVI) — goes to the FFmpeg transcoder, which decodes it properly.
-        let native = Self.avNativeContainers.contains(src.pathExtension.lowercased())
-        let codec = (item.codec ?? "").lowercased()
-        let isH264 = codec.contains("h264") || codec.contains("avc")
-        let useAVFoundation = native && isH264
-        let transcoder: any OnDeviceTranscoder = useAVFoundation ? VideoTranscoder() : FFmpegTranscoder()
-        transcoders[item.id] = transcoder
         let id = item.id
+        transcodeSettingsInFlight[id] = settings   // remembered so backgrounding can auto-resume it
+        // Resumable engine: it chunks the re-encode into a persistent work dir, so an interrupted transcode
+        // (backgrounded, or the app killed) continues from the last committed chunk instead of restarting.
+        // Persist the settings there too, so even a cold relaunch can resume. Universal (H.264/HEVC/exotic)
+        // via FFmpeg + VideoToolbox — replaces the old AVFoundation/FFmpeg split.
+        let workDir = transcodeWorkDir(id)
+        try? FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+        if let data = try? JSONEncoder().encode(settings) {
+            try? data.write(to: workDir.appendingPathComponent("settings.json"), options: .atomic)
+        }
+        let transcoder: any OnDeviceTranscoder = FFmpegResumableTranscoder(workDir: workDir)
+        transcoders[id] = transcoder
         let gen = (transcodeGen[id] ?? 0) + 1
         transcodeGen[id] = gen
         // Transcode into the OS tmp dir, NOT downloadsDir: a kill/crash mid-transcode must not leave a
@@ -521,7 +556,9 @@ final class DownloadManager {
     /// Cancel a running transcode. Signals the engine AND resets the UI immediately — a wedged VideoToolbox
     /// call (e.g. after backgrounding) may never return to fire the normal completion, so we can't wait for
     /// it. Bumping the generation detaches that job: if it ever unblocks, its completion is ignored.
-    func cancelTranscode(_ item: DownloadItem) {
+    /// - Parameter preserveResume: keep the chunk work dir so the transcode can continue (used when the
+    ///   interruption is a backgrounding). A real user cancel wipes it so the next transcode starts clean.
+    func cancelTranscode(_ item: DownloadItem, preserveResume: Bool = false) {
         let id = item.id
         transcoders[id]?.cancel()
         transcoders[id] = nil
@@ -533,6 +570,7 @@ final class DownloadManager {
         item.transcodeStatus = ""
         try? FileManager.default.removeItem(
             at: FileManager.default.temporaryDirectory.appendingPathComponent("\(id).transcode.mp4"))
+        if !preserveResume { try? FileManager.default.removeItem(at: transcodeWorkDir(id)) }
     }
 
     /// Wipe the diagnostics box for any item that isn't actively transcoding — called when the Downloads
@@ -616,6 +654,7 @@ final class DownloadManager {
             }
         }
         transcoders[id] = nil
+        try? FileManager.default.removeItem(at: transcodeWorkDir(id))   // chunks no longer needed
     }
 
     // MARK: - Launch / suspend
@@ -735,7 +774,7 @@ final class DownloadManager {
         // There's no mid-stream checkpoint, so the resume re-runs the transcode — but it's automatic.
         for item in items where item.transcoding {
             if let settings = transcodeSettingsInFlight[item.id] { transcodeResumeOnForeground[item.id] = settings }
-            cancelTranscode(item)
+            cancelTranscode(item, preserveResume: true)   // keep committed chunks so it resumes, not restarts
             item.transcodeStatus = "Paused — resumes automatically when you reopen Stashy"
         }
         for item in items where item.state == .downloading { handoff(item, toBackground: true) }
