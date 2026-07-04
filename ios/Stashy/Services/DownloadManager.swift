@@ -87,9 +87,6 @@ final class DownloadItem: Identifiable {
     /// Multi-connection (parallel byte-range) vs single connection. Only applies to an ORIGINAL download —
     /// a live server transcode has no size/range support, so it's always single-connection.
     var multiThread = true
-    /// Estimated final byte size for a server transcode (no Content-Length is known up front), used only to
-    /// drive a rolling %-estimate bar. 0 = unknown.
-    var estimatedTotal: Int64 = 0
 
     /// On-device transcode progress (0…1) while `transcoding`; the card shows it in place of the download bar.
     var transcoding = false
@@ -111,13 +108,7 @@ final class DownloadItem: Identifiable {
     @ObservationIgnored var lastSampleBytes: Int64 = 0
     @ObservationIgnored var lastSampleTime = Date()
 
-    var progress: Double {
-        if totalBytes > 0 { return min(1, Double(receivedBytes) / Double(totalBytes)) }
-        // Unknown size (live server transcode): show progress against the estimate, capped below 100% so it
-        // doesn't sit at "done" before the stream actually closes.
-        if estimatedTotal > 0 { return min(0.99, Double(receivedBytes) / Double(estimatedTotal)) }
-        return 0
-    }
+    var progress: Double { totalBytes > 0 ? min(1, Double(receivedBytes) / Double(totalBytes)) : 0 }
 
     var resolutionLabel: String? { height.map { "\($0)p" } }
     var codecLabel: String? { codec?.uppercased() }
@@ -416,14 +407,6 @@ final class DownloadManager {
             item.url = url
             item.ext = "mp4"                                    // Stash server transcode is H.264/AAC MP4
             item.rebuildConnections(count: 1, totalBytes: 0)    // unknown size → single connection, plain GET
-            let dur = scene.files.first?.duration ?? 0
-            let mbps: Double
-            switch item.serverResolution {
-            case .p1080: mbps = 5;   case .p720: mbps = 3
-            case .p480:  mbps = 1.5; case .p240: mbps = 0.6
-            default:     mbps = 4
-            }
-            item.estimatedTotal = dur > 0 ? Int64(dur * mbps * 1_000_000 / 8) : 0
         } else {
             guard let url = scene.directFileURL(apiKey: apiKey) else {
                 item.error = "This scene has no direct file URL"; return
@@ -433,7 +416,6 @@ final class DownloadManager {
             let total = Int64(scene.files.first?.size ?? 0)
             let n = (total > 0 && item.multiThread) ? connectionCount : 1
             item.rebuildConnections(count: n, totalBytes: total)
-            item.estimatedTotal = 0
         }
         item.error = nil
         startConnections(item)

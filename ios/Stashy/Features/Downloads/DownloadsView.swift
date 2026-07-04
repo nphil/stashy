@@ -251,18 +251,26 @@ private struct DownloadCard: View {
         .animation(.linear(duration: 0.2), value: item.transcodeProgress)
     }
 
-    /// Rolling-estimate bar for an unknown-size (live server transcode) download — fills against the size
-    /// estimate; bytes/speed in the status line carry the real numbers.
+    /// Indeterminate bar for a live server transcode: its final size is unknowable up front (Stash sends no
+    /// Content-Length), so a % would lie — an earlier estimate sat at 99% while gigabytes kept arriving. A
+    /// sliding highlight means "working"; the status line carries the real bytes + speed.
     private var estimateBar: some View {
         GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                Capsule().fill(themeManager.current.accentColor.opacity(0.18))
-                Capsule().fill(themeManager.current.accentColor)
-                    .frame(width: max(0, geo.size.width * item.progress))
+            let w = geo.size.width
+            let segW = w * 0.35
+            TimelineView(.animation) { timeline in
+                let period = 1.3
+                let phase = timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
+                ZStack(alignment: .leading) {
+                    Capsule().fill(themeManager.current.accentColor.opacity(0.18))
+                    Capsule().fill(themeManager.current.accentColor)
+                        .frame(width: segW)
+                        .offset(x: -segW + (w + segW) * CGFloat(phase))
+                }
+                .clipShape(Capsule())
             }
         }
         .frame(height: 6)
-        .animation(.linear(duration: 0.2), value: item.receivedBytes)
     }
 
     /// Options on a staged card, shown before the download starts: Original vs Server transcode, then
@@ -439,10 +447,9 @@ private struct DownloadCard: View {
             return item.useServerTranscode ? "Server \(item.serverResolution.label) · ready" : "Ready to download"
         case .queued: return "Queued…"
         case .downloading:
-            if item.totalBytes == 0 {   // live server transcode: no % — show bytes received (+ speed, ~est)
+            if item.totalBytes == 0 {   // live server transcode: no size is known — show real bytes + speed
                 let got = ByteCountFormatter.string(fromByteCount: item.receivedBytes, countStyle: .file)
-                let est = item.estimatedTotal > 0 ? " · ~\(Int(item.progress * 100))%" : ""
-                return item.speedLabel.isEmpty ? "\(got)\(est)" : "\(got) · \(item.speedLabel)\(est)"
+                return item.speedLabel.isEmpty ? "Transcoding · \(got)" : "Transcoding · \(got) · \(item.speedLabel)"
             }
             let pct = Int(item.progress * 100)
             let extra = [item.speedLabel, item.etaLabel].filter { !$0.isEmpty }.joined(separator: " · ")
