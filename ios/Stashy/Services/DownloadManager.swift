@@ -699,6 +699,19 @@ final class DownloadManager {
         return (lo, hi)
     }
 
+    // MARK: - Keep-awake
+
+    /// True while the Downloads screen is on-screen (set by the view). Combined with active work to keep
+    /// the display from sleeping.
+    var downloadsScreenVisible = false
+    /// Any download / merge / transcode currently in progress.
+    var hasActiveWork: Bool {
+        items.contains { $0.state == .downloading || $0.state == .merging || $0.transcoding }
+    }
+    /// Keep the screen awake when the user is watching Downloads, or whenever work is happening — an
+    /// idle-sleep backgrounds the app, which would pause a foreground-only transcode.
+    var keepScreenAwake: Bool { downloadsScreenVisible || hasActiveWork }
+
     // MARK: - Foreground / background handoff
 
     /// Move active downloads between the fast foreground engine and the suspend-surviving single-connection

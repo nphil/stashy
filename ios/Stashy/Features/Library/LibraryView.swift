@@ -3,6 +3,7 @@ import SwiftUI
 struct LibraryView: View {
     @Environment(ThemeManager.self) private var themeManager
     @Environment(AppRouter.self) private var router
+    @Environment(DownloadManager.self) private var downloads
 
     var body: some View {
         @Bindable var router = router
@@ -21,5 +22,10 @@ struct LibraryView: View {
             }
         }
         .tint(themeManager.current.accentColor)
+        // Keep the display awake while watching Downloads or while a download/transcode runs (a
+        // foreground-only transcode would otherwise pause when the screen sleeps and the app backgrounds).
+        .onChange(of: downloads.keepScreenAwake, initial: true) { _, awake in
+            UIApplication.shared.isIdleTimerDisabled = awake
+        }
     }
 }

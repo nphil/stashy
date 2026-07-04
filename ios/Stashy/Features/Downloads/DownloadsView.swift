@@ -30,10 +30,10 @@ struct DownloadsView: View {
         .background(themeManager.current.backgroundColor.ignoresSafeArea())
         .navigationTitle("Downloads")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { downloads.pruneStopped() }
+        .onAppear { downloads.pruneStopped(); downloads.downloadsScreenVisible = true }
         // Leaving the screen wipes finished transcode diagnostics, so returning shows a clean card. An
         // in-flight transcode keeps its box.
-        .onDisappear { downloads.clearFinishedTranscodeLogs() }
+        .onDisappear { downloads.clearFinishedTranscodeLogs(); downloads.downloadsScreenVisible = false }
         .fullScreenCover(item: $playing) { item in
             DownloadPlayerCover(item: item)
         }
