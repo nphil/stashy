@@ -193,11 +193,10 @@ struct SceneDetailView: View {
     }
 
     private var socialLinks: [SocialLink]? {
-        let raw = performers.flatMap { $0.urls ?? [] }
-        let links = raw.compactMap { SocialLink(raw: $0) }
-        guard !links.isEmpty else { return nil }
-        var seen = Set<URL>()
-        return links.filter { seen.insert($0.url).inserted }.sorted { $0.priority < $1.priority }
+        // Same builder as the performer screen (dedup + priority sort) so the two never disagree — here
+        // aggregated across all of the scene's performers.
+        let links = SocialLink.list(from: performers.flatMap { $0.urls ?? [] })
+        return links.isEmpty ? nil : links
     }
 
     private var techItems: [(label: String, symbol: String)] {

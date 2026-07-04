@@ -132,7 +132,7 @@ struct PerformerDetailView: View {
                 FavoriteHeart(isFavorite: edits.isFavorite(performer), size: 22, offColor: .secondary) { new in
                     edits.setPerformerFavorite(new, id: performer.id, client: appState.client)
                 }
-                PopupMenu(actions: [
+                PopupMenu(vertical: true, actions: [
                     PopupMenuAction(title: "Delete Performer", systemImage: "trash", isDestructive: true) {
                         confirmDelete = true
                     }
@@ -198,12 +198,8 @@ struct PerformerDetailView: View {
     }
 
     private var socialLinks: [SocialLink]? {
-        guard let urls = performer.urls else { return nil }
-        // Stable sort by priority so Reddit / OnlyFans surface first.
-        return urls.compactMap { SocialLink(raw: $0) }
-            .enumerated()
-            .sorted { ($0.element.priority, $0.offset) < ($1.element.priority, $1.offset) }
-            .map(\.element)
+        let links = SocialLink.list(from: performer.urls ?? [])
+        return links.isEmpty ? nil : links
     }
 }
 
@@ -235,5 +231,17 @@ struct SocialLink {
         default:
             label = host.replacingOccurrences(of: "www.", with: ""); symbol = "link"; priority = 3
         }
+    }
+
+    /// Build the displayed link list from raw URL strings — deduplicated by URL and stable-sorted by
+    /// priority. Used by BOTH the performer screen and the inline scene screen so they never disagree.
+    static func list(from urls: [String]) -> [SocialLink] {
+        let links = urls.compactMap { SocialLink(raw: $0) }
+        var seen = Set<URL>()
+        return links
+            .filter { seen.insert($0.url).inserted }
+            .enumerated()
+            .sorted { ($0.element.priority, $0.offset) < ($1.element.priority, $1.offset) }
+            .map(\.element)
     }
 }
