@@ -18,6 +18,8 @@ struct SettingsView: View {
     @AppStorage("appLockEnabled") private var appLockEnabled = false
     @AppStorage("privacyMode") private var privacyMode = false
     @State private var debugLogging = RemoteLog.isLoggingEnabled
+    @State private var debugServer = RemoteLog.server
+    @State private var debugTopic = RemoteLog.topic
 
     private let swatchColumns = [GridItem(.adaptive(minimum: 64), spacing: 12)]
 
@@ -180,10 +182,37 @@ struct SettingsView: View {
                             RemoteLog.isLoggingEnabled = on
                             if on { RemoteLog.shared.enable() } else { RemoteLog.shared.disable() }
                         }
+                    if debugLogging {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Log server")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            TextField("https://ntfy.sh", text: $debugServer)
+                                .keyboardType(.URL)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .font(.callout.monospaced())
+                                .onChange(of: debugServer) { _, v in RemoteLog.server = v }
+                                .onSubmit { debugServer = RemoteLog.server }
+                        }
+                        .padding(.vertical, 2)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Topic / channel")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            TextField("stashy-dbg-…", text: $debugTopic)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .font(.callout.monospaced())
+                                .onChange(of: debugTopic) { _, v in RemoteLog.topic = v }
+                                .onSubmit { debugTopic = RemoteLog.topic }
+                        }
+                        .padding(.vertical, 2)
+                    }
                 } header: {
                     Text("Diagnostics")
                 } footer: {
-                    Text("Streams playback diagnostics to a public ntfy topic (\(RemoteLog.topic)) for troubleshooting. Off by default; broadcasts to a public channel while on, so leave it off for normal use. (Telemetry is temporary and will be removed.)")
+                    Text("Streams playback/transcode diagnostics to an ntfy server + topic so they can be read back off-device for troubleshooting. Point \"Log server\" at a self-hosted ntfy (e.g. an Unraid container) to keep the stream private; leave it as https://ntfy.sh to use the public server (the topic is then readable by anyone who knows it — don't log secrets). Off by default. (Telemetry is temporary and will be removed.)")
                 }
 
                 // About section

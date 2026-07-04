@@ -320,7 +320,17 @@ final class ScenePlayerModel {
             guard let self, size.width > 0, size.height > 0 else { return }
             let aspect = size.width / size.height
             if self.videoAspect != aspect { self.videoAspect = aspect }
+            let firstFrame = self.presentationSize == .zero
             if self.presentationSize != size { self.presentationSize = size }
+            // The arrival of a non-zero presentation size is the "there ARE visible pixels" signal. If a
+            // transcode reports done + bytes but this line never logs, that's the "video disappeared" case
+            // (AVPlayer has audio/duration but no renderable video track) — the exact split we're hunting.
+            if firstFrame {
+                RemoteLog.shared.event("▶︎ video", [
+                    ("size", "\(Int(size.width))×\(Int(size.height))"),
+                    ("tier", self.playbackTier.label)
+                ])
+            }
         }
         engine.onFailed = { [weak self] error in self?.fallbackToHLS(error: error) }
         return engine

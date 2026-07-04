@@ -188,6 +188,18 @@ final class FFmpegStreamTranscoder: @unchecked Sendable {
             else { audioNote = "audio \(name) dropped (AAC re-encode pending)" }
         }
 
+        // Stage diagnostic: exactly what came in and how we're decoding it. This is the line that tells us
+        // *why* an HEVC/exotic file black-screens — source codec, pixel format (10-bit / 4:2:2 shows here),
+        // and whether the VideoToolbox HW decoder actually attached vs. falling back to software.
+        let container = input?.pointee.iformat.map { String(cString: $0.pointee.name) } ?? "?"
+        let srcPix = av_get_pix_fmt_name(AVPixelFormat(rawValue: vCodecpar.pointee.format)).map { String(cString: $0) } ?? "?"
+        RemoteLog.shared.event("⚙︎ transcode-in", [
+            ("codec", srcName), ("container", container), ("src", "\(srcW)×\(srcH)"),
+            ("pix", srcPix), ("hwdec", hwDeviceCtx != nil ? "vt" : "sw"),
+            ("out", "\(outSize.width)×\(outSize.height)"), ("fps", String(format: "%.1f", fps)),
+            ("kbps", bitrate / 1000), ("audio", audioNote), ("start", Int(startTime))
+        ])
+
         // --- Output: MP4 muxer → custom write AVIO (fragmented, forward-only) ---
         var outFmtOpt: UnsafeMutablePointer<AVFormatContext>?
         guard avformat_alloc_output_context2(&outFmtOpt, nil, "mp4", nil) >= 0,
@@ -266,6 +278,7 @@ final class FFmpegStreamTranscoder: @unchecked Sendable {
         var tsShiftSeconds = -1.0            // set from the first timestamped packet after seek (zero-basing)
         var frames = 0
         var encError = false
+        var loggedFirstFrame = false
 
         // Drain the encoder into the muxer.
         func drainEncoder(_ frame: UnsafeMutablePointer<AVFrame>?) -> Bool {
@@ -306,6 +319,17 @@ final class FFmpegStreamTranscoder: @unchecked Sendable {
                 let sW = Int(src!.pointee.width), sH = Int(src!.pointee.height)
                 let srcFmt = AVPixelFormat(rawValue: src!.pointee.format)
                 let best = decFrame!.pointee.best_effort_timestamp
+
+                // First decoded frame proves the decoder is emitting pixels (not silently stalling) and
+                // reveals the real post-transfer format we're about to scale — the tell for the "black
+                // video" HEVC cases where decode succeeds but the surface never becomes CPU-readable NV12.
+                if !loggedFirstFrame {
+                    loggedFirstFrame = true
+                    let fmtName = av_get_pix_fmt_name(srcFmt).map { String(cString: $0) } ?? "?"
+                    RemoteLog.shared.event("⚙︎ transcode-frame1", [
+                        ("path", usingHW ? "hw→cpu" : "sw"), ("dims", "\(sW)×\(sH)"), ("pix", fmtName)
+                    ])
+                }
 
                 var scaled: UnsafeMutablePointer<AVFrame>?
                 defer { if scaled != nil { av_frame_free(&scaled) } }
@@ -388,6 +412,13 @@ final class FFmpegStreamTranscoder: @unchecked Sendable {
             _ = av_write_trailer(outFmt)
         }
         let status = aborted ? "aborted" : encError ? "encode error" : "done"
+        // Final tally: bytes actually muxed is the decisive signal for "video disappeared after transcode".
+        // frames>0 but bytes≈0 ⇒ the muxer never emitted the init segment (avcC/decoder config missing);
+        // bytes>0 but black on screen ⇒ tagging/config, not production. Either way this line disambiguates.
+        RemoteLog.shared.event("⚙︎ transcode-out", [
+            ("status", status), ("frames", frames), ("mediaSec", String(format: "%.1f", producedSeconds)),
+            ("bytes", producedBytes), ("audio", audioNote)
+        ])
         return "h264 \(outSize.width)×\(outSize.height) · \(frames) frames · \(audioNote) · \(status)"
     }
 

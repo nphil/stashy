@@ -259,6 +259,11 @@ final class FFmpegRemuxer: @unchecked Sendable {
         let headerResult = avformat_write_header(outputCtx, &options)
         av_dict_free(&options)
         if headerResult < 0 {
+            // A failed MP4 header on an HEVC-in-MKV source is the classic "HEVC won't play native" cause:
+            // no init segment (hvc1 parameter sets) ⇒ AVPlayer can't configure the decoder ⇒ black.
+            RemoteLog.shared.event("⚙︎ remux-header-FAIL", [
+                ("err", errString(headerResult)), ("streams", copied.joined(separator: "/"))
+            ])
             cleanupOutput(outputCtx, writeAVIO)
             cleanupInput(&input, readAVIO)
             return "write_header failed (\(errString(headerResult)))\ncopied: \(copied.joined(separator: ", "))"
@@ -340,6 +345,10 @@ final class FFmpegRemuxer: @unchecked Sendable {
             return "write_frame failed (\(errString(writeError)))\ncopied: \(copied.joined(separator: ", "))"
         }
         let status = interrupted ? "timed out (partial)" : reachedEOF ? "EOF" : "capped"
+        RemoteLog.shared.event("⚙︎ remux-out", [
+            ("status", status), ("streams", copied.joined(separator: "/")),
+            ("header", headerBytes), ("bytes", bytesWritten), ("packets", packetCount)
+        ])
         return """
         mp4 · \(copied.count) streams · \(status)
         copied: \(copied.joined(separator: ", "))

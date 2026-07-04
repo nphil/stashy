@@ -13,14 +13,46 @@ import Darwin
 final class RemoteLog: @unchecked Sendable {
     static let shared = RemoteLog()
 
-    static let topic = "stashy-dbg-n7x2k9q"
+    private static let defaultServer = "https://ntfy.sh"
+    private static let defaultTopic = "stashy-dbg-n7x2k9q"
     private static let settingKey = "stashy.debugLogging"
+    private static let serverKey = "stashy.debug.server"
+    private static let topicKey = "stashy.debug.topic"
+
     /// Whether debug log streaming is enabled (off by default — it broadcasts to a public ntfy topic).
     static var isLoggingEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: settingKey) }
         set { UserDefaults.standard.set(newValue, forKey: settingKey) }
     }
-    private let endpoint = URL(string: "https://ntfy.sh/\(topic)")!
+    /// ntfy base URL. Point this at a self-hosted ntfy (e.g. an Unraid container) to keep the stream off
+    /// the public server; defaults to `https://ntfy.sh`. Empty/whitespace resets to the default.
+    static var server: String {
+        get {
+            let v = (UserDefaults.standard.string(forKey: serverKey) ?? "").trimmingCharacters(in: .whitespaces)
+            return v.isEmpty ? defaultServer : v
+        }
+        set {
+            let v = newValue.trimmingCharacters(in: .whitespaces)
+            // Strip a trailing slash so `server + "/" + topic` never doubles up.
+            let clean = v.hasSuffix("/") ? String(v.dropLast()) : v
+            UserDefaults.standard.set(clean, forKey: serverKey)
+        }
+    }
+    /// ntfy topic (the channel path). Defaults to an obscure-but-public topic.
+    static var topic: String {
+        get {
+            let v = (UserDefaults.standard.string(forKey: topicKey) ?? "").trimmingCharacters(in: .whitespaces)
+            return v.isEmpty ? defaultTopic : v
+        }
+        set {
+            let v = newValue.trimmingCharacters(in: .whitespaces)
+            UserDefaults.standard.set(v, forKey: topicKey)
+        }
+    }
+    /// The full POST/read URL — computed each use so a Settings change takes effect without a relaunch.
+    private var endpoint: URL {
+        URL(string: "\(RemoteLog.server)/\(RemoteLog.topic)") ?? URL(string: "\(RemoteLog.defaultServer)/\(RemoteLog.defaultTopic)")!
+    }
     private let session: URLSession
     private let queue = DispatchQueue(label: "stashy.remotelog")
     private var buffer: [String] = []
@@ -88,6 +120,16 @@ final class RemoteLog: @unchecked Sendable {
         }
     }
 
+    /// Structured one-liner: `tag  k=v k=v …`. Nil values are dropped so a line only carries what's known.
+    /// Keeps diagnostics grep-friendly and compact instead of a multi-line dump per event.
+    func event(_ tag: String, _ fields: [(String, Any?)]) {
+        let parts = fields.compactMap { key, value -> String? in
+            guard let value else { return nil }
+            return "\(key)=\(value)"
+        }
+        log("\(tag)  " + parts.joined(separator: " "))
+    }
+
     func log(_ message: String) {
         let line = String(format: "%7.2f  %@", Date().timeIntervalSince(start), message)
         queue.async {
@@ -147,6 +189,36 @@ final class RemoteLog: @unchecked Sendable {
         } else {
             session.dataTask(with: req).resume()
         }
+    }
+
+    /// Upload a screenshot (or any image) as an ntfy **attachment**. ntfy hosts a PUT body at a public URL
+    /// referenced from the message JSON, so on the public server the image can be fetched back off-device
+    /// for inspection — the one way an image leaves the phone through the same channel as the text logs.
+    /// No-op unless logging is enabled. Best-effort; failures are logged, not surfaced.
+    func uploadImage(_ data: Data, caption: String) {
+        guard RemoteLog.isLoggingEnabled, !data.isEmpty else { return }
+        let name = "shot-\(Int(Date().timeIntervalSince1970)).jpg"
+        var req = URLRequest(url: endpoint)
+        req.httpMethod = "PUT"
+        req.httpBody = data
+        req.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+        req.setValue(name, forHTTPHeaderField: "Filename")
+        // ntfy header values must be ASCII; strip anything else out of the caption title.
+        let asciiCaption = caption.unicodeScalars.filter { $0.isASCII }.map(String.init).joined()
+        if !asciiCaption.isEmpty { req.setValue(asciiCaption, forHTTPHeaderField: "Title") }
+        log("📷 uploading screenshot \(name) (\(data.count / 1024) KB)…")
+        session.dataTask(with: req) { [weak self] respData, response, error in
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if error == nil, (200..<300).contains(code) {
+                // Echo the hosted attachment URL into the text stream so it can be fetched back.
+                let url = respData
+                    .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                    .flatMap { ($0["attachment"] as? [String: Any])?["url"] as? String }
+                self?.log("📷 screenshot posted\(url.map { " → \($0)" } ?? "")")
+            } else {
+                self?.log("📷 screenshot upload failed (code \(code) \(error?.localizedDescription ?? ""))")
+            }
+        }.resume()
     }
 
     private func observeMemoryWarning() {

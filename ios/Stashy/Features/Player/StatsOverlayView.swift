@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// A clean, translucent on-video diagnostics panel. Refreshes once a second via `TimelineView` (off the
 /// render path), pulling a fresh `PlaybackStats` snapshot from the model. Section-based so the future
@@ -23,6 +24,23 @@ struct StatsOverlayView: View {
             demux = await FFmpegSource(url: probeURL).probeSummary()
             loopback = await LoopbackProbe(url: probeURL).run()
         }
+    }
+
+    /// Snapshot the key window to JPEG for upload. Runs on the main actor (button action). Captures the
+    /// UIKit/SwiftUI layer tree only — AVPlayer/Metal-backed video renders black in a UIKit snapshot.
+    @MainActor
+    static func captureWindowJPEG() -> Data? {
+        guard let window = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .flatMap({ $0.windows })
+            .first(where: { $0.isKeyWindow }) ?? UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene }).flatMap({ $0.windows }).first
+        else { return nil }
+        let renderer = UIGraphicsImageRenderer(bounds: window.bounds)
+        let image = renderer.image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
+        }
+        return image.jpegData(compressionQuality: 0.6)
     }
 
     private func panel(_ stats: PlaybackStats) -> some View {
@@ -81,6 +99,23 @@ struct StatsOverlayView: View {
                 .onChange(of: debugLogging) { _, on in
                     RemoteLog.isLoggingEnabled = on
                     if on { RemoteLog.shared.enable() } else { RemoteLog.shared.disable() }
+                }
+
+                // Manual screenshot → ntfy attachment (only useful while logging is on). Note: a UIKit
+                // window snapshot can't capture the AVPlayer/Metal video layer, so the video area reads
+                // black — this is for UI/layout/overlay bugs; the video pixels are diagnosed via the text
+                // stream (presentationSize / transcode-frame1) instead.
+                if debugLogging {
+                    Button {
+                        if let data = Self.captureWindowJPEG() {
+                            RemoteLog.shared.uploadImage(data, caption: "manual · \(scene.title ?? "scene")")
+                        }
+                    } label: {
+                        Label("Send screenshot", systemImage: "camera")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.85))
+                    }
+                    .buttonStyle(.plain)
                 }
             }
             .padding(12)
