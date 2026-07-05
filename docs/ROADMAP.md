@@ -108,14 +108,40 @@ core both items reuse.
   deferred:** option (b) *normal-(1×)-speed audio under slow video* — that needs a decoupled audio
   timeline (`AVSampleBufferAudioRenderer` / a separate normal-rate pass); the shipped toggle covers
   mute-vs-pitch-corrected, not the fully-decoupled case.
-- **AI / motion-interpolated slow-mo (on-device).** When the source frame rate is too low for smooth
-  slow motion (e.g. slowing 24–30 fps to 0.25× looks choppy/blurry from frame duplication), **synthesise
-  intermediate frames on-device** so the slowed footage looks smooth. Candidate approaches to research:
-  Apple's **Vision / optical-flow** APIs (`VNGenerateOpticalFlowRequest`) to warp between frames, a
-  **Core ML frame-interpolation model** (RIFE/FILM-class, converted to Core ML), or `AVFoundation`'s
-  scaled-edit / `VTFrameProcessor` (iOS 18+ has a motion-interpolation/optical-flow API worth checking).
-  Must stay on-device, respect thermal/battery limits (interpolate only around the current playhead, not
-  the whole file), and gate on device capability. Heaviest item here — spike the API options first.
+- **★ AI / motion-interpolated slow-mo (on-device) — researched 2026-07-05, Phase 1 in progress.** Plain
+  slow playback (setting `AVPlayer` rate < 1) doesn't create frames — it just holds each real frame on
+  screen longer, so a 30fps file at 0.25× shows ~7.5 distinct fps = judder. Fix = **synthesise the
+  in-between frames** so slowed footage looks like true high-fps slow motion.
+  - **Native tool (chosen): `VTFrameProcessor`** — VideoToolbox's ML/Neural-Engine frame processor, new in
+    **iOS 26** (the app's target) and supported on the owner's A19 iPhone 17 Pro. No Core ML model to ship,
+    no licensing. Two relevant effects: (a) **Frame Rate Conversion** (quality) — `VTFrameRateConversion
+    Parameters` takes an **`interpolationPhase` array of floats in [0,1]** giving *where* to insert frames
+    between two source frames, array length = *how many* (so 0.25× → `[0.25,0.5,0.75]` = 3 synthetic frames
+    = 4×; **arbitrary factor**); (b) **Low-Latency Frame Interpolation** — a real-time (video-conferencing)
+    2× doubler, optional upscale. Both are `async` over `CVPixelBuffer`s.
+  - **Key feasibility insight:** slow-mo *relaxes* the real-time budget (0.25× = 4× wall-clock time per
+    output frame), so even the "offline"-grade Frame Rate Conversion can plausibly run live *during*
+    slow-mo — the opposite of the usual can-the-NPU-keep-up-at-30fps problem.
+  - **Architecture:** `AVPlayer` can't have frames injected (it renders its own into `AVPlayerLayer`), so
+    slow-mo needs a **dedicated render path that engages only in slow-mo**: pull consecutive decoded frames
+    from the **existing `AVPlayerItemVideoOutput` tap** (already feeding the live blur → **engine-agnostic**:
+    works for direct / remux-loopback / server-HLS alike, post-decode), run `VTFrameProcessor` between each
+    pair, and present the synthesized stream on an **`AVSampleBufferDisplayLayer` paced by `CADisplayLink`**
+    at the slow rate with `AVPlayerLayer` hidden. **Audio = muted**, which reuses the **already-shipped
+    "Mute when slowed" toggle** and sidesteps the whole audio/video-sync problem.
+  - **Rejected/inferior alternatives:** Vision `VNGenerateOpticalFlowRequest`+Metal warp (more code, lower
+    quality, only needed for pre-iOS-26); Core ML RIFE/FILM (heavy to convert/ship, marginal A-series
+    real-time, redundant vs VTFrameProcessor); frame blending/crossfade (cheap but just ghosts motion — keep
+    as a **low-tier fallback** if the NPU can't keep up); offline pre-generate (on-device export or P40
+    plugin) = highest quality but not live → future "export smooth slow-mo clip" action.
+  - **Guardrails (per the never-stutter rule):** gate on device capability, interpolate **only around the
+    playhead**, run the processor **off the render thread**, watch thermals/battery, and **fall back to plain
+    slow playback** (or cheap frame-blend) if it can't keep the buffer fed — never starve real playback.
+  - **Phasing:** **Phase 1 (in progress)** — custom slow-mo render path engaging at ≤0.5×, using Low-Latency
+    Frame Interpolation (2×, real-time-friendly), audio muted; prove the render path + thermal envelope.
+    **Phase 2** — swap in Frame Rate Conversion with a per-rate `interpolationPhase` for arbitrary-factor
+    smoothness (`[0.5]`@0.5×, `[0.25,0.5,0.75]`@0.25×). **Phase 3 (optional)** — an "export smooth slow-mo
+    clip" action (on-device or P40 plugin) for a saved max-quality result.
 - **Mini-player / undock the player (owner-requested 2026-07-04).** Let the player detach from the scene
   screen into a floating, draggable mini-player (à la Apple Podcasts / YouTube PiP) so it keeps playing
   while the user browses performers, links, other scenes, etc. Would make navigation-away seamless (see
