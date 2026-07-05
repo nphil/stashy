@@ -76,7 +76,7 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   checklist; plus playback engineering learnings.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.184** (file-aware loading-donut estimate, commit `e49a7f6`, IPA ~8.38 MB)
+- Latest release: **v1.0.191** (playback-speed control 0.25×–2×, commit `31f6924`, IPA ~8.40 MB)
   — verify the newest release/IPA size each push (CI Build step swallows exit codes; only a published
   release proves compile).
 - **Stashy Companion plugin shipped** (`stash-plugin/` — its OWN top-level folder, sibling to `ios/`):
@@ -147,7 +147,16 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   4:2:2/4:4:4 HEVC), (2) **playability filter** (`SceneFilterPanel` Any/Direct-play/Needs-transcode, pages
   via `findScenesByIDs`). No scene-card badges (owner). Plugin writes nothing to scenes; **Remove Stashy
   Library Data** task cleans up tags/fields from ≤0.1.17.
-- Next candidates: **resumable/checkpointed transcode** (fragmented-MP4 append —
-  owner wants it, see ROADMAP Downloads); Netflix fullscreen UI / playback-speed / WYSIWYG layout editor /
-  mini-player-PiP / AI zoom-follow (all in ROADMAP); **remove RemoteLog telemetry** before wider release
+- **Playback speed shipped**: Podcasts-style speed pill on the player control row (left of the gear) →
+  0.25×–2× menu, **pitch-corrected** audio (`AVPlayerItem.audioTimePitchAlgorithm = .timeDomain`). Rate is
+  published via `AVPlayer.defaultRate` + a re-invoked `play()` (applies live, keeps
+  `automaticallyWaitsToMinimizeStalling` on, won't force-start while paused). `PlaybackEngine` gained
+  `playbackRate` + `slowMute`; the model re-applies both in `makeEngine` so speed survives every engine
+  rebuild (seek-reinit / quality / fallback). Persisted **"Mute when slowed"** toggle in the same menu
+  (mute vs. pitch-corrected audio below 1×; `slowMute` is a separate output-volume gate so it never
+  clobbers the user's volume). Fully-decoupled *normal-speed audio under slow video* stays deferred.
+- Next candidates: **Netflix fullscreen player UI** (next-biggest ★ player item); **resumable/checkpointed
+  transcode** (fragmented-MP4 append — owner wants it, see ROADMAP Downloads); Blur-Media app-wide /
+  WYSIWYG layout editor / mini-player-PiP / AI zoom-follow (all in ROADMAP); **concurrent-queue server
+  transcode** (needs a Stash-scheduling spike first); **remove RemoteLog telemetry** before wider release
   (the one open tech-debt / release blocker).

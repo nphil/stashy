@@ -95,14 +95,19 @@ core both items reuse.
     `{controlID, gridSlot, sizeClass}`); `PlayerControlsView` renders from the saved layout, falling back
     to the default. Sizeable feature — spike the drag/grid/drop-target interaction and the layout model
     first; reuse the existing control components as the draggable pieces.
-- **Playback speed control** in the player menu (e.g. 0.25× / 0.5× / 0.75× / 1× / 1.25× / 1.5× / 2×).
-  Drive via `AVPlayer.rate` / `AVPlayerItem.audioTimePitchAlgorithm`. Add it to the overlay controls
-  (alongside the quality gear).
-- **Slow-motion mode with two audio behaviours:** when playing below 1×, either (a) **mute audio**, or
-  (b) **keep audio at normal (1×) speed/pitch** while the video runs slow — an explicit toggle, since
-  pitch-corrected slowed audio is usually undesirable. (Implementation note: AVFoundation slows audio
-  with the video; "normal-speed audio under slow video" needs decoupling the audio timeline — investigate
-  `AVSampleBufferAudioRenderer` / a separate normal-rate audio pass, or simply mute below a threshold.)
+- **✅ SHIPPED — Playback speed control** in the player menu (0.25× / 0.5× / 0.75× / 1× / 1.25× / 1.5× /
+  2×). A Podcasts-style **speed pill** on the control row (left of the gear) opens a rate menu; audio is
+  **pitch-corrected** (`AVPlayerItem.audioTimePitchAlgorithm = .timeDomain`) so every speed keeps natural
+  pitch. Rate is published via `AVPlayer.defaultRate` + a re-invoked `play()` so it applies live while
+  keeping `automaticallyWaitsToMinimizeStalling` on (and won't force-start while paused). `PlaybackEngine`
+  gained `playbackRate` + `slowMute`; `ScenePlayerModel` re-applies both in `makeEngine`, so a mid-scene
+  speed change **survives every engine rebuild** (seek-reinit / quality / fallback).
+- **✅ SHIPPED (partial) — slow-motion audio behaviour toggle.** The speed menu carries a persisted
+  **"Mute when slowed"** preference: below 1× either mute (default) or hear pitch-corrected slow audio.
+  `slowMute` is a separate output-volume gate so it never clobbers the user's chosen volume. **Still
+  deferred:** option (b) *normal-(1×)-speed audio under slow video* — that needs a decoupled audio
+  timeline (`AVSampleBufferAudioRenderer` / a separate normal-rate pass); the shipped toggle covers
+  mute-vs-pitch-corrected, not the fully-decoupled case.
 - **AI / motion-interpolated slow-mo (on-device).** When the source frame rate is too low for smooth
   slow motion (e.g. slowing 24–30 fps to 0.25× looks choppy/blurry from frame duplication), **synthesise
   intermediate frames on-device** so the slowed footage looks smooth. Candidate approaches to research:
