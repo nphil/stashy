@@ -1,4 +1,5 @@
 import UIKit
+import AVFoundation
 
 /// Coarse playback state used to drive the loading indicator vs. play/pause control.
 enum PlaybackPhase: Sendable { case paused, waiting, playing }
@@ -16,6 +17,10 @@ protocol PlaybackEngine: AnyObject {
     var renderView: UIView? { get }
     /// A live blurred-backdrop view vended from the engine's decoded frames.
     var liveBlurView: UIView? { get }
+    /// The engine's live decoded-frame output (the same `AVPlayerItemVideoOutput` the blur taps), for
+    /// on-device frame interpolation / analysis — or nil if the backend doesn't vend one. Read-only; the
+    /// buffers it hands out are treated as immutable (never write them).
+    var frameOutput: AVPlayerItemVideoOutput? { get }
 
     /// current, duration (seconds). Throttled by the engine to ~10 Hz.
     var onTime: ((TimeInterval, TimeInterval) -> Void)? { get set }

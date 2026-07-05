@@ -230,6 +230,9 @@ final class AVPlaybackEngine: PlaybackEngine {
 
     private func applyOutputVolume() { player.volume = slowMuted ? 0 : storedVolume }
 
+    /// The live decoded-frame output (shared with the blur) for the slow-mo frame interpolator.
+    var frameOutput: AVPlayerItemVideoOutput? { videoOutput }
+
     private var desiredRate: Float = 1
     var playbackRate: Float {
         get { desiredRate }

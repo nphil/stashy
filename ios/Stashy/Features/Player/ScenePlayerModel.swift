@@ -1,4 +1,5 @@
 import SwiftUI
+import AVFoundation
 
 /// Observable facade over a `PlaybackEngine`. Today that's `AVPlaybackEngine` (native AVPlayer); the
 /// on-device FFmpeg remux/transcode engine that will serve `.localFFmpeg` routes plugs in behind the
@@ -50,6 +51,12 @@ final class ScenePlayerModel {
             applySlowMute()
         }
     }
+    /// On-device AI slow-mo (VTFrameProcessor frame interpolation) live telemetry, surfaced in the Stats
+    /// overlay. Driven by `slowMoRunner` while playback is ≤0.5×. Read ~1 Hz by the overlay, so it needn't
+    /// be observable — it's snapshotted on each poll.
+    @ObservationIgnored private var slowMoTelemetry = SlowMoTelemetry()
+    /// Runs the frame-interpolation pipeline while slow-mo is engaged (nil when disengaged).
+    @ObservationIgnored private var slowMoRunner: SlowMoRunner?
     /// True once playback has run to the end (player parked there). The next play() restarts from 0.
     @ObservationIgnored private var reachedEnd = false
 
@@ -331,6 +338,9 @@ final class ScenePlayerModel {
                     ("size", "\(Int(size.width))×\(Int(size.height))"),
                     ("tier", self.playbackTier.label)
                 ])
+                // Now that the decoded frame size is known, engage slow-mo if the user is already ≤0.5×
+                // (e.g. the rate was set before the first frame, or the engine was just rebuilt).
+                self.updateSlowMo()
             }
         }
         engine.onFailed = { [weak self] error in self?.fallbackToHLS(error: error) }
@@ -394,6 +404,8 @@ final class ScenePlayerModel {
         if currentTime > 1 { pendingResume = currentTime }
         stopped = true
         startInProgress = false
+        slowMoRunner?.stop()
+        slowMoRunner = nil
         watchdog?.cancel()
         loadTicker?.cancel(); loadTicker = nil
         loadStart = nil
@@ -512,12 +524,35 @@ final class ScenePlayerModel {
         playbackRate = rate
         engine?.playbackRate = Float(rate)
         applySlowMute()
+        updateSlowMo()
     }
 
     /// Apply the "mute while slowed" policy to the live engine (mute only below 1×, and only when the
     /// preference is on). Called whenever the rate or the preference changes.
     private func applySlowMute() {
         engine?.slowMute = playbackRate < 1 && muteWhenSlowed
+    }
+
+    /// Engage the AI slow-mo interpolation pipeline at ≤0.5× (once the decoded frame size is known), or
+    /// disengage above it. Purely additive telemetry today (Phase 1b(A)) — it never alters normal playback,
+    /// so if VTFrameProcessor is unavailable or the pipeline can't keep up, playback is unaffected.
+    private func updateSlowMo() {
+        let engage = playbackRate > 0 && playbackRate <= 0.5
+        if engage {
+            guard slowMoRunner == nil, presentationSize.width > 0, presentationSize.height > 0 else { return }
+            let runner = SlowMoRunner(
+                width: Int(presentationSize.width), height: Int(presentationSize.height),
+                outputProvider: { [weak self] in self?.engine?.frameOutput },
+                onTelemetry: { [weak self] telemetry in self?.slowMoTelemetry = telemetry }
+            )
+            slowMoRunner = runner
+            slowMoTelemetry = SlowMoTelemetry(active: true)
+            runner.start()
+        } else if slowMoRunner != nil {
+            slowMoRunner?.stop()
+            slowMoRunner = nil
+            slowMoTelemetry = SlowMoTelemetry()
+        }
     }
 
     func seek(to time: TimeInterval) {
@@ -610,6 +645,21 @@ final class ScenePlayerModel {
             StatLine(label: "FFmpeg", value: FFmpegProbe.versionInfo),
             StatLine(label: "VT h264 enc", value: FFmpegProbe.hasVideoToolboxH264 ? "yes" : "no"),
         ]))
+
+        // AI slow-mo (VTFrameProcessor frame interpolation) — shown whenever engaged, or after it has ever
+        // produced a frame this session, so the Stats box proves the pipeline is live at ≤0.5×.
+        let sm = slowMoTelemetry
+        if sm.active || sm.synthesized > 0 {
+            sections.append(StatSection(title: "Slow-mo (AI)", lines: [
+                StatLine(label: "Interpolation",
+                         value: !sm.supported ? "Unsupported on device" : (sm.active ? "Active" : "Idle")),
+                StatLine(label: "Engine", value: "VTFrameProcessor (low-latency 2×)"),
+                StatLine(label: "Speed", value: PlaybackSpeed.closest(to: playbackRate).label),
+                StatLine(label: "Source frames", value: "\(sm.sourceFrames)"),
+                StatLine(label: "Synthesized frames", value: "\(sm.synthesized)"),
+                StatLine(label: "Last interp", value: String(format: "%.1f ms", sm.lastMs)),
+            ]))
+        }
 
         var media: [StatLine] = []
         if let c = scene.codecLabel { media.append(StatLine(label: "Codec", value: c)) }
