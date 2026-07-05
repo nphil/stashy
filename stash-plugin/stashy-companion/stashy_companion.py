@@ -36,6 +36,7 @@ Progress + logs are emitted on stderr in Stash's control format and surface as
 live `Job.progress` / log lines the app reads via findJob / loggingSubscribe.
 """
 
+import contextlib
 import json
 import os
 import subprocess
@@ -43,6 +44,11 @@ import sys
 import time
 import urllib.error
 import urllib.request
+
+try:
+    import fcntl   # POSIX advisory file lock (the plugin runs on the Linux Stash host)
+except ImportError:
+    fcntl = None
 
 PLUGIN_ID = "stashy-companion"
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1075,15 +1081,18 @@ def _iter_scenes(stash, page_size=100):
         page += 1
 
 
-def run_stats(stash, settings):
-    """ffprobe every scene and write the whole library's playability to ONE served file
-    (cache/playability.json) that the app reads over HTTP. Makes **zero** sceneUpdate calls — so it fires
-    no Scene.Update hooks and queues no "Sync" tasks, no matter how large the library. (The previous
-    version wrote each scene's custom_fields / tags, which on a fresh library meant hundreds of
-    sceneUpdates → hundreds of hooked Sync tasks. Never write per-scene for a bulk operation.)"""
+def run_stats(stash, settings, rebuild=False):
+    """ffprobe scenes and write the whole library's playability to ONE served file
+    (cache/playability.json) the app reads over HTTP. **Incremental by default**: scenes already in the
+    report are skipped (the slow ffprobe is avoided), scenes that no longer exist are pruned — so re-running
+    after a Stash scan only analyzes the NEW files. `rebuild=True` re-analyzes everything. Makes **zero**
+    sceneUpdate calls, so it fires no Scene.Update hooks and queues no "Sync" tasks, however large the
+    library. (The Scene.Create.Post hook keeps this current automatically; this task is the manual catch-up
+    / first build.)"""
     ffprobe = _bin("ffprobe", settings.get("ffmpegPath"))
-    agg = {"total": 0, "direct": 0, "remux": 0, "transcode": 0, "hdr": 0, "ten_bit": 0, "codecs": {}}
-    report = {}
+    report = {} if rebuild else _load_playability()
+    agg = {"total": 0, "new": 0, "direct": 0, "remux": 0, "transcode": 0, "hdr": 0}
+    seen = set()
 
     total_count = 0
     for count, _ in _iter_scenes(stash, page_size=1):
@@ -1097,6 +1106,11 @@ def run_stats(stash, settings):
             processed += 1
             if total_count:
                 log_progress(processed / float(total_count))
+            sid = str(scene["id"])
+            seen.add(sid)
+            agg["total"] += 1
+            if sid in report and not rebuild:
+                continue   # already analyzed — incremental skip
             files = scene.get("files") or []
             if not files:
                 continue
@@ -1104,28 +1118,21 @@ def run_stats(stash, settings):
             if not probe:
                 continue
             info = _analyze(probe)
-            agg["total"] += 1
-            agg["codecs"][info["codec"]] = agg["codecs"].get(info["codec"], 0) + 1
+            report[sid] = _entry(info)
+            agg["new"] += 1
             agg[info["tier"]] = agg.get(info["tier"], 0) + 1
             if info["hdr"]:
                 agg["hdr"] += 1
-            if info["ten_bit"]:
-                agg["ten_bit"] += 1
-            report[str(scene["id"])] = {
-                "tier": info["tier"],
-                "needs_transcode": info["needs_transcode"],
-                "direct_play": info["direct_play"],
-                "hdr": info["hdr"],
-                "ten_bit": info["ten_bit"],
-                "codec": info["codec"],
-                "pix_fmt": info["pix_fmt"],
-            }
+
+    pruned = [sid for sid in report if sid not in seen]   # scenes deleted from Stash since last run
+    for sid in pruned:
+        del report[sid]
 
     _write_playability_file(report)
-    log_info("Library codec report — {} scenes: {} direct-play, {} on-device remux, {} need transcode, "
-             "{} HDR, {} 10-bit. Codecs: {}. Wrote served playability.json (no scene writes / no Sync tasks)."
-             .format(agg["total"], agg["direct"], agg["remux"], agg["transcode"], agg["hdr"], agg["ten_bit"],
-                     ", ".join("{} {}".format(k or "?", v) for k, v in sorted(agg["codecs"].items()))))
+    log_info("Library codec report ({}) — {} scenes total, {} newly analyzed, {} pruned. New this run: "
+             "{} direct-play, {} remux, {} transcode, {} HDR. Served playability.json — no scene writes."
+             .format("rebuild" if rebuild else "incremental", agg["total"], agg["new"], len(pruned),
+                     agg["direct"], agg["remux"], agg["transcode"], agg["hdr"]))
     log_progress(1.0)
     return agg
 
@@ -1134,15 +1141,96 @@ def _playability_path():
     return os.path.join(CACHE_DIR, "playability.json")
 
 
-def _write_playability_file(report):
-    """Whole-library playability map → a served file the app reads over HTTP. Filesystem-only: no
-    sceneUpdate, no Scene.Update hooks, no queued Sync tasks. Atomic."""
+def _entry(info):
+    return {k: info[k] for k in ("tier", "needs_transcode", "direct_play", "hdr", "ten_bit", "codec", "pix_fmt")}
+
+
+def _load_playability():
+    """The current served report as {scene_id: entry}, or {} if none / unreadable."""
+    try:
+        with open(_playability_path()) as fh:
+            scenes = (json.load(fh) or {}).get("scenes")
+        return scenes if isinstance(scenes, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+@contextlib.contextmanager
+def _playability_lock():
+    """Serialize concurrent writers of playability.json — the manual report and any number of concurrent
+    Scene.Create.Post hook processes during a scan — so appends never clobber each other."""
     os.makedirs(CACHE_DIR, exist_ok=True)
+    lockf = open(_playability_path() + ".lock", "w")
+    try:
+        if fcntl:
+            try:
+                fcntl.flock(lockf, fcntl.LOCK_EX)
+            except OSError:
+                pass
+        yield
+    finally:
+        try:
+            if fcntl:
+                fcntl.flock(lockf, fcntl.LOCK_UN)
+        finally:
+            lockf.close()
+
+
+def _write_playability_raw(report):
     blob = {"generated": int(time.time()), "count": len(report), "scenes": report}
     tmp = _playability_path() + ".tmp"
     with open(tmp, "w") as fh:
         json.dump(blob, fh)
     os.replace(tmp, _playability_path())
+
+
+def _write_playability_file(report):
+    """Whole-library playability map → the served file, under the write lock. Filesystem-only: no
+    sceneUpdate, no Scene.Update hooks, no queued Sync tasks. Atomic."""
+    with _playability_lock():
+        _write_playability_raw(report)
+
+
+def _report_scene_append(stash, settings, scene_id):
+    """ffprobe ONE scene and merge it into the served report (under the lock). The Scene.Create.Post hook
+    calls this so a newly-scanned file flows into the report automatically. Zero scene writes."""
+    scene = find_scene(stash, scene_id)
+    files = (scene or {}).get("files") or []
+    if not files:
+        return
+    ffprobe = _bin("ffprobe", settings.get("ffmpegPath"))
+    probe = ffprobe_streams(files[0]["path"], ffprobe)
+    if not probe:
+        return
+    info = _analyze(probe)
+    with _playability_lock():
+        data = _load_playability()
+        data[str(scene_id)] = _entry(info)
+        _write_playability_raw(data)
+    log_info("Auto codec-reported scene {} → {} (served file, no scene writes).".format(scene_id, info["tier"]))
+
+
+def _report_scene_remove(scene_id):
+    with _playability_lock():
+        data = _load_playability()
+        if str(scene_id) in data:
+            del data[str(scene_id)]
+            _write_playability_raw(data)
+
+
+def run_hook(stash, settings, hook_ctx):
+    """Dispatch a Stash plugin hook: Scene.Create.Post appends the new scene to the report,
+    Scene.Destroy.Post drops it. Opt out via the 'autoReportNewScenes' setting."""
+    if str(settings.get("autoReportNewScenes", True)).strip().lower() in ("false", "0", "no", "off"):
+        return
+    typ = str(hook_ctx.get("type") or "")
+    sid = hook_ctx.get("id")
+    if sid is None:
+        return
+    if typ.startswith("Scene.Create"):
+        _report_scene_append(stash, settings, str(sid))
+    elif typ.startswith("Scene.Destroy"):
+        _report_scene_remove(str(sid))
 
 
 # Legacy Stashy:* tag names created by v0.1.16/0.1.17 (before playability moved to a served file). Kept
@@ -1216,11 +1304,17 @@ def main():
     mode = (args.get("mode") or "transcode").lower()
     log_debug("mode={} args={}".format(mode, {k: v for k, v in args.items() if k != "mode"}))
 
+    # A Stash plugin hook invocation carries a `hookContext` (Scene.Create.Post etc.) and usually no mode.
+    # Handle it first so it isn't mistaken for the default "transcode" mode.
+    hook_ctx = args.get("hookContext")
+
     try:
-        if mode == "transcode":
+        if hook_ctx:
+            run_hook(stash, settings, hook_ctx)
+        elif mode == "transcode":
             run_transcode(stash, args, settings)
         elif mode == "stats":
-            run_stats(stash, settings)
+            run_stats(stash, settings, rebuild=bool(args.get("rebuild")))
         elif mode == "tag":
             # Legacy task id (≤0.1.17 tagged scenes). Now a no-tag alias for the report — it writes the
             # served playability.json and makes zero scene writes, so an old invocation can't storm hooks.
