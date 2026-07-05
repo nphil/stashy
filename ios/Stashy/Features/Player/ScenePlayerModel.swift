@@ -670,6 +670,7 @@ final class ScenePlayerModel {
                 StatLine(label: "Speed", value: PlaybackSpeed.closest(to: playbackRate).label),
                 StatLine(label: "Source", value: sm.sourceWidth > 0
                          ? "\(sm.sourceWidth)×\(sm.sourceHeight) \(sm.sourceFormat)" : "—"),
+                StatLine(label: "Interp size", value: sm.interpSize.isEmpty ? "—" : sm.interpSize),
                 StatLine(label: "Color", value: sm.sourceColor.isEmpty ? "—" : sm.sourceColor),
                 StatLine(label: "Source frames", value: "\(sm.sourceFrames)"),
                 StatLine(label: "Synthesized frames", value: "\(sm.synthesized)"),

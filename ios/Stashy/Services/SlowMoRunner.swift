@@ -15,6 +15,7 @@ struct SlowMoTelemetry: Sendable {
     var sourceWidth = 0       // actual decoded buffer width
     var sourceHeight = 0      // actual decoded buffer height
     var sourceColor = ""      // color primaries / transfer function of the decoded buffer — diagnostics
+    var interpSize = ""       // resolution interpolation runs at ("native" or upscaled to dodge the 720p crash)
     var skipReason = ""       // why interpolation was skipped (e.g. "HDR"), empty if running
 }
 
@@ -102,14 +103,20 @@ final class SlowMoRunner {
             let primaries = (attach[kCVImageBufferColorPrimariesKey as String] as? String) ?? "?"
             let transfer = (attach[kCVImageBufferTransferFunctionKey as String] as? String) ?? "?"
             telemetry.sourceColor = "\(primaries)/\(transfer)"
-            // HDR / wide-gamut buffers (PQ 2084, HLG 2100, BT.2020 primaries) are the leading suspect for the
-            // hard crash inside VTFrameProcessor. Detect via substring (avoids fragile constant names).
+            // Interpolation runs at a crash-safe size (1280×720 hard-crashes VTFrameProcessor; sub-1080p is
+            // upscaled to 1920×1080).
+            let target = SlowMoInterpolator.safeInterpolationSize(width: width, height: height)
+            telemetry.interpSize = (target.width != width || target.height != height)
+                ? "\(target.width)×\(target.height)" : "native"
+            // HDR / wide-gamut buffers (PQ 2084, HLG 2100, BT.2020 primaries) — detect via substring (avoids
+            // fragile constant names) and skip, as a separate safety.
             let isHDR = transfer.contains("2084") || transfer.uppercased().contains("HLG")
                      || transfer.contains("2100") || primaries.contains("2020")
             // Persist the profile off-device BEFORE the first (crash-prone) process() call, so even a hard
             // SIGABRT leaves this file's dimensions/format/color in the recovered ntfy tail.
             RemoteLog.shared.event("⚙︎ slowmo-start", [
                 ("size", "\(width)×\(height)"),
+                ("interp", telemetry.interpSize),
                 ("fmt", telemetry.sourceFormat),
                 ("prim", primaries), ("trc", transfer), ("hdr", "\(isHDR)")
             ])

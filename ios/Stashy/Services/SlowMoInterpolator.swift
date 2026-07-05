@@ -1,39 +1,56 @@
+import Accelerate
 import CoreMedia
 import CoreVideo
 import VideoToolbox
 
-/// Phase 1a of on-device AI slow-motion (see ROADMAP → "AI / motion-interpolated slow-mo"). A small,
-/// self-contained wrapper over VideoToolbox's **low-latency frame interpolation** (`VTFrameProcessor`,
-/// new in iOS 26, Neural-Engine accelerated on Apple silicon). It turns a pair of consecutive decoded
-/// frames — `previous` → `current` — into N synthesised in-between frames, so slowed playback shows real
-/// intermediate motion instead of the same frame held for several display refreshes (the judder you get
-/// from plain `AVPlayer` rate < 1).
+/// On-device AI slow-motion frame interpolation over VideoToolbox's **low-latency frame interpolation**
+/// (`VTFrameProcessor`, iOS 26, Neural-Engine accelerated). Turns a pair of consecutive decoded frames —
+/// `previous` → `current` — into N synthesised in-between frames, so slowed playback shows real intermediate
+/// motion instead of the same frame held for several refreshes (the judder from plain `AVPlayer` rate < 1).
 ///
-/// This class does *only* "two frames in → N synthesised frames out". The render loop that pulls frames
-/// (from the existing `AVPlayerItemVideoOutput` tap), paces the synthesised stream onto a display layer,
-/// and engages this at ≤0.5× is Phase 1b — deliberately separate so the risky new-API surface lands and
-/// compiles on its own before it can touch the load-bearing playback path.
+/// **Resolution workaround (v1.0.197):** `VTLowLatencyFrameInterpolation` *hard-crashes* at 1280×720 on
+/// iOS 26.x (reproduced across multiple HEVC + H.264 files; 1920×1080 works fine). So sub-1080p frames are
+/// scaled up to a safe **1920×1080** interpolation size (via vImage) before being handed to VideoToolbox —
+/// 720p content gets smooth slow-mo instead of crashing. Content already ≥1080p is interpolated natively.
 ///
 /// Concurrency: intentionally **non-isolated** and **`@unchecked Sendable`**. `interpolate(...)` builds its
 /// VideoToolbox parameter objects and awaits `process` all within one isolation domain, so no non-`Sendable`
-/// value crosses an actor boundary inside here. The `@unchecked` promise is upheld by the caller
-/// (`SlowMoRunner`): it starts the session on the main actor *before* any work runs, then issues **one**
-/// `interpolate` at a time (single-flight), so `started`/`pool` are never touched concurrently.
+/// value crosses an actor boundary here. The `@unchecked` promise is upheld by the caller (`SlowMoRunner`):
+/// it issues **one** `interpolate` at a time (single-flight), so the session/pools are never touched
+/// concurrently.
 final class SlowMoInterpolator: @unchecked Sendable {
-    /// Frame dimensions the session is configured for. A size change needs a fresh interpolator.
+    /// The decoded source size handed in by the caller.
+    let nativeWidth: Int
+    let nativeHeight: Int
+    /// The size interpolation actually runs at (native, or upscaled to dodge the 1280×720 crash).
     let width: Int
     let height: Int
+    /// True when frames are scaled from native → interpolation size.
+    let scaled: Bool
     /// Max synthesised frames per source pair (session config). Phase 1 uses 1 → 2× (one mid frame).
     let interpolatedFrames: Int
 
     private let processor = VTFrameProcessor()
     private var started = false
-    private var pool: CVPixelBufferPool?
+    private var sourcePool: CVPixelBufferPool?        // scaled source frames (interpolation size)
+    private var destinationPool: CVPixelBufferPool?   // synthesised outputs (interpolation size)
 
     init(width: Int, height: Int, interpolatedFrames: Int = 1) {
-        self.width = width
-        self.height = height
+        self.nativeWidth = width
+        self.nativeHeight = height
+        let safe = Self.safeInterpolationSize(width: width, height: height)
+        self.width = safe.width
+        self.height = safe.height
+        self.scaled = (safe.width != width || safe.height != height)
         self.interpolatedFrames = max(1, interpolatedFrames)
+    }
+
+    /// The resolution to actually interpolate at. `VTLowLatencyFrameInterpolation` hard-crashes at 1280×720
+    /// (and likely other sub-1080p sizes) on iOS 26.x but works at 1920×1080, so anything smaller than 1080p
+    /// is bumped up to 1920×1080. (Content ≥1080p that the model can't handle throws — caught — rather than
+    /// crashing, so it's left native.)
+    static func safeInterpolationSize(width: Int, height: Int) -> (width: Int, height: Int) {
+        (width < 1920 || height < 1080) ? (1920, 1080) : (width, height)
     }
 
     /// Start the VideoToolbox session (idempotent). Returns `false` if the effect isn't available on this
@@ -53,24 +70,27 @@ final class SlowMoInterpolator: @unchecked Sendable {
         }
     }
 
-    /// Synthesise `phases.count` frames between `previous` and `current`. Phases are fractions in (0,1)
-    /// from the previous frame (0) to the current one (1) — e.g. `[0.5]` for one mid frame, or
-    /// `[0.25, 0.5, 0.75]` for 4×. Returns the synthesised buffers in phase order, or `[]` on any failure
-    /// (so the caller can fall back to showing the real frames un-interpolated).
+    /// Synthesise `phases.count` frames between `previous` and `current`. Phases are fractions in (0,1) from
+    /// the previous frame (0) to the current one (1) — e.g. `[0.5]` for one mid frame. Returns the synthesised
+    /// buffers (at the interpolation size) in phase order, or `[]` on any failure.
     func interpolate(previous: CVPixelBuffer, previousPTS: CMTime,
                      current: CVPixelBuffer, currentPTS: CMTime,
                      phases: [Double]) async -> [CVPixelBuffer] {
         guard started || startIfNeeded() else { return [] }
-        // VTFrameProcessorFrame requires IOSurface-backed buffers; the tap's BGRA buffers are.
-        guard let previousFrame = VTFrameProcessorFrame(buffer: previous, presentationTimeStamp: previousPTS),
-              let currentFrame = VTFrameProcessorFrame(buffer: current, presentationTimeStamp: currentPTS)
+        // Scale native frames up to the (crash-safe) interpolation size when needed.
+        guard let previousSized = scaled ? scaleToInterpolationSize(previous) : previous,
+              let currentSized  = scaled ? scaleToInterpolationSize(current)  : current
+        else { return [] }
+        // VTFrameProcessorFrame requires IOSurface-backed buffers; the tap's (and our pool's) BGRA buffers are.
+        guard let previousFrame = VTFrameProcessorFrame(buffer: previousSized, presentationTimeStamp: previousPTS),
+              let currentFrame = VTFrameProcessorFrame(buffer: currentSized, presentationTimeStamp: currentPTS)
         else { return [] }
 
         let span = currentPTS - previousPTS
         var destinations: [CVPixelBuffer] = []
         var destinationFrames: [VTFrameProcessorFrame] = []
         for phase in phases {
-            guard let buffer = makeDestinationBuffer() else { return [] }
+            guard let buffer = makeBuffer(&destinationPool) else { return [] }
             let pts = previousPTS + CMTimeMultiplyByFloat64(span, multiplier: phase)
             guard let frame = VTFrameProcessorFrame(buffer: buffer, presentationTimeStamp: pts) else { return [] }
             destinations.append(buffer)
@@ -93,15 +113,40 @@ final class SlowMoInterpolator: @unchecked Sendable {
         return destinations
     }
 
-    /// End the session and drop the pool.
+    /// End the session and drop the pools.
     func invalidate() {
         if started { processor.endSession(); started = false }
-        pool = nil
+        sourcePool = nil
+        destinationPool = nil
     }
 
-    /// Lazily build an IOSurface-backed BGRA pixel-buffer pool for the synthesised (destination) frames,
-    /// matching the format of the app's `AVPlayerItemVideoOutput` tap.
-    private func makeDestinationBuffer() -> CVPixelBuffer? {
+    /// Scale a native decoded frame into an interpolation-size (`width`×`height`) BGRA buffer with vImage.
+    /// A plain stretch — the app's content is 16:9 so 720p→1080p introduces no distortion; non-16:9 is only
+    /// used for the (not-yet-rendered) telemetry pipeline today.
+    private func scaleToInterpolationSize(_ source: CVPixelBuffer) -> CVPixelBuffer? {
+        guard let destination = makeBuffer(&sourcePool) else { return nil }
+        CVPixelBufferLockBaseAddress(source, .readOnly)
+        CVPixelBufferLockBaseAddress(destination, [])
+        defer {
+            CVPixelBufferUnlockBaseAddress(destination, [])
+            CVPixelBufferUnlockBaseAddress(source, .readOnly)
+        }
+        guard let sourceBase = CVPixelBufferGetBaseAddress(source),
+              let destinationBase = CVPixelBufferGetBaseAddress(destination) else { return nil }
+        var src = vImage_Buffer(data: sourceBase,
+                                height: vImagePixelCount(CVPixelBufferGetHeight(source)),
+                                width: vImagePixelCount(CVPixelBufferGetWidth(source)),
+                                rowBytes: CVPixelBufferGetBytesPerRow(source))
+        var dst = vImage_Buffer(data: destinationBase,
+                                height: vImagePixelCount(height),
+                                width: vImagePixelCount(width),
+                                rowBytes: CVPixelBufferGetBytesPerRow(destination))
+        return vImageScale_ARGB8888(&src, &dst, nil, vImage_Flags(kvImageNoFlags)) == kvImageNoError
+            ? destination : nil
+    }
+
+    /// Lazily build an IOSurface-backed BGRA pixel-buffer pool at the interpolation size.
+    private func makeBuffer(_ pool: inout CVPixelBufferPool?) -> CVPixelBuffer? {
         if pool == nil {
             let attributes: [String: Any] = [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
