@@ -178,10 +178,16 @@ core both items reuse.
     surface the decoded **source W×H + pixel fourcc** to compare a crashing file against a working one.
     **Next (root-cause fix):** read `frameSupportedPixelFormats`/`sourcePixelBufferAttributes` and feed VT the
     format it actually wants (likely a dedicated NV12 `AVPlayerItemVideoOutput`), validate dimensions against
-    the (undocumented) minimums, and only then re-enable by default. **Phase 1b-B (after that)** — the render
-    swap: present the synthesised frames on an `AVSampleBufferDisplayLayer` (paced via its timebase / the
-    display link) with `AVPlayerLayer` hidden + audio muted; fall back to plain slow playback if it can't keep
-    the buffer fed. Needs on-device visual/thermal tuning. **Phase 2** — swap in Frame Rate Conversion with a per-rate
+    the (undocumented) minimums, and only then re-enable by default. **Phase 1b-B ✅ SHIPPED (v1.0.201)** — the
+    synthesised frames render on screen: `Features/Player/SlowMoRenderView.swift` (a Metal MTKView + CIContext,
+    reusing the `LiveBlurBackdrop` path) overlays the player surface while engaged, and `SlowMoRunner` presents
+    the **real + synthesised** frames through it paced by a wall-clock display-time FIFO (`startWall +
+    (itemTime−anchor)/rate + latency`, 0.15s for the causal mid-frame), single-flight, first frame seeded (no
+    black flash). Chose the Metal path over `AVSampleBufferDisplayLayer`/`CMTimebase` (lower blind-API risk,
+    proven code). **v1 caveats / next tuning:** shares the blur's `AVPlayerItemVideoOutput` so *inline* (blur
+    active) may drop frames while *fullscreen* (blur paused) is clean → give slow-mo its **own** video output;
+    zoom during slow-mo not mirrored on the overlay; higher interpolation factor for 0.25× (2× only today).
+    **Phase 2** — swap in Frame Rate Conversion with a per-rate
     `interpolationPhase` for arbitrary-factor smoothness (`[0.5]`@0.5×, `[0.25,0.5,0.75]`@0.25×). **Phase 3
     (optional)** — an "export smooth slow-mo clip" action (on-device or P40 plugin) for a saved max-quality
     result.
