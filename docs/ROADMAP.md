@@ -145,10 +145,20 @@ core both items reuse.
     that retires the new-API risk. **API gotchas found (for Phase 2):** `interpolationPhase` is `[Float]`
     (binding refines the `NSNumber` array); `process(parameters:)` is `async throws`; `endSession()` is
     non-throwing. Not yet wired to playback (that's 1b), so it's inert in the shipped build.
-    **Phase 1b (next)** — the render path: pull consecutive frames from `AVPlayerItemVideoOutput`, feed pairs
-    to the interpolator, present on an `AVSampleBufferDisplayLayer` paced by `CADisplayLink`, engage at ≤0.5×
-    with `AVPlayerLayer` hidden + audio muted; capability gate (startSession succeeds) + fall back to plain
-    slow playback if it can't keep the buffer fed. **Phase 2** — swap in Frame Rate Conversion with a per-rate
+    **Phase 1b-A ✅ SHIPPED (v1.0.193)** — the pipeline runs live but doesn't yet render. `Services/
+    SlowMoRunner.swift` (a `@MainActor` `CADisplayLink` driver) engages at ≤0.5×: pulls consecutive decoded
+    frames from `PlaybackEngine.frameOutput` (the shared `AVPlayerItemVideoOutput`, newly exposed), feeds each
+    new pair to the interpolator **single-flight** (drops pairs if the NPU lags → never stalls real playback),
+    and reports live telemetry to a **"Slow-mo (AI)" section in the Stats overlay** (Active/Unsupported, source
+    vs synthesized frame counts, per-frame ms). Zero render risk — what's on screen is untouched; this is the
+    observable proof the pipeline works end-to-end. Concurrency shape: interpolator is `@unchecked Sendable`,
+    touched single-flight; frame pairs cross to `Task.detached` via an `@unchecked Sendable` box; results hop
+    back via an `await self?.method()` (not `MainActor.run`, which trips "sending self"). *(Also fixed a latent
+    strict-concurrency error a broader recompile surfaced: `RemoteLog.enable()` is nonisolated and used
+    `UIDevice.current` (now `@MainActor`) → switched to `ProcessInfo.operatingSystemVersionString`.)*
+    **Phase 1b-B (next)** — the render swap: present the synthesised frames on an `AVSampleBufferDisplayLayer`
+    (paced via its timebase / the display link) with `AVPlayerLayer` hidden + audio muted; fall back to plain
+    slow playback if it can't keep the buffer fed. This is the part that needs on-device visual/thermal tuning. **Phase 2** — swap in Frame Rate Conversion with a per-rate
     `interpolationPhase` for arbitrary-factor smoothness (`[0.5]`@0.5×, `[0.25,0.5,0.75]`@0.25×). **Phase 3
     (optional)** — an "export smooth slow-mo clip" action (on-device or P40 plugin) for a saved max-quality
     result.
