@@ -137,11 +137,21 @@ core both items reuse.
   - **Guardrails (per the never-stutter rule):** gate on device capability, interpolate **only around the
     playhead**, run the processor **off the render thread**, watch thermals/battery, and **fall back to plain
     slow playback** (or cheap frame-blend) if it can't keep the buffer fed — never starve real playback.
-  - **Phasing:** **Phase 1 (in progress)** — custom slow-mo render path engaging at ≤0.5×, using Low-Latency
-    Frame Interpolation (2×, real-time-friendly), audio muted; prove the render path + thermal envelope.
-    **Phase 2** — swap in Frame Rate Conversion with a per-rate `interpolationPhase` for arbitrary-factor
-    smoothness (`[0.5]`@0.5×, `[0.25,0.5,0.75]`@0.25×). **Phase 3 (optional)** — an "export smooth slow-mo
-    clip" action (on-device or P40 plugin) for a saved max-quality result.
+  - **Phasing:** **Phase 1a ✅ SHIPPED (v1.0.192)** — `Services/SlowMoInterpolator.swift`, a self-contained
+    wrapper over `VTFrameProcessor` low-latency interpolation (two decoded frames → N synthesised frames;
+    `VTLowLatencyFrameInterpolationConfiguration/Parameters`, `VTFrameProcessorFrame(buffer:presentation
+    TimeStamp:)`, IOSurface-backed BGRA destination pool). Non-isolated so no non-Sendable value crosses an
+    actor boundary internally; returns `[]` on failure. **Verified compiling on the iOS 26 runner SDK** —
+    that retires the new-API risk. **API gotchas found (for Phase 2):** `interpolationPhase` is `[Float]`
+    (binding refines the `NSNumber` array); `process(parameters:)` is `async throws`; `endSession()` is
+    non-throwing. Not yet wired to playback (that's 1b), so it's inert in the shipped build.
+    **Phase 1b (next)** — the render path: pull consecutive frames from `AVPlayerItemVideoOutput`, feed pairs
+    to the interpolator, present on an `AVSampleBufferDisplayLayer` paced by `CADisplayLink`, engage at ≤0.5×
+    with `AVPlayerLayer` hidden + audio muted; capability gate (startSession succeeds) + fall back to plain
+    slow playback if it can't keep the buffer fed. **Phase 2** — swap in Frame Rate Conversion with a per-rate
+    `interpolationPhase` for arbitrary-factor smoothness (`[0.5]`@0.5×, `[0.25,0.5,0.75]`@0.25×). **Phase 3
+    (optional)** — an "export smooth slow-mo clip" action (on-device or P40 plugin) for a saved max-quality
+    result.
 - **Mini-player / undock the player (owner-requested 2026-07-04).** Let the player detach from the scene
   screen into a floating, draggable mini-player (à la Apple Podcasts / YouTube PiP) so it keeps playing
   while the user browses performers, links, other scenes, etc. Would make navigation-away seamless (see
