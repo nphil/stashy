@@ -23,43 +23,41 @@ private struct SlowMoFramePair: @unchecked Sendable {
     let currentPTS: CMTime
 }
 
-/// Phase 1b of on-device AI slow-motion. While engaged (playback ≤ 0.5×), a `CADisplayLink` pulls
-/// consecutive decoded frames from the player's `AVPlayerItemVideoOutput` (the same tap the live blur
-/// uses) and feeds each new pair to `SlowMoInterpolator`, synthesising the in-between frame(s).
+/// Phase 1b of on-device AI slow-motion. While engaged (playback ≤ 0.5× on an item that can actually
+/// slow-play), a `CADisplayLink` pulls consecutive decoded frames from the player's
+/// `AVPlayerItemVideoOutput` (the same tap the live blur uses) and feeds each new pair to
+/// `SlowMoInterpolator`, synthesising the in-between frame(s).
 ///
 /// **1b(A) — this stage** runs the pipeline and reports live telemetry (proof it works, visible in the
-/// Stats overlay) WITHOUT changing what's on screen; the display swap that presents the synthesised frames
-/// is 1b(B). The loop is **single-flight** (at most one interpolation outstanding) so it can never pile up
-/// or stall real playback — if the NPU can't keep up it simply drops pairs.
+/// Stats overlay) WITHOUT changing what's on screen; the display swap is 1b(B). The loop is **single-flight**
+/// (at most one interpolation outstanding) so it can never pile up or stall real playback, and the
+/// interpolator is sized from the **actual decoded buffer** (never `presentationSize`, which can differ for
+/// anamorphic content and would mismatch VideoToolbox) so a size mismatch can't hard-fail.
 @MainActor
 final class SlowMoRunner {
     private let outputProvider: () -> AVPlayerItemVideoOutput?
     private let onTelemetry: (SlowMoTelemetry) -> Void
-    private let interpolator: SlowMoInterpolator
 
+    private var interpolator: SlowMoInterpolator?
+    private var configWidth = 0
+    private var configHeight = 0
     private var displayLink: CADisplayLink?
     private var previous: CVPixelBuffer?
     private var previousPTS: CMTime = .invalid
     private var inFlight = false
     private var telemetry = SlowMoTelemetry()
 
-    init(width: Int, height: Int,
-         outputProvider: @escaping () -> AVPlayerItemVideoOutput?,
+    init(outputProvider: @escaping () -> AVPlayerItemVideoOutput?,
          onTelemetry: @escaping (SlowMoTelemetry) -> Void) {
-        self.interpolator = SlowMoInterpolator(width: width, height: height, interpolatedFrames: 1)
         self.outputProvider = outputProvider
         self.onTelemetry = onTelemetry
     }
 
-    /// Start the VideoToolbox session (on the main actor, before any interpolation task exists) and, if
-    /// supported, begin the display-link frame pull. If unsupported, reports `supported = false` and does
-    /// nothing further (the caller keeps plain slow playback).
+    /// Begin the display-link frame pull. The VideoToolbox session is created lazily from the first decoded
+    /// frame's real dimensions (so it always matches the source).
     func start() {
-        telemetry.supported = interpolator.startIfNeeded()
-        telemetry.active = telemetry.supported
+        telemetry.active = true
         onTelemetry(telemetry)
-        guard telemetry.supported else { return }
-
         let proxy = SlowMoLinkProxy(target: self)
         let link = CADisplayLink(target: proxy, selector: #selector(SlowMoLinkProxy.tick))
         proxy.link = link
@@ -67,8 +65,8 @@ final class SlowMoRunner {
         displayLink = link
     }
 
-    /// Stop the frame pull. Any in-flight interpolation is allowed to finish (single-flight, so nothing
-    /// races the interpolator's state); the session is released when the runner deallocates.
+    /// Stop the frame pull. Any in-flight interpolation finishes (single-flight, so nothing races the
+    /// interpolator's state); the session is released when the runner deallocates.
     func stop() {
         displayLink?.invalidate()
         displayLink = nil
@@ -84,6 +82,26 @@ final class SlowMoRunner {
         guard output.hasNewPixelBuffer(forItemTime: now),
               let buffer = output.copyPixelBuffer(forItemTime: now, itemTimeForDisplay: nil) else { return }
 
+        let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
+        guard width > 0, height > 0 else { return }
+
+        // Lazily create the interpolator sized to the ACTUAL decoded buffer (never presentationSize — for
+        // anamorphic content that display size differs from the coded buffer and would mismatch VideoToolbox).
+        if interpolator == nil {
+            let interp = SlowMoInterpolator(width: width, height: height, interpolatedFrames: 1)
+            telemetry.supported = interp.startIfNeeded()
+            onTelemetry(telemetry)
+            guard telemetry.supported else { stop(); return }   // unsupported device → give up cleanly
+            interpolator = interp
+            configWidth = width; configHeight = height
+        }
+        // A mid-stream size change (e.g. an engine rebuild on seek-reinit) would break the fixed-size
+        // session — re-seed and skip rather than feed VideoToolbox a mismatched frame.
+        guard width == configWidth, height == configHeight else {
+            previous = nil; previousPTS = .invalid
+            return
+        }
+
         // Seed on the first frame.
         guard let prev = previous, previousPTS.isValid else {
             previous = buffer; previousPTS = now
@@ -97,11 +115,10 @@ final class SlowMoRunner {
         previousPTS = now
 
         // Single-flight: if the previous interpolation hasn't returned, drop this pair (never stall).
-        guard !inFlight else { onTelemetry(telemetry); return }
+        guard !inFlight, let interp = interpolator else { onTelemetry(telemetry); return }
         inFlight = true
         onTelemetry(telemetry)
 
-        let interp = interpolator
         Task.detached { [weak self, interp, pair] in
             let t0 = Date()
             let frames = await interp.interpolate(previous: pair.previous, previousPTS: pair.previousPTS,

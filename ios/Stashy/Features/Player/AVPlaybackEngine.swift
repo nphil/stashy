@@ -238,14 +238,32 @@ final class AVPlaybackEngine: PlaybackEngine {
         get { desiredRate }
         set {
             desiredRate = newValue
+            // The current item may not support the requested rate: a growing/live **loopback-remux HLS**
+            // stream reports `canPlayFastForward`/`canPlaySlowForward == false`, and applying an unsupported
+            // rate is ignored at best and *raises* at worst (the remux-path crash: >1× did nothing, <1×
+            // crashed). Clamp to a rate the item can actually honor.
+            let effective = supportedRate(newValue)
             // With `automaticallyWaitsToMinimizeStalling` on, `play()` sets the live rate to `defaultRate`
-            // (and setting `rate` directly is discouraged / logs). So publish the new rate via defaultRate,
-            // then re-invoke play() to apply it live — but only if already playing, so changing speed while
-            // paused doesn't force playback to start.
-            player.defaultRate = newValue
+            // (setting `rate` directly is discouraged / logs). Publish via defaultRate, then re-invoke
+            // play() to apply it live — but only if already playing, so changing speed while paused doesn't
+            // force playback to start.
+            player.defaultRate = effective
             if player.timeControlStatus != .paused { player.play() }
         }
     }
+
+    /// The requested rate if the current item can honor it, else 1.0. A live/loopback HLS stream can't
+    /// fast- or slow-forward, so applying such a rate there is unsafe.
+    private func supportedRate(_ rate: Float) -> Float {
+        guard let item = player.currentItem else { return 1 }
+        if rate > 1 { return item.canPlayFastForward ? rate : 1 }
+        if rate < 1 { return item.canPlaySlowForward ? rate : 1 }
+        return 1
+    }
+
+    /// Whether the current item supports slow-forward playback (false for a live/loopback HLS stream). The
+    /// player model uses this to avoid engaging slow-mo interpolation where slow playback isn't possible.
+    var canSlowForward: Bool { player.currentItem?.canPlaySlowForward ?? false }
 
     /// True when audio is routed somewhere private (wired headphones, AirPods / other Bluetooth, USB or
     /// AirPlay) rather than the built-in phone speaker.

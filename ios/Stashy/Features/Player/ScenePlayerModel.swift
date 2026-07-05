@@ -537,11 +537,12 @@ final class ScenePlayerModel {
     /// disengage above it. Purely additive telemetry today (Phase 1b(A)) — it never alters normal playback,
     /// so if VTFrameProcessor is unavailable or the pipeline can't keep up, playback is unaffected.
     private func updateSlowMo() {
-        let engage = playbackRate > 0 && playbackRate <= 0.5
+        // Engage only at ≤0.5× AND when the item can actually slow-play — a live/loopback-remux HLS stream
+        // can't, so there's nothing to interpolate there (and applying the slow rate is skipped too).
+        let engage = playbackRate > 0 && playbackRate <= 0.5 && (engine?.canSlowForward ?? false)
         if engage {
-            guard slowMoRunner == nil, presentationSize.width > 0, presentationSize.height > 0 else { return }
+            guard slowMoRunner == nil else { return }
             let runner = SlowMoRunner(
-                width: Int(presentationSize.width), height: Int(presentationSize.height),
                 outputProvider: { [weak self] in self?.engine?.frameOutput },
                 onTelemetry: { [weak self] telemetry in self?.slowMoTelemetry = telemetry }
             )

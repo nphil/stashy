@@ -57,6 +57,10 @@ protocol PlaybackEngine: AnyObject {
     /// clobbering the user's chosen volume level (restored when the flag clears).
     var slowMute: Bool { get set }
 
+    /// Whether the current item can actually play slow-forward (false for a live/loopback HLS stream, where
+    /// AVPlayer can't slow-play). The model gates slow-mo interpolation on this.
+    var canSlowForward: Bool { get }
+
     func play()
     func pause()
     /// `precise` seeks frame-accurately (zero tolerance) so the frame lands exactly where the scrub
