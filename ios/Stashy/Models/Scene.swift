@@ -165,25 +165,15 @@ extension StashScene {
                                  reason: why, fallbackURL: hlsURL, duration: files.first?.duration ?? 0)
         }
 
-        // Transcode class (codec Apple can't decode at all: VP9, software-AV1, MPEG4-ASP/VC1, …).
-        // M-A: prefer an on-device streaming transcode (re-encode → H.264 over the loopback) for
-        // reasonable source sizes (≤1080p long-edge), which keeps it off the server and works offline;
-        // it carries the Stash HLS as `fallbackURL` so a too-slow transcode auto-recovers to the server.
-        // Heavier 4K software-decode is handed straight to the server (its GPU is faster and won't
-        // thermally throttle the phone).
-        let srcLongEdge = max(files.first?.width ?? 0, files.first?.height ?? 0)
+        // Transcode class (codec Apple can't decode at all: VP9, software-AV1, MPEG4-ASP/VC1, exotic pixel
+        // formats, or a plugin-flagged Apple-undecodable file) → the Stash **server** HLS transcode. It's
+        // reliable, scrubs well, and on a self-hosted LAN the server (P40) does it in seconds. On-device
+        // streaming transcode was removed: it was flaky, its seek-by-reinit made scrubbing glitchy, and it
+        // pulled the whole original file over the network to re-encode locally (more bandwidth, not less).
         let why = flaggedTranscode ? "\(codec ?? "?") (plugin: Apple-undecodable)" : (codec ?? "?")
-        if srcLongEdge > 0, srcLongEdge <= 1920, let source = directFileURL(apiKey: apiKey) {
-            return PlaybackRoute(url: source, engine: .localFFmpeg, streamType: "On-device transcode",
-                                 reason: "\(why) → on-device transcode (H.264)",
-                                 fallbackURL: hlsURL, duration: files.first?.duration ?? 0,
-                                 onDeviceTranscode: true, transcodeMaxDimension: 1920)
-        }
-
-        // Otherwise (or no on-device path) the Stash server HLS transcode.
         if let hlsURL {
             return PlaybackRoute(url: hlsURL, engine: .avPlayer, streamType: "HLS (transcoded)",
-                                 reason: "codec \(codec ?? "?") → HLS (transcode)")
+                                 reason: "codec \(why) → HLS (transcode)")
         }
 
         // No HLS offered → last-resort direct file (may not render for exotic codecs/containers).

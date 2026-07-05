@@ -89,7 +89,6 @@ final class LoadEstimator {
             switch tier {
             case .direct:         perWeight = 0.3
             case .remux:          perWeight = 0.7   // av_seek_frame → one GOP remuxed, already-open input
-            case .localTranscode: perWeight = 1.4   // re-encode spin-up from the seek keyframe
             case .server:         perWeight = 1.2
             }
         }
@@ -133,7 +132,6 @@ final class LoadEstimator {
         switch tier {
         case .direct:         base = 0.4   // native file — near-instant on LAN
         case .remux:          base = 1.2   // on-device container rewrite of the first GOP
-        case .localTranscode: base = 2.2   // on-device re-encode spin-up
         case .server:         base = 1.8   // server transcode + first segment over the network
         }
         return expensive ? base * 2.0 : base
@@ -157,7 +155,6 @@ struct LoadCurveParams {
         switch tier {
         case .direct:         return .init(knee: 0.96, cap: 0.995, tailFrac: 0.35, pace: 1.7)
         case .remux:          return .init(knee: 0.95, cap: 0.995, tailFrac: 0.40, pace: 1.5)
-        case .localTranscode: return .init(knee: 0.90, cap: 0.99,  tailFrac: 0.50, pace: 1.1)
         case .server:         return .init(knee: 0.90, cap: 0.99,  tailFrac: 0.35, pace: 1.05)
         }
     }

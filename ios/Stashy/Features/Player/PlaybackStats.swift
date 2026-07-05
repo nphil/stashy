@@ -23,11 +23,6 @@ struct PlaybackRoute {
     /// Media duration (seconds) from Stash metadata — lets the local-HLS index compute the final
     /// segment's EXTINF without decoding the whole file. 0 when unknown.
     var duration: Double = 0
-    /// For a `.localFFmpeg` route: true = on-device streaming *transcode* (re-encode via
-    /// `LocalTranscodeStream`) rather than a stream-copy remux. (Roadmap M-A.)
-    var onDeviceTranscode: Bool = false
-    /// Longest-edge cap for that transcode (nil = keep source size); used to gate on-device to ≤1080p.
-    var transcodeMaxDimension: Int? = nil
 }
 
 /// Manual server-side transcode quality (the player's gear menu / M-B). `.auto` = normal routing
@@ -69,14 +64,12 @@ enum ServerQuality: String, CaseIterable, Identifiable, Hashable {
 enum PlaybackTier: Int {
     case direct           // AVPlayer plays the file as-is — no conversion anywhere (least work)
     case remux            // on-device container rewrite (cheap; no re-encode)
-    case localTranscode   // on-device VideoToolbox re-encode (heavier, but stays on the phone)
     case server           // Stash server transcodes live — most costly (server compute)
 
     var label: String {
         switch self {
         case .direct: return "Direct"
         case .remux: return "Remux"
-        case .localTranscode: return "Local"   // on-device transcode — short label to fit the control row
         case .server: return "Server"
         }
     }
@@ -85,7 +78,6 @@ enum PlaybackTier: Int {
         switch self {
         case .direct: return "bolt.fill"           // instant, no work
         case .remux: return "shippingbox.fill"     // repackage the container
-        case .localTranscode: return "cpu.fill"    // the phone's chip does the work
         case .server: return "server.rack"         // the server does the work
         }
     }

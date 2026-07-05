@@ -10,7 +10,6 @@ extension PlaybackTier {
         switch self {
         case .direct:         return Color(red: 0.30, green: 0.80, blue: 0.46)  // green — least work
         case .remux:          return Color(red: 0.24, green: 0.80, blue: 0.80)  // teal — cheap rewrite
-        case .localTranscode: return Color(red: 1.00, green: 0.62, blue: 0.12)  // orange — phone works
         case .server:         return Color(red: 1.00, green: 0.35, blue: 0.30)  // red — server compute
         }
     }
