@@ -67,6 +67,11 @@ final class ScenePlayerModel {
     @ObservationIgnored private var slowMoTelemetry = SlowMoTelemetry()
     /// Runs the frame-interpolation pipeline while slow-mo is engaged (nil when disengaged).
     @ObservationIgnored private var slowMoRunner: SlowMoRunner?
+    /// True while the AI slow-mo render overlay should be shown — drives `ScenePlayerView` to overlay the
+    /// interpolated frame stream on top of the (hidden) player surface.
+    var slowMoActive = false
+    /// The runner's render view (interpolated frame stream). Read by `ScenePlayerView` when `slowMoActive`.
+    @ObservationIgnored var slowMoRenderView: UIView?
     /// True once playback has run to the end (player parked there). The next play() restarts from 0.
     @ObservationIgnored private var reachedEnd = false
 
@@ -416,6 +421,8 @@ final class ScenePlayerModel {
         startInProgress = false
         slowMoRunner?.stop()
         slowMoRunner = nil
+        slowMoRenderView = nil
+        slowMoActive = false
         watchdog?.cancel()
         loadTicker?.cancel(); loadTicker = nil
         loadStart = nil
@@ -554,14 +561,19 @@ final class ScenePlayerModel {
             guard slowMoRunner == nil else { return }
             let runner = SlowMoRunner(
                 outputProvider: { [weak self] in self?.engine?.frameOutput },
+                rateProvider: { [weak self] in self?.playbackRate ?? 0.5 },
                 onTelemetry: { [weak self] telemetry in self?.slowMoTelemetry = telemetry }
             )
             slowMoRunner = runner
+            slowMoRenderView = runner.renderView
             slowMoTelemetry = SlowMoTelemetry(active: true)
+            slowMoActive = true
             runner.start()
         } else if slowMoRunner != nil {
             slowMoRunner?.stop()
             slowMoRunner = nil
+            slowMoRenderView = nil
+            slowMoActive = false
             slowMoTelemetry = SlowMoTelemetry()
         }
     }

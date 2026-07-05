@@ -121,6 +121,15 @@ struct ScenePlayerView: View {
                 )
                 .frame(width: surfaceSize.width, height: surfaceSize.height)
 
+                // AI slow-mo (≤0.5×, opt-in): overlay the interpolated frame stream over the video surface
+                // so the slowed motion is smooth. Non-interactive — taps/zoom pass through to the surface
+                // below; the controls sit above this.
+                if model.slowMoActive, let renderView = model.slowMoRenderView {
+                    SlowMoRenderHost(view: renderView)
+                        .frame(width: surfaceSize.width, height: surfaceSize.height)
+                        .allowsHitTesting(false)
+                }
+
                 if model.didFail {
                     VStack(spacing: 10) {
                         Image(systemName: "exclamationmark.triangle.fill").font(.largeTitle)
