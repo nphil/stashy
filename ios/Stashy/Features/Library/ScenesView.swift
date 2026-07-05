@@ -28,6 +28,7 @@ struct ScenesView: View {
 
     private var filterActive: Bool {
         !query.tags.isEmpty || query.sort != .date || query.direction != .desc || query.downloadedOnly
+            || query.playabilityTag != nil
     }
 
     /// Scenes to show: the downloaded-only view reads completed downloads locally (no network),

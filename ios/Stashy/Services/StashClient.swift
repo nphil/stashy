@@ -119,12 +119,13 @@ struct StashClient: Sendable {
           }
         }
         """
+        let tagIDs = q.effectiveTagIDs
         var sceneFilter: SceneFilter?
-        if !q.tagIDs.isEmpty || q.performerID != nil {
+        if !tagIDs.isEmpty || q.performerID != nil {
             sceneFilter = SceneFilter(
                 performers: q.performerID.map { MultiCriterion(value: [$0], modifier: "INCLUDES") },
-                tags: q.tagIDs.isEmpty ? nil
-                    : HierarchicalMultiCriterion(value: q.tagIDs, modifier: "INCLUDES_ALL", depth: 0)
+                tags: tagIDs.isEmpty ? nil
+                    : HierarchicalMultiCriterion(value: tagIDs, modifier: "INCLUDES_ALL", depth: 0)
             )
         }
         let vars = FindScenesVariables(
@@ -382,8 +383,14 @@ struct SceneQuery: Sendable, Equatable {
     var performerID: String? = nil
     /// Client-side filter: show only scenes that have a completed on-device download (not a Stash concept).
     var downloadedOnly: Bool = false
+    /// Playability filter — a resolved Stashy Companion tag (Direct-Play / Needs-Transcode). Kept separate
+    /// from `tags` so it drives its own dedicated control and doesn't clutter the tag picker; folded into
+    /// the server-side tag criterion via `effectiveTagIDs`. nil = no playability filter.
+    var playabilityTag: Tag? = nil
 
     var tagIDs: [String] { tags.map(\.id) }
+    /// Tag IDs actually sent to Stash: the user's tags plus the playability tag (INCLUDES_ALL).
+    var effectiveTagIDs: [String] { tagIDs + (playabilityTag.map { [$0.id] } ?? []) }
 }
 
 enum PerformerSort: String, CaseIterable, Sendable, Identifiable, Hashable {

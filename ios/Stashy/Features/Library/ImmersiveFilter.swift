@@ -77,6 +77,14 @@ struct FilterPopoverAnchor<Panel: View>: View {
 struct SceneFilterPanel: View {
     @Binding var query: SceneQuery
     @Environment(ThemeManager.self) private var themeManager
+    @Environment(AppState.self) private var appState
+    // Resolved Stashy Companion playability tags (nil until looked up / if the plugin hasn't tagged the
+    // library). The Playability row only appears when at least one exists — so libraries without the
+    // plugin see no dead control.
+    @State private var directPlayTag: Tag?
+    @State private var needsTranscodeTag: Tag?
+
+    private var hasPlayabilityTags: Bool { directPlayTag != nil || needsTranscodeTag != nil }
 
     var body: some View {
         // Popover content: no floating panel chrome (the system popover is the container); just the
@@ -92,11 +100,62 @@ struct SceneFilterPanel: View {
                 Spacer()
                 downloadedToggle
             }
+            if hasPlayabilityTags {
+                HStack {
+                    Text("Playability").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Spacer()
+                    playabilityMenu
+                }
+            }
             Divider().opacity(0.25)
             InlineTagEditor(selected: $query.tags)
         }
         .padding(16)
         .frame(width: 330)
+        .task { await resolvePlayabilityTags() }
+    }
+
+    /// Look up the Companion plugin's playability tags by exact name (they're just Stash tags). One cheap
+    /// query when the panel opens; absent tags simply hide the row.
+    private func resolvePlayabilityTags() async {
+        guard directPlayTag == nil, needsTranscodeTag == nil, let client = appState.client else { return }
+        let found = (try? await client.findTags(query: "Stashy")) ?? []
+        directPlayTag = found.first { $0.name == PlayabilityTag.directPlay }
+        needsTranscodeTag = found.first { $0.name == PlayabilityTag.needsTranscode }
+    }
+
+    private var playabilityMenu: some View {
+        Menu {
+            Button { query.playabilityTag = nil } label: {
+                Label("Any", systemImage: query.playabilityTag == nil ? "checkmark" : "square.grid.2x2")
+            }
+            if let t = directPlayTag {
+                Button { query.playabilityTag = t } label: {
+                    Label("Direct-play", systemImage: query.playabilityTag == t ? "checkmark" : "bolt.fill")
+                }
+            }
+            if let t = needsTranscodeTag {
+                Button { query.playabilityTag = t } label: {
+                    Label("Needs transcode", systemImage: query.playabilityTag == t ? "checkmark" : "arrow.triangle.2.circlepath")
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "iphone").font(.caption)
+                Text(playabilityLabel)
+                Image(systemName: "chevron.down").font(.caption2)
+            }
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(query.playabilityTag != nil ? themeManager.current.accentColor : themeManager.current.foregroundColor)
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(themeManager.current.backgroundColor.opacity(0.6), in: Capsule())
+        }
+    }
+
+    /// Chip label: the selected playability tag, minus the "Stashy:" namespace, or "Any".
+    private var playabilityLabel: String {
+        guard let name = query.playabilityTag?.name else { return "Any" }
+        return name.replacingOccurrences(of: "Stashy:", with: "")
     }
 
     private var downloadedToggle: some View {
