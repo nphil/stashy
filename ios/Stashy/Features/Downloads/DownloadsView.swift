@@ -96,51 +96,33 @@ private struct DownloadCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // Top row spanning the full card: scene/file name at the top-left (scrolls if long), tappable
-            // performer chip at the top-right.
-            HStack(alignment: .top, spacing: 10) {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    Text(item.title.isEmpty ? item.fileName : item.title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(themeManager.current.foregroundColor)
-                        .lineLimit(1)
-                        .fixedSize()
-                        .privacyTitleBlur()
+            titleRow
+            if item.state == .staged {
+                // Staging: thumbnail + specs sit compactly at the top (right under the title), so the
+                // option controls below get the FULL card width — no truncated segments / wrapped menus.
+                HStack(alignment: .top, spacing: 12) {
+                    thumbnail
+                    specsFlow.frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                performerChip
-            }
-
-            // Body: thumbnail (vertically centered) alongside the specs + status/controls column.
-            HStack(alignment: .center, spacing: 12) {
-                thumbnail
-                VStack(alignment: .leading, spacing: 8) {
-                    FlowLayout(spacing: 6) {
-                        ForEach(specs, id: \.self) { spec in
-                            Text(spec)
-                                .font(.caption2.weight(.medium))
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 7).padding(.vertical, 3)
-                                .background(themeManager.current.backgroundColor, in: Capsule())
+                stagingControls
+                actionRow
+            } else {
+                // Completed / downloading: thumbnail (vertically centered) beside the specs + status column.
+                HStack(alignment: .center, spacing: 12) {
+                    thumbnail
+                    VStack(alignment: .leading, spacing: 8) {
+                        specsFlow
+                        if item.transcoding { transcodeBar }
+                        else if item.state == .serverProcessing { serverProcessingBar }
+                        else if item.state != .completed {
+                            if item.totalBytes > 0 { connectionBar } else { estimateBar }
                         }
+                        transcodeLogBox
+                        actionRow
                     }
-
-                    if item.state == .staged { stagingControls }
-                    else if item.transcoding { transcodeBar }
-                    else if item.state == .serverProcessing { serverProcessingBar }
-                    else if item.state != .completed {
-                        if item.totalBytes > 0 { connectionBar } else { estimateBar }
-                    }
-                    transcodeLogBox
-
-                    HStack(alignment: .center, spacing: 10) {
-                        statusView
-                        Spacer(minLength: 8)
-                        controls
-                    }
+                    // Pin the column so a long monospaced log line in the transcode box can't stretch the card.
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                // Pin the column so a long monospaced log line in the transcode box can't stretch the card.
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(12)
@@ -165,6 +147,45 @@ private struct DownloadCard: View {
     }
 
     // MARK: - Pieces
+
+    /// Top row spanning the full card: scene/file name at the top-left (scrolls if long), tappable
+    /// performer chip at the top-right.
+    private var titleRow: some View {
+        HStack(alignment: .top, spacing: 10) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(item.title.isEmpty ? item.fileName : item.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(themeManager.current.foregroundColor)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .privacyTitleBlur()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            performerChip
+        }
+    }
+
+    /// Media spec chips (container / resolution / codec / bitrate / size), wrapping to as many rows as needed.
+    private var specsFlow: some View {
+        FlowLayout(spacing: 6) {
+            ForEach(specs, id: \.self) { spec in
+                Text(spec)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 7).padding(.vertical, 3)
+                    .background(themeManager.current.backgroundColor, in: Capsule())
+            }
+        }
+    }
+
+    /// Status text (left) + action buttons (right).
+    private var actionRow: some View {
+        HStack(alignment: .center, spacing: 10) {
+            statusView
+            Spacer(minLength: 8)
+            controls
+        }
+    }
 
     private var thumbnail: some View {
         ZStack {
@@ -311,20 +332,6 @@ private struct DownloadCard: View {
         Binding(get: { item.companionCodec ?? .hevc }, set: { item.companionCodec = $0 })
     }
 
-    /// Resolution choices for a server transcode: Original (keep source — portrait-safe) + the standard
-    /// download sizes. 240p is streaming-only, so it's intentionally not offered for downloads.
-    private var resolutionRow: some View {
-        HStack(spacing: 6) {
-            Text("Resolution").font(.caption2.weight(.medium)).foregroundStyle(.secondary)
-            Spacer(minLength: 6)
-            Picker("Resolution", selection: $item.serverResolution) {
-                ForEach([ServerQuality.original, .p1080, .p720, .p480]) { Text($0.label).tag($0) }
-            }
-            .pickerStyle(.menu)
-            .tint(themeManager.current.accentColor)
-        }
-    }
-
     private var stagingControls: some View {
         VStack(alignment: .leading, spacing: 8) {
             Picker("Source", selection: stageSource) {
@@ -341,25 +348,38 @@ private struct DownloadCard: View {
                 }
                 .pickerStyle(.segmented)
             case .serverTranscode:
-                Picker("Codec", selection: companionCodecBinding) {
-                    ForEach(StashCompanion.Codec.allCases) { Text($0.label).tag($0) }
+                labeledSegment("Codec") {
+                    Picker("Codec", selection: companionCodecBinding) {
+                        ForEach(StashCompanion.Codec.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
                 }
-                .pickerStyle(.segmented)
-                resolutionRow
-                HStack(spacing: 6) {
-                    Text("Quality").font(.caption2.weight(.medium)).foregroundStyle(.secondary)
-                    Spacer(minLength: 6)
+                labeledSegment("Resolution") {
+                    Picker("Resolution", selection: $item.serverResolution) {
+                        ForEach([ServerQuality.original, .p1080, .p720, .p480]) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                }
+                labeledSegment("Quality") {
                     Picker("Quality", selection: $item.companionQuality) {
                         ForEach(CompanionQuality.allCases) { Text($0.label).tag($0) }
                     }
-                    .pickerStyle(.menu)
-                    .tint(themeManager.current.accentColor)
+                    .pickerStyle(.segmented)
                 }
                 // Compact one-liner (no wrap): the live size/ETA estimate shows in the log box once running.
                 Text("→ \(companionCodecBinding.wrappedValue.label) · \(item.serverResolution.label)")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .lineLimit(1)
             }
+        }
+    }
+
+    /// A small caption above a full-width control, so segmented pickers stay self-explanatory without a
+    /// side label squeezing them (which caused the menu wrapping/truncation).
+    private func labeledSegment<Content: View>(_ label: String, @ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).font(.caption2.weight(.medium)).foregroundStyle(.secondary)
+            content()
         }
     }
 
