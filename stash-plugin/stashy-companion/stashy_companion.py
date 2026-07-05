@@ -1158,57 +1158,29 @@ TAG_NAMES = {
 
 
 def run_untag(stash):
-    """Reverse the per-scene writes older plugin versions (≤0.1.17) made: strip every Stashy:* tag from
-    every scene, clear the `stashy_probe` custom field, then delete the now-unused Stashy:* tag definitions
-    — leaving the user's own tags and custom fields untouched. The current plugin writes NONE of these
-    (playability lives in a served file now), so this is purely a one-time cleanup for earlier installs.
-    Only scenes that actually carry Stashy data are updated, so on a clean library it makes no writes."""
-    tag_ids = {}
-    for key, name in TAG_NAMES.items():   # resolve only tags that already exist — don't create to delete
+    """Delete the Stashy:* tag DEFINITIONS that older plugin versions (≤0.1.17) created. Destroying a tag
+    makes Stash remove it from every scene via its own cascade — with **no per-scene sceneUpdate**, so this
+    fires no Scene.Update hooks and queues no "Sync" tasks (6 tagDestroy calls total, not hundreds of scene
+    writes). The user's own tags are untouched.
+
+    NOTE: a residual `stashy_probe` custom field (if a ≤0.1.17 Library Codec Report wrote one) is left in
+    place on purpose — it's harmless dead data nothing reads, and clearing a custom field is per-scene
+    sceneUpdate = exactly the Sync-task storm we're avoiding. On a clean/current library this does nothing."""
+    destroyed = 0
+    for name in TAG_NAMES.values():
         data = stash.call(
             "query($t: TagFilterType) { findTags(tag_filter: $t) { tags { id } } }",
             {"t": {"name": {"value": name, "modifier": "EQUALS"}}},
         )
-        tags = (data.get("findTags") or {}).get("tags") or []
-        if tags:
-            tag_ids[key] = str(tags[0]["id"])
-    ours = set(tag_ids.values())
-
-    removed, cleared, total_count, processed = 0, 0, 0, 0
-    for count, _ in _iter_scenes(stash, page_size=1):
-        total_count = count
-        break
-    for count, scenes in _iter_scenes(stash):
-        total_count = count or total_count
-        for scene in scenes:
-            processed += 1
-            if total_count:
-                log_progress(processed / float(total_count))
-            existing = {str(t["id"]) for t in (scene.get("tags") or [])}
-            keep = existing - ours
-            if ours and keep != existing:
-                stash.call(
-                    "mutation($id: ID!, $ids: [ID!]) { sceneUpdate(input: {id: $id, tag_ids: $ids}) { id } }",
-                    {"id": str(scene["id"]), "ids": sorted(keep)},
-                )
-                removed += 1
-            if "stashy_probe" in (scene.get("custom_fields") or {}):
-                try:  # partial update with a null value clears just this key (never the user's fields)
-                    stash.call(
-                        "mutation($id: ID!, $cf: CustomFieldsInput!) {"
-                        " sceneUpdate(input: {id: $id, custom_fields: $cf}) { id } }",
-                        {"id": str(scene["id"]), "cf": {"partial": {"stashy_probe": None}}},
-                    )
-                    cleared += 1
-                except Exception as e:
-                    log_debug("probe clear failed for {}: {}".format(scene["id"], e))
-    for tid in ours:                      # remove the empty Stashy:* tag definitions so the tag list is clean
-        try:
-            stash.call("mutation($id: ID!) { tagDestroy(input: {id: $id}) }", {"id": tid})
-        except Exception as e:
-            log_debug("tag destroy failed for {}: {}".format(tid, e))
-    log_info("Removed Stashy tags from {} scenes, cleared probe on {} scenes, deleted {} tag definitions."
-             .format(removed, cleared, len(ours)))
+        for t in ((data.get("findTags") or {}).get("tags") or []):
+            try:
+                # tagDestroy → cascade-removes the tag from all scenes; no Scene.Update hook fires.
+                stash.call("mutation($id: ID!) { tagDestroy(input: {id: $id}) }", {"id": str(t["id"])})
+                destroyed += 1
+            except Exception as e:
+                log_debug("tag destroy failed for {}: {}".format(t["id"], e))
+    log_info("Removed {} Stashy:* tag definition(s) via cascade — no scene writes, no Sync tasks. "
+             "(Any residual stashy_probe custom field is harmless and left in place.)".format(destroyed))
     log_progress(1.0)
 
 
