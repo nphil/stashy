@@ -81,18 +81,6 @@ extension SceneStreamEndpoint {
     }
 }
 
-/// Tag names the Stashy Companion plugin's "Tag iPhone-Ready Scenes" task writes. The app consumes these
-/// (they're already fetched on every scene) for the playability filter and as a routing hint — no extra
-/// query, no scene-card badges. Keep in exact sync with `TAG_NAMES` in the plugin's `stashy_companion.py`.
-enum PlayabilityTag {
-    static let directPlay = "Stashy:Direct-Play"
-    static let needsTranscode = "Stashy:Needs-Transcode"
-    static let hdr = "Stashy:HDR"
-    static let tenBit = "Stashy:10-bit"
-    static let hevc = "Stashy:HEVC"
-    static let av1 = "Stashy:AV1"
-}
-
 extension StashScene {
     /// Codecs AVPlayer reliably direct-plays from a progressive MP4 (matched loosely vs Stash's
     /// `video_codec`). H.264 only: HEVC also decodes in hardware, but AVPlayer renders the very common
@@ -106,14 +94,6 @@ extension StashScene {
     static let av1Codecs = ["av1", "av01"]
     /// Containers AVPlayer opens directly.
     static let directPlayContainers = ["mp4", "m4v", "mov", "qt"]
-
-    /// True when the Stashy Companion plugin has tagged this scene `Stashy:Needs-Transcode` — its ffprobe
-    /// verdict that Apple can't decode the stream at all (4:2:2 / 4:4:4 / 12-bit HEVC, VP9, exotic). That's
-    /// finer than Stash's coarse `video_codec`: a 4:2:2 HEVC still reads as "hevc", so without this hint the
-    /// app attempts an on-device remux that renders black and only recovers after the 20s watchdog. Reading
-    /// the tag (already fetched on every scene) lets routing skip straight to transcode/server. Absent tag →
-    /// false → routing is exactly as before, so libraries without the plugin are unaffected.
-    var pluginNeedsTranscode: Bool { tags.contains { $0.name == PlayabilityTag.needsTranscode } }
 
     /// Cheap, plugin-free load weight for this scene's file (resolution × bitrate × codec), fed to the
     /// player's loading-donut estimate so heavier files get a proportionally longer expected fill. All
@@ -141,7 +121,10 @@ extension StashScene {
     ///   • codec AVPlayer can't decode (MPEG4-ASP, VC1, VP9/AV1 on older HW) → needs **transcode**.
     /// Until the on-device remux/transcode engine is wired up, the latter two fall back to Stash's HLS
     /// (server transcode). `reason` records the decision for the Stats overlay.
-    func playbackRoute(apiKey: String) -> PlaybackRoute? {
+    /// `pluginNeedsTranscode` = the Companion plugin's ffprobe verdict (from `PlayabilityStore`) that Apple
+    /// can't decode this scene at all. Threaded in (not read off the scene) because the data lives in the
+    /// plugin's served file, not on the scene. Default false ⇒ routing is exactly the codec-based heuristic.
+    func playbackRoute(apiKey: String, pluginNeedsTranscode: Bool = false) -> PlaybackRoute? {
         let codec = files.first?.video_codec?.lowercased()
         let container = fileContainer
         let containerOK = Self.directPlayContainers.contains(container)

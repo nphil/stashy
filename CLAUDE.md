@@ -139,9 +139,15 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
 - **RESOLVED**: the HEVC-won't-play-native + video-disappeared-after-transcode bug is no longer open (owner
   confirmed). Diagnostics (`⚙︎ transcode-in/frame1/out`, `remux-header-FAIL/out`, `▶︎ video`, `color=HDR-…`)
   stay wired but the hunt is closed.
-- Next candidates: **surface the companion plugin's codec-report stats + `Stashy:*` playability tags in the
-  app** (direct-play/needs-transcode/HDR badges + filter-by-playability — producer shipped, app surface is
-  the open half; see ROADMAP Downloads §); **resumable/checkpointed transcode** (fragmented-MP4 append —
+- **Playability intelligence shipped (served-file, NO scene writes)**: plugin `Library Codec Report`
+  (v0.1.18) ffprobes the library → one served `cache/playability.json`; **zero `sceneUpdate`** (the old
+  per-scene tag/custom_field writes caused a hundreds-of-Sync-tasks storm — never write per-scene in bulk;
+  use served files, like the transcode-progress file). App: `PlayabilityStore` fetches+caches it →
+  (1) **smarter routing** (`playbackRoute(pluginNeedsTranscode:)` skips a doomed remux on Apple-undecodable
+  4:2:2/4:4:4 HEVC), (2) **playability filter** (`SceneFilterPanel` Any/Direct-play/Needs-transcode, pages
+  via `findScenesByIDs`). No scene-card badges (owner). Plugin writes nothing to scenes; **Remove Stashy
+  Library Data** task cleans up tags/fields from ≤0.1.17.
+- Next candidates: **resumable/checkpointed transcode** (fragmented-MP4 append —
   owner wants it, see ROADMAP Downloads); Netflix fullscreen UI / playback-speed / WYSIWYG layout editor /
   mini-player-PiP / AI zoom-follow (all in ROADMAP); **remove RemoteLog telemetry** before wider release
   (the one open tech-debt / release blocker).

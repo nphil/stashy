@@ -28,7 +28,7 @@ struct ScenesView: View {
 
     private var filterActive: Bool {
         !query.tags.isEmpty || query.sort != .date || query.direction != .desc || query.downloadedOnly
-            || query.playabilityTag != nil
+            || query.playability != .any
     }
 
     /// Scenes to show: the downloaded-only view reads completed downloads locally (no network),
@@ -47,6 +47,18 @@ struct ScenesView: View {
         guard !query.downloadedOnly else { return }
         guard let client = appState.client else { return }
         let q = query
+        // Playability filter: page over the plugin report's scene IDs for the bucket (numeric-ascending),
+        // fetched by ID — no tags, no server-side custom-field filter needed.
+        if q.playability != .any {
+            let ids = PlayabilityStore.shared.ids(directPlay: q.playability == .directPlay)
+            await loader.reload { page, perPage in
+                let start = (page - 1) * perPage
+                guard start < ids.count else { return ([], ids.count) }
+                let slice = Array(ids[start..<min(start + perPage, ids.count)])
+                return (try await client.findScenesByIDs(slice), ids.count)
+            }
+            return
+        }
         await loader.reload { page, perPage in
             let result = try await client.findScenes(q, page: page, perPage: perPage)
             return (result.scenes, result.count)
@@ -109,6 +121,9 @@ struct ScenesView: View {
         .task {
             guard let client = appState.client else { return }
             Task { await TagRankingStore.shared.refreshIfNeeded(client: client) }
+            // Load the plugin's served playability report (for smarter routing + the filter). Fire-and-
+            // forget so it never delays the scene grid; no-op if the plugin isn't installed.
+            Task { await PlayabilityStore.shared.refresh(serverURL: client.serverURL, apiKey: client.apiKey) }
             guard loader.items.isEmpty else { return }
             await reload()
         }

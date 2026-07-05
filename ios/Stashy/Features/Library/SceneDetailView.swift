@@ -36,7 +36,8 @@ struct SceneDetailView: View {
                                             nativeMP4: downloads.wasTranscoded(sceneID: scene.id))
         }
         guard let client = appState.client else { return nil }
-        return scene.playbackRoute(apiKey: client.apiKey)
+        return scene.playbackRoute(apiKey: client.apiKey,
+                                   pluginNeedsTranscode: PlayabilityStore.shared.needsTranscode(scene.id))
     }
 
     var body: some View {

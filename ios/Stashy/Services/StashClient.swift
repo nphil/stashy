@@ -119,7 +119,7 @@ struct StashClient: Sendable {
           }
         }
         """
-        let tagIDs = q.effectiveTagIDs
+        let tagIDs = q.tagIDs
         var sceneFilter: SceneFilter?
         if !tagIDs.isEmpty || q.performerID != nil {
             sceneFilter = SceneFilter(
@@ -140,6 +140,23 @@ struct StashClient: Sendable {
         )
         let response: FindScenesResponse = try await query(gql, variables: vars)
         return response.findScenes
+    }
+
+    /// Fetch a specific set of scenes by ID (used by the playability filter, which pages over the ID list
+    /// from the plugin's served report). Results are re-ordered to match the requested `ids` order.
+    func findScenesByIDs(_ ids: [String]) async throws -> [StashScene] {
+        guard !ids.isEmpty else { return [] }
+        let gql = """
+        query FindScenesByIDs($ids: [ID!]) {
+          findScenes(ids: $ids) {
+            count
+            scenes { \(Self.sceneListFields) }
+          }
+        }
+        """
+        let response: FindScenesResponse = try await query(gql, variables: SceneIDsVariables(ids: ids))
+        let byID = Dictionary(response.findScenes.scenes.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        return ids.compactMap { byID[$0] }
     }
 
     /// Full detail for a single scene (complete performer profiles + social links). The list query
@@ -383,14 +400,25 @@ struct SceneQuery: Sendable, Equatable {
     var performerID: String? = nil
     /// Client-side filter: show only scenes that have a completed on-device download (not a Stash concept).
     var downloadedOnly: Bool = false
-    /// Playability filter — a resolved Stashy Companion tag (Direct-Play / Needs-Transcode). Kept separate
-    /// from `tags` so it drives its own dedicated control and doesn't clutter the tag picker; folded into
-    /// the server-side tag criterion via `effectiveTagIDs`. nil = no playability filter.
-    var playabilityTag: Tag? = nil
+    /// Playability filter — resolved from the Companion plugin's served report (via `PlayabilityStore`),
+    /// NOT from tags (the plugin writes no tags). When not `.any`, the scene list is paged over that
+    /// bucket's scene IDs instead of the normal library query. `.any` = normal library.
+    var playability: Playability = .any
 
     var tagIDs: [String] { tags.map(\.id) }
-    /// Tag IDs actually sent to Stash: the user's tags plus the playability tag (INCLUDES_ALL).
-    var effectiveTagIDs: [String] { tagIDs + (playabilityTag.map { [$0.id] } ?? []) }
+}
+
+/// Which playability bucket to show — resolved from the plugin's served `playability.json`, not from tags.
+enum Playability: String, Sendable, Equatable, CaseIterable, Identifiable {
+    case any, directPlay, needsTranscode
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .any: return "Any"
+        case .directPlay: return "Direct-play"
+        case .needsTranscode: return "Needs transcode"
+        }
+    }
 }
 
 enum PerformerSort: String, CaseIterable, Sendable, Identifiable, Hashable {
@@ -525,6 +553,7 @@ private struct FindScenesVariables: Encodable, Sendable {
     let filter: FindFilter
     let scene_filter: SceneFilter?
 }
+private struct SceneIDsVariables: Encodable, Sendable { let ids: [String] }
 private struct FindPerformersFilterVariables: Encodable, Sendable {
     let filter: FindFilter
     let performer_filter: PerformerFilter?

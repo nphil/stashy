@@ -378,13 +378,24 @@ blocks, both first-class iOS APIs:
     - **Maintenance/versioning**: **Self-Test** task (nvidia-smi + nvenc smoke probes + GraphQL/serving
       health), **Install / Switch ffmpeg** (pinned versions coexist), and a shown active-version + switch
       control — so a Stash upgrade or driver change is a one-task diagnosis, not a silent break.
-    - **Follow-up (NOT yet built) — surface the plugin's ffprobe stats + playability tags in the app.**
-      The **Library Codec Report** and **Tag iPhone-Ready Scenes** tasks already write codec/profile/pixel-
-      format/HDR/direct-play info + `Stashy:Direct-Play / Needs-Transcode / HDR / 10-bit / HEVC / AV1` tags
-      into each scene's `custom_fields` — but the app reads **none** of it. Build the consumer: a small
-      "direct-play / needs-transcode / HDR" badge on scene cards + the detail/stats overlay, and a
-      **filter-by-playability** in the scenes filter (so "show only what my phone direct-plays" is one tap).
-      Producer shipped; app surface is the open half.
+    - **✅ SHIPPED — the app consumes the plugin's playability intelligence via a SERVED FILE (no scene
+      writes)** (plugin v0.1.18). **Why served-file, not tags:** the first tag/custom_field approach wrote
+      every scene via `sceneUpdate`, which on a fresh library = hundreds of `Scene.Update` hooks → hundreds
+      of queued "Sync" tasks (owner hit this). The `Library Codec Report` now ffprobes the library and writes
+      the whole result to ONE served `cache/playability.json` — **zero `sceneUpdate`, zero hooks, zero Sync
+      tasks** — exactly like the transcode-progress file. Two app uses, **no scene-card badges** (owner: the
+      cards are crowded enough):
+      1. **Smarter routing** — `PlayabilityStore` fetches the served file once and caches it;
+         `Scene.playbackRoute(pluginNeedsTranscode:)` is passed `store.needsTranscode(id)` at the one call
+         site, and when true skips the direct/remux branches straight to transcode/server. Catches 4:2:2/4:4:4
+         HEVC that reads as plain "hevc" and would otherwise render black until the 20s watchdog. Purely
+         additive — store empty ⇒ routing unchanged.
+      2. **Filter-by-playability** — a "Playability" row in `SceneFilterPanel` (Any / Direct-play /
+         Needs-transcode), shown only when the store is loaded; it pages the grid over that bucket's scene
+         IDs (`SceneQuery.playability` → `PlayabilityStore.ids` → `findScenesByIDs`), no tags involved.
+      Plugin (v0.1.18) writes NOTHING to scenes anymore — the tagging task was removed; a one-time **Remove
+      Stashy Library Data** cleanup strips tags/custom_fields left by ≤0.1.17. Nice-to-have: an "On-device
+      only" filter bucket (direct + remux).
   - **On-device transcode on the fly** (reuse the FFmpeg engine to produce a smaller/compatible file
     locally). ✅ H.264/HEVC (VideoToolbox) with resolution + quality presets.
 - **Downloaded Videos management screen** — list/manage offline videos (size, source, delete, play
