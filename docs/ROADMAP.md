@@ -396,6 +396,24 @@ blocks, both first-class iOS APIs:
       Plugin (v0.1.18) writes NOTHING to scenes anymore — the tagging task was removed; a one-time **Remove
       Stashy Library Data** cleanup strips tags/custom_fields left by ≤0.1.17. Nice-to-have: an "On-device
       only" filter bucket (direct + remux).
+    - **Concurrent-queue server transcoding (P40 throughput) — owner-requested 2026-07-05.** When multiple
+      downloads are queued with the Companion transcode source, run **2–3 transcode Jobs at once** instead of
+      strictly one at a time, to use the P40's spare encoder capacity. This is the *right* parallelism lever
+      — NOT splitting a single file. **Research (2026-07-05, verified):** the P40 is a datacenter card with
+      **24 concurrent NVENC sessions** (uncapped) but only **1–2 physical NVENC engines**, and NVIDIA's NVENC
+      App Note states *a single encode session cannot exceed one engine's throughput* — so splitting ONE file
+      caps at ~1–2× (engine count), not 8×, and the actually-slow path (**CPU SVT-AV1**) is already fully
+      multithreaded across the 9900K, so file-splitting there oversubscribes and *hurts*. Running different
+      scenes concurrently instead gives a clean ~2× aggregate with no keyframe-split / concat-seam artifacts.
+      **Design:** cap concurrency (setting, default 2). Decide where the limiter lives — app-side
+      (`DownloadManager` allows N simultaneous `.serverProcessing` items, each its own `runPluginTask`) vs
+      plugin-side — and first **verify how Stash schedules concurrent `runPluginTask` invocations** (parallel
+      vs serialized in its Task Queue); if Stash serializes plugin tasks, the plugin itself must fork the
+      encodes. HEVC (NVENC) benefits; gate/limit CPU-AV1 concurrency to 1 (it already saturates the CPU).
+      Pairs with a **Self-Test probe** for NVENC engine count + single-session fps so the concurrency default
+      is grounded. (Rejected alternative — single-file segment-and-concat split: feasible via the resumable-
+      transcode segment primitive, but ~1–2× ceiling for HEVC only, negative for AV1, plus rate-control seams
+      at joins → low ROI. Don't build it unless a Self-Test probe proves HEVC is the bottleneck.)
   - **On-device transcode on the fly** (reuse the FFmpeg engine to produce a smaller/compatible file
     locally). ✅ H.264/HEVC (VideoToolbox) with resolution + quality presets.
 - **Downloaded Videos management screen** — list/manage offline videos (size, source, delete, play
