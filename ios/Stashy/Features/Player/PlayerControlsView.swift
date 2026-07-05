@@ -84,7 +84,22 @@ struct PlayerControlsView: View {
                         .padding(.trailing, isFullscreen ? safeArea.trailing : 0)
                         .transition(.opacity)
 
-                    if let onBack {
+                    // Top-corner dismiss. Fullscreen: an ✕ at top-right returns to portrait-inline (the
+                    // player keeps playing — no teardown). Inline: a back chevron at top-left leaves the scene.
+                    if isFullscreen {
+                        Button { isFullscreen = false } label: {
+                            Image(systemName: "xmark")
+                                .font(.headline.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .padding(10)
+                                .background(.black.opacity(0.4), in: Circle())
+                                .shadow(radius: 4)
+                        }
+                        .padding(.trailing, safeArea.trailing + 12)
+                        .padding(.top, safeArea.top + 8)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .transition(.opacity)
+                    } else if let onBack {
                         Button(action: onBack) {
                             Image(systemName: "chevron.left")
                                 .font(.headline.weight(.semibold))
@@ -230,11 +245,12 @@ struct PlayerControlsView: View {
                         .modifier(ControlIcon())
                 }
                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("playerControls")) } action: { gearFrame = $0 }
-                Button { isFullscreen.toggle() } label: {
-                    Image(systemName: isFullscreen
-                          ? "arrow.down.right.and.arrow.up.left"
-                          : "arrow.up.left.and.arrow.down.right")
-                        .modifier(ControlIcon())
+                // Enter fullscreen (inline only). Exit is the top-right ✕ — so no exit-fullscreen glyph here.
+                if !isFullscreen {
+                    Button { isFullscreen = true } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .modifier(ControlIcon())
+                    }
                 }
             }
             .foregroundStyle(.white)

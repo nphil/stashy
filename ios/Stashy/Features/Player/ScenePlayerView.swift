@@ -21,7 +21,9 @@ struct ScenePlayerView: View {
     @Environment(DownloadManager.self) private var downloads
     @State private var model: ScenePlayerModel
     @State private var sprites = SpriteThumbnails()
-    @State private var suppressAutoFullscreen = false
+    /// After exiting fullscreen while the phone is still physically landscape, suppress re-entering
+    /// fullscreen until the device returns to portrait (so ✕ doesn't immediately bounce back to landscape).
+    @State private var suppressReentry = false
     @State private var zoomScale: CGFloat = 1
     /// Live window geometry, used for fullscreen layout so it's identical regardless of the screen that
     /// presented the player (a plain stack vs a `.searchable` list report different ambient geometry).
@@ -181,30 +183,30 @@ struct ScenePlayerView: View {
                   let sprite = downloads.localSprite(sceneID: scene.id) ?? scene.spriteURL(apiKey: apiKey) else { return }
             await sprites.load(vttURL: vtt, spriteURL: sprite, imageCache: imageCache)
         }
-        // Landscape videos: rotating to landscape enters fullscreen (and back to portrait exits).
-        // Portrait videos never auto-rotate into a landscape fullscreen — they go fullscreen in
-        // portrait via the button instead.
+        // Orientation model — deliberately "sticky": tilting the phone to landscape ENTERS fullscreen, but
+        // fullscreen is only ever LEFT via the ✕ button (or swipe-down), never by tilting back. This kills
+        // the old auto-exit-on-portrait-tilt path, whose race with the geometry lock was the regression
+        // ("UI stuck in landscape"). While fullscreen, device-orientation notifications are ignored entirely;
+        // only the inline state reacts to tilt. faceUp/faceDown/unknown are ignored.
         .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
-            guard !isPortraitVideo else { return }
+            guard !isFullscreen else { return }          // fullscreen is sticky — tilt can't exit it
+            guard !isPortraitVideo else { return }       // vertical videos: button-only fullscreen (portrait)
             let orientation = UIDevice.current.orientation
             if orientation.isLandscape {
-                if !suppressAutoFullscreen { isFullscreen = true }
+                if !suppressReentry { isFullscreen = true }
             } else if orientation.isPortrait {
-                suppressAutoFullscreen = false
-                isFullscreen = false
+                suppressReentry = false                  // back to portrait → allow tilt-to-enter again
             }
         }
         .onChange(of: isFullscreen) { _, now in
             if now {
-                // Portrait videos go fullscreen in portrait; everything else uses landscape.
+                // Portrait (vertical) videos go fullscreen in portrait; everything else forces landscape.
                 OrientationController.lock(isPortraitVideo ? .portrait : [.landscapeLeft, .landscapeRight])
             } else {
-                // Force back to portrait even if the phone is still held in landscape. Zoom is reset
-                // automatically by the surface once zoom is disabled (zoomEnabled = isFullscreen).
+                // Exit (✕ / swipe-down): force back to portrait even if the phone is still held landscape,
+                // and suppress an immediate tilt-re-entry until the device physically returns to portrait.
                 OrientationController.lock(.portrait)
-                if UIDevice.current.orientation.isLandscape {
-                    suppressAutoFullscreen = true
-                }
+                if UIDevice.current.orientation.isLandscape { suppressReentry = true }
             }
         }
         .onAppear {
