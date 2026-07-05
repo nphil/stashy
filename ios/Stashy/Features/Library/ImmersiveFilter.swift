@@ -138,6 +138,7 @@ struct SceneFilterPanel: View {
         switch p {
         case .any: return "square.grid.2x2"
         case .directPlay: return "bolt.fill"
+        case .needsRemux: return "shippingbox"
         case .needsTranscode: return "arrow.triangle.2.circlepath"
         }
     }

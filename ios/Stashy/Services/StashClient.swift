@@ -410,13 +410,23 @@ struct SceneQuery: Sendable, Equatable {
 
 /// Which playability bucket to show — resolved from the plugin's served `playability.json`, not from tags.
 enum Playability: String, Sendable, Equatable, CaseIterable, Identifiable {
-    case any, directPlay, needsTranscode
+    case any, directPlay, needsRemux, needsTranscode
     var id: String { rawValue }
     var label: String {
         switch self {
         case .any: return "Any"
         case .directPlay: return "Direct-play"
+        case .needsRemux: return "Needs remux"
         case .needsTranscode: return "Needs transcode"
+        }
+    }
+    /// The plugin report's `tier` string this bucket maps to (nil = no filter / show everything).
+    var tier: String? {
+        switch self {
+        case .any: return nil
+        case .directPlay: return "direct"
+        case .needsRemux: return "remux"
+        case .needsTranscode: return "transcode"
         }
     }
 }

@@ -35,9 +35,10 @@ final class PlayabilityStore {
     /// ⇒ routing falls back to the codec-based heuristic (unchanged behaviour).
     func needsTranscode(_ id: String) -> Bool { scenes[id]?.needs_transcode ?? false }
 
-    /// Scene IDs for a playability bucket, numeric-ascending — used to page the filtered scene list.
-    func ids(directPlay: Bool) -> [String] {
-        scenes.filter { directPlay ? $0.value.direct_play : $0.value.needs_transcode }
+    /// Scene IDs in a playability tier (`direct` / `remux` / `transcode`), numeric-ascending — used to page
+    /// the filtered scene list.
+    func ids(tier: String) -> [String] {
+        scenes.filter { $0.value.tier == tier }
             .keys.sorted { (Int($0) ?? 0) < (Int($1) ?? 0) }
     }
 

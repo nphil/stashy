@@ -49,8 +49,8 @@ struct ScenesView: View {
         let q = query
         // Playability filter: page over the plugin report's scene IDs for the bucket (numeric-ascending),
         // fetched by ID — no tags, no server-side custom-field filter needed.
-        if q.playability != .any {
-            let ids = PlayabilityStore.shared.ids(directPlay: q.playability == .directPlay)
+        if let tier = q.playability.tier {
+            let ids = PlayabilityStore.shared.ids(tier: tier)
             await loader.reload { page, perPage in
                 let start = (page - 1) * perPage
                 guard start < ids.count else { return ([], ids.count) }
