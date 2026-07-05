@@ -78,17 +78,14 @@ final class SlowMoInterpolator {
         guard let parameters = VTLowLatencyFrameInterpolationParameters(
             sourceFrame: currentFrame,
             previousFrame: previousFrame,
-            interpolationPhase: phases.map { NSNumber(value: $0) },
+            interpolationPhase: phases.map { Float($0) },
             destinationFrames: destinationFrames)
         else { return [] }
 
-        do {
-            // VideoToolbox fills the destination buffers in place on its own queue; we just await it.
-            _ = try await processor.process(parameters: parameters)
-            return destinations
-        } catch {
-            return []
-        }
+        // VideoToolbox fills the destination buffers in place on its own queue; we just await it.
+        // (`process(parameters:)` is async but non-throwing — failures surface as untouched buffers.)
+        _ = await processor.process(parameters: parameters)
+        return destinations
     }
 
     /// End the session and drop the pool.
