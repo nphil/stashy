@@ -95,6 +95,23 @@ extension StashScene {
     /// Containers AVPlayer opens directly.
     static let directPlayContainers = ["mp4", "m4v", "mov", "qt"]
 
+    /// Cheap, plugin-free load weight for this scene's file (resolution × bitrate × codec), fed to the
+    /// player's loading-donut estimate so heavier files get a proportionally longer expected fill. All
+    /// inputs come free from Stash's scene metadata — the companion plugin adds nothing here.
+    var loadProfile: LoadProfile {
+        let f = files.first
+        let pixels = max(0, (f?.width ?? 0) * (f?.height ?? 0))
+        let mbps = max(0, Double(f?.bit_rate ?? 0) / 1_000_000)
+        let codec: LoadProfile.Codec
+        if let c = f?.video_codec?.lowercased() {
+            if Self.av1Codecs.contains(where: { c.contains($0) }) { codec = .av1 }
+            else if Self.remuxableCodecs.contains(where: { c.contains($0) }) { codec = .hevc }
+            else if Self.directPlayCodecs.contains(where: { c.contains($0) }) { codec = .h264 }
+            else { codec = .other }
+        } else { codec = .other }
+        return LoadProfile(pixels: pixels, bitrateMbps: mbps, codec: codec)
+    }
+
     /// Resolve which stream to play, on which engine, and *why*. The goal is to **direct-play** (native
     /// hardware decode + instant seeks, no server load) whenever AVPlayer can handle the file, and to
     /// fall back only when it can't:

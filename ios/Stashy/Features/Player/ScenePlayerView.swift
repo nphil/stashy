@@ -41,8 +41,10 @@ struct ScenePlayerView: View {
         _quality = quality
         _resumeTime = resumeTime
         self.onBack = onBack
-        // Seed the (rebuilt) model with the position captured just before the source changed.
-        _model = State(initialValue: ScenePlayerModel(route: route, startAt: resumeTime.wrappedValue))
+        // Seed the (rebuilt) model with the position captured just before the source changed, plus the
+        // file's load weight so the loading donut's expected time scales with how heavy this scene is.
+        _model = State(initialValue: ScenePlayerModel(route: route, startAt: resumeTime.wrappedValue,
+                                                      loadProfile: scene.loadProfile))
     }
 
     /// The video's display aspect. Prefer the *actual* decoded size reported by the player (correct

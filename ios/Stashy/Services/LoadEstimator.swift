@@ -12,13 +12,44 @@ import Network
 /// - **First guess** (no samples yet) is seeded by the tier and whether the link is expensive
 ///   (cellular / hotspot) — no data-wasting speed probe.
 /// - Recorded durations are clamped to a plausible range so a one-off stall can't poison the average.
+/// A cheap, plugin-free descriptor of how heavy a file is to *start* playing — used to scale the loading
+/// donut's expected time (and seek re-buffer) so a 4K HEVC file and a 720p H.264 file don't share one
+/// estimate. Every input comes free from Stash's normal scene metadata: no companion plugin, no probe.
+/// The companion plugin's ffprobe stats add nothing the app doesn't already have for this purpose.
+struct LoadProfile: Sendable, Equatable {
+    var pixels: Int = 0          // width × height (0 = unknown → weight 1)
+    var bitrateMbps: Double = 0  // source video bitrate, Mbps (0 = unknown → neutral)
+    var codec: Codec = .other
+
+    enum Codec: Sendable, Equatable { case h264, hevc, av1, other }
+
+    /// Reference file — 1080p (2.07 Mpx) H.264 @ 8 Mbps → weight ≈ 1.0. Resolution and bitrate scale the
+    /// weight *sub-linearly* (a bigger file isn't proportionally slower to *begin*), and codec adds a decode
+    /// cost multiplier. Clamped to a sane band so one outlier can't send the donut to either extreme.
+    var weight: Double {
+        guard pixels > 0 else { return 1 }
+        let res = pow(Double(pixels) / 2_073_600, 0.6)                 // 1080p = 1.0
+        let br  = bitrateMbps > 0 ? pow(bitrateMbps / 8, 0.4) : 1      // 8 Mbps = 1.0
+        let cx: Double
+        switch codec {
+        case .h264:  cx = 1.0
+        case .hevc:  cx = 1.35
+        case .av1:   cx = 1.6
+        case .other: cx = 1.2
+        }
+        return min(4, max(0.3, res * br * cx))
+    }
+}
+
 @MainActor
 final class LoadEstimator {
     static let shared = LoadEstimator()
 
     private let window = 6
-    private let defaultsKey = "loadEstimatorSamples.v1"
-    private var samples: [Int: [Double]] = [:]   // tier.rawValue → recent load durations (seconds)
+    // v2: samples now store seconds *per unit of file weight* (see LoadProfile), not raw seconds — so the
+    // v1 raw samples must be discarded rather than misread under the new normalized semantics.
+    private let defaultsKey = "loadEstimatorSamples.v2"
+    private var samples: [Int: [Double]] = [:]   // bucket key → recent normalized load durations (s / weight)
 
     private init() {
         if let raw = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: [Double]] {
@@ -26,12 +57,20 @@ final class LoadEstimator {
         }
     }
 
-    /// Expected load seconds for a tier: the mean of recent samples, else a connection-biased default.
-    func expected(for tier: PlaybackTier) -> Double {
+    /// Sanitise a caller-supplied file weight; `LoadProfile.weight` already clamps, this just guards NaN/0.
+    private func clean(_ weight: Double) -> Double { (weight.isFinite && weight > 0) ? weight : 1 }
+
+    /// Expected load seconds for a tier and a file of `weight` (1 = a ~1080p H.264 reference). The learned
+    /// samples are seconds-*per-weight*, so a 4K/HEVC file (heavier) scales the same learning up and a 720p
+    /// file scales it down — the donut stops sharing one estimate across wildly different files.
+    func expected(for tier: PlaybackTier, weight: Double = 1) -> Double {
+        let perWeight: Double
         if let s = samples[tier.rawValue], !s.isEmpty {
-            return min(20, max(0.25, s.reduce(0, +) / Double(s.count)))
+            perWeight = s.reduce(0, +) / Double(s.count)
+        } else {
+            perWeight = Self.seedDefault(tier: tier, expensive: NetworkStatus.shared.isExpensive)
         }
-        return Self.seedDefault(tier: tier, expensive: NetworkStatus.shared.isExpensive)
+        return min(20, max(0.25, perWeight * clean(weight)))
     }
 
     /// Seek-reinit re-buffers get their OWN per-tier bucket (`seekKey`, disjoint from the cold-start keys)
@@ -40,37 +79,42 @@ final class LoadEstimator {
     /// lets the donut fill at a believable *seek* rate instead of crawling on the cold-start estimate.
     private func seekKey(_ tier: PlaybackTier) -> Int { -(tier.rawValue + 1) }   // -1…-4, disjoint from 0…3
 
-    /// Expected seconds for a seek-reinit re-buffer on this tier — warm, so the defaults sit well under the
-    /// equivalent cold start; the rolling window then adapts to the real device/server.
-    func expectedSeek(for tier: PlaybackTier) -> Double {
+    /// Expected seconds for a seek-reinit re-buffer on this tier and file weight — warm, so the defaults sit
+    /// well under the equivalent cold start; the rolling window then adapts to the real device/server.
+    func expectedSeek(for tier: PlaybackTier, weight: Double = 1) -> Double {
+        let perWeight: Double
         if let s = samples[seekKey(tier)], !s.isEmpty {
-            return min(12, max(0.15, s.reduce(0, +) / Double(s.count)))
+            perWeight = s.reduce(0, +) / Double(s.count)
+        } else {
+            switch tier {
+            case .direct:         perWeight = 0.3
+            case .remux:          perWeight = 0.7   // av_seek_frame → one GOP remuxed, already-open input
+            case .localTranscode: perWeight = 1.4   // re-encode spin-up from the seek keyframe
+            case .server:         perWeight = 1.2
+            }
         }
-        let base: Double
-        switch tier {
-        case .direct:         base = 0.3
-        case .remux:          base = 0.7   // av_seek_frame → one GOP remuxed, already-open input
-        case .localTranscode: base = 1.4   // re-encode spin-up from the seek keyframe
-        case .server:         base = 1.2
-        }
-        return NetworkStatus.shared.isExpensive ? base * 1.8 : base
+        let seed = NetworkStatus.shared.isExpensive && samples[seekKey(tier)] == nil ? 1.8 : 1.0
+        return min(12, max(0.15, perWeight * seed * clean(weight)))
     }
 
     /// Record an actual load duration; implausible values are ignored so a stall can't skew the window.
     /// `record` is called exactly as `isLoading` clears — i.e. as the first frames start playing — so the
     /// persistence is pushed **off the main thread** to guarantee it never delays playback start.
-    func record(tier: PlaybackTier, seconds: Double) { record(key: tier.rawValue, seconds: seconds) }
+    func record(tier: PlaybackTier, seconds: Double, weight: Double = 1) {
+        record(key: tier.rawValue, rawSeconds: seconds, weight: weight)
+    }
 
     /// Record a seek-reinit re-buffer into its own per-tier bucket. A warm seek can complete faster than a
     /// cold start, so the plausibility floor is lower here.
-    func recordSeek(tier: PlaybackTier, seconds: Double) {
-        record(key: seekKey(tier), seconds: seconds, minSeconds: 0.12)
+    func recordSeek(tier: PlaybackTier, seconds: Double, weight: Double = 1) {
+        record(key: seekKey(tier), rawSeconds: seconds, weight: weight, minSeconds: 0.12)
     }
 
-    private func record(key: Int, seconds: Double, minSeconds: Double = 0.3) {
-        guard seconds >= minSeconds, seconds <= 30 else { return }
+    private func record(key: Int, rawSeconds: Double, weight: Double, minSeconds: Double = 0.3) {
+        guard rawSeconds >= minSeconds, rawSeconds <= 30 else { return }
+        let normalized = rawSeconds / clean(weight)   // store seconds-per-unit-weight so any file can apply it
         var s = samples[key] ?? []
-        s.append(seconds)
+        s.append(normalized)
         if s.count > window { s.removeFirst(s.count - window) }
         samples[key] = s
         let snapshot = samples        // Sendable value copy — nothing main-actor is captured below
@@ -82,7 +126,8 @@ final class LoadEstimator {
         }
     }
 
-    /// Reasonable first-load guesses (seconds) before any samples exist; doubled on an expensive link.
+    /// Reasonable first-load guesses (seconds *for a reference-weight file*) before any samples exist;
+    /// doubled on an expensive link. `expected(for:weight:)` scales these by the file's weight.
     private static func seedDefault(tier: PlaybackTier, expensive: Bool) -> Double {
         let base: Double
         switch tier {

@@ -44,6 +44,10 @@ final class ScenePlayerModel {
 
     @ObservationIgnored private var engine: PlaybackEngine?
     @ObservationIgnored private let route: PlaybackRoute
+    /// Plugin-free descriptor of how heavy this file is to start/seek — scales the loading-donut estimate
+    /// (see LoadProfile). Constant for the model's lifetime, so the load and seek weights match.
+    @ObservationIgnored private let loadProfile: LoadProfile
+    private var loadWeight: Double { loadProfile.weight }
     /// Owns the on-device local stream (seekable HLS or linear remux) for a `.localFFmpeg` route.
     @ObservationIgnored private var localStream: (any LocalPlaybackStream)?
     /// Set once if the local pipeline fails and we switch to the HLS fallback (so we never loop).
@@ -120,8 +124,9 @@ final class ScenePlayerModel {
     /// The engine is created exactly once in `start()`, from `.onAppear`.
     /// `startAt` > 0 resumes playback at that timestamp once the new engine is ready — used to keep the
     /// exact position when the source is rebuilt (e.g. switching server-transcode quality via the gear).
-    init(route: PlaybackRoute, startAt: Double = 0) {
+    init(route: PlaybackRoute, startAt: Double = 0, loadProfile: LoadProfile = LoadProfile()) {
         self.route = route
+        self.loadProfile = loadProfile
         self.resumeAt = max(0, startAt)
         // Seed the scrubber's duration from Stash metadata. The local-HLS path is a growing EVENT
         // playlist (no ENDLIST until the remux finishes), so AVPlayer reports an *indefinite* duration
@@ -426,10 +431,10 @@ final class ScenePlayerModel {
         // A seek's re-buffer is warm (source already open) — fill from the per-seek estimate + curve so the
         // ring races to near-full quickly, rather than crawling on the slower cold-start estimate.
         if loadIsSeek {
-            expectedLoad = LoadEstimator.shared.expectedSeek(for: loadTier)
+            expectedLoad = LoadEstimator.shared.expectedSeek(for: loadTier, weight: loadWeight)
             loadCurve = .seek
         } else {
-            expectedLoad = LoadEstimator.shared.expected(for: loadTier)
+            expectedLoad = LoadEstimator.shared.expected(for: loadTier, weight: loadWeight)
             loadCurve = .forTier(loadTier)
         }
         bufferFraction = 0
@@ -447,8 +452,8 @@ final class ScenePlayerModel {
         loadTicker?.cancel(); loadTicker = nil
         if let loadStart {
             let seconds = Date().timeIntervalSince(loadStart)
-            if loadIsSeek { LoadEstimator.shared.recordSeek(tier: loadTier, seconds: seconds) }
-            else { LoadEstimator.shared.record(tier: loadTier, seconds: seconds) }
+            if loadIsSeek { LoadEstimator.shared.recordSeek(tier: loadTier, seconds: seconds, weight: loadWeight) }
+            else { LoadEstimator.shared.record(tier: loadTier, seconds: seconds, weight: loadWeight) }
         }
         loadStart = nil
         loadIsSeek = false   // the next episode is cold unless another seek sets it

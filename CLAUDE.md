@@ -128,6 +128,14 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   `loadIsSeek` in `ScenePlayerModel`) instead of the slower cold-start estimate — and seek times stop
   polluting the first-load learning. Untouched (load-bearing): the `seekTarget`/`seekHoldUntil` hold that
   pins the scrub thumb where the finger releases — verified the change is bookkeeping-only, no regression.
+- **File-aware load estimate shipped**: the loading donut's expected time (load AND seek) now scales by a
+  cheap `resolution × bitrate × codec` **weight** (`LoadProfile` in LoadEstimator.swift; `Scene.loadProfile`),
+  so a 4K HEVC file and a 720p H.264 file no longer share one estimate. `LoadEstimator` now learns
+  seconds-*per-weight* per tier (defaults bumped to `.v2`, old raw samples discarded) and multiplies by the
+  current file's weight — threaded via `ScenePlayerModel(loadProfile:)` from `ScenePlayerView`. **Plugin-
+  independent**: every input comes free from Stash's scene metadata (the companion plugin gives the *player*
+  donut nothing — it's a Downloads-flow tool; its server-transcode download bar is already determinate off
+  live `Job.progress`).
 - Next candidates: **resumable/checkpointed transcode** (fragmented-MP4 append — owner wants it, see
   ROADMAP Downloads); Netflix fullscreen UI / playback-speed / WYSIWYG layout editor / mini-player-PiP /
   AI zoom-follow (all in ROADMAP); **remove RemoteLog telemetry** before wider release (tech-debt).
