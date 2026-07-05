@@ -48,15 +48,16 @@ enum PlaybackBadgeStyle {
     }
 }
 
-/// The two status pills (quality + method), compact enough to share the single control row with the
-/// time, volume and transport buttons. Fixed-size so text never truncates; kept short so nothing spills.
+/// The two status pills — **quality** (resolution + codec) on top, **method** (playback tier) below —
+/// stacked vertically so they take one pill's width instead of two, leaving room in the narrow portrait
+/// control row. Fixed-size + single-line so text never truncates or wraps.
 struct PlayerStatusBadges: View {
     let scene: StashScene
     let presentationSize: CGSize
     let tier: PlaybackTier
 
     var body: some View {
-        HStack(spacing: 4) {
+        VStack(alignment: .leading, spacing: 3) {
             qualityBadge
             methodBadge
         }
@@ -73,7 +74,7 @@ struct PlayerStatusBadges: View {
                 Text(codec).foregroundStyle(.white.opacity(0.82))
             }
         }
-        .font(.system(size: 10, weight: .bold))
+        .font(.system(size: 9.5, weight: .bold))
         .padding(.horizontal, 6).padding(.vertical, 2)
         .background(.black.opacity(0.38), in: Capsule())
         .overlay(Capsule().strokeBorder(q.color.opacity(0.55), lineWidth: 0.75))
@@ -81,8 +82,8 @@ struct PlayerStatusBadges: View {
 
     private var methodBadge: some View {
         HStack(spacing: 3) {
-            Image(systemName: tier.symbol).font(.system(size: 8.5, weight: .black))
-            Text(tier.label).font(.system(size: 10, weight: .bold))
+            Image(systemName: tier.symbol).font(.system(size: 8, weight: .black))
+            Text(tier.label).font(.system(size: 9.5, weight: .bold))
         }
         .foregroundStyle(tier.color)
         .padding(.horizontal, 6).padding(.vertical, 2)

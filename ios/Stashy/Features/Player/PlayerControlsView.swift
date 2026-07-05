@@ -84,8 +84,8 @@ struct PlayerControlsView: View {
                         .padding(.trailing, isFullscreen ? safeArea.trailing : 0)
                         .transition(.opacity)
 
-                    // Top-corner dismiss. Fullscreen: an ✕ at top-right returns to portrait-inline (the
-                    // player keeps playing — no teardown). Inline: a back chevron at top-left leaves the scene.
+                    // Fullscreen: an ✕ at top-right returns to portrait-inline (the player keeps playing — no
+                    // teardown). Inline has no top button — swipe-back leaves the scene.
                     if isFullscreen {
                         Button { isFullscreen = false } label: {
                             Image(systemName: "xmark")
@@ -98,19 +98,6 @@ struct PlayerControlsView: View {
                         .padding(.trailing, safeArea.trailing + 12)
                         .padding(.top, safeArea.top + 8)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                        .transition(.opacity)
-                    } else if let onBack {
-                        Button(action: onBack) {
-                            Image(systemName: "chevron.left")
-                                .font(.headline.weight(.semibold))
-                                .foregroundStyle(.white)
-                                .padding(10)
-                                .background(.black.opacity(0.4), in: Circle())
-                                .shadow(radius: 4)
-                        }
-                        .padding(.leading, safeArea.leading + 12)
-                        .padding(.top, safeArea.top + 8)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         .transition(.opacity)
                     }
                 }
@@ -203,11 +190,10 @@ struct PlayerControlsView: View {
                 onSeek: { model.seek(to: $0); scheduleHide() }
             )
 
-            // One control row: elapsed · quality + method badges · stats ‖ volume (last on the left) ‖
-            // duration · gear · fullscreen. Volume is the final left-hand control and expands rightward
-            // into the flexible middle gap, so it never pushes or covers anything; in landscape fullscreen
-            // there's far more room, so the track is ~2× wider. Times/badges are fixed-size (never truncate).
-            HStack(spacing: 6) {
+            // One control row: elapsed · stacked badges · stats ‖ volume ‖ duration · speed · gear ·
+            // fullscreen. Badges stack vertically (one pill's width) so the row fits a narrow portrait
+            // screen without clipping. Times/badges are fixed-size (never truncate).
+            HStack(spacing: 5) {
                 Text(Self.timeString(isScrubbing ? scrubTime : model.currentTime))
                     .font(.caption2.weight(.semibold).monospacedDigit())
                     .fixedSize()
