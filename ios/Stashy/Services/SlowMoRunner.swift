@@ -14,6 +14,8 @@ struct SlowMoTelemetry: Sendable {
     var sourceFormat = ""     // fourcc of the decoded buffer (e.g. "BGRA") — diagnostics
     var sourceWidth = 0       // actual decoded buffer width
     var sourceHeight = 0      // actual decoded buffer height
+    var sourceColor = ""      // color primaries / transfer function of the decoded buffer — diagnostics
+    var skipReason = ""       // why interpolation was skipped (e.g. "HDR"), empty if running
 }
 
 /// A snapshot pair of consecutive decoded frames handed off the main actor to the interpolator.
@@ -91,20 +93,37 @@ final class SlowMoRunner {
         // Lazily create the interpolator sized to the ACTUAL decoded buffer (never presentationSize — for
         // anamorphic content that display size differs from the coded buffer and would mismatch VideoToolbox).
         if interpolator == nil {
-            // Diagnostics: record what this file's decoded frames actually look like (dimensions + pixel
-            // format), so a crashing file can be compared against a working one.
+            // Diagnostics: record what this file's decoded frames actually look like (dimensions, pixel
+            // format, color) so a crashing file can be compared against a working one.
             telemetry.sourceWidth = width
             telemetry.sourceHeight = height
             telemetry.sourceFormat = Self.fourCC(CVPixelBufferGetPixelFormatType(buffer))
-            let interp = SlowMoInterpolator(width: width, height: height, interpolatedFrames: 1)
-            telemetry.supported = interp.startIfNeeded()
-            // Persist the decoded-frame profile off-device before the first (crash-prone) process() call, so
-            // a file that hard-crashes VTFrameProcessor still leaves its dimensions/format in the ntfy log.
+            let attach = (CVBufferCopyAttachments(buffer, .shouldPropagate) as? [String: Any]) ?? [:]
+            let primaries = (attach[kCVImageBufferColorPrimariesKey as String] as? String) ?? "?"
+            let transfer = (attach[kCVImageBufferTransferFunctionKey as String] as? String) ?? "?"
+            telemetry.sourceColor = "\(primaries)/\(transfer)"
+            // HDR / wide-gamut buffers (PQ 2084, HLG 2100, BT.2020 primaries) are the leading suspect for the
+            // hard crash inside VTFrameProcessor. Detect via substring (avoids fragile constant names).
+            let isHDR = transfer.contains("2084") || transfer.uppercased().contains("HLG")
+                     || transfer.contains("2100") || primaries.contains("2020")
+            // Persist the profile off-device BEFORE the first (crash-prone) process() call, so even a hard
+            // SIGABRT leaves this file's dimensions/format/color in the recovered ntfy tail.
             RemoteLog.shared.event("⚙︎ slowmo-start", [
                 ("size", "\(width)×\(height)"),
                 ("fmt", telemetry.sourceFormat),
-                ("session", "\(telemetry.supported)")
+                ("prim", primaries), ("trc", transfer), ("hdr", "\(isHDR)")
             ])
+            guard !isHDR else {
+                // Don't feed VTFrameProcessor an HDR/wide-gamut buffer — skip cleanly instead of risking the
+                // crash. (If HDR turns out not to be the trigger, the recovered log still tells us the color.)
+                telemetry.skipReason = "HDR/wide-gamut"
+                telemetry.supported = false
+                onTelemetry(telemetry)
+                stop()
+                return
+            }
+            let interp = SlowMoInterpolator(width: width, height: height, interpolatedFrames: 1)
+            telemetry.supported = interp.startIfNeeded()
             onTelemetry(telemetry)
             guard telemetry.supported else { stop(); return }   // unsupported device → give up cleanly
             interpolator = interp

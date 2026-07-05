@@ -145,6 +145,10 @@ final class RemoteLog: @unchecked Sendable {
             if self.buffer.count > 400 { self.buffer.removeFirst(self.buffer.count - 400) }
             self.tail.append(line)
             if self.tail.count > 60 { self.tail.removeFirst(self.tail.count - 60) }
+            // Mirror the tail to disk on *every* line (not just the ~10s network flush) so a hard crash's
+            // final moments — e.g. the log line right before a VideoToolbox SIGABRT — are always recovered
+            // on next launch. The tail is only 60 short lines, so the write is cheap.
+            try? self.tail.joined(separator: "\n").write(to: self.tailFile, atomically: true, encoding: .utf8)
         }
     }
 

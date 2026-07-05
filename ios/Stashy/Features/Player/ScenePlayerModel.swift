@@ -663,12 +663,14 @@ final class ScenePlayerModel {
         if aiSlowMoEnabled || sm.synthesized > 0 {
             sections.append(StatSection(title: "Slow-mo (AI · beta)", lines: [
                 StatLine(label: "Interpolation",
-                         value: !sm.supported ? "Unsupported on device"
+                         value: !sm.skipReason.isEmpty ? "Skipped (\(sm.skipReason))"
+                              : !sm.supported ? "Unsupported on device"
                               : (sm.active ? "Active" : (playbackRate <= 0.5 ? "Idle (unsupported stream)" : "Idle (≥0.75×)"))),
                 StatLine(label: "Engine", value: "VTFrameProcessor (low-latency 2×)"),
                 StatLine(label: "Speed", value: PlaybackSpeed.closest(to: playbackRate).label),
                 StatLine(label: "Source", value: sm.sourceWidth > 0
                          ? "\(sm.sourceWidth)×\(sm.sourceHeight) \(sm.sourceFormat)" : "—"),
+                StatLine(label: "Color", value: sm.sourceColor.isEmpty ? "—" : sm.sourceColor),
                 StatLine(label: "Source frames", value: "\(sm.sourceFrames)"),
                 StatLine(label: "Synthesized frames", value: "\(sm.synthesized)"),
                 StatLine(label: "Last interp", value: String(format: "%.1f ms", sm.lastMs)),
