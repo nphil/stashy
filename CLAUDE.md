@@ -76,7 +76,7 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   checklist; plus playback engineering learnings.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.175** (server-transcode indeterminate progress bar, commit `afa5d21`, IPA ~8.30 MB)
+- Latest release: **v1.0.184** (file-aware loading-donut estimate, commit `e49a7f6`, IPA ~8.38 MB)
   — verify the newest release/IPA size each push (CI Build step swallows exit codes; only a published
   release proves compile).
 - **Stashy Companion plugin shipped** (`stash-plugin/` — its OWN top-level folder, sibling to `ios/`):
@@ -136,8 +136,12 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   independent**: every input comes free from Stash's scene metadata (the companion plugin gives the *player*
   donut nothing — it's a Downloads-flow tool; its server-transcode download bar is already determinate off
   live `Job.progress`).
-- Next candidates: **resumable/checkpointed transcode** (fragmented-MP4 append — owner wants it, see
-  ROADMAP Downloads); Netflix fullscreen UI / playback-speed / WYSIWYG layout editor / mini-player-PiP /
-  AI zoom-follow (all in ROADMAP); **remove RemoteLog telemetry** before wider release (tech-debt).
-  Also open: **HEVC-won't-play-native + video-disappeared-after-transcode** bug hunt — diagnostics wired
-  (`⚙︎ transcode-in/frame1/out`, `remux-header-FAIL/out`, `▶︎ video`, `color=HDR-…`), awaiting a device repro.
+- **RESOLVED**: the HEVC-won't-play-native + video-disappeared-after-transcode bug is no longer open (owner
+  confirmed). Diagnostics (`⚙︎ transcode-in/frame1/out`, `remux-header-FAIL/out`, `▶︎ video`, `color=HDR-…`)
+  stay wired but the hunt is closed.
+- Next candidates: **surface the companion plugin's codec-report stats + `Stashy:*` playability tags in the
+  app** (direct-play/needs-transcode/HDR badges + filter-by-playability — producer shipped, app surface is
+  the open half; see ROADMAP Downloads §); **resumable/checkpointed transcode** (fragmented-MP4 append —
+  owner wants it, see ROADMAP Downloads); Netflix fullscreen UI / playback-speed / WYSIWYG layout editor /
+  mini-player-PiP / AI zoom-follow (all in ROADMAP); **remove RemoteLog telemetry** before wider release
+  (the one open tech-debt / release blocker).

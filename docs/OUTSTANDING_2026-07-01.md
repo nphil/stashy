@@ -12,35 +12,31 @@ A consolidated punch list pulled from the session history, cross-referenced agai
 items from this session are listed at the bottom for context.
 
 ## Near-term (active threads, smallest lifts first)
-- [ ] **Verify the downloaded-only filter + offline sprites on device** (shipped in v1.0.101 but untested
-      on hardware): downloaded grid populates, tapping plays the local file, scrubbing a downloaded scene
-      uses the offline sprite sheet, and the funnel highlights when the toggle is on.
-- [ ] **Confirm the filter-popover flicker/crash is actually gone on device.** Root-caused to the popover
-      being hosted from a toolbar item (torn down/re-presented on every query change) and moved to a
-      stable content anchor. Needs the "mash lots of tags + sorts" stress test the user used to reproduce
-      it — verify no pop-down/up and no crash.
-- [ ] **Settings popup clipping** — earlier report: the settings popup was clipped *behind the links
-      card*. Re-verify after the popover rework; fix z-order/presentation if it still clips.
+- [x] **Downloaded-only filter + offline sprites** — verified on device (owner daily-drives it).
+- [x] **Filter-popover flicker/crash** — verified gone on device (stable-anchor `FilterPopoverAnchor`).
+- [x] **Settings popup clipping** — verified resolved after the popover rework.
+- [x] **M-A on-device streaming transcode (video + audio)** — verified on device.
+- [x] **Seek-by-reinit + loading-donut tuning** (warm per-seek estimate + file-weight-scaled) — verified.
 - [ ] **Downloaded thumbnails in the scene grid** — a downloaded scene currently shows the same remote
       thumbnail. Consider a small "downloaded" badge on grid cells so offline availability is visible in
       the normal (non-filtered) scenes grid too.
 
-## Downloads (M2 / M3 — planned, not started)
-- [ ] **M2 — true background continuation.** Move the engine to `URLSessionConfiguration.background`,
-      wire `application(_:handleEventsForBackgroundURLSession:)`, verify downloads survive app
-      suspension/exit. (Current engine uses `.default` = foreground; pauses when suspended.)
-- [ ] **M2 — Live Activity / Dynamic Island for downloads.** Requires a **Widget Extension target** in
-      `project.yml` (ActivityKit + `NSSupportsLiveActivities`): thumbnail + aggregate %/speed/ETA,
-      compact leading/trailing + minimal, with pause/resume/stop. Start/update/end from `DownloadManager`.
-- [ ] **M3 — on-device transcode.** FFmpeg → `h264_videotoolbox`/`hevc_videotoolbox` (+aac). Encoding
-      card mirroring the download card. Presets: resolution target (Original/2160/1080/720/480) + quality
-      Low/Med/High bitrate ladders; HEVC default. **The transcode button already exists on completed
-      cards, disabled (`wand.and.stars`).**
-- [ ] **AV1 encode option** — **blocked**: current FFmpeg XCFrameworks are LGPL-minimal (VideoToolbox
-      H.264/HEVC + AAC only; AV1 *decode* only). Needs a separate FFmpeg rebuild with an AV1 encoder
-      (see the FFmpeg-iOS build brief) — GPL/heavy, CPU-only, slow on phone. Deferred.
-- [ ] **Download source choice** (roadmap): Original file / Stash-transcoded / on-device transcode.
+## Downloads (M2 / M3 — SHIPPED)
+- [x] **M2 — background continuation.** Downloads run under a background `URLSession` and survive
+      suspension/exit (dual-engine handoff: foreground 8-way ⇄ background single-connection — see
+      ENGINEERING_NOTES §3).
+- [x] **M2 — Live Activity / Dynamic Island for downloads.** Aggregate %/speed/ETA.
+- [x] **M3 — on-device transcode.** FFmpeg → `h264/hevc_videotoolbox` (+aac), encoding card, resolution +
+      bitrate-capped quality presets, HEVC default.
+- [x] **Server-side HEVC/AV1 transcode-for-download** — the Stashy Companion plugin (GPU HEVC on the EOL
+      P40 via dual-ffmpeg, CPU AV1, HDR-preserve, real `Job.progress`, app-cancel). See ROADMAP Downloads §.
+- [x] **Download source choice** — Original / server-transcode (companion HEVC/AV1) staged on the Downloads
+      screen.
+- [ ] **On-device AV1 encode option** — still **blocked** on an FFmpeg XCFramework rebuild (LGPL-minimal
+      build ships VideoToolbox H.264/HEVC + AAC only; AV1 *decode* only). Note: server-side AV1 via the
+      companion plugin already covers this need; on-device AV1 encode remains deferred.
 - [ ] **Re-download at different quality** from the management screen.
+- [ ] **Resumable/checkpointed on-device transcode** (fragmented-MP4 append — owner-requested; see ROADMAP).
 
 ## FFmpeg iOS XCFrameworks (separate build project — enables M3/AV1/broader transcode)
 - [ ] Stand up the dedicated `ffmpeg-ios` repo + `macos-15` GitHub Actions build producing the 6

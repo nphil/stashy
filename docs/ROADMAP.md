@@ -9,7 +9,7 @@ scrubbing**, **direct-play first**, on-device FFmpeg as the fallback, minimal se
 foreign-container H.264 → **on-device linear remux over loopback HLS** (smooth playback, confirmed
 on-device); everything Apple can't decode → Stash HLS.
 
-### What works now (v1.0.71) ✅
+### What works now ✅ (linear-remux baseline — still current as of v1.0.184; seek-by-reinit + on-device transcode now layered on top)
 - **Linear continuous remux → byte-range HLS over loopback** plays HEVC (incl. hev1→hvc1) smoothly
   on-device. Fast start (~2s), flat memory, no crashes. This is the default for the remux class.
 - **4 MB read-ahead** on the source AVIO (one HTTP request per slab, not per 64 KB) — essential; without
@@ -24,15 +24,23 @@ introduces frame-timing / AAC-priming discontinuities at every segment boundary 
 unevenly (and eventually stalls). Code is kept, disabled (`buildHLS` is no longer called). To revive it,
 segments must come from **one continuous muxer** (like ffmpeg's `hls` muxer) rather than per-segment muxing.
 
-### Next: fast seeking on the linear path (seek-by-reinit)
-Linear remux is forward-only, so a far-forward seek waits for it to reach that point. Fix without
-reintroducing segment choppiness: on a seek past the produced point, **restart the linear remux
-input-seeked (`av_seek_frame`) near the target keyframe** and rebuild the loopback stream from there
-(playback stays one continuous mux = smooth). Track a time offset so the scrubber shows absolute time.
-This is the immediate next lever for responsive scrubbing.
+### ✅ SHIPPED: fast seeking on the linear path (seek-by-reinit)
+Linear remux was forward-only, so a far-forward seek waited for it to reach that point. Fixed without
+reintroducing segment choppiness: on a seek before the stream's start or past the produced/seekable point,
+`ScenePlayerModel.seek(to:)` **restarts the linear remux/transcode input-seeked (`av_seek_frame`) near the
+target keyframe** (`reinitLocal(at:)`, zero-based) and rebuilds the loopback stream from there — playback
+stays one continuous mux = smooth. A `timeOffset` maps stream-relative → absolute so the scrubber shows
+real time; the `seekTarget`/`seekHoldUntil` hold pins the thumb where the finger releases. The loading
+donut was tuned to match (warm per-seek estimate + snappy curve, and a file-weight-scaled expected time —
+see LoadEstimator). **Do not disturb the seek-hold logic.** (Reinit debounce still deferred — seek fires
+only on drag release, so mid-drag thrash isn't a concern.)
 
-### Next milestone (planned 2026-07-03): on-device transcode as a playback tier + manual server-quality menu
-Two linked pieces, both approved by the owner. They build on the **file** transcoder shipped in
+### ✅ SHIPPED (2026-07-04/05): on-device transcode playback tier (M-A) + manual server-quality menu (M-B)
+Both pieces shipped and on device. M-A = the on-device streaming transcode tier (`FFmpegStreamTranscoder`
++ `LocalTranscodeStream`, HW decode → `h264_videotoolbox` → fragmented MP4, audio copy-or-AAC-reencode,
+seek-by-reinit, `armWatchdog` auto-fallback to Stash HLS). M-B = the player gear → force Stash HLS at a
+chosen resolution (the `?resolution=` duplicate-param bug fixed; resumes at the exact position). Original
+design below, kept as the record. They build on the **file** transcoder shipped in
 v1.0.12x (`FFmpegTranscoder`: libavformat demux → FFmpeg decode → libswscale NV12 → VideoToolbox
 `h264/hevc_videotoolbox` encode → MP4; audio copy for AAC/AC3/EAC3/MP3/ALAC). That class is the encode
 core both items reuse.
@@ -149,10 +157,10 @@ core both items reuse.
      valid independently-decodable segment; `codec_tag=0` puts hvc1 param sets in the init segment.
    - **Source I/O fixed**: a 4 MB read-ahead cache in the remux read callback replaces one URLSession
      range request per 64 KB read (which made a 4K file produce only ~400 KB before the player gave up).
-   - Still **forward-only** for now: a far-forward seek waits for the remux to reach that point. Seekable
-     remux (re-init FFmpeg from an input seek near the target) is the next lever — see Scrubbing below.
-   - **On-device transcode** (MPEG4-ASP/VC1/VP9, AV1 on non-HW-AV1 devices, 4:2:2/4:4:4 HEVC) will ride
-     on the same HLS delivery, decode via FFmpeg/dav1d → `h264/hevc_videotoolbox`.
+   - ✅ **Seekable now** (seek-by-reinit shipped — see above): a far/backward seek restarts the mux input-
+     seeked near the target keyframe instead of waiting.
+   - ✅ **On-device transcode shipped** (M-A): MPEG4-ASP/VC1/VP9, software-AV1, exotic ≤1080p ride the same
+     HLS delivery, decoding via FFmpeg → `h264_videotoolbox`; heavy 4K → server.
 
 3. **Quality / gear selector** — Auto / Direct / On-device / Server transcode + resolution; also the
    manual escape hatch.
@@ -168,10 +176,10 @@ core both items reuse.
 
 ## Scrubbing & seeking (responsiveness)
 
-- **Seekable remux** — the current remux is forward-only, so a far-forward seek waits for the remux to
-  produce everything in between. Fix: on a seek past the produced point, re-init FFmpeg from an input
-  seek near the target timestamp and emit a fresh fragment, instead of waiting. This is the single
-  biggest lever for responsive scrubbing across both remux and (future) on-device transcode.
+- ✅ **Seekable remux — SHIPPED** (seek-by-reinit). A seek before the stream start / past the produced
+  point re-inits FFmpeg input-seeked (`av_seek_frame`) near the target keyframe and rebuilds the loopback
+  from there, instead of waiting; the donut's expected time is warm-per-seek + file-weight-scaled. Works
+  across both remux and on-device transcode. (Reinit debounce still deferred.)
 - **Hybrid scrub preview** — show the (instant) Stash sprite tile while dragging, then refine with an
   on-device decoded frame at the exact position when the user pauses on it. Sprites are coarse on long
   videos (fixed tile count ÷ duration); on-device extraction is exact but has decode latency, so layer
@@ -347,22 +355,36 @@ blocks, both first-class iOS APIs:
     screen: Original+thread-count vs a server resolution). Confirmed against stashapp/stash source: the
     built-in stream API is **H.264-only, resolution-only, quality fixed by server config** — `libx265` is
     in the code but dead/unwired, and there's no per-request codec/quality param.
-  - **★ Stash plugin for server-side HEVC + AV1 transcode-for-download (owner-requested 2026-07-04).** To
-    offer real HEVC/AV1 downloads (smaller files, offload the phone), write a **Stash plugin** that runs its
-    own ffmpeg and exposes a "transcode this scene for download" task the app triggers + polls:
-    - **HEVC via GPU (NVENC).** Reuse the CUDA/NVENC Stash already has — `hevc_nvenc` on the owner's
-      **Tesla P40 (Pascal)**, which has NVENC HEVC. Output **iPhone-native `hvc1`-tagged HEVC in MP4**
-      (`-tag:v hvc1`, yuv420p) so it direct-plays with no on-device remux.
-    - **AV1 via CPU.** The P40 predates NVENC AV1 (needs Ada/RTX 40), so AV1 encode is CPU — **SVT-AV1**
-      or libaom; slow, so offer it as an explicit "small, slow" option.
-    - **Progress + logs come free.** A plugin runs as a Stash **Job**, so `jobQueue`/`findJob`/`jobsSubscribe`
-      expose a real `progress: Float` %, and the plugin can emit `Progress`/`Info` log lines the app tails
-      via the GraphQL `logs` subscription — the structured server-side progress the built-in live-transcode
-      stream can't give. App flow: trigger via GraphQL `runPluginTask`, poll the job for %, then download the
-      produced **static** file (real Content-Length → range/multi-thread download).
-    - Delivers the full codec/quality matrix the built-in API can't (1080/720/… × HEVC/AV1/H.264 × quality),
-      all server-side — the proper answer to "why can't the server give me HEVC." Supersedes on-device
-      transcode for owners who'd rather spend server GPU than phone battery.
+  - **✅ SHIPPED — Stashy Companion plugin for server-side HEVC + AV1 transcode-for-download.** Lives in
+    its own top-level `stash-plugin/` folder (sibling to `ios/`); a zero-dep Python `interface: raw` plugin,
+    installed by adding `raw.githubusercontent.com/nphil/stashy/main/stash-plugin/index.yml` as a Plugin
+    Source. Confirmed working end-to-end on the owner's server. What actually shipped (broader than the
+    original brief below):
+    - **GPU HEVC via NVENC on the EOL Tesla P40.** `hevc_nvenc`, output **iPhone-native `hvc1` MP4** so it
+      direct-plays. The P40 is EOL at driver 580 (NVENC API 13.0), and modern BtbN ffmpeg needs driver ≥610
+      (API 13.1) → **dual-ffmpeg**: **jellyfin-ffmpeg** (driver ≥520) for NVENC + BtbN `latest` (SVT-AV1 3.x)
+      for software/AV1, selected per-build via a `.ffdir` pointer. Pascal HEVC caveats baked in: no B-frames
+      (`-bf 0`), Main10 (10-bit) OK, no AV1, no Dolby Vision.
+    - **CPU AV1 (SVT-AV1)** as the explicit "small, slow" option, with an `av1Preset` speed knob.
+    - **HDR-preserving** transcode: HDR10/HLG kept as true 10-bit (`p010le`, Main10, BT.2020 color tags →
+      the MP4 `colr` atom iOS needs); Dolby Vision mapped to its HDR10/HLG base (DV P5 → SDR).
+    - **Bitrate-aware quality presets** (High/Balanced/Small cap at a fraction of source bitrate — never
+      inflate an 8 Mbps source to 20). Default resolution = Original.
+    - **Real progress + robustness**: runs as a Stash **Job** (`runPluginTask` → poll `findJob` for real
+      `Job.progress`), and live stats are written to a **served `cache/scene<id>.progress.json`** the app
+      polls (survives app switch/exit/crash). App-side cancel calls `stopJob`. Finished file handed to the
+      normal Range-capable multi-connection download engine. `.serverProcessing` DownloadState drives a
+      determinate bar.
+    - **Maintenance/versioning**: **Self-Test** task (nvidia-smi + nvenc smoke probes + GraphQL/serving
+      health), **Install / Switch ffmpeg** (pinned versions coexist), and a shown active-version + switch
+      control — so a Stash upgrade or driver change is a one-task diagnosis, not a silent break.
+    - **Follow-up (NOT yet built) — surface the plugin's ffprobe stats + playability tags in the app.**
+      The **Library Codec Report** and **Tag iPhone-Ready Scenes** tasks already write codec/profile/pixel-
+      format/HDR/direct-play info + `Stashy:Direct-Play / Needs-Transcode / HDR / 10-bit / HEVC / AV1` tags
+      into each scene's `custom_fields` — but the app reads **none** of it. Build the consumer: a small
+      "direct-play / needs-transcode / HDR" badge on scene cards + the detail/stats overlay, and a
+      **filter-by-playability** in the scenes filter (so "show only what my phone direct-plays" is one tap).
+      Producer shipped; app surface is the open half.
   - **On-device transcode on the fly** (reuse the FFmpeg engine to produce a smaller/compatible file
     locally). ✅ H.264/HEVC (VideoToolbox) with resolution + quality presets.
 - **Downloaded Videos management screen** — list/manage offline videos (size, source, delete, play
