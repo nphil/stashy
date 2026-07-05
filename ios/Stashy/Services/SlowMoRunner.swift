@@ -11,6 +11,9 @@ struct SlowMoTelemetry: Sendable {
     var sourceFrames = 0      // distinct decoded source frames seen since engaging
     var synthesized = 0       // interpolated frames produced
     var lastMs = 0.0          // wall-clock of the most recent interpolation
+    var sourceFormat = ""     // fourcc of the decoded buffer (e.g. "BGRA") — diagnostics
+    var sourceWidth = 0       // actual decoded buffer width
+    var sourceHeight = 0      // actual decoded buffer height
 }
 
 /// A snapshot pair of consecutive decoded frames handed off the main actor to the interpolator.
@@ -88,8 +91,20 @@ final class SlowMoRunner {
         // Lazily create the interpolator sized to the ACTUAL decoded buffer (never presentationSize — for
         // anamorphic content that display size differs from the coded buffer and would mismatch VideoToolbox).
         if interpolator == nil {
+            // Diagnostics: record what this file's decoded frames actually look like (dimensions + pixel
+            // format), so a crashing file can be compared against a working one.
+            telemetry.sourceWidth = width
+            telemetry.sourceHeight = height
+            telemetry.sourceFormat = Self.fourCC(CVPixelBufferGetPixelFormatType(buffer))
             let interp = SlowMoInterpolator(width: width, height: height, interpolatedFrames: 1)
             telemetry.supported = interp.startIfNeeded()
+            // Persist the decoded-frame profile off-device before the first (crash-prone) process() call, so
+            // a file that hard-crashes VTFrameProcessor still leaves its dimensions/format in the ntfy log.
+            RemoteLog.shared.event("⚙︎ slowmo-start", [
+                ("size", "\(width)×\(height)"),
+                ("fmt", telemetry.sourceFormat),
+                ("session", "\(telemetry.supported)")
+            ])
             onTelemetry(telemetry)
             guard telemetry.supported else { stop(); return }   // unsupported device → give up cleanly
             interpolator = interp
@@ -137,6 +152,13 @@ final class SlowMoRunner {
         telemetry.lastMs = ms
         inFlight = false
         onTelemetry(telemetry)
+    }
+
+    /// A CoreVideo pixel-format `OSType` as its 4-character code (e.g. `'BGRA'`), for diagnostics.
+    private static func fourCC(_ type: OSType) -> String {
+        let bytes = [UInt8((type >> 24) & 0xff), UInt8((type >> 16) & 0xff),
+                     UInt8((type >> 8) & 0xff), UInt8(type & 0xff)]
+        return String(bytes: bytes, encoding: .ascii)?.trimmingCharacters(in: .whitespaces) ?? "\(type)"
     }
 }
 

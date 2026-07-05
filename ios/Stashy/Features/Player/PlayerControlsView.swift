@@ -147,7 +147,7 @@ struct PlayerControlsView: View {
     /// Half the fixed width of the quality menu (see `qualityMenu`), used to clamp its pop-up position.
     private static let menuHalfWidth: CGFloat = 89
     /// Half the fixed width of the speed menu (see `speedMenu`).
-    private static let speedMenuHalfWidth: CGFloat = 105
+    private static let speedMenuHalfWidth: CGFloat = 110
 
     /// Centre a pop-up panel a fixed gap above its anchor button, clamped so it never runs off-screen
     /// (horizontally within the safe area, and never above the top inset).
@@ -327,8 +327,27 @@ struct PlayerControlsView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            // Opt-in AI frame-interpolated slow-mo (default off) — Apple's VTFrameProcessor can hard-crash on
+            // some files, so it must be explicitly enabled. Only meaningful at ≤0.5× on a slow-playable stream.
+            Button {
+                Haptics.tap(soft: true)
+                model.aiSlowMoEnabled.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "wand.and.stars").frame(width: 18)
+                    Text("AI slow-mo (beta)")
+                    Spacer(minLength: 12)
+                    Image(systemName: model.aiSlowMoEnabled ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(model.aiSlowMoEnabled ? .white : .white.opacity(0.4))
+                }
+                .font(.subheadline)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14).padding(.vertical, 9)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
-        .frame(width: 210)
+        .frame(width: 220)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(.white.opacity(0.15), lineWidth: 1))
         .shadow(color: .black.opacity(0.5), radius: 16, y: 6)

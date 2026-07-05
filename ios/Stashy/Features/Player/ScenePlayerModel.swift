@@ -51,6 +51,16 @@ final class ScenePlayerModel {
             applySlowMute()
         }
     }
+    /// **Opt-in** for on-device AI slow-mo interpolation (default OFF). Apple's `VTLowLatencyFrame
+    /// Interpolation` (iOS 26) hard-crashes inside the framework on certain inputs (undocumented dimension/
+    /// format restrictions — not catchable from Swift), so it must not auto-engage on a daily-driven app.
+    /// Persisted; toggling re-evaluates engagement.
+    var aiSlowMoEnabled: Bool = UserDefaults.standard.bool(forKey: "player.aiSlowMo") {
+        didSet {
+            UserDefaults.standard.set(aiSlowMoEnabled, forKey: "player.aiSlowMo")
+            updateSlowMo()
+        }
+    }
     /// On-device AI slow-mo (VTFrameProcessor frame interpolation) live telemetry, surfaced in the Stats
     /// overlay. Driven by `slowMoRunner` while playback is ≤0.5×. Read ~1 Hz by the overlay, so it needn't
     /// be observable — it's snapshotted on each poll.
@@ -537,9 +547,9 @@ final class ScenePlayerModel {
     /// disengage above it. Purely additive telemetry today (Phase 1b(A)) — it never alters normal playback,
     /// so if VTFrameProcessor is unavailable or the pipeline can't keep up, playback is unaffected.
     private func updateSlowMo() {
-        // Engage only at ≤0.5× AND when the item can actually slow-play — a live/loopback-remux HLS stream
-        // can't, so there's nothing to interpolate there (and applying the slow rate is skipped too).
-        let engage = playbackRate > 0 && playbackRate <= 0.5 && (engine?.canSlowForward ?? false)
+        // Engage only when the user has opted in, at ≤0.5×, AND the item can actually slow-play. The opt-in
+        // is required because VTFrameProcessor can hard-crash on some inputs (see `aiSlowMoEnabled`).
+        let engage = aiSlowMoEnabled && playbackRate > 0 && playbackRate <= 0.5 && (engine?.canSlowForward ?? false)
         if engage {
             guard slowMoRunner == nil else { return }
             let runner = SlowMoRunner(
@@ -647,15 +657,18 @@ final class ScenePlayerModel {
             StatLine(label: "VT h264 enc", value: FFmpegProbe.hasVideoToolboxH264 ? "yes" : "no"),
         ]))
 
-        // AI slow-mo (VTFrameProcessor frame interpolation) — shown whenever engaged, or after it has ever
-        // produced a frame this session, so the Stats box proves the pipeline is live at ≤0.5×.
+        // AI slow-mo (VTFrameProcessor frame interpolation) — opt-in (see aiSlowMoEnabled). Shown whenever
+        // enabled so the Stats box reflects state + the decoded-frame diagnostics used to debug crashes.
         let sm = slowMoTelemetry
-        if sm.active || sm.synthesized > 0 {
-            sections.append(StatSection(title: "Slow-mo (AI)", lines: [
+        if aiSlowMoEnabled || sm.synthesized > 0 {
+            sections.append(StatSection(title: "Slow-mo (AI · beta)", lines: [
                 StatLine(label: "Interpolation",
-                         value: !sm.supported ? "Unsupported on device" : (sm.active ? "Active" : "Idle")),
+                         value: !sm.supported ? "Unsupported on device"
+                              : (sm.active ? "Active" : (playbackRate <= 0.5 ? "Idle (unsupported stream)" : "Idle (≥0.75×)"))),
                 StatLine(label: "Engine", value: "VTFrameProcessor (low-latency 2×)"),
                 StatLine(label: "Speed", value: PlaybackSpeed.closest(to: playbackRate).label),
+                StatLine(label: "Source", value: sm.sourceWidth > 0
+                         ? "\(sm.sourceWidth)×\(sm.sourceHeight) \(sm.sourceFormat)" : "—"),
                 StatLine(label: "Source frames", value: "\(sm.sourceFrames)"),
                 StatLine(label: "Synthesized frames", value: "\(sm.synthesized)"),
                 StatLine(label: "Last interp", value: String(format: "%.1f ms", sm.lastMs)),
