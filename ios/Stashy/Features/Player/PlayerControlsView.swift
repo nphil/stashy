@@ -22,6 +22,11 @@ struct PlayerControlsView: View {
     @State private var gearFrame: CGRect = .zero
     /// Measured height of the quality menu, so it can be centred a fixed gap above the gear.
     @State private var menuHeight: CGFloat = 0
+    /// Speed menu (playback rate) — mirrors the quality popup: its own visibility, anchor frame, and
+    /// measured height, so it pops up directly above the speed pill.
+    @State private var showSpeed = false
+    @State private var speedFrame: CGRect = .zero
+    @State private var speedMenuHeight: CGFloat = 0
     /// The rectangle the video actually occupies (in the controls' coordinate space) — used to centre
     /// the play/pause control and anchor the bottom bar on the real video, not the full player frame.
     var videoRect: CGRect = .zero
@@ -95,21 +100,27 @@ struct PlayerControlsView: View {
                     }
                 }
 
-                // Server-quality gear menu (M-B) — a translucent panel that pops up directly above the
-                // gear button (its measured frame), clamped so it never runs off-screen.
-                if showQuality {
+                // Popup menus (server-quality gear + playback speed) — translucent panels that pop up
+                // directly above their button (each button publishes its frame), clamped so they never
+                // run off-screen, behind one shared dismiss backdrop.
+                if showQuality || showSpeed {
                     Color.black.opacity(0.001)
                         .contentShape(Rectangle())
                         .ignoresSafeArea()
-                        .onTapGesture { withAnimation(.easeOut(duration: 0.15)) { showQuality = false } }
+                        .onTapGesture { withAnimation(.easeOut(duration: 0.15)) { showQuality = false; showSpeed = false } }
+                }
+                if showQuality {
                     qualityMenu
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { menuHeight = $0 }
-                        .position(
-                            x: min(max(gearFrame.midX, Self.menuHalfWidth + safeArea.leading + 8),
-                                   proxy.size.width - Self.menuHalfWidth - safeArea.trailing - 8),
-                            y: max(gearFrame.minY - 12 - menuHeight / 2,
-                                   menuHeight / 2 + safeArea.top + 8)
-                        )
+                        .position(popupPosition(anchor: gearFrame, height: menuHeight,
+                                                halfWidth: Self.menuHalfWidth, in: proxy.size))
+                        .transition(.opacity)
+                }
+                if showSpeed {
+                    speedMenu
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { speedMenuHeight = $0 }
+                        .position(popupPosition(anchor: speedFrame, height: speedMenuHeight,
+                                                halfWidth: Self.speedMenuHalfWidth, in: proxy.size))
                         .transition(.opacity)
                 }
 
@@ -135,6 +146,18 @@ struct PlayerControlsView: View {
 
     /// Half the fixed width of the quality menu (see `qualityMenu`), used to clamp its pop-up position.
     private static let menuHalfWidth: CGFloat = 89
+    /// Half the fixed width of the speed menu (see `speedMenu`).
+    private static let speedMenuHalfWidth: CGFloat = 105
+
+    /// Centre a pop-up panel a fixed gap above its anchor button, clamped so it never runs off-screen
+    /// (horizontally within the safe area, and never above the top inset).
+    private func popupPosition(anchor: CGRect, height: CGFloat, halfWidth: CGFloat, in size: CGSize) -> CGPoint {
+        CGPoint(
+            x: min(max(anchor.midX, halfWidth + safeArea.leading + 8),
+                   size.width - halfWidth - safeArea.trailing - 8),
+            y: max(anchor.minY - 12 - height / 2, height / 2 + safeArea.top + 8)
+        )
+    }
 
     /// A ±10s skip button: clean `gobackward.10`/`goforward.10` glyph, a comfortable 60pt hit target, and
     /// a light haptic tap on press.
@@ -190,9 +213,19 @@ struct PlayerControlsView: View {
                 Text(Self.timeString(model.duration))
                     .font(.caption2.weight(.semibold).monospacedDigit())
                     .fixedSize()
+                // Playback-speed pill (Podcasts-style "1×"). Highlighted when not at normal speed. Its
+                // frame is published so the speed menu pops up directly above it.
+                Button { Haptics.tap(soft: true); withAnimation(.easeOut(duration: 0.15)) { showQuality = false; showSpeed.toggle() }; scheduleHide() } label: {
+                    Text(PlaybackSpeed.closest(to: model.playbackRate).label)
+                        .font(.system(size: 13, weight: .heavy).monospacedDigit())
+                        .foregroundStyle(model.playbackRate == 1 ? .white : Color.accentColor)
+                        .frame(width: 40, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("playerControls")) } action: { speedFrame = $0 }
                 // Server-quality gear (M-B): pick a manual server-transcode resolution. Its frame is
                 // published so the quality menu can pop up directly above it.
-                Button { withAnimation(.easeOut(duration: 0.15)) { showQuality.toggle() }; scheduleHide() } label: {
+                Button { withAnimation(.easeOut(duration: 0.15)) { showSpeed = false; showQuality.toggle() }; scheduleHide() } label: {
                     Image(systemName: quality == .auto ? "gearshape" : "gearshape.fill")
                         .modifier(ControlIcon())
                 }
@@ -242,6 +275,60 @@ struct PlayerControlsView: View {
             }
         }
         .frame(width: 178)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(.white.opacity(0.15), lineWidth: 1))
+        .shadow(color: .black.opacity(0.5), radius: 16, y: 6)
+        .environment(\.colorScheme, .dark)   // keep the material dark/legible over video
+    }
+
+    /// Playback-speed picker (same translucent style as the quality menu). Selecting a rung keeps the menu
+    /// open so the sub-1× "mute when slowed" toggle at the bottom can be flipped without reopening it.
+    private var speedMenu: some View {
+        let current = PlaybackSpeed.closest(to: model.playbackRate)
+        return VStack(alignment: .leading, spacing: 0) {
+            Text("Playback Speed")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.6))
+                .padding(.horizontal, 14).padding(.top, 11).padding(.bottom, 5)
+            ForEach(PlaybackSpeed.allCases) { s in
+                Button {
+                    Haptics.tap(soft: true)
+                    model.setPlaybackRate(s.rawValue)
+                } label: {
+                    HStack(spacing: 8) {
+                        Text(s == .normal ? "Normal (1×)" : s.label)
+                        Spacer(minLength: 12)
+                        if s == current { Image(systemName: "checkmark").font(.caption.weight(.bold)) }
+                    }
+                    .font(.subheadline.weight(s == current ? .semibold : .regular))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            Divider().overlay(.white.opacity(0.15))
+            // Slow-motion audio behaviour: mute below 1× vs. keep pitch-corrected audio at the slow speed.
+            Button {
+                Haptics.tap(soft: true)
+                model.muteWhenSlowed.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: model.muteWhenSlowed ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        .frame(width: 18)
+                    Text("Mute when slowed")
+                    Spacer(minLength: 12)
+                    Image(systemName: model.muteWhenSlowed ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(model.muteWhenSlowed ? .white : .white.opacity(0.4))
+                }
+                .font(.subheadline)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14).padding(.vertical, 9)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(width: 210)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(.white.opacity(0.15), lineWidth: 1))
         .shadow(color: .black.opacity(0.5), radius: 16, y: 6)

@@ -57,6 +57,24 @@ enum ServerQuality: String, CaseIterable, Identifiable, Hashable {
     }
 }
 
+/// Playback-speed rungs offered in the player's speed menu (0.25×…2×). Driven via `AVPlayer` rate with
+/// pitch-corrected audio; the sub-1× rungs pair with the "mute while slowed" preference.
+enum PlaybackSpeed: Double, CaseIterable, Identifiable, Hashable {
+    case quarter = 0.25, half = 0.5, threeQuarter = 0.75, normal = 1
+    case oneQuarter = 1.25, oneHalf = 1.5, double = 2
+    var id: Double { rawValue }
+    /// Compact chip label, e.g. "1×", "1.5×", "0.25×" (integers drop the decimal point).
+    var label: String {
+        let v = rawValue
+        let s = v == v.rounded() ? String(Int(v)) : String(v)
+        return "\(s)×"
+    }
+    /// The rung matching an arbitrary rate (defaults to 1× if none matches exactly).
+    static func closest(to rate: Double) -> PlaybackSpeed {
+        allCases.first { abs($0.rawValue - rate) < 0.001 } ?? .normal
+    }
+}
+
 /// How much work — and *whose* — is going into getting the current scene on screen, ordered best→worst.
 /// Surfaced as a colour-coded badge on the player so it's obvious at a glance whether we're on the cheap
 /// native path or leaning on the server (a workstation whose compute we treat as the last resort). The

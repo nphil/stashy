@@ -68,6 +68,9 @@ final class AVPlaybackEngine: PlaybackEngine {
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
         ])
         item.add(videoOutput)
+        // Pitch-correct audio when the playback speed isn't 1× (so 1.5×/0.75× keep natural pitch instead
+        // of chipmunking). Time-domain is the low-CPU choice that sounds clean for speech-heavy content.
+        item.audioTimePitchAlgorithm = .timeDomain
         // Cap how far ahead AVPlayer buffers. The on-device HLS loopback answers instantly, so AVPlayer
         // otherwise treats bandwidth as infinite and prefetches the *entire* VOD — driving the segment
         // producer to remux hundreds of segments back-to-back, which pegs the CPU and starves 4K decode
@@ -210,9 +213,35 @@ final class AVPlaybackEngine: PlaybackEngine {
         set { player.isMuted = newValue }
     }
 
+    // The user's chosen level and the slow-mute flag are kept separately from the player's applied
+    // `volume`, so toggling one never clobbers the other; `applyOutputVolume()` combines them.
+    private var storedVolume: Float = 0
+    private var slowMuted = false
+
     var volume: Float {
-        get { player.volume }
-        set { player.volume = newValue; if newValue > 0 { player.isMuted = false } }
+        get { storedVolume }
+        set { storedVolume = newValue; if newValue > 0 { player.isMuted = false }; applyOutputVolume() }
+    }
+
+    var slowMute: Bool {
+        get { slowMuted }
+        set { slowMuted = newValue; applyOutputVolume() }
+    }
+
+    private func applyOutputVolume() { player.volume = slowMuted ? 0 : storedVolume }
+
+    private var desiredRate: Float = 1
+    var playbackRate: Float {
+        get { desiredRate }
+        set {
+            desiredRate = newValue
+            // With `automaticallyWaitsToMinimizeStalling` on, `play()` sets the live rate to `defaultRate`
+            // (and setting `rate` directly is discouraged / logs). So publish the new rate via defaultRate,
+            // then re-invoke play() to apply it live — but only if already playing, so changing speed while
+            // paused doesn't force playback to start.
+            player.defaultRate = newValue
+            if player.timeControlStatus != .paused { player.play() }
+        }
     }
 
     /// True when audio is routed somewhere private (wired headphones, AirPods / other Bluetooth, USB or

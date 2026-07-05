@@ -44,6 +44,14 @@ protocol PlaybackEngine: AnyObject {
     /// actually takes effect.
     var volume: Float { get set }
 
+    /// Playback speed (1 = normal). Changing it takes effect immediately if playing, and is the rate used
+    /// the next time `play()` runs. Audio is pitch-corrected, so pitch stays natural at every speed.
+    var playbackRate: Float { get set }
+
+    /// Silence audio independently of `volume` — used to mute while playing slower than 1× without
+    /// clobbering the user's chosen volume level (restored when the flag clears).
+    var slowMute: Bool { get set }
+
     func play()
     func pause()
     /// `precise` seeks frame-accurately (zero tolerance) so the frame lands exactly where the scrub

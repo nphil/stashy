@@ -39,6 +39,17 @@ final class ScenePlayerModel {
     var isMuted: Bool { volume <= 0.001 }
     /// The last non-zero level, so a tap-to-mute can restore the previous volume.
     @ObservationIgnored private var lastNonZeroVolume: Double = 1
+    /// Playback speed (1 = normal). Applied live to the engine and re-applied to every rebuilt engine
+    /// (seek-reinit / quality / fallback swaps all go through `makeEngine`), so speed survives them.
+    private(set) var playbackRate: Double = 1
+    /// When true, audio is muted while playing slower than 1× (slowed audio is usually unwanted); when
+    /// false it plays pitch-corrected at the slow speed. Persisted across launches. Only affects sub-1×.
+    var muteWhenSlowed: Bool = UserDefaults.standard.object(forKey: "player.muteWhenSlowed") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(muteWhenSlowed, forKey: "player.muteWhenSlowed")
+            applySlowMute()
+        }
+    }
     /// True once playback has run to the end (player parked there). The next play() restarts from 0.
     @ObservationIgnored private var reachedEnd = false
 
@@ -251,6 +262,9 @@ final class ScenePlayerModel {
         // Every engine (the initial one and any seek-reinit / quality / fallback swap) inherits the
         // current volume — which starts at 0, so playback always begins silent until the user raises it.
         engine.volume = Float(volume)
+        // …and the current playback speed + slow-mute policy, so a mid-scene rate change survives reinit.
+        engine.playbackRate = Float(playbackRate)
+        engine.slowMute = playbackRate < 1 && muteWhenSlowed
         engine.onTime = { [weak self] current, duration in
             guard let self else { return }
             let absolute = self.usesAbsoluteTime ? self.timeOffset + current : current
@@ -491,6 +505,20 @@ final class ScenePlayerModel {
 
     /// Tap-to-mute: drop to 0, or restore the previous level.
     func toggleMute() { setVolume(volume > 0.001 ? 0 : lastNonZeroVolume) }
+
+    /// Change playback speed (0.25…2×). Takes effect immediately on the live engine and, via `makeEngine`,
+    /// survives every engine rebuild. Re-evaluates the slow-mute policy for the new rate.
+    func setPlaybackRate(_ rate: Double) {
+        playbackRate = rate
+        engine?.playbackRate = Float(rate)
+        applySlowMute()
+    }
+
+    /// Apply the "mute while slowed" policy to the live engine (mute only below 1×, and only when the
+    /// preference is on). Called whenever the rate or the preference changes.
+    private func applySlowMute() {
+        engine?.slowMute = playbackRate < 1 && muteWhenSlowed
+    }
 
     func seek(to time: TimeInterval) {
         reachedEnd = false   // any seek means we're no longer parked at EOF
