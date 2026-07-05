@@ -14,6 +14,9 @@ final class PlayabilityStore {
     static let shared = PlayabilityStore()
     private init() {}
 
+    // Mirrors the plugin's per-scene entry in playability.json. Only `tier` (filter) and `needs_transcode`
+    // (routing hint) are consumed today; the rest are decoded and retained for future use (e.g. an HDR
+    // filter bucket) and cost nothing to keep.
     struct Info: Decodable, Sendable, Equatable {
         var tier: String = "remux"            // direct | remux | transcode
         var needs_transcode: Bool = false
