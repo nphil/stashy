@@ -66,13 +66,24 @@ core both items reuse.
 
 ### ★ PRIORITY — Player UI rework + playback speed / AI slow-motion (owner-requested 2026-07-04)
 
-- **Netflix-style fullscreen player UI.** Rework the fullscreen controls layout taking the **Netflix
-  iPhone player as the design reference** — the large centred transport cluster (back-10s / play-pause /
-  forward-10s), a clean top bar (title + close), a bottom scrubber with elapsed/remaining, and a small
-  cluster of secondary controls (speed, audio/quality, episodes) rather than everything crammed on one
-  bar. Applies to **fullscreen only**; the inline compact bar stays as-is. Reuse the existing gear
+- **Netflix-style fullscreen player UI + finish the portrait-controls polish (owner-requested; partially
+  shipped).** Rework the fullscreen controls layout taking the **Netflix iPhone player as the design
+  reference** — the large centred transport cluster (back-10s / play-pause / forward-10s), a clean top bar
+  (title + close), a bottom scrubber with elapsed/remaining, and a small cluster of secondary controls
+  (speed, audio/quality, episodes) rather than everything crammed on one bar. Reuse the existing gear
   (quality), volume, and status-badge components, re-laid-out for the immersive layout. Owner is exacting
   about native feel — match Apple/Netflix animation physics and spacing.
+  - **✅ Shipped in the orientation/controls pass (v1.0.199–200):** sticky fullscreen with **✕-to-inline**
+    exit (no auto-exit-on-tilt race — the old landscape/portrait regression); manual fullscreen → landscape
+    (portrait for vertical videos), X to leave; **portrait volume slider expands vertically** (no clip);
+    **status badges stacked vertically** (resolution over method pill, one-pill-width, no truncation) in
+    both orientations; inline back chevron removed (swipe-back leaves). The control layout is orientation-
+    driven (`landscape = width > height`), so portrait-fullscreen (vertical videos) shares the portrait
+    layout.
+  - **⏳ Still to finish (fold into this rework):** the portrait bottom-controls fine layout — scrubber not
+    too high, **use the vertical gap between the progress bar and the bottom row**, keep the transport
+    cluster centred on the video, and decide **elapsed/duration placement** (keep both in the bottom row vs
+    move elapsed left / remaining right of the scrubber). Needs on-device visual iteration.
 - **Custom WYSIWYG player-control layout editor (Settings) — owner-requested 2026-07-04.** A Settings
   entry opens a "custom layout" mode where the user hand-places the on-video controls, with **separate
   layouts for landscape (fullscreen) and portrait (inline)**. The default ships as the Netflix-style
