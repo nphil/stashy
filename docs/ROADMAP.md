@@ -156,9 +156,21 @@ core both items reuse.
     back via an `await self?.method()` (not `MainActor.run`, which trips "sending self"). *(Also fixed a latent
     strict-concurrency error a broader recompile surfaced: `RemoteLog.enable()` is nonisolated and used
     `UIDevice.current` (now `@MainActor`) → switched to `ProcessInfo.operatingSystemVersionString`.)*
-    **Phase 1b-B (next)** — the render swap: present the synthesised frames on an `AVSampleBufferDisplayLayer`
-    (paced via its timebase / the display link) with `AVPlayerLayer` hidden + audio muted; fall back to plain
-    slow playback if it can't keep the buffer fed. This is the part that needs on-device visual/thermal tuning. **Phase 2** — swap in Frame Rate Conversion with a per-rate
+    **⚠️ Fragility found (v1.0.195) — now OPT-IN (default OFF).** `VTLowLatencyFrameInterpolation` **hard-crashes
+    inside the framework** (SIGABRT, uncatchable from Swift) on certain decoded frames — reproduced on a 720p
+    HEVC 0.9 Mbps file, and it persisted after a server transcode to direct-play H.264 at the same ≤0.5× line,
+    so it's the interpolator, not the codec/remux path. Apple's own forums report undocumented dimension/aspect
+    restrictions (e.g. 144×144 fails) and reproducible crashes on iOS 26.3, and the config vends its own required
+    pixel format via `frameSupportedPixelFormats` that we currently ignore (we force `32BGRA`; ML video models
+    usually want biplanar YUV). So slow-mo is now gated behind `aiSlowMoEnabled` (speed-menu "AI slow-mo (beta)"
+    toggle, default off) and the "Slow-mo (AI · beta)" Stats section + a pre-`process()` `RemoteLog` line now
+    surface the decoded **source W×H + pixel fourcc** to compare a crashing file against a working one.
+    **Next (root-cause fix):** read `frameSupportedPixelFormats`/`sourcePixelBufferAttributes` and feed VT the
+    format it actually wants (likely a dedicated NV12 `AVPlayerItemVideoOutput`), validate dimensions against
+    the (undocumented) minimums, and only then re-enable by default. **Phase 1b-B (after that)** — the render
+    swap: present the synthesised frames on an `AVSampleBufferDisplayLayer` (paced via its timebase / the
+    display link) with `AVPlayerLayer` hidden + audio muted; fall back to plain slow playback if it can't keep
+    the buffer fed. Needs on-device visual/thermal tuning. **Phase 2** — swap in Frame Rate Conversion with a per-rate
     `interpolationPhase` for arbitrary-factor smoothness (`[0.5]`@0.5×, `[0.25,0.5,0.75]`@0.25×). **Phase 3
     (optional)** — an "export smooth slow-mo clip" action (on-device or P40 plugin) for a saved max-quality
     result.
