@@ -83,14 +83,17 @@ final class SlowMoInterpolator {
         else { return [] }
 
         // VideoToolbox fills the destination buffers in place on its own queue; we just await it.
-        // (`process(parameters:)` is async but non-throwing — failures surface as untouched buffers.)
-        _ = await processor.process(parameters: parameters)
+        do {
+            _ = try await processor.process(parameters: parameters)
+        } catch {
+            return []
+        }
         return destinations
     }
 
     /// End the session and drop the pool.
     func invalidate() {
-        if started { try? processor.endSession(); started = false }
+        if started { processor.endSession(); started = false }
         pool = nil
     }
 
