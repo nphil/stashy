@@ -1075,13 +1075,16 @@ def _iter_scenes(stash, page_size=100):
         page += 1
 
 
-def run_stats(stash, settings, do_tag):
+def run_stats(stash, settings):
+    """ffprobe every scene and write the whole library's playability to ONE served file
+    (cache/playability.json) that the app reads over HTTP. Makes **zero** sceneUpdate calls — so it fires
+    no Scene.Update hooks and queues no "Sync" tasks, no matter how large the library. (The previous
+    version wrote each scene's custom_fields / tags, which on a fresh library meant hundreds of
+    sceneUpdates → hundreds of hooked Sync tasks. Never write per-scene for a bulk operation.)"""
     ffprobe = _bin("ffprobe", settings.get("ffmpegPath"))
-    agg = {"total": 0, "direct": 0, "remux": 0, "transcode": 0, "hdr": 0,
-           "ten_bit": 0, "codecs": {}}
-    tag_ids = _ensure_tags(stash) if do_tag else {}
+    agg = {"total": 0, "direct": 0, "remux": 0, "transcode": 0, "hdr": 0, "ten_bit": 0, "codecs": {}}
+    report = {}
 
-    # First pass count (for progress) via a cheap query.
     total_count = 0
     for count, _ in _iter_scenes(stash, page_size=1):
         total_count = count
@@ -1108,29 +1111,42 @@ def run_stats(stash, settings, do_tag):
                 agg["hdr"] += 1
             if info["ten_bit"]:
                 agg["ten_bit"] += 1
-            # Write the probe only when it changed — an unchanged scene fires no sceneUpdate, so a re-run
-            # over an already-analyzed library triggers no Scene.Update hooks (no queued "sync" tasks).
-            try:
-                prev = json.loads((scene.get("custom_fields") or {}).get("stashy_probe") or "null")
-            except Exception:
-                prev = None
-            if prev != info:
-                try:
-                    set_custom_field(stash, scene["id"], "stashy_probe", json.dumps(info, sort_keys=True))
-                except Exception as e:
-                    log_debug("probe write failed for {}: {}".format(scene["id"], e))
-            if do_tag:
-                _tag_scene(stash, scene, info, tag_ids)
+            report[str(scene["id"])] = {
+                "tier": info["tier"],
+                "needs_transcode": info["needs_transcode"],
+                "direct_play": info["direct_play"],
+                "hdr": info["hdr"],
+                "ten_bit": info["ten_bit"],
+                "codec": info["codec"],
+                "pix_fmt": info["pix_fmt"],
+            }
 
+    _write_playability_file(report)
     log_info("Library codec report — {} scenes: {} direct-play, {} on-device remux, {} need transcode, "
-             "{} HDR, {} 10-bit. Codecs: {}".format(
-                 agg["total"], agg["direct"], agg["remux"], agg["transcode"],
-                 agg["hdr"], agg["ten_bit"],
-                 ", ".join("{} {}".format(k or "?", v) for k, v in sorted(agg["codecs"].items()))))
+             "{} HDR, {} 10-bit. Codecs: {}. Wrote served playability.json (no scene writes / no Sync tasks)."
+             .format(agg["total"], agg["direct"], agg["remux"], agg["transcode"], agg["hdr"], agg["ten_bit"],
+                     ", ".join("{} {}".format(k or "?", v) for k, v in sorted(agg["codecs"].items()))))
     log_progress(1.0)
     return agg
 
 
+def _playability_path():
+    return os.path.join(CACHE_DIR, "playability.json")
+
+
+def _write_playability_file(report):
+    """Whole-library playability map → a served file the app reads over HTTP. Filesystem-only: no
+    sceneUpdate, no Scene.Update hooks, no queued Sync tasks. Atomic."""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    blob = {"generated": int(time.time()), "count": len(report), "scenes": report}
+    tmp = _playability_path() + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(blob, fh)
+    os.replace(tmp, _playability_path())
+
+
+# Legacy Stashy:* tag names created by v0.1.16/0.1.17 (before playability moved to a served file). Kept
+# ONLY so the cleanup task below can find and remove them — the plugin no longer creates or writes tags.
 TAG_NAMES = {
     "direct_play": "Stashy:Direct-Play",
     "needs_transcode": "Stashy:Needs-Transcode",
@@ -1141,57 +1157,12 @@ TAG_NAMES = {
 }
 
 
-def _ensure_tags(stash):
-    ids = {}
-    for key, name in TAG_NAMES.items():
-        data = stash.call(
-            "query($f: FindFilterType, $t: TagFilterType) { findTags(filter: $f, tag_filter: $t) { tags { id name } } }",
-            {"f": {"per_page": 1}, "t": {"name": {"value": name, "modifier": "EQUALS"}}},
-        )
-        tags = (data.get("findTags") or {}).get("tags") or []
-        if tags:
-            ids[key] = tags[0]["id"]
-        else:
-            created = stash.call("mutation($n: String!) { tagCreate(input: {name: $n}) { id } }", {"n": name})
-            ids[key] = created["tagCreate"]["id"]
-    return ids
-
-
-def _tag_scene(stash, scene, info, tag_ids):
-    """Set this scene's Stashy:* playability tags from the ffprobe verdict, preserving every user tag, and
-    — crucially — issue sceneUpdate ONLY when the set actually changes, so re-running over an already-tagged
-    library fires no Scene.Update hooks (no queued 'sync' tasks). `scene` carries its current `tags` already
-    (fetched in SCENE_FIELDS), so there's no per-scene extra query either."""
-    want = set()
-    if info["tier"] == "direct":
-        want.add(tag_ids["direct_play"])
-    elif info["tier"] == "transcode":
-        want.add(tag_ids["needs_transcode"])
-    # (remux tier gets neither playability tag — it plays on-device, no server needed.)
-    if info["hdr"]:
-        want.add(tag_ids["hdr"])
-    if info["ten_bit"]:
-        want.add(tag_ids["ten_bit"])
-    if any(c in info["codec"] for c in ("hevc", "h265", "hvc")):
-        want.add(tag_ids["hevc"])
-    if "av1" in info["codec"] or "av01" in info["codec"]:
-        want.add(tag_ids["av1"])
-    existing = {str(t["id"]) for t in (scene.get("tags") or [])}
-    ours = set(tag_ids.values())
-    final = (existing - ours) | want          # replace only OUR tags; keep everything the user set
-    if final == existing:
-        return                                # already correct — leave the scene untouched
-    stash.call(
-        "mutation($id: ID!, $ids: [ID!]) { sceneUpdate(input: {id: $id, tag_ids: $ids}) { id } }",
-        {"id": str(scene["id"]), "ids": sorted(final)},
-    )
-
-
 def run_untag(stash):
-    """Fully reverse everything the stats/tag tasks wrote: strip every Stashy:* tag from every scene, clear
-    the `stashy_probe` custom field, then delete the now-unused Stashy:* tag definitions — leaving the
-    user's own tags and custom fields untouched. Idempotent, and the clean 'undo' for anyone wary of the
-    plugin touching their library."""
+    """Reverse the per-scene writes older plugin versions (≤0.1.17) made: strip every Stashy:* tag from
+    every scene, clear the `stashy_probe` custom field, then delete the now-unused Stashy:* tag definitions
+    — leaving the user's own tags and custom fields untouched. The current plugin writes NONE of these
+    (playability lives in a served file now), so this is purely a one-time cleanup for earlier installs.
+    Only scenes that actually carry Stashy data are updated, so on a clean library it makes no writes."""
     tag_ids = {}
     for key, name in TAG_NAMES.items():   # resolve only tags that already exist — don't create to delete
         data = stash.call(
@@ -1277,9 +1248,11 @@ def main():
         if mode == "transcode":
             run_transcode(stash, args, settings)
         elif mode == "stats":
-            run_stats(stash, settings, do_tag=False)
+            run_stats(stash, settings)
         elif mode == "tag":
-            run_stats(stash, settings, do_tag=True)
+            # Legacy task id (≤0.1.17 tagged scenes). Now a no-tag alias for the report — it writes the
+            # served playability.json and makes zero scene writes, so an old invocation can't storm hooks.
+            run_stats(stash, settings)
         elif mode == "untag":
             run_untag(stash)
         elif mode == "purge":
