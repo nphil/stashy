@@ -113,7 +113,9 @@ final class RemoteLog: @unchecked Sendable {
             m.resume()
             self.memTimer = m
         }
-        log("=== RemoteLog enabled (\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)) ===")
+        // ProcessInfo (not UIDevice.current, which is @MainActor) so this stays legal in the nonisolated
+        // enable() under strict concurrency; gives the same "iOS 26.x" string.
+        log("=== RemoteLog enabled (\(ProcessInfo.processInfo.operatingSystemVersionString)) ===")
     }
 
     func disable() {

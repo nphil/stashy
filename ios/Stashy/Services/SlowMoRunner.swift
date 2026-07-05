@@ -108,15 +108,18 @@ final class SlowMoRunner {
                                                   current: pair.current, currentPTS: pair.currentPTS,
                                                   phases: [0.5])
             let ms = Date().timeIntervalSince(t0) * 1000
-            let count = frames.count
-            await MainActor.run {
-                guard let self else { return }
-                self.telemetry.synthesized += count
-                self.telemetry.lastMs = ms
-                self.inFlight = false
-                self.onTelemetry(self.telemetry)
-            }
+            // Hop back to the main actor via a method call (avoids "sending self" into a MainActor.run
+            // closure); Int/Double are Sendable, and the runner is @MainActor.
+            await self?.recordInterpolation(synthesized: frames.count, ms: ms)
         }
+    }
+
+    /// Fold a completed interpolation's result into the telemetry (main actor) and free the single-flight slot.
+    private func recordInterpolation(synthesized: Int, ms: Double) {
+        telemetry.synthesized += synthesized
+        telemetry.lastMs = ms
+        inFlight = false
+        onTelemetry(telemetry)
     }
 }
 
