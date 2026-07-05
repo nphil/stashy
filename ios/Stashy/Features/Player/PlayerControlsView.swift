@@ -220,10 +220,12 @@ struct PlayerControlsView: View {
                             .modifier(ControlIcon())
                     }
                 }
-                // Volume: last item on the left. Wider expanded track in landscape fullscreen.
+                // Volume: last item on the left. Landscape expands rightward inline (wider track when
+                // fullscreen); portrait floats a vertical slider upward so it can't clip a narrow row.
                 VolumeControl(volume: model.volume, isMuted: model.isMuted,
                               onChange: { model.setVolume($0) }, onInteract: { scheduleHide() },
-                              trackWidth: (isFullscreen && landscape) ? 120 : 54)
+                              trackWidth: (isFullscreen && landscape) ? 120 : 54,
+                              vertical: !landscape)
                 Spacer(minLength: 6)
                 Text(Self.timeString(model.duration))
                     .font(.caption2.weight(.semibold).monospacedDigit())
