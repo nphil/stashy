@@ -9,7 +9,7 @@ description: >-
   codec + HDR stats, and auto-tagging of direct-play-ready scenes — capabilities
   vanilla Stash lacks. Output is served back to the app over Stash's own HTTP
   with real Job progress.
-version: 0.1.16
+version: 0.1.17
 url: https://github.com/nphil/stashy/tree/main/stash-plugin
 exec:
   - python
@@ -80,13 +80,17 @@ tasks:
     defaultArgs:
       mode: transcode
   - name: Library Codec Report
-    description: "ffprobe every scene; record codec / profile / pixel-format / HDR / direct-play info into each scene's custom_fields and log an aggregate summary."
+    description: "ffprobe every scene; record codec / profile / pixel-format / HDR / playability tier (direct / on-device remux / needs-transcode) into each scene's custom_fields (a partial write — never clobbers your other fields) and log an aggregate summary. Powers the app's smarter routing. Re-runnable: unchanged scenes are skipped, so nothing is re-written."
     defaultArgs:
       mode: stats
   - name: Tag iPhone-Ready Scenes
-    description: "Auto-tag scenes Stashy:Direct-Play / Needs-Transcode / HDR / 10-bit / HEVC / AV1 so the app and Stash UI can filter by playability."
+    description: "Auto-tag scenes Stashy:Direct-Play (zero-conversion H.264/AV1) / Needs-Transcode (Apple can't decode — 4:2:2/4:4:4/10-12-bit-exotic/VP9) / HDR / 10-bit / HEVC / AV1 so the app and Stash UI can filter by playability. Only ever touches Stashy:* tags (your tags are preserved), and skips any scene already correct (no Scene.Update hook / no queued sync task on a re-run)."
     defaultArgs:
       mode: tag
+  - name: Remove Stashy Tags & Data
+    description: "Full undo: strip every Stashy:* tag from every scene, clear the stashy_probe custom field, and delete the now-empty Stashy:* tag definitions. Your own tags and custom fields are left untouched. Run this to completely reverse the Library Codec Report / Tag tasks."
+    defaultArgs:
+      mode: untag
   - name: Purge Transcode Cache
     description: "Delete the companion HEVC/AV1 cache (or trim it to the size cap if one is set)."
     defaultArgs:

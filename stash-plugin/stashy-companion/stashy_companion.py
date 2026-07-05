@@ -224,6 +224,8 @@ def encoder_available(ffmpeg, encoder):
 SCENE_FIELDS = """
   id
   title
+  tags { id }
+  custom_fields
   files { path duration width height video_codec audio_codec format bit_rate frame_rate size }
 """
 
@@ -1013,8 +1015,16 @@ def run_selftest(stash, settings):
 # Stats + tagging (ffprobe-derived, iterates the whole library).
 # ----------------------------------------------------------------------------
 HDR_TRANSFERS = {"smpte2084", "arib-std-b67", "smpte2086", "bt2020-10", "bt2020-12"}
-DIRECT_PLAY_VIDEO = {"h264", "hevc", "h265"}
+# Truly zero-conversion (direct play) video: H.264 or AV1 in an Apple-native container, 8-bit SDR 4:2:0.
+# HEVC is deliberately EXCLUDED — the app remuxes hev1→hvc1 first (an on-device remux, not direct play),
+# so tagging HEVC as "Direct-Play" would be a lie. Mirrors StashScene.directPlayCodecs on the app side.
+DIRECT_PLAY_VIDEO = {"h264", "avc", "avc1", "av1", "av01"}
 DIRECT_PLAY_CONTAINER = ("mp4", "mov", "m4v", "quicktime")
+# Codecs Apple can decode at all (natively, or via the app's on-device remux/transcode of a 4:2:0 stream).
+APPLE_DECODABLE_CODECS = ("h264", "avc", "hevc", "h265", "hvc", "av1", "av01")
+# Pixel formats Apple's H.264/HEVC decoders cannot handle → must transcode (server or on-device re-encode).
+# Mirrors ScenePlayerModel.needsTranscode(pixFmt:) so the app's routing can trust this verdict.
+UNDECODABLE_PIX = ("422", "444", "12le", "12be", "gbr")
 
 
 def _analyze(probe):
@@ -1025,9 +1035,15 @@ def _analyze(probe):
     codec = (v.get("codec_name") or "").lower()
     ten_bit = "10" in pix or "p010" in pix or (v.get("bits_per_raw_sample") in ("10", 10))
     hdr = transfer in HDR_TRANSFERS
-    direct = (codec in DIRECT_PLAY_VIDEO
+    # Apple can't decode this stream at all (exotic pixel format, or a codec outside its decoders) → the
+    # app's server / on-device *transcode* tier. This is the verdict routing most wants: it's the case the
+    # app otherwise only discovers after a doomed remux attempt.
+    undecodable = (any(t in pix for t in UNDECODABLE_PIX)
+                   or (codec != "" and not any(c in codec for c in APPLE_DECODABLE_CODECS)))
+    direct = (any(c == codec or c in codec for c in DIRECT_PLAY_VIDEO)
               and any(c in fmt for c in DIRECT_PLAY_CONTAINER)
-              and not ten_bit and not hdr)
+              and not undecodable and not ten_bit and not hdr)
+    tier = "transcode" if undecodable else ("direct" if direct else "remux")
     return {
         "codec": codec,
         "profile": v.get("profile"),
@@ -1036,6 +1052,9 @@ def _analyze(probe):
         "hdr": hdr,
         "ten_bit": bool(ten_bit),
         "direct_play": bool(direct),
+        "needs_transcode": bool(undecodable),
+        # direct | remux | transcode — matches the app's routing tiers so filter + routing agree.
+        "tier": tier,
     }
 
 
@@ -1058,7 +1077,7 @@ def _iter_scenes(stash, page_size=100):
 
 def run_stats(stash, settings, do_tag):
     ffprobe = _bin("ffprobe", settings.get("ffmpegPath"))
-    agg = {"total": 0, "direct_play": 0, "needs_transcode": 0, "hdr": 0,
+    agg = {"total": 0, "direct": 0, "remux": 0, "transcode": 0, "hdr": 0,
            "ten_bit": 0, "codecs": {}}
     tag_ids = _ensure_tags(stash) if do_tag else {}
 
@@ -1084,24 +1103,28 @@ def run_stats(stash, settings, do_tag):
             info = _analyze(probe)
             agg["total"] += 1
             agg["codecs"][info["codec"]] = agg["codecs"].get(info["codec"], 0) + 1
-            if info["direct_play"]:
-                agg["direct_play"] += 1
-            else:
-                agg["needs_transcode"] += 1
+            agg[info["tier"]] = agg.get(info["tier"], 0) + 1
             if info["hdr"]:
                 agg["hdr"] += 1
             if info["ten_bit"]:
                 agg["ten_bit"] += 1
+            # Write the probe only when it changed — an unchanged scene fires no sceneUpdate, so a re-run
+            # over an already-analyzed library triggers no Scene.Update hooks (no queued "sync" tasks).
             try:
-                set_custom_field(stash, scene["id"], "stashy_probe", json.dumps(info))
-            except Exception as e:
-                log_debug("probe write failed for {}: {}".format(scene["id"], e))
+                prev = json.loads((scene.get("custom_fields") or {}).get("stashy_probe") or "null")
+            except Exception:
+                prev = None
+            if prev != info:
+                try:
+                    set_custom_field(stash, scene["id"], "stashy_probe", json.dumps(info, sort_keys=True))
+                except Exception as e:
+                    log_debug("probe write failed for {}: {}".format(scene["id"], e))
             if do_tag:
-                _tag_scene(stash, scene["id"], info, tag_ids)
+                _tag_scene(stash, scene, info, tag_ids)
 
-    log_info("Library codec report — {} scenes: {} direct-play, {} need transcode, "
+    log_info("Library codec report — {} scenes: {} direct-play, {} on-device remux, {} need transcode, "
              "{} HDR, {} 10-bit. Codecs: {}".format(
-                 agg["total"], agg["direct_play"], agg["needs_transcode"],
+                 agg["total"], agg["direct"], agg["remux"], agg["transcode"],
                  agg["hdr"], agg["ten_bit"],
                  ", ".join("{} {}".format(k or "?", v) for k, v in sorted(agg["codecs"].items()))))
     log_progress(1.0)
@@ -1134,27 +1157,88 @@ def _ensure_tags(stash):
     return ids
 
 
-def _tag_scene(stash, scene_id, info, tag_ids):
+def _tag_scene(stash, scene, info, tag_ids):
+    """Set this scene's Stashy:* playability tags from the ffprobe verdict, preserving every user tag, and
+    — crucially — issue sceneUpdate ONLY when the set actually changes, so re-running over an already-tagged
+    library fires no Scene.Update hooks (no queued 'sync' tasks). `scene` carries its current `tags` already
+    (fetched in SCENE_FIELDS), so there's no per-scene extra query either."""
     want = set()
-    want.add(tag_ids["direct_play"] if info["direct_play"] else tag_ids["needs_transcode"])
+    if info["tier"] == "direct":
+        want.add(tag_ids["direct_play"])
+    elif info["tier"] == "transcode":
+        want.add(tag_ids["needs_transcode"])
+    # (remux tier gets neither playability tag — it plays on-device, no server needed.)
     if info["hdr"]:
         want.add(tag_ids["hdr"])
     if info["ten_bit"]:
         want.add(tag_ids["ten_bit"])
-    if info["codec"] in ("hevc", "h265"):
+    if any(c in info["codec"] for c in ("hevc", "h265", "hvc")):
         want.add(tag_ids["hevc"])
-    if info["codec"] == "av1":
+    if "av1" in info["codec"] or "av01" in info["codec"]:
         want.add(tag_ids["av1"])
-    # Merge with existing tags (don't drop unrelated ones).
-    data = stash.call("query($id: ID!) { findScene(id: $id) { tags { id } } }", {"id": str(scene_id)})
-    existing = {t["id"] for t in ((data.get("findScene") or {}).get("tags") or [])}
-    # Drop any of OUR tags the scene shouldn't have, keep everything else.
+    existing = {str(t["id"]) for t in (scene.get("tags") or [])}
     ours = set(tag_ids.values())
-    final = (existing - ours) | want
+    final = (existing - ours) | want          # replace only OUR tags; keep everything the user set
+    if final == existing:
+        return                                # already correct — leave the scene untouched
     stash.call(
         "mutation($id: ID!, $ids: [ID!]) { sceneUpdate(input: {id: $id, tag_ids: $ids}) { id } }",
-        {"id": str(scene_id), "ids": sorted(final)},
+        {"id": str(scene["id"]), "ids": sorted(final)},
     )
+
+
+def run_untag(stash):
+    """Fully reverse everything the stats/tag tasks wrote: strip every Stashy:* tag from every scene, clear
+    the `stashy_probe` custom field, then delete the now-unused Stashy:* tag definitions — leaving the
+    user's own tags and custom fields untouched. Idempotent, and the clean 'undo' for anyone wary of the
+    plugin touching their library."""
+    tag_ids = {}
+    for key, name in TAG_NAMES.items():   # resolve only tags that already exist — don't create to delete
+        data = stash.call(
+            "query($t: TagFilterType) { findTags(tag_filter: $t) { tags { id } } }",
+            {"t": {"name": {"value": name, "modifier": "EQUALS"}}},
+        )
+        tags = (data.get("findTags") or {}).get("tags") or []
+        if tags:
+            tag_ids[key] = str(tags[0]["id"])
+    ours = set(tag_ids.values())
+
+    removed, cleared, total_count, processed = 0, 0, 0, 0
+    for count, _ in _iter_scenes(stash, page_size=1):
+        total_count = count
+        break
+    for count, scenes in _iter_scenes(stash):
+        total_count = count or total_count
+        for scene in scenes:
+            processed += 1
+            if total_count:
+                log_progress(processed / float(total_count))
+            existing = {str(t["id"]) for t in (scene.get("tags") or [])}
+            keep = existing - ours
+            if ours and keep != existing:
+                stash.call(
+                    "mutation($id: ID!, $ids: [ID!]) { sceneUpdate(input: {id: $id, tag_ids: $ids}) { id } }",
+                    {"id": str(scene["id"]), "ids": sorted(keep)},
+                )
+                removed += 1
+            if "stashy_probe" in (scene.get("custom_fields") or {}):
+                try:  # partial update with a null value clears just this key (never the user's fields)
+                    stash.call(
+                        "mutation($id: ID!, $cf: CustomFieldsInput!) {"
+                        " sceneUpdate(input: {id: $id, custom_fields: $cf}) { id } }",
+                        {"id": str(scene["id"]), "cf": {"partial": {"stashy_probe": None}}},
+                    )
+                    cleared += 1
+                except Exception as e:
+                    log_debug("probe clear failed for {}: {}".format(scene["id"], e))
+    for tid in ours:                      # remove the empty Stashy:* tag definitions so the tag list is clean
+        try:
+            stash.call("mutation($id: ID!) { tagDestroy(input: {id: $id}) }", {"id": tid})
+        except Exception as e:
+            log_debug("tag destroy failed for {}: {}".format(tid, e))
+    log_info("Removed Stashy tags from {} scenes, cleared probe on {} scenes, deleted {} tag definitions."
+             .format(removed, cleared, len(ours)))
+    log_progress(1.0)
 
 
 # ----------------------------------------------------------------------------
@@ -1196,6 +1280,8 @@ def main():
             run_stats(stash, settings, do_tag=False)
         elif mode == "tag":
             run_stats(stash, settings, do_tag=True)
+        elif mode == "untag":
+            run_untag(stash)
         elif mode == "purge":
             run_purge(settings)
         elif mode == "update_ffmpeg":
