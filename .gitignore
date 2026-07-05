@@ -19,3 +19,7 @@ android/.gradle/
 android/build/
 android/local.properties
 android/*.apk
+
+# Python bytecode
+__pycache__/
+*.pyc
