@@ -123,6 +123,11 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   transcode box rich live line + **auto-pause/resume on background/foreground**; **keep-screen-awake** on
   Downloads/active work; social-links overlap bug fixed (ScrollView) + unified `SocialLink.list`; performer
   ••• menu vertical.
+- **Seek-donut tuning shipped**: a seek-by-reinit re-buffer now fills the loading ring on a **warm per-seek
+  estimate + snappy curve** (`LoadEstimator.expectedSeek`/`recordSeek`, `LoadCurveParams.seek`, gated by
+  `loadIsSeek` in `ScenePlayerModel`) instead of the slower cold-start estimate — and seek times stop
+  polluting the first-load learning. Untouched (load-bearing): the `seekTarget`/`seekHoldUntil` hold that
+  pins the scrub thumb where the finger releases — verified the change is bookkeeping-only, no regression.
 - Next candidates: **resumable/checkpointed transcode** (fragmented-MP4 append — owner wants it, see
   ROADMAP Downloads); Netflix fullscreen UI / playback-speed / WYSIWYG layout editor / mini-player-PiP /
   AI zoom-follow (all in ROADMAP); **remove RemoteLog telemetry** before wider release (tech-debt).

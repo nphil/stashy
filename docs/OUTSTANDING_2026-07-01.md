@@ -49,9 +49,16 @@ items from this session are listed at the bottom for context.
       on-device transcode/remux features ride on these.
 
 ## Playback & scrubbing
-- [ ] **Seekable remux (seek-by-reinit)** — the linear remux is forward-only; a far-forward seek waits.
-      Re-init FFmpeg from an input seek near the target keyframe and rebuild the loopback stream. Biggest
-      lever for responsive scrubbing. (Note: reinit debounce deferred — seek-latency tradeoff.)
+- [x] **Seekable remux (seek-by-reinit)** — SHIPPED. `ScenePlayerModel.seek(to:)` reinits the local remux/
+      transcode stream from a keyframe near the target (`reinitLocal(at:)`, zero-based) whenever the target
+      is before this stream's start or past the seekable end; in-range seeks stay a plain frame-accurate
+      engine seek. The scrub thumb is pinned at the released position by the `seekTarget`/`seekHoldUntil`
+      hold (ticks reporting the pre-seek position are suppressed until the player lands) — do not disturb
+      that logic. The loading donut during a seek fills on a **warm per-seek estimate + snappy curve**
+      (`LoadEstimator.expectedSeek`/`recordSeek`, `LoadCurveParams.seek`, gated by `loadIsSeek`) so a
+      re-seek's ring races to near-full instead of crawling on the cold-start estimate, and seek times no
+      longer pollute the first-load learning. (Note: reinit debounce still deferred — seek fires only on
+      drag release, so mid-drag thrash isn't a concern.)
 - [ ] **Hybrid scrub preview** — show the instant Stash/offline sprite tile while dragging, then refine
       with an on-device decoded frame at the exact position when the user pauses on it.
 - [ ] **Watch-heat / "most replayed" overlay** on the scrubber — YouTube-style heat curve built locally

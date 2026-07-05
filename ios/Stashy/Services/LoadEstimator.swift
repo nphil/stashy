@@ -34,21 +34,51 @@ final class LoadEstimator {
         return Self.seedDefault(tier: tier, expensive: NetworkStatus.shared.isExpensive)
     }
 
+    /// Seek-reinit re-buffers get their OWN per-tier bucket (`seekKey`, disjoint from the cold-start keys)
+    /// so a warm re-seek — the source is already open on the server / device — is judged against, and
+    /// learns from, past seeks rather than the slower first-load average. Keeping the two separate is what
+    /// lets the donut fill at a believable *seek* rate instead of crawling on the cold-start estimate.
+    private func seekKey(_ tier: PlaybackTier) -> Int { -(tier.rawValue + 1) }   // -1…-4, disjoint from 0…3
+
+    /// Expected seconds for a seek-reinit re-buffer on this tier — warm, so the defaults sit well under the
+    /// equivalent cold start; the rolling window then adapts to the real device/server.
+    func expectedSeek(for tier: PlaybackTier) -> Double {
+        if let s = samples[seekKey(tier)], !s.isEmpty {
+            return min(12, max(0.15, s.reduce(0, +) / Double(s.count)))
+        }
+        let base: Double
+        switch tier {
+        case .direct:         base = 0.3
+        case .remux:          base = 0.7   // av_seek_frame → one GOP remuxed, already-open input
+        case .localTranscode: base = 1.4   // re-encode spin-up from the seek keyframe
+        case .server:         base = 1.2
+        }
+        return NetworkStatus.shared.isExpensive ? base * 1.8 : base
+    }
+
     /// Record an actual load duration; implausible values are ignored so a stall can't skew the window.
     /// `record` is called exactly as `isLoading` clears — i.e. as the first frames start playing — so the
     /// persistence is pushed **off the main thread** to guarantee it never delays playback start.
-    func record(tier: PlaybackTier, seconds: Double) {
-        guard seconds >= 0.3, seconds <= 30 else { return }
-        var s = samples[tier.rawValue] ?? []
+    func record(tier: PlaybackTier, seconds: Double) { record(key: tier.rawValue, seconds: seconds) }
+
+    /// Record a seek-reinit re-buffer into its own per-tier bucket. A warm seek can complete faster than a
+    /// cold start, so the plausibility floor is lower here.
+    func recordSeek(tier: PlaybackTier, seconds: Double) {
+        record(key: seekKey(tier), seconds: seconds, minSeconds: 0.12)
+    }
+
+    private func record(key: Int, seconds: Double, minSeconds: Double = 0.3) {
+        guard seconds >= minSeconds, seconds <= 30 else { return }
+        var s = samples[key] ?? []
         s.append(seconds)
         if s.count > window { s.removeFirst(s.count - window) }
-        samples[tier.rawValue] = s
+        samples[key] = s
         let snapshot = samples        // Sendable value copy — nothing main-actor is captured below
-        let key = defaultsKey
+        let defaults = defaultsKey
         Task.detached(priority: .utility) {
             var raw: [String: [Double]] = [:]
             for (i, v) in snapshot { raw[String(i)] = v }
-            UserDefaults.standard.set(raw, forKey: key)
+            UserDefaults.standard.set(raw, forKey: defaults)
         }
     }
 
@@ -86,6 +116,11 @@ struct LoadCurveParams {
         case .server:         return .init(knee: 0.90, cap: 0.99,  tailFrac: 0.35, pace: 1.05)
         }
     }
+
+    /// Curve for a seek-reinit re-buffer — fills *ahead* of real time (high pace/knee) so the ring reads as
+    /// "almost there" quickly, matching a warm re-seek. Independent of the playback tier; the *timing* comes
+    /// from `expectedSeek(for:)`, this only shapes the fill.
+    static let seek = LoadCurveParams(knee: 0.94, cap: 0.995, tailFrac: 0.40, pace: 1.6)
 }
 
 /// Minimal shared reachability: tracks whether the current network path is expensive (cellular / hotspot)

@@ -78,6 +78,11 @@ final class ScenePlayerModel {
     @ObservationIgnored private var loadStart: Date?              // wall-clock start of this load episode
     @ObservationIgnored private var expectedLoad: Double = 1      // learned expected seconds for the curve
     @ObservationIgnored private var loadTier: PlaybackTier = .direct
+    @ObservationIgnored private var loadCurve: LoadCurveParams = .forTier(.direct)  // fill shape for this episode
+    /// True while the current loading episode was kicked by a seek (reinit or an in-stream re-buffer) — it
+    /// picks the warm per-seek estimate + snappy fill curve instead of the cold first-load ones, and files
+    /// the recorded duration into the seek bucket. Cleared when the episode ends.
+    @ObservationIgnored private var loadIsSeek = false
     @ObservationIgnored private var loadTicker: Task<Void, Never>?
     @ObservationIgnored private var wasLoading = false
     /// Overrides the displayed stream label after a fallback / transcode decision.
@@ -418,7 +423,15 @@ final class ScenePlayerModel {
     private func beginLoadEstimate() {
         loadStart = Date()
         loadTier = playbackTier
-        expectedLoad = LoadEstimator.shared.expected(for: loadTier)
+        // A seek's re-buffer is warm (source already open) — fill from the per-seek estimate + curve so the
+        // ring races to near-full quickly, rather than crawling on the slower cold-start estimate.
+        if loadIsSeek {
+            expectedLoad = LoadEstimator.shared.expectedSeek(for: loadTier)
+            loadCurve = .seek
+        } else {
+            expectedLoad = LoadEstimator.shared.expected(for: loadTier)
+            loadCurve = .forTier(loadTier)
+        }
         bufferFraction = 0
         tickLoadingProgress()
         loadTicker?.cancel()
@@ -433,9 +446,12 @@ final class ScenePlayerModel {
     private func finishLoadEstimate() {
         loadTicker?.cancel(); loadTicker = nil
         if let loadStart {
-            LoadEstimator.shared.record(tier: loadTier, seconds: Date().timeIntervalSince(loadStart))
+            let seconds = Date().timeIntervalSince(loadStart)
+            if loadIsSeek { LoadEstimator.shared.recordSeek(tier: loadTier, seconds: seconds) }
+            else { LoadEstimator.shared.record(tier: loadTier, seconds: seconds) }
         }
         loadStart = nil
+        loadIsSeek = false   // the next episode is cold unless another seek sets it
         loadingProgress = 1
     }
 
@@ -450,9 +466,10 @@ final class ScenePlayerModel {
     private func tickLoadingProgress() {
         guard let loadStart else { return }
         let elapsed = Date().timeIntervalSince(loadStart)
-        // Per-mode shaping applied to the real learned time — fast local modes fill ahead of real time,
-        // server transcode fills near real time with a brisk tail. See LoadCurveParams.
-        let p = LoadCurveParams.forTier(loadTier)
+        // Per-episode shaping (cold-start-per-tier, or the snappy seek curve) applied to the real learned
+        // time — fast local modes fill ahead of real time, server transcode fills near real time with a
+        // brisk tail. Chosen once in beginLoadEstimate. See LoadCurveParams.
+        let p = loadCurve
         let e = max(0.3, expectedLoad / p.pace)
         let timeCurve: Double
         if elapsed <= e {
@@ -495,6 +512,10 @@ final class ScenePlayerModel {
 
     func seek(to time: TimeInterval) {
         reachedEnd = false   // any seek means we're no longer parked at EOF
+        // Mark this (and any re-buffer it triggers) as a warm seek so the loading donut fills on the
+        // per-seek estimate/curve. Purely bookkeeping — it does NOT affect the seekTarget hold below that
+        // keeps the scrub thumb pinned where the finger released.
+        loadIsSeek = true
         // Never seek to the literal end — AVPlayer then waits for a forward buffer that can't exist past
         // EOF and hangs on "waiting to minimize stalls". Land a hair before the end instead.
         let ceiling = duration > 0 ? max(0, duration - 0.3) : time
