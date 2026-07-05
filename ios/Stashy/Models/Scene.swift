@@ -81,6 +81,18 @@ extension SceneStreamEndpoint {
     }
 }
 
+/// Tag names the Stashy Companion plugin's "Tag iPhone-Ready Scenes" task writes. The app consumes these
+/// (they're already fetched on every scene) for the playability filter and as a routing hint — no extra
+/// query, no scene-card badges. Keep in exact sync with `TAG_NAMES` in the plugin's `stashy_companion.py`.
+enum PlayabilityTag {
+    static let directPlay = "Stashy:Direct-Play"
+    static let needsTranscode = "Stashy:Needs-Transcode"
+    static let hdr = "Stashy:HDR"
+    static let tenBit = "Stashy:10-bit"
+    static let hevc = "Stashy:HEVC"
+    static let av1 = "Stashy:AV1"
+}
+
 extension StashScene {
     /// Codecs AVPlayer reliably direct-plays from a progressive MP4 (matched loosely vs Stash's
     /// `video_codec`). H.264 only: HEVC also decodes in hardware, but AVPlayer renders the very common
@@ -94,6 +106,14 @@ extension StashScene {
     static let av1Codecs = ["av1", "av01"]
     /// Containers AVPlayer opens directly.
     static let directPlayContainers = ["mp4", "m4v", "mov", "qt"]
+
+    /// True when the Stashy Companion plugin has tagged this scene `Stashy:Needs-Transcode` — its ffprobe
+    /// verdict that Apple can't decode the stream at all (4:2:2 / 4:4:4 / 12-bit HEVC, VP9, exotic). That's
+    /// finer than Stash's coarse `video_codec`: a 4:2:2 HEVC still reads as "hevc", so without this hint the
+    /// app attempts an on-device remux that renders black and only recovers after the 20s watchdog. Reading
+    /// the tag (already fetched on every scene) lets routing skip straight to transcode/server. Absent tag →
+    /// false → routing is exactly as before, so libraries without the plugin are unaffected.
+    var pluginNeedsTranscode: Bool { tags.contains { $0.name == PlayabilityTag.needsTranscode } }
 
     /// Cheap, plugin-free load weight for this scene's file (resolution × bitrate × codec), fed to the
     /// player's loading-donut estimate so heavier files get a proportionally longer expected fill. All
@@ -136,10 +156,16 @@ extension StashScene {
         let av1Native = isAV1 && DeviceCapabilities.av1HardwareDecode
         let isDirectClass = isH264 || av1Native
 
+        // Companion-plugin routing hint: the plugin's ffprobe verdict that Apple can't decode this stream
+        // at all (e.g. 4:2:2/4:4:4 HEVC that reads as plain "hevc"). When present, skip the direct/remux
+        // attempts below — they'd render black and only recover after the 20s watchdog — and fall through
+        // to the transcode/server tiers. No tag ⇒ false ⇒ routing is unchanged.
+        let flaggedTranscode = pluginNeedsTranscode
+
         // Fast path: H.264 / native-AV1 in a native container — AVPlayer plays the file as-is (instant
         // seeks, no server). AV1 carries an HLS fallback in case its pixel format (4:2:2/4:4:4/12-bit)
         // isn't hardware-decodable; H.264 is always 4:2:0 so it needs none.
-        if isDirectClass, containerOK, let url = directFileURL(apiKey: apiKey) {
+        if isDirectClass, containerOK, !flaggedTranscode, let url = directFileURL(apiKey: apiKey) {
             return PlaybackRoute(url: url, engine: .avPlayer, streamType: "Direct",
                                  reason: "Direct play (\(codec ?? "?") in \(container))",
                                  fallbackURL: av1Native ? hlsURL : nil)
@@ -148,7 +174,7 @@ extension StashScene {
         // Remux class: HEVC (any container → hvc1 retag), or a natively-decodable codec in a foreign
         // container (MKV/WebM) → on-device remux over the loopback, with HLS fallback. The pixel-format
         // probe (in the facade) sends Apple-undecodable 4:2:2/4:4:4 straight to HLS.
-        if isHEVC || (isDirectClass && !containerOK), let source = directFileURL(apiKey: apiKey) {
+        if (isHEVC || (isDirectClass && !containerOK)), !flaggedTranscode, let source = directFileURL(apiKey: apiKey) {
             let why = isHEVC
                 ? "\(codec ?? "?") → hvc1 remux (local)"
                 : "container .\(container) → remux (local)"
@@ -163,9 +189,10 @@ extension StashScene {
         // Heavier 4K software-decode is handed straight to the server (its GPU is faster and won't
         // thermally throttle the phone).
         let srcLongEdge = max(files.first?.width ?? 0, files.first?.height ?? 0)
+        let why = flaggedTranscode ? "\(codec ?? "?") (plugin: Apple-undecodable)" : (codec ?? "?")
         if srcLongEdge > 0, srcLongEdge <= 1920, let source = directFileURL(apiKey: apiKey) {
             return PlaybackRoute(url: source, engine: .localFFmpeg, streamType: "On-device transcode",
-                                 reason: "\(codec ?? "?") → on-device transcode (H.264)",
+                                 reason: "\(why) → on-device transcode (H.264)",
                                  fallbackURL: hlsURL, duration: files.first?.duration ?? 0,
                                  onDeviceTranscode: true, transcodeMaxDimension: 1920)
         }
