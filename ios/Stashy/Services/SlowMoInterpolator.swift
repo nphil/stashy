@@ -18,6 +18,13 @@ import VideoToolbox
 /// value crosses an actor boundary here. The `@unchecked` promise is upheld by the caller (`SlowMoRunner`):
 /// it issues **one** `interpolate` at a time (single-flight), so the session/pools are never touched
 /// concurrently.
+/// A tiny `@unchecked Sendable` wrapper to carry non-`Sendable` values (CVPixelBuffers) across the
+/// dispatch-queue / continuation boundary — safe because they're immutable snapshots here.
+private final class SlowMoBox<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
+}
+
 final class SlowMoInterpolator: @unchecked Sendable {
     /// The decoded source size handed in by the caller.
     let nativeWidth: Int
@@ -31,6 +38,10 @@ final class SlowMoInterpolator: @unchecked Sendable {
     let interpolatedFrames: Int
 
     private let processor = VTFrameProcessor()
+    /// VideoToolbox's frame-processor session is **thread-affine** — `startSession` and `process` must run
+    /// on the same thread (Swift concurrency hops threads across `await`, which throws -19730 "Processor is
+    /// not initialized"). So all VT calls are serialised onto this dedicated queue.
+    private let vtQueue = DispatchQueue(label: "com.stashy.slowmo.videotoolbox")
     private var started = false
     private var config: VTLowLatencyFrameInterpolationConfiguration?   // retained for the session's lifetime
     private var sourcePool: CVPixelBufferPool?        // scaled source frames (interpolation size)
@@ -78,42 +89,44 @@ final class SlowMoInterpolator: @unchecked Sendable {
     func interpolate(previous: CVPixelBuffer, previousPTS: CMTime,
                      current: CVPixelBuffer, currentPTS: CMTime,
                      phases: [Double]) async -> [CVPixelBuffer] {
-        guard started || startIfNeeded() else { logFail("no-session"); return [] }
-        // Scale native frames up to the (crash-safe) interpolation size when needed.
-        guard let previousSized = scaled ? scaleToInterpolationSize(previous) : previous,
-              let currentSized  = scaled ? scaleToInterpolationSize(current)  : current
-        else { logFail("scale-nil"); return [] }
-        // VTFrameProcessorFrame requires IOSurface-backed buffers; the tap's (and our pool's) BGRA buffers are.
-        guard let previousFrame = VTFrameProcessorFrame(buffer: previousSized, presentationTimeStamp: previousPTS),
-              let currentFrame = VTFrameProcessorFrame(buffer: currentSized, presentationTimeStamp: currentPTS)
-        else { logFail("frame-nil"); return [] }
+        let inputs = SlowMoBox((previous, current))   // carry the non-Sendable buffers onto the VT queue
+        return await withCheckedContinuation { (continuation: CheckedContinuation<[CVPixelBuffer], Never>) in
+            vtQueue.async { [self] in
+                let previous = inputs.value.0, current = inputs.value.1
+                // startSession + process must run in this one block (same thread) or process throws -19730.
+                guard started || startIfNeeded() else { logFail("no-session"); continuation.resume(returning: []); return }
+                // Scale native frames up to the (crash-safe) interpolation size when needed.
+                guard let previousSized = scaled ? scaleToInterpolationSize(previous) : previous,
+                      let currentSized  = scaled ? scaleToInterpolationSize(current)  : current
+                else { logFail("scale-nil"); continuation.resume(returning: []); return }
+                guard let previousFrame = VTFrameProcessorFrame(buffer: previousSized, presentationTimeStamp: previousPTS),
+                      let currentFrame = VTFrameProcessorFrame(buffer: currentSized, presentationTimeStamp: currentPTS)
+                else { logFail("frame-nil"); continuation.resume(returning: []); return }
 
-        let span = currentPTS - previousPTS
-        var destinations: [CVPixelBuffer] = []
-        var destinationFrames: [VTFrameProcessorFrame] = []
-        for phase in phases {
-            guard let buffer = makeBuffer(&destinationPool) else { logFail("dest-buf-nil"); return [] }
-            let pts = previousPTS + CMTimeMultiplyByFloat64(span, multiplier: phase)
-            guard let frame = VTFrameProcessorFrame(buffer: buffer, presentationTimeStamp: pts) else { logFail("dest-frame-nil"); return [] }
-            destinations.append(buffer)
-            destinationFrames.append(frame)
+                let span = currentPTS - previousPTS
+                var destinations: [CVPixelBuffer] = []
+                var destinationFrames: [VTFrameProcessorFrame] = []
+                for phase in phases {
+                    guard let buffer = makeBuffer(&destinationPool) else { logFail("dest-buf-nil"); continuation.resume(returning: []); return }
+                    let pts = previousPTS + CMTimeMultiplyByFloat64(span, multiplier: phase)
+                    guard let frame = VTFrameProcessorFrame(buffer: buffer, presentationTimeStamp: pts) else { logFail("dest-frame-nil"); continuation.resume(returning: []); return }
+                    destinations.append(buffer)
+                    destinationFrames.append(frame)
+                }
+                guard let parameters = VTLowLatencyFrameInterpolationParameters(
+                    sourceFrame: currentFrame, previousFrame: previousFrame,
+                    interpolationPhase: phases.map { Float($0) }, destinationFrames: destinationFrames)
+                else { logFail("params-nil"); continuation.resume(returning: []); return }
+
+                let outputs = SlowMoBox(destinations)
+                // Completion-handler process() (not the async form) so it's invoked on THIS thread, right
+                // after startSession — the completion fires on VT's own queue and just resumes us.
+                processor.process(parameters: parameters, completionHandler: { [self] _, error in
+                    if let error { logFail("process:\(error)"); continuation.resume(returning: []) }
+                    else { continuation.resume(returning: outputs.value) }
+                })
+            }
         }
-
-        guard let parameters = VTLowLatencyFrameInterpolationParameters(
-            sourceFrame: currentFrame,
-            previousFrame: previousFrame,
-            interpolationPhase: phases.map { Float($0) },
-            destinationFrames: destinationFrames)
-        else { logFail("params-nil"); return [] }
-
-        // VideoToolbox fills the destination buffers in place on its own queue; we just await it.
-        do {
-            _ = try await processor.process(parameters: parameters)
-        } catch {
-            logFail("process:\(error)")
-            return []
-        }
-        return destinations
     }
 
     /// Log the first interpolation failure point (once) off-device — pins down why `synthesized` stays 0
