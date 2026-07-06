@@ -76,23 +76,23 @@ final class SlowMoInterpolator: @unchecked Sendable {
     func interpolate(previous: CVPixelBuffer, previousPTS: CMTime,
                      current: CVPixelBuffer, currentPTS: CMTime,
                      phases: [Double]) async -> [CVPixelBuffer] {
-        guard started || startIfNeeded() else { return [] }
+        guard started || startIfNeeded() else { logFail("no-session"); return [] }
         // Scale native frames up to the (crash-safe) interpolation size when needed.
         guard let previousSized = scaled ? scaleToInterpolationSize(previous) : previous,
               let currentSized  = scaled ? scaleToInterpolationSize(current)  : current
-        else { return [] }
+        else { logFail("scale-nil"); return [] }
         // VTFrameProcessorFrame requires IOSurface-backed buffers; the tap's (and our pool's) BGRA buffers are.
         guard let previousFrame = VTFrameProcessorFrame(buffer: previousSized, presentationTimeStamp: previousPTS),
               let currentFrame = VTFrameProcessorFrame(buffer: currentSized, presentationTimeStamp: currentPTS)
-        else { return [] }
+        else { logFail("frame-nil"); return [] }
 
         let span = currentPTS - previousPTS
         var destinations: [CVPixelBuffer] = []
         var destinationFrames: [VTFrameProcessorFrame] = []
         for phase in phases {
-            guard let buffer = makeBuffer(&destinationPool) else { return [] }
+            guard let buffer = makeBuffer(&destinationPool) else { logFail("dest-buf-nil"); return [] }
             let pts = previousPTS + CMTimeMultiplyByFloat64(span, multiplier: phase)
-            guard let frame = VTFrameProcessorFrame(buffer: buffer, presentationTimeStamp: pts) else { return [] }
+            guard let frame = VTFrameProcessorFrame(buffer: buffer, presentationTimeStamp: pts) else { logFail("dest-frame-nil"); return [] }
             destinations.append(buffer)
             destinationFrames.append(frame)
         }
@@ -102,15 +102,29 @@ final class SlowMoInterpolator: @unchecked Sendable {
             previousFrame: previousFrame,
             interpolationPhase: phases.map { Float($0) },
             destinationFrames: destinationFrames)
-        else { return [] }
+        else { logFail("params-nil"); return [] }
 
         // VideoToolbox fills the destination buffers in place on its own queue; we just await it.
         do {
             _ = try await processor.process(parameters: parameters)
         } catch {
+            logFail("process:\(error)")
             return []
         }
         return destinations
+    }
+
+    /// Log the first interpolation failure point (once) off-device — pins down why `synthesized` stays 0
+    /// (e.g. a `process` throw naming an unsupported pixel format).
+    private var didLogFail = false
+    private func logFail(_ reason: String) {
+        guard !didLogFail else { return }
+        didLogFail = true
+        RemoteLog.shared.event("⚙︎ slowmo-fail", [
+            ("where", reason),
+            ("interp", "\(width)×\(height)"),
+            ("native", "\(nativeWidth)×\(nativeHeight)")
+        ])
     }
 
     /// End the session and drop the pools.

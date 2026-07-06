@@ -159,16 +159,19 @@ final class SlowMoRunner {
             return
         }
 
-        // Seed on the first frame: present it immediately (so the overlay isn't black) and anchor the clock.
-        guard let prev = previous, previousPTS.isValid else {
+        // Seed on the first frame OR re-anchor after a seek/discontinuity (item time jumps backward, or far
+        // forward): clear the pipeline and present the new frame immediately, so the overlay follows the seek
+        // instead of freezing on the last pre-seek frame. Otherwise it's black/frozen after any seek.
+        let jump = previousPTS.isValid ? (now - previousPTS).seconds : 0
+        if previous == nil || !previousPTS.isValid || jump < -0.05 || jump > 0.75 {
+            displayQueue.removeAll()
             previous = buffer; previousPTS = now
             anchorItem = now
             startWall = CACurrentMediaTime()
             renderView.present(buffer)
             return
         }
-        // Only act when the source frame genuinely advanced (a new decoded frame, not a repeat).
-        guard now > previousPTS else { return }
+        guard let prev = previous, now > previousPTS else { return }
         telemetry.sourceFrames += 1
         let pair = SlowMoFramePair(previous: prev, previousPTS: previousPTS, current: buffer, currentPTS: now)
         previous = buffer
