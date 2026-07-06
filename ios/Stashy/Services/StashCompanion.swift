@@ -24,10 +24,11 @@ struct StashCompanion: Sendable {
 
     /// Companion task names — must match `tasks[].name` in `stashy-companion.yml` exactly.
     enum Task: String, Sendable {
-        case transcode = "Transcode for iPhone"
-        case stats     = "Library Codec Report"
-        case tag       = "Tag iPhone-Ready Scenes"
-        case purge     = "Purge Transcode Cache"
+        case transcode   = "Transcode for iPhone"
+        case stats       = "Library Codec Report"
+        case tag         = "Tag iPhone-Ready Scenes"
+        case purge       = "Purge Transcode Cache"
+        case deleteCache = "Delete Cache File"
     }
 
     /// Output codecs the plugin can produce. HEVC = GPU (hevc_nvenc) — the default; AV1 = CPU (SVT-AV1),
@@ -91,6 +92,14 @@ struct StashCompanion: Sendable {
             "resolution": resolution.rawValue,
             "quality": quality.arg,
         ])
+    }
+
+    /// Delete the cached iPhone transcode for a scene once the app has downloaded it, so server-side
+    /// proxies don't accumulate. Returns the Job id; fire-and-forget from the caller's side (a failure just
+    /// leaves the plugin's cache cap / manual purge to reclaim the space later).
+    @discardableResult
+    func deleteCache(sceneID: String) async throws -> String {
+        try await run(.deleteCache, args: ["scene_id": sceneID])
     }
 
     /// The transcode result the plugin recorded on the scene's custom_fields, or nil if not ready.

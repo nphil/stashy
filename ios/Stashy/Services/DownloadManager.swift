@@ -515,6 +515,15 @@ final class DownloadManager {
         }
     }
 
+    /// Ask the plugin to delete a scene's served transcode proxy after the phone has finished downloading
+    /// it, so proxies don't accumulate on the server. Fire-and-forget: any failure is harmless (the plugin's
+    /// cache cap / manual purge still reclaim the space). `sceneID` == the download item id.
+    private func deleteServerProxy(sceneID: String, apiKey: String) {
+        guard let serverURL = KeychainService.read("serverURL") else { return }
+        let companion = StashCompanion(client: StashClient(serverURL: serverURL, apiKey: apiKey))
+        Task { try? await companion.deleteCache(sceneID: sceneID) }
+    }
+
     /// Kick off a Stashy Companion server-side transcode (HEVC/AV1 via the plugin's modern ffmpeg), then
     /// monitor it and hand the finished file to the normal byte-download engine. Robust across app
     /// switch/kill/crash: the job runs server-side, and we persist its id + params in a sidecar so a
@@ -1391,6 +1400,10 @@ final class DownloadManager {
                     for i in item.connections.indices { item.connections[i].received = item.connections[i].total }
                     item.state = .completed
                     self.clearActive(item.id)
+                    // Server-transcoded (Companion) download finished on the phone → delete the served proxy
+                    // so transcodes don't pile up on the server. (companionCodec is nil for original /
+                    // built-in-H.264 / on-device-transcoded downloads, so only true server proxies are freed.)
+                    if item.companionCodec != nil { self.deleteServerProxy(sceneID: item.id, apiKey: item.apiKey) }
                 } else {
                     item.error = "Couldn't assemble the file"
                     item.state = .failed
