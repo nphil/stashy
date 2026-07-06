@@ -32,6 +32,7 @@ final class SlowMoInterpolator: @unchecked Sendable {
 
     private let processor = VTFrameProcessor()
     private var started = false
+    private var config: VTLowLatencyFrameInterpolationConfiguration?   // retained for the session's lifetime
     private var sourcePool: CVPixelBufferPool?        // scaled source frames (interpolation size)
     private var destinationPool: CVPixelBufferPool?   // synthesised outputs (interpolation size)
 
@@ -58,11 +59,12 @@ final class SlowMoInterpolator: @unchecked Sendable {
     @discardableResult
     func startIfNeeded() -> Bool {
         if started { return true }
-        guard let config = VTLowLatencyFrameInterpolationConfiguration(
+        guard let cfg = VTLowLatencyFrameInterpolationConfiguration(
             frameWidth: width, frameHeight: height, numberOfInterpolatedFrames: interpolatedFrames)
         else { return false }
         do {
-            try processor.startSession(configuration: config)
+            try processor.startSession(configuration: cfg)
+            config = cfg          // keep the configuration alive for the session's lifetime
             started = true
             return true
         } catch {
@@ -130,6 +132,7 @@ final class SlowMoInterpolator: @unchecked Sendable {
     /// End the session and drop the pools.
     func invalidate() {
         if started { processor.endSession(); started = false }
+        config = nil
         sourcePool = nil
         destinationPool = nil
     }

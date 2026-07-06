@@ -145,10 +145,12 @@ final class SlowMoRunner {
                 stop()
                 return
             }
+            // Create the interpolator but DON'T start the VideoToolbox session here on the main actor — the
+            // session is context-affine, so it's started lazily inside interpolate() on the same background
+            // task that calls process() (otherwise process throws -19730 "Processor is not initialized").
             let interp = SlowMoInterpolator(width: width, height: height, interpolatedFrames: 1)
-            telemetry.supported = interp.startIfNeeded()
+            telemetry.supported = true
             onTelemetry(telemetry)
-            guard telemetry.supported else { stop(); return }   // unsupported device → give up cleanly
             interpolator = interp
             configWidth = width; configHeight = height
         }
