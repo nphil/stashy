@@ -32,8 +32,8 @@ targets:
         CFBundleDisplayName: Stashy
         CFBundleName: Stashy
         CFBundleIdentifier: com.nphil.stashy
-        CFBundleShortVersionString: "1.0.205"
-        CFBundleVersion: "206"
+        CFBundleShortVersionString: "1.0.206"
+        CFBundleVersion: "207"
         CFBundlePackageType: APPL
         CFBundleExecutable: $(EXECUTABLE_NAME)
         LSRequiresIPhoneOS: true
@@ -62,8 +62,8 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         SWIFT_STRICT_CONCURRENCY: complete
         ENABLE_USER_SCRIPT_SANDBOXING: NO
-        MARKETING_VERSION: "1.0.205"
-        CURRENT_PROJECT_VERSION: "206"
+        MARKETING_VERSION: "1.0.206"
+        CURRENT_PROJECT_VERSION: "207"
       configs:
         Release:
           SWIFT_OPTIMIZATION_LEVEL: -O
