@@ -40,6 +40,10 @@ final class PlayabilityStore {
 
     var isAvailable: Bool { !scenes.isEmpty }
 
+    /// The continuous quality score (codec-normalized bits-per-pixel) for a scene, or 0 if unknown — used to
+    /// sort a report-filtered list by Quality client-side.
+    func qscore(_ id: String) -> Double { scenes[id]?.qscore ?? 0 }
+
     /// Routing hint: the plugin's ffprobe verdict that Apple can't decode this scene at all. Unknown ⇒ false
     /// ⇒ routing falls back to the codec-based heuristic (unchanged behaviour).
     func needsTranscode(_ id: String) -> Bool { scenes[id]?.needs_transcode ?? false }

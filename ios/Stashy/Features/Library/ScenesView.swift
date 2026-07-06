@@ -21,6 +21,8 @@ struct ScenesView: View {
     // Multi-select download (additive; off by default → zero cost during normal browsing).
     @State private var selectionMode = false
     @State private var selectedIDs: Set<String> = []
+    // The ⋯ actions menu, shown as the SAME custom popover as the filter (not a system Menu).
+    @State private var actionsExpanded = false
 
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
@@ -59,18 +61,41 @@ struct ScenesView: View {
         // framerate/quality): page over the plugin report's scene IDs, reordered by the sort key. Fetched by
         // ID and re-sorted after fetch (findScenesByIDs doesn't preserve order). Only when the report exists;
         // otherwise a native Stash sort handles resolution/framerate below.
-        if (q.usesReport || q.sort.isReportSort), PlayabilityStore.shared.isAvailable {
-            let ids = PlayabilityStore.shared.ordered(
-                PlayabilityStore.shared.matchingIDs(
-                    playability: q.playability, resolution: q.resolution, fps: q.fps, quality: q.quality),
-                by: q.sort, direction: q.direction)
-            await loader.reload { page, perPage in
-                let start = (page - 1) * perPage
-                guard start < ids.count else { return ([], ids.count) }
-                let slice = Array(ids[start..<min(start + perPage, ids.count)])
-                let fetched = try await client.findScenesByIDs(slice)
-                let byID = Dictionary(fetched.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-                return (slice.compactMap { byID[$0] }, ids.count)   // restore the sorted order
+        // Report path: a report FILTER is active, or the sort is Quality (no native Stash equivalent).
+        // Resolution/frame-rate sorts WITHOUT a filter fall through to the native Stash sort below.
+        if (q.usesReport || q.sort == .quality), PlayabilityStore.shared.isAvailable {
+            let ids = PlayabilityStore.shared.matchingIDs(
+                playability: q.playability, resolution: q.resolution, fps: q.fps, quality: q.quality)
+            if q.sort.isReportSort {
+                // The report carries the sort key (height / fps / quality score) → order the IDs and page by
+                // ID (efficient, incremental).
+                let sortedIDs = PlayabilityStore.shared.ordered(ids, by: q.sort, direction: q.direction)
+                await loader.reload { page, perPage in
+                    let start = (page - 1) * perPage
+                    guard start < sortedIDs.count else { return ([], sortedIDs.count) }
+                    let slice = Array(sortedIDs[start..<min(start + perPage, sortedIDs.count)])
+                    let fetched = try await client.findScenesByIDs(slice)
+                    let byID = Dictionary(fetched.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+                    return (slice.compactMap { byID[$0] }, sortedIDs.count)   // restore sorted order
+                }
+            } else {
+                // Native sort key (size/duration/date/title) within a report filter — the report can't order
+                // it, so fetch the filtered set and sort CLIENT-SIDE, then page from the sorted array. Bounded
+                // by the filtered set's size.
+                var all: [StashScene] = []
+                let chunk = 200
+                var c = 0
+                while c * chunk < ids.count {
+                    let slice = Array(ids[(c * chunk)..<min((c + 1) * chunk, ids.count)])
+                    if let s = try? await client.findScenesByIDs(slice) { all += s }
+                    c += 1
+                }
+                let sorted = Self.sortScenes(all, by: q.sort, direction: q.direction)
+                await loader.reload { page, perPage in
+                    let start = (page - 1) * perPage
+                    guard start < sorted.count else { return ([], sorted.count) }
+                    return (Array(sorted[start..<min(start + perPage, sorted.count)]), sorted.count)
+                }
             }
             return
         }
@@ -90,6 +115,40 @@ struct ScenesView: View {
                 }
                 throw error
             }
+        }
+    }
+
+    /// Sort a fetched scene set by a `SceneSort` key, client-side — used when a report filter is active (so
+    /// the filtered subset can be ordered by any key, including file size / duration that the report path
+    /// otherwise couldn't). Quality reads the plugin report's score; createdAt has no field on the model so
+    /// it proxies to date. Stable numeric-id tiebreak.
+    @MainActor
+    static func sortScenes(_ scenes: [StashScene], by sort: SceneSort, direction: SortDirection) -> [StashScene] {
+        let asc = direction == .asc
+        let stringKeyed = (sort == .title || sort == .date || sort == .createdAt)
+        func str(_ s: StashScene) -> String {
+            sort == .title ? (s.title ?? "").lowercased() : (s.date ?? "")
+        }
+        func num(_ s: StashScene) -> Double {
+            let f = s.files.first
+            switch sort {
+            case .duration: return f?.duration ?? 0
+            case .size: return Double(f?.size ?? 0)
+            case .resolution: return Double(f?.height ?? 0)
+            case .framerate: return f?.frame_rate ?? 0
+            case .quality: return PlayabilityStore.shared.qscore(s.id)
+            default: return 0
+            }
+        }
+        return scenes.sorted { a, b in
+            if stringKeyed {
+                let ka = str(a), kb = str(b)
+                if ka == kb { return (Int(a.id) ?? 0) < (Int(b.id) ?? 0) }
+                return asc ? ka < kb : ka > kb
+            }
+            let ka = num(a), kb = num(b)
+            if ka == kb { return (Int(a.id) ?? 0) < (Int(b.id) ?? 0) }
+            return asc ? ka < kb : ka > kb
         }
     }
 
@@ -156,12 +215,43 @@ struct ScenesView: View {
         }
     }
 
+    /// The ⋯ actions popover content (Download all / Select), styled to sit in the shared popover chrome.
+    private var actionsPanel: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Button {
+                actionsExpanded = false
+                startBulkDownload()
+            } label: {
+                Label("Download all in filter", systemImage: "arrow.down.circle")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .padding(.vertical, 9).padding(.horizontal, 6)
+            }
+            .disabled(bulkLoading)
+            Button {
+                actionsExpanded = false
+                selectionMode = true
+            } label: {
+                Label("Select…", systemImage: "checkmark.circle")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .padding(.vertical, 9).padding(.horizontal, 6)
+            }
+        }
+        .font(.subheadline.weight(.medium))
+        .foregroundStyle(themeManager.current.foregroundColor)
+        .buttonStyle(.plain)
+        .padding(8)
+        .frame(width: 240)
+    }
+
     var body: some View {
         NavigationStack(path: $path) {
             ZStack(alignment: .topTrailing) {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .dismissesPopover($filterExpanded)   // swipe/tap the list closes the panel AND scrolls
+                    .dismissesPopover($actionsExpanded)
                 // The filter dropdown is hosted from a *stable sibling* of `content`, never as an overlay on
                 // it. `content` flips its `@ViewBuilder` branch (grid ⇄ full-screen spinner ⇄ empty state)
                 // every time a reload clears `items`; a panel attached to that churning subtree is torn
@@ -171,7 +261,14 @@ struct ScenesView: View {
                 FilterPopoverAnchor(isPresented: $filterExpanded) {
                     SceneFilterPanel(query: $query)
                 }
+                // The ⋯ actions menu — same custom popover chrome/animation as the filter.
+                FilterPopoverAnchor(isPresented: $actionsExpanded) {
+                    actionsPanel
+                }
             }
+            // Only one popover open at a time.
+            .onChange(of: filterExpanded) { _, open in if open { actionsExpanded = false } }
+            .onChange(of: actionsExpanded) { _, open in if open { filterExpanded = false } }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(themeManager.current.backgroundColor.ignoresSafeArea())
             .navigationTitle("Scenes")
@@ -190,26 +287,23 @@ struct ScenesView: View {
                             .fontWeight(.semibold)
                             .disabled(selectedIDs.isEmpty)
                     } else if !query.downloadedOnly {
-                        Menu {
-                            Button {
-                                startBulkDownload()
-                            } label: {
-                                Label("Download all in filter", systemImage: "arrow.down.circle")
-                            }
-                            .disabled(bulkLoading)
-                            Button {
-                                selectionMode = true
-                            } label: {
-                                Label("Select…", systemImage: "checkmark.circle")
-                            }
+                        Button {
+                            actionsExpanded.toggle()
                         } label: {
-                            if bulkLoading {
-                                ProgressView()
-                            } else {
-                                Image(systemName: "ellipsis.circle")
+                            Group {
+                                if bulkLoading { ProgressView() }
+                                else { Image(systemName: "ellipsis") }
                             }
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(actionsExpanded ? themeManager.current.accentColor : themeManager.current.foregroundColor)
+                            .frame(width: 34, height: 34)
                         }
                     }
+                }
+                // A fixed spacer splits the ⋯ and funnel into SEPARATE glass pills, so pressing one only
+                // lights that button (not the whole grouped pill).
+                if !selectionMode && !query.downloadedOnly {
+                    ToolbarSpacer(.fixed, placement: .topBarTrailing)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     if !selectionMode {
