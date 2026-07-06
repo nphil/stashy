@@ -779,6 +779,27 @@ def run_purge(settings):
     log_info("cache purged ({} files)".format(removed))
 
 
+def run_delete(args):
+    """Delete the cached transcode(s) for ONE scene — the app calls this after it finishes downloading a
+    server-transcoded file, so proxies don't accumulate. Output is named scene<id>_<codec>_<h>p.mp4 (plus a
+    .json sidecar); the live progress file is scene<id>.progress.json. Match by the scene<id>_ prefix."""
+    scene_id = str(args.get("scene_id") or "").strip()
+    if not scene_id:
+        log_error("delete: missing scene_id")
+        return
+    removed = 0
+    if os.path.isdir(CACHE_DIR):
+        prefix = "scene{}_".format(scene_id)
+        for n in os.listdir(CACHE_DIR):
+            if n.startswith(prefix) and n.endswith(".mp4"):
+                p = os.path.join(CACHE_DIR, n)
+                _safe_unlink(p)
+                _safe_unlink(p + ".json")
+                removed += 1
+    _safe_unlink(_progress_path(scene_id))
+    log_info("deleted cache for scene {} ({} file(s))".format(scene_id, removed))
+
+
 # ----------------------------------------------------------------------------
 # ffmpeg version management: download + PIN + switch between BtbN static builds
 # (SVT-AV1 3.x + nvenc + libx265), self-contained. Builds coexist under bin/<tag>/;
@@ -1323,6 +1344,8 @@ def main():
             run_untag(stash)
         elif mode == "purge":
             run_purge(settings)
+        elif mode == "delete":
+            run_delete(args)
         elif mode == "update_ffmpeg":
             run_update_ffmpeg(settings)
         elif mode == "selftest":
