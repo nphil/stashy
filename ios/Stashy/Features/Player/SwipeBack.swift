@@ -19,18 +19,23 @@ struct EnableSwipeBack: UIViewControllerRepresentable {
     }
 
     final class Proxy: UIViewController, UIGestureRecognizerDelegate {
-        private var foregroundObserver: NSObjectProtocol?
+        private var observing = false
 
         override func didMove(toParent parent: UIViewController?) {
             super.didMove(toParent: parent)
-            if parent != nil, foregroundObserver == nil {
-                foregroundObserver = NotificationCenter.default.addObserver(
-                    forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-                    MainActor.assumeIsolated { self?.reassert() }
-                }
+            // Selector-based observation (not block-based): NotificationCenter auto-removes it on dealloc
+            // (iOS 9+), so there's no stored token to clean up — which avoids a `deinit` that would have to
+            // touch a non-Sendable member (illegal from a @MainActor class's nonisolated deinit under Swift 6).
+            if parent != nil, !observing {
+                observing = true
+                NotificationCenter.default.addObserver(
+                    self, selector: #selector(appBecameActive),
+                    name: UIApplication.didBecomeActiveNotification, object: nil)
             }
             reassert()
         }
+
+        @objc private func appBecameActive() { reassert() }
 
         override func viewWillAppear(_ animated: Bool) {
             super.viewWillAppear(animated)
@@ -54,10 +59,6 @@ struct EnableSwipeBack: UIViewControllerRepresentable {
         // Only allow the swipe when there's somewhere to pop back to (not on the stack root).
         func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
             (navigationController?.viewControllers.count ?? 0) > 1
-        }
-
-        deinit {
-            if let foregroundObserver { NotificationCenter.default.removeObserver(foregroundObserver) }
         }
     }
 }
