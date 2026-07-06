@@ -356,6 +356,13 @@ extension StashScene {
         return String(format: "%.0f fps", fr)
     }
 
+    /// Numeric source frame rate (fps) from the primary file — used by the Stats overlay's decode-health
+    /// row to compare what the decoder is actually presenting against what the file should deliver.
+    var sourceFrameRate: Double? {
+        guard let fr = files.first?.frame_rate, fr > 0 else { return nil }
+        return fr
+    }
+
     var fileSizeLabel: String? {
         guard let s = files.first?.size, s > 0 else { return nil }
         return ByteCountFormatter.string(fromByteCount: Int64(s), countStyle: .file)

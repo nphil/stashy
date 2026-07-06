@@ -22,8 +22,20 @@ struct StatsOverlayView: View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
             panel(model.snapshotStats(scene: scene))
         }
-        .onAppear { compute.start() }
-        .onDisappear { compute.stop() }
+        .onAppear {
+            model.setStatsSampling(true)   // arm the engine's presented-frame counter
+            compute.start(frameSource: {
+                FrameHealthSample(presented: model.presentedFrameCount,
+                                  dropped: model.droppedFrameCount,
+                                  sourceFPS: scene.sourceFrameRate ?? 0,
+                                  rate: model.playbackRate,
+                                  playing: model.isPlaying)
+            })
+        }
+        .onDisappear {
+            compute.stop()
+            model.setStatsSampling(false)
+        }
     }
 
     private func panel(_ stats: PlaybackStats) -> some View {
@@ -116,12 +128,43 @@ private struct ComputeMetersView: View {
             MeterRow(label: "MEM", fraction: min(1, monitor.memoryMB / 2000),
                      value: "\(Int(monitor.memoryMB)) MB", tint: .blue)
 
+            // Decode health — is the hardware decoder keeping up with the file's frame rate (green),
+            // slipping (amber), or falling behind (red)? Judged against sourceFPS × current playback rate,
+            // so slow-mo doesn't read as a fault; grey while paused.
+            MeterRow(label: "DEC",
+                     fraction: monitor.expectedFPS > 0 ? min(1, monitor.decodeFPS / monitor.expectedFPS) : 0,
+                     value: monitor.framePlaying ? "\(Int(monitor.decodeFPS)) fps" : "—",
+                     detail: monitor.framePlaying ? "target \(Int(monitor.expectedFPS)) fps" : "paused",
+                     history: monitor.decodeHistory, tint: decodeColor)
+
+            // Dropped frames per second — a few at start/seek is normal (green); a steady climb means the
+            // phone is compute-bound (amber → red), the cue to drop resolution or disable AI slow-mo.
+            MeterRow(label: "DROP",
+                     fraction: min(1, monitor.droppedPerSec / 10),
+                     value: String(format: "%.0f/s", monitor.droppedPerSec),
+                     detail: "total \(model.droppedFrameCount)",
+                     history: monitor.dropHistory, tint: dropColor)
+
             // Active decode/transcode pipeline (what's actually turning bytes into frames right now).
             Text(pipelineSummary)
                 .font(.system(size: 8.5, weight: .medium))
                 .foregroundStyle(.white.opacity(0.5))
         }
         .padding(.bottom, 2)
+    }
+
+    /// Decode-health colour: green = keeping up (≥90% of target fps), amber = slipping (≥70%), red = behind.
+    /// Grey while paused or when the source fps is unknown (nothing to judge against).
+    private var decodeColor: Color {
+        guard monitor.framePlaying, monitor.expectedFPS > 0.5 else { return .gray }
+        let ratio = monitor.decodeFPS / monitor.expectedFPS
+        return ratio >= 0.9 ? .green : (ratio >= 0.7 ? .yellow : .red)
+    }
+
+    /// Dropped-frames colour: green < 1/s, amber 1–5/s, red > 5/s (the phone is dropping to keep sync).
+    private var dropColor: Color {
+        let d = monitor.droppedPerSec
+        return d < 1 ? .green : (d < 5 ? .yellow : .red)
     }
 
     /// One-line summary of the current pipeline: the cost tier + the fact decode is hardware VideoToolbox.

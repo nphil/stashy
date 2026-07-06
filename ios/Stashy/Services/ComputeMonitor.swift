@@ -35,9 +35,22 @@ final class GPUTimeAccumulator: @unchecked Sendable {
     func reset() { lock.withLock { seconds = 0; frames = 0 } }
 }
 
+/// A raw read of the player's frame pipeline for the decode-health rows: cumulative presented + dropped
+/// frame counts (the monitor deltas them into per-second rates), the file's source fps, the current
+/// playback rate (so "keeping up" is judged against `sourceFPS × rate`, not the source fps), and whether
+/// it's actually playing (a paused player legitimately presents 0 fps).
+struct FrameHealthSample {
+    var presented: Int
+    var dropped: Int
+    var sourceFPS: Double
+    var rate: Double
+    var playing: Bool
+}
+
 /// Live compute telemetry for the Stats overlay's hardware graphic: app CPU load, GPU busy-time from the
-/// app's own Metal passes, and process memory — sampled at 2 Hz **only while the overlay is open**. `start()`
-/// arms the GPU probe and the sampling loop; `stop()` disarms both, so nothing runs when the window is shut.
+/// app's own Metal passes, process memory, and decode health (presented fps vs source, dropped frames/sec)
+/// — sampled at 2 Hz **only while the overlay is open**. `start()` arms the GPU probe and the sampling loop;
+/// `stop()` disarms both, so nothing runs when the window is shut.
 @MainActor
 @Observable
 final class ComputeMonitor {
@@ -51,16 +64,33 @@ final class ComputeMonitor {
     private(set) var cpuHistory: [Double] = []
     private(set) var gpuHistory: [Double] = []
 
+    // Decode health — presented frame rate vs. what the file should deliver, and dropped frames per second.
+    private(set) var decodeFPS = 0.0
+    private(set) var expectedFPS = 0.0    // sourceFPS × playback rate (what "keeping up" means right now)
+    private(set) var sourceFPS = 0.0
+    private(set) var droppedPerSec = 0.0
+    private(set) var framePlaying = false
+    private(set) var decodeHistory: [Double] = []
+    private(set) var dropHistory: [Double] = []
+
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var lastSample = CACurrentMediaTime()
+    @ObservationIgnored private var frameSource: (() -> FrameHealthSample?)?
+    @ObservationIgnored private var lastPresented = 0
+    @ObservationIgnored private var lastDropped = 0
+    @ObservationIgnored private var haveFrameBaseline = false
     private let historyCap = 40
     private let coreCount = Double(max(1, ProcessInfo.processInfo.activeProcessorCount))
 
     /// Fraction 0…1 for the CPU bar — normalised so a full bar means every core is saturated.
     var cpuFraction: Double { min(1, cpuPercent / (coreCount * 100)) }
 
-    func start() {
+    /// `frameSource` (optional) supplies the player's cumulative frame counts each tick for the decode-fps
+    /// and dropped-frames rows; pass nil to skip those rows.
+    func start(frameSource: (() -> FrameHealthSample?)? = nil) {
         guard task == nil else { return }
+        self.frameSource = frameSource
+        haveFrameBaseline = false
         GPUProbe.active = true
         GPUTimeAccumulator.shared.reset()
         lastSample = CACurrentMediaTime()
@@ -74,6 +104,7 @@ final class ComputeMonitor {
 
     func stop() {
         task?.cancel(); task = nil
+        frameSource = nil
         GPUProbe.active = false
         GPUTimeAccumulator.shared.reset()
     }
@@ -91,6 +122,28 @@ final class ComputeMonitor {
 
         push(&cpuHistory, cpuFraction)
         push(&gpuHistory, gpuFraction)
+
+        sampleFrameHealth(elapsed: elapsed)
+    }
+
+    private func sampleFrameHealth(elapsed: Double) {
+        guard let s = frameSource?() else { return }
+        sourceFPS = s.sourceFPS
+        expectedFPS = s.sourceFPS * max(0, s.rate)
+        framePlaying = s.playing
+        // First tick establishes the baseline (a delta from 0 would spike); subsequent ticks give rates.
+        if haveFrameBaseline {
+            decodeFPS = max(0, Double(s.presented - lastPresented)) / elapsed
+            droppedPerSec = max(0, Double(s.dropped - lastDropped)) / elapsed
+        }
+        lastPresented = s.presented
+        lastDropped = s.dropped
+        haveFrameBaseline = true
+
+        // Normalised history: decode as fraction of expected (1 = keeping up); drops against a 10/s ceiling.
+        let decodeFrac = expectedFPS > 0.5 ? min(1, decodeFPS / expectedFPS) : (framePlaying ? 0 : 1)
+        push(&decodeHistory, decodeFrac)
+        push(&dropHistory, min(1, droppedPerSec / 10))
     }
 
     private func push(_ arr: inout [Double], _ v: Double) {

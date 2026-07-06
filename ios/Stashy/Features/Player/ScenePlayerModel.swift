@@ -158,6 +158,19 @@ final class ScenePlayerModel {
     var streamType: String { activeStreamType ?? route.streamType }
     var routingReason: String { route.reason }
 
+    /// Frames actually presented to screen since stats sampling was armed (decode-fps row). 0 when off.
+    var presentedFrameCount: Int { (engine as? AVPlaybackEngine)?.presentedFrameCount ?? 0 }
+    /// Cumulative frames the player dropped (arrived too late) — the dropped-frames-per-second row deltas it.
+    var droppedFrameCount: Int { (engine as? AVPlaybackEngine)?.droppedFrameCount ?? 0 }
+
+    /// Whether the Stats overlay is open — arms the engine's presented-frame counter. Remembered so an
+    /// engine rebuild (seek-reinit / quality / fallback) re-arms it. Set by `StatsOverlayView`.
+    @ObservationIgnored private var statsSampling = false
+    func setStatsSampling(_ on: Bool) {
+        statsSampling = on
+        (engine as? AVPlaybackEngine)?.setFrameRateProbeActive(on)
+    }
+
     /// Side-effect-free on purpose. SwiftUI evaluates `State(initialValue:)` on *every* view init, so
     /// building the engine here (which creates an AVPlayer, activates the audio session, and starts
     /// playback) spun up multiple overlapping players — duplicate audio that kept playing after pause.
@@ -369,6 +382,8 @@ final class ScenePlayerModel {
             }
         }
         engine.onFailed = { [weak self] error in self?.fallbackToHLS(error: error) }
+        // If the Stats overlay is open, re-arm the presented-frame counter on this (possibly rebuilt) engine.
+        if statsSampling { (engine as? AVPlaybackEngine)?.setFrameRateProbeActive(true) }
         return engine
     }
 

@@ -36,6 +36,14 @@ final class AVPlaybackEngine: PlaybackEngine {
     private var endObserver: NSObjectProtocol?
     private var lastStatLog: CFTimeInterval = 0
 
+    // Debug-only presented-frame counter (Stats overlay decode-fps row). A dedicated video output +
+    // display link count how many distinct decoded frames actually reach the screen — `copyPixelBuffer`
+    // hands back a *reference* to the already-decoded buffer (IOSurface-backed, no pixel copy), so counting
+    // is cheap and doesn't perturb what it measures. Armed only while the overlay is open.
+    private var probeOutput: AVPlayerItemVideoOutput?
+    private var probeLink: CADisplayLink?
+    private var presentedFrames = 0
+
     var onTime: ((TimeInterval, TimeInterval) -> Void)?
     var onReady: ((Bool) -> Void)?
     var onState: ((PlaybackPhase) -> Void)?
@@ -184,6 +192,7 @@ final class AVPlaybackEngine: PlaybackEngine {
         bufferObservation?.invalidate(); bufferObservation = nil
         if let stallObserver { NotificationCenter.default.removeObserver(stallObserver); self.stallObserver = nil }
         if let endObserver { NotificationCenter.default.removeObserver(endObserver); self.endObserver = nil }
+        setFrameRateProbeActive(false)
         player.pause()
         // Detach the render layer + backdrop so an engine swap (far-seek reinit / HLS fallback) doesn't
         // strand the whole previous AVPlayer stack: `AVPlayerLayer.player` is a strong ref (tens of MB with
@@ -288,6 +297,51 @@ final class AVPlaybackEngine: PlaybackEngine {
                     toleranceBefore: tolerance, toleranceAfter: tolerance)
     }
 
+    // MARK: - Decode-health probe (debug Stats overlay)
+
+    /// Cumulative decoded frames the player has thrown away (arrived too late to display), summed across
+    /// the access log's events. A steadily-climbing value under 1× = the device is compute-bound.
+    var droppedFrameCount: Int {
+        (item.accessLog()?.events ?? []).reduce(0) { $0 + max(0, Int($1.numberOfDroppedVideoFrames)) }
+    }
+
+    /// Cumulative frames actually presented to the screen since the probe was armed (0 when disarmed).
+    var presentedFrameCount: Int { presentedFrames }
+
+    /// Arm/disarm the presented-frame counter. Called by the model when the Stats overlay opens/closes, so
+    /// there's no extra output or display link running when the overlay is shut.
+    func setFrameRateProbeActive(_ active: Bool) {
+        if active {
+            guard probeOutput == nil else { return }
+            let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+            ])
+            item.add(output)
+            probeOutput = output
+            presentedFrames = 0
+            let proxy = FrameProbeLinkProxy(target: self)
+            let link = CADisplayLink(target: proxy, selector: #selector(FrameProbeLinkProxy.tick))
+            proxy.link = link
+            link.add(to: .main, forMode: .common)
+            probeLink = link
+        } else {
+            probeLink?.invalidate(); probeLink = nil
+            if let probeOutput { item.remove(probeOutput) }
+            probeOutput = nil
+        }
+    }
+
+    /// One display-link tick: if a new decoded frame is available, consume its (reference-only) buffer to
+    /// advance the output and tally it. The count/elapsed is the presented frame rate.
+    fileprivate func probeTick() {
+        guard let probeOutput else { return }
+        let t = probeOutput.itemTime(forHostTime: CACurrentMediaTime())
+        if probeOutput.hasNewPixelBuffer(forItemTime: t) {
+            _ = probeOutput.copyPixelBuffer(forItemTime: t, itemTimeForDisplay: nil)
+            presentedFrames &+= 1
+        }
+    }
+
     // MARK: - Stats
 
     var seekableEnd: TimeInterval {
@@ -370,4 +424,16 @@ final class AVPlaybackEngine: PlaybackEngine {
 
 private extension Optional where Wrapped == String {
     var isNilOrEmpty: Bool { self?.isEmpty ?? true }
+}
+
+/// Weak-target proxy for the frame-rate probe's `CADisplayLink` (the run loop retains the link, and the
+/// link retains its target — targeting the engine directly would leak it).
+private final class FrameProbeLinkProxy: NSObject {
+    weak var target: AVPlaybackEngine?
+    var link: CADisplayLink?
+    init(target: AVPlaybackEngine) { self.target = target; super.init() }
+    @objc func tick() {
+        guard let target else { link?.invalidate(); link = nil; return }
+        MainActor.assumeIsolated { target.probeTick() }
+    }
 }
