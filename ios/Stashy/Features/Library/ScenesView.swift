@@ -66,9 +66,22 @@ struct ScenesView: View {
             }
             return
         }
+        // Only the unfiltered library is cached for offline browsing (a tag/filtered view offline would be
+        // misleading). Save the first page on success; on an offline failure, fall back to the cache so the
+        // grid still shows the library instead of an error.
+        let cacheable = q.tags.isEmpty
         await loader.reload { page, perPage in
-            let result = try await client.findScenes(q, page: page, perPage: perPage)
-            return (result.scenes, result.count)
+            do {
+                let result = try await client.findScenes(q, page: page, perPage: perPage)
+                if cacheable && page == 1 { LibraryCache.save(result.scenes) }
+                return (result.scenes, result.count)
+            } catch {
+                if cacheable && page == 1 {
+                    let cached = LibraryCache.load()
+                    if !cached.isEmpty { return (cached, cached.count) }
+                }
+                throw error
+            }
         }
     }
 
