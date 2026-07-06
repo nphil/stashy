@@ -66,6 +66,12 @@ final class SlowMoRenderView: UIView, MTKViewDelegate {
             bounds: CGRect(origin: .zero, size: target),
             colorSpace: CGColorSpaceCreateDeviceRGB()
         )
+        // Debug-only GPU busy-time probe (Stats overlay). Gated on a bare bool so it's zero-cost when off.
+        if GPUProbe.active {
+            commandBuffer.addCompletedHandler { cb in
+                GPUTimeAccumulator.shared.record(cb.gpuEndTime - cb.gpuStartTime)
+            }
+        }
         commandBuffer.present(drawable)
         commandBuffer.commit()
     }

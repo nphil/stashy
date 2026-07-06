@@ -65,6 +65,10 @@ final class ScenePlayerModel {
     /// overlay. Driven by `slowMoRunner` while playback is ≤0.5×. Read ~1 Hz by the overlay, so it needn't
     /// be observable — it's snapshotted on each poll.
     @ObservationIgnored private var slowMoTelemetry = SlowMoTelemetry()
+    /// Live AI-interpolation telemetry, read once a second by the Stats overlay's compute graphic (the
+    /// Neural-Engine row). `@ObservationIgnored` on the storage keeps the render path from churning; the
+    /// overlay's periodic tick re-reads it.
+    var slowMoStats: SlowMoTelemetry { slowMoTelemetry }
     /// Runs the frame-interpolation pipeline while slow-mo is engaged (nil when disengaged).
     @ObservationIgnored private var slowMoRunner: SlowMoRunner?
     /// True while the AI slow-mo render overlay should be shown — drives `ScenePlayerView` to overlay the
@@ -135,8 +139,6 @@ final class ScenePlayerModel {
     /// a loading donut that would otherwise spin forever. Resets naturally: reopening the scene builds a
     /// fresh model.
     var didFail = false
-    /// Loopback server request log captured at the moment of fallback, for diagnosing remux stalls.
-    var loopbackLog: [String] = []
     /// Fires a fallback if the local path produces no frames in time (covers stalls AVPlayer never
     /// reports as a hard failure).
     @ObservationIgnored private var watchdog: Task<Void, Never>?
@@ -360,14 +362,7 @@ final class ScenePlayerModel {
             if self.videoAspect != aspect { self.videoAspect = aspect }
             let firstFrame = self.presentationSize == .zero
             if self.presentationSize != size { self.presentationSize = size }
-            // The arrival of a non-zero presentation size is the "there ARE visible pixels" signal. If a
-            // transcode reports done + bytes but this line never logs, that's the "video disappeared" case
-            // (AVPlayer has audio/duration but no renderable video track) — the exact split we're hunting.
             if firstFrame {
-                RemoteLog.shared.event("▶︎ video", [
-                    ("size", "\(Int(size.width))×\(Int(size.height))"),
-                    ("tier", self.playbackTier.label)
-                ])
                 // Now that the decoded frame size is known, engage slow-mo if the user is already ≤0.5×
                 // (e.g. the rate was set before the first frame, or the engine was just rebuilt).
                 self.updateSlowMo()
@@ -409,7 +404,6 @@ final class ScenePlayerModel {
         RemoteLog.shared.log("⤵︎ fallback to Stash HLS: \(error ?? "—")")
         if let error { lastError = error }
         activeStreamType = "HLS (fallback)"
-        loopbackLog = localStream?.diagnostics() ?? loopbackLog   // capture before tearing the server down
         engine?.teardown()
         localStream?.stop()
         localStream = nil
@@ -678,12 +672,6 @@ final class ScenePlayerModel {
         if let lastError { playback.append(StatLine(label: "Error", value: lastError)) }
         sections.append(StatSection(title: "Playback", lines: playback))
 
-        // Proof the self-built FFmpeg links + is callable (foundation for the local transcode pipeline).
-        sections.append(StatSection(title: "Engine", lines: [
-            StatLine(label: "FFmpeg", value: FFmpegProbe.versionInfo),
-            StatLine(label: "VT h264 enc", value: FFmpegProbe.hasVideoToolboxH264 ? "yes" : "no"),
-        ]))
-
         // AI slow-mo (VTFrameProcessor frame interpolation) — opt-in (see aiSlowMoEnabled). Shown whenever
         // enabled so the Stats box reflects state + the decoded-frame diagnostics used to debug crashes.
         let sm = slowMoTelemetry
@@ -716,23 +704,6 @@ final class ScenePlayerModel {
         if !media.isEmpty { sections.append(StatSection(title: "Media", lines: media)) }
 
         sections.append(StatSection(title: "Network", lines: engine?.liveStats() ?? []))
-
-        // Live loopback/index/remux state while the local-HLS path is actually playing (so we can see
-        // produced bytes climb + which byte ranges AVPlayer is fetching, esp. during scrubbing).
-        if let live = localStream?.diagnostics(), !live.isEmpty {
-            // Cap + stable positional ids: keep the last handful and update them in place instead of an
-            // ever-growing scroll of request lines.
-            sections.append(StatSection(title: "Loopback (live)", lines: Array(live.suffix(12)).enumerated().map {
-                StatLine("looplive\($0.offset)", label: "·", value: $0.element)
-            }))
-        }
-
-        // Loopback request log captured at fallback — diagnoses what AVPlayer asked the remux server for.
-        if !loopbackLog.isEmpty {
-            sections.append(StatSection(title: "Loopback", lines: Array(loopbackLog.suffix(12)).enumerated().map {
-                StatLine("looplog\($0.offset)", label: "·", value: $0.element)
-            }))
-        }
 
         // Stash-transcoder details — only when we're actually using the server transcode (fell back, or
         // the route itself is server HLS), never for the on-device local-HLS path.
