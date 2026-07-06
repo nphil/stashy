@@ -35,6 +35,7 @@ struct ScenesView: View {
 
     private var filterActive: Bool {
         !query.tags.isEmpty || query.sort != .date || query.direction != .desc || query.downloadedOnly
+            || query.usesReport
             || query.playability != .any
     }
 
@@ -54,10 +55,11 @@ struct ScenesView: View {
         guard !query.downloadedOnly else { return }
         guard let client = appState.client else { return }
         let q = query
-        // Playability filter: page over the plugin report's scene IDs for the bucket (numeric-ascending),
-        // fetched by ID — no tags, no server-side custom-field filter needed.
-        if let tier = q.playability.tier {
-            let ids = PlayabilityStore.shared.ids(tier: tier)
+        // Report filters (playability / resolution / fps / quality): page over the plugin report's matching
+        // scene IDs (numeric-ascending), fetched by ID — no tags, no server-side custom-field filter needed.
+        if q.usesReport {
+            let ids = PlayabilityStore.shared.matchingIDs(
+                playability: q.playability, resolution: q.resolution, fps: q.fps, quality: q.quality)
             await loader.reload { page, perPage in
                 let start = (page - 1) * perPage
                 guard start < ids.count else { return ([], ids.count) }
@@ -92,8 +94,9 @@ struct ScenesView: View {
     private func allMatchingScenes() async -> [StashScene] {
         guard let client = appState.client else { return [] }
         let q = query
-        if let tier = q.playability.tier {
-            let ids = PlayabilityStore.shared.ids(tier: tier)
+        if q.usesReport {
+            let ids = PlayabilityStore.shared.matchingIDs(
+                playability: q.playability, resolution: q.resolution, fps: q.fps, quality: q.quality)
             var out: [StashScene] = []
             let per = 100
             var page = 0

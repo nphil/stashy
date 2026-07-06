@@ -112,6 +112,22 @@ struct SceneFilterPanel: View {
                     Spacer()
                     playabilityMenu
                 }
+                HStack {
+                    Text("Resolution").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Spacer()
+                    reportMenu($query.resolution, icon: "rectangle.on.rectangle",
+                               active: query.resolution != .any) { $0.label }
+                }
+                HStack {
+                    Text("Frame rate").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Spacer()
+                    reportMenu($query.fps, icon: "speedometer", active: query.fps != .any) { $0.label }
+                }
+                HStack {
+                    Text("Quality").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Spacer()
+                    reportMenu($query.quality, icon: "sparkles", active: query.quality != .any) { $0.label }
+                }
             }
             Divider().opacity(0.25)
             InlineTagEditor(selected: $query.tags)
@@ -122,6 +138,30 @@ struct SceneFilterPanel: View {
             if let client = appState.client {
                 await PlayabilityStore.shared.refresh(serverURL: client.serverURL, apiKey: client.apiKey)
             }
+        }
+    }
+
+    /// A themed capsule menu for a report-backed filter enum (resolution / fps / quality). Mirrors the
+    /// playability menu's look; `active` highlights it in the accent colour when a non-Any value is chosen.
+    private func reportMenu<T: CaseIterable & Identifiable & Equatable>(
+        _ selection: Binding<T>, icon: String, active: Bool, label: @escaping (T) -> String
+    ) -> some View where T.AllCases: RandomAccessCollection {
+        Menu {
+            ForEach(Array(T.allCases)) { opt in
+                Button { selection.wrappedValue = opt } label: {
+                    Label(label(opt), systemImage: selection.wrappedValue == opt ? "checkmark" : icon)
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: icon).font(.caption)
+                Text(label(selection.wrappedValue))
+                Image(systemName: "chevron.down").font(.caption2)
+            }
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(active ? themeManager.current.accentColor : themeManager.current.foregroundColor)
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(themeManager.current.backgroundColor.opacity(0.6), in: Capsule())
         }
     }
 

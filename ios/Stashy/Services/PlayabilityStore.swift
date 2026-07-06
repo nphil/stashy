@@ -25,6 +25,11 @@ final class PlayabilityStore {
         var ten_bit: Bool = false
         var codec: String = ""
         var pix_fmt: String = ""
+        // Resolution / fps / quality (plugin ≥0.1.22). Optional so older reports still decode; a scene
+        // missing them is simply excluded from those filters (nil height / fps, "unknown" quality).
+        var height: Int? = nil
+        var fps: Double? = nil
+        var quality: String = "unknown"
     }
 
     private struct Payload: Decodable { let scenes: [String: Info] }
@@ -43,6 +48,20 @@ final class PlayabilityStore {
     func ids(tier: String) -> [String] {
         scenes.filter { $0.value.tier == tier }
             .keys.sorted { (Int($0) ?? 0) < (Int($1) ?? 0) }
+    }
+
+    /// Scene IDs matching ALL active report filters (playability tier ∩ min-resolution ∩ fps bucket ∩
+    /// min-quality), numeric-ascending — used to page the filtered scene list.
+    func matchingIDs(playability: Playability, resolution: ResolutionFilter,
+                     fps: FPSFilter, quality: QualityFilter) -> [String] {
+        scenes.filter { (_, info) in
+            if let tier = playability.tier, info.tier != tier { return false }
+            if let minH = resolution.minHeight, (info.height ?? 0) < minH { return false }
+            if fps != .any, !fps.passes(info.fps) { return false }
+            if let minRank = quality.minRank, QualityFilter.rank(info.quality) < minRank { return false }
+            return true
+        }
+        .keys.sorted { (Int($0) ?? 0) < (Int($1) ?? 0) }
     }
 
     /// Fetch the served file (skipped if fetched within ~5 min and already populated, unless `force`).

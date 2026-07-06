@@ -404,8 +404,73 @@ struct SceneQuery: Sendable, Equatable {
     /// NOT from tags (the plugin writes no tags). When not `.any`, the scene list is paged over that
     /// bucket's scene IDs instead of the normal library query. `.any` = normal library.
     var playability: Playability = .any
+    /// Resolution / frame-rate / quality filters — all resolved from the Companion plugin's served report
+    /// (via `PlayabilityStore`), like `playability`. When any report filter is active the list is paged over
+    /// the matching scene IDs instead of the normal library query.
+    var resolution: ResolutionFilter = .any
+    var fps: FPSFilter = .any
+    var quality: QualityFilter = .any
 
     var tagIDs: [String] { tags.map(\.id) }
+
+    /// True when a plugin-report-derived filter (playability / resolution / fps / quality) is active — the
+    /// scene list is then paged over `PlayabilityStore.matchingIDs` rather than the normal library query.
+    var usesReport: Bool {
+        playability != .any || resolution != .any || fps != .any || quality != .any
+    }
+}
+
+/// Minimum-resolution buckets (scene height from the plugin report).
+enum ResolutionFilter: String, Sendable, Equatable, CaseIterable, Identifiable {
+    case any, uhd, fhd, hd
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .any: return "Any"; case .uhd: return "4K+"; case .fhd: return "1080p+"; case .hd: return "720p+"
+        }
+    }
+    /// Minimum height (px) a scene must meet, or nil for no filter.
+    var minHeight: Int? {
+        switch self { case .any: return nil; case .uhd: return 2160; case .fhd: return 1080; case .hd: return 720 }
+    }
+}
+
+/// Frame-rate buckets. `high` ≈ 50/60 fps; `standard` is everything below.
+enum FPSFilter: String, Sendable, Equatable, CaseIterable, Identifiable {
+    case any, high, standard
+    var id: String { rawValue }
+    var label: String {
+        switch self { case .any: return "Any"; case .high: return "60fps"; case .standard: return "30fps" }
+    }
+    /// Returns whether a scene's fps passes this bucket (nil = no filter).
+    func passes(_ fps: Double?) -> Bool {
+        switch self {
+        case .any: return true
+        case .high: return (fps ?? 0) >= 48
+        case .standard: return (fps ?? 0) > 0 && (fps ?? 0) < 48
+        }
+    }
+}
+
+/// Quality buckets from the plugin's codec-normalized bits-per-pixel score. Filter is "at least this tier".
+enum QualityFilter: String, Sendable, Equatable, CaseIterable, Identifiable {
+    case any, low, standard, high, ultra
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .any: return "Any"; case .low: return "Low+"; case .standard: return "Standard+"
+        case .high: return "High+"; case .ultra: return "Ultra"
+        }
+    }
+    /// Rank ordering low < standard < high < ultra; nil = no filter.
+    var minRank: Int? {
+        switch self {
+        case .any: return nil; case .low: return 1; case .standard: return 2; case .high: return 3; case .ultra: return 4
+        }
+    }
+    static func rank(_ quality: String) -> Int {
+        switch quality { case "low": return 1; case "standard": return 2; case "high": return 3; case "ultra": return 4; default: return 0 }
+    }
 }
 
 /// Which playability bucket to show — resolved from the plugin's served `playability.json`, not from tags.

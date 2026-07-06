@@ -1085,6 +1085,55 @@ def _analyze(probe):
     }
 
 
+# Codec efficiency vs H.264 (HEVC/AV1 reach the same quality at ~half the bitrate). Used to normalize
+# bits-per-pixel into an H.264-equivalent quality score.
+CODEC_EFF = {
+    "h264": 1.0, "avc": 1.0, "avc1": 1.0, "x264": 1.0,
+    "hevc": 0.55, "h265": 0.55, "hvc1": 0.55, "hev1": 0.55, "x265": 0.55,
+    "av1": 0.5, "av01": 0.5,
+    "vp9": 0.6, "vp09": 0.6, "vp8": 1.1,
+    "mpeg4": 1.4, "mpeg2video": 1.6, "msmpeg4v3": 1.6, "wmv3": 1.5, "vc1": 1.2,
+}
+
+
+def _num(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _quality(scene_file):
+    """Resolution (height), fps and a codec-normalized quality tier from Stash's stored file metadata.
+    quality = bits-per-pixel-per-frame (bitrate / (w*h*fps)) ÷ codec efficiency, bucketed against
+    H.264-equivalent thresholds (web-rip ~0.04, Netflix 1080p ~0.10, Blu-ray ~0.12, YouTube ~0.16).
+    'unknown' when metadata is missing → excluded from the quality filter."""
+    w = int(_num(scene_file.get("width")))
+    h = int(_num(scene_file.get("height")))
+    br = int(_num(scene_file.get("bit_rate")))
+    fps = _num(scene_file.get("frame_rate"))
+    if not (1 <= fps <= 240):
+        fps = 30.0
+    codec = (scene_file.get("video_codec") or "").lower()
+    quality = "unknown"
+    if w > 0 and h > 0 and br > 0:
+        adj = (br / float(w * h * fps)) / CODEC_EFF.get(codec, 1.0)
+        if adj >= 0.15:
+            quality = "ultra"
+        elif adj >= 0.08:
+            quality = "high"
+        elif adj >= 0.04:
+            quality = "standard"
+        else:
+            quality = "low"
+    return {
+        "height": h or None,
+        "fps": round(fps, 3) if fps else None,
+        "bitrate": br or None,
+        "quality": quality,
+    }
+
+
 def _iter_scenes(stash, page_size=100):
     page = 1
     while True:
@@ -1139,7 +1188,9 @@ def run_stats(stash, settings, rebuild=False):
             if not probe:
                 continue
             info = _analyze(probe)
-            report[sid] = _entry(info)
+            entry = _entry(info)
+            entry.update(_quality(files[0]))   # resolution + fps + quality tier (from Stash file metadata)
+            report[sid] = entry
             agg["new"] += 1
             agg[info["tier"]] = agg.get(info["tier"], 0) + 1
             if info["hdr"]:
