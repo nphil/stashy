@@ -61,6 +61,11 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
 - FFmpeg = SPM package `nphil/stashy-videoengine`, LGPL-minimal (**no AV1 encode**). Capability
   changes happen by rebuilding that package, not in this repo. (§5)
 - Adding a `DownloadState` case = updating the exhaustive switches in `DownloadsView`. (§7)
+- **`VTFrameProcessor` (AI slow-mo):** `-19730 "Processor is not initialized"` is a **misleading** error —
+  it means the input is unsupported, NOT that startSession failed. Two real causes, both bit us: (1) feed
+  buffers in the config's own `sourcePixelBufferAttributes` format (**420v biplanar YUV**, NOT BGRA —
+  convert via CoreImage); (2) the model has a **device-specific max dimension (~720p)** that iOS 26 can't
+  query (OS 27 only) — so **cap interpolation at 1280×720**, never scale up. `SlowMoInterpolator`.
 
 ## Docs map — what to read when
 - **`docs/ENGINEERING_NOTES.md`** — deep reference: CI detail, Swift 6 concurrency patterns,
@@ -76,9 +81,17 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   checklist; plus playback engineering learnings.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.191** (playback-speed control 0.25×–2×, commit `31f6924`, IPA ~8.40 MB)
+- Latest release: **v1.0.207** (AI slow-mo 4× interpolation, commit `4001768`, IPA ~8.44 MB)
   — verify the newest release/IPA size each push (CI Build step swallows exit codes; only a published
   release proves compile).
+- **AI slow-mo shipped & working** (`Services/SlowMoInterpolator.swift` + `SlowMoRunner.swift` +
+  `Features/Player/SlowMoRenderView.swift`): on-device Neural-Engine frame interpolation via `VTFrameProcessor`
+  (`VTLowLatencyFrameInterpolation`, iOS 26). While playback ≤0.5× (gated, `aiSlowMoEnabled` off by default),
+  a `CADisplayLink` pulls decoded frames from the player's `AVPlayerItemVideoOutput`, synthesises **3 mid
+  frames (4×)** per pair, and paces real+synth onto a Metal overlay (`SlowMoRenderView`) via a display-time
+  FIFO (single-flight, `latency`=0.15s). **The -19730 saga (see Landmines):** feed the config's required
+  **420v** format (not BGRA) AND **cap at 1280×720** (device max the model won't exceed). Confirmed producing
+  synthesised frames on-device. Deferred: adaptive frame count per rate; the standalone 0.25×-won't-play bug.
 - **Stashy Companion plugin shipped** (`stash-plugin/` — its OWN top-level folder, sibling to `ios/`):
   a stashapp/stash plugin (`interface: raw`, zero-dep Python) that adds what vanilla Stash can't — **GPU
   HEVC (hevc_nvenc, Tesla P40) / CPU AV1 (SVT-AV1) transcode**, ffprobe codec+HDR stats, direct-play

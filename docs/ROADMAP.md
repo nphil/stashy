@@ -176,9 +176,20 @@ core both items reuse.
     usually want biplanar YUV). So slow-mo is now gated behind `aiSlowMoEnabled` (speed-menu "AI slow-mo (beta)"
     toggle, default off) and the "Slow-mo (AI · beta)" Stats section + a pre-`process()` `RemoteLog` line now
     surface the decoded **source W×H + pixel fourcc** to compare a crashing file against a working one.
-    **Next (root-cause fix):** read `frameSupportedPixelFormats`/`sourcePixelBufferAttributes` and feed VT the
-    format it actually wants (likely a dedicated NV12 `AVPlayerItemVideoOutput`), validate dimensions against
-    the (undocumented) minimums, and only then re-enable by default. **Phase 1b-B ✅ SHIPPED (v1.0.201)** — the
+    **✅ ROOT-CAUSE RESOLVED (v1.0.205–206) — interpolation confirmed producing frames on-device.** The
+    `-19730 "Processor is not initialized"` was TWO bugs, both misdiagnosed above: **(1) pixel format** — we
+    forced `32BGRA`; the model requires the config's own `sourcePixelBufferAttributes` format, which it reports
+    as **`420v`** (biplanar YUV video-range). Fix: build the source/dest `CVPixelBufferPool`s from
+    `sourcePixelBufferAttributes`/`destinationPixelBufferAttributes` and convert the player's BGRA frames →
+    420v (and to the interp size) with **one CoreImage pass** (dropped the old vImage BGRA scaler). **(2) frame
+    dimension** — the model has a **device-specific max (~720p on M1 Pro)** that iOS 26 gives *no API to query*
+    (Apple engineer confirmed OS 27 only); exceeding it throws the misleading -19730. Our old workaround scaled
+    sub-1080p *UP* to 1920×1080 → guaranteed failure at every size. Fix: **cap** interpolation at **1280×720**
+    (downscale larger, preserve aspect, even dims; smaller stays native); the render view upscales for display.
+    The earlier "1280×720 hard-crash" was the BGRA bug, not a size crash. Still `aiSlowMoEnabled`-gated (beta).
+    **Phase 2 ✅ SHIPPED (v1.0.207)** — **4× interpolation** (3 mids at 0.25/0.5/0.75; `interpolatedFrames=3`,
+    phases derived so the count lives in one place) for ~2×-source smoothness at 0.5× and source-fps at 0.25×.
+    **Phase 1b-B ✅ SHIPPED (v1.0.201)** — the
     synthesised frames render on screen: `Features/Player/SlowMoRenderView.swift` (a Metal MTKView + CIContext,
     reusing the `LiveBlurBackdrop` path) overlays the player surface while engaged, and `SlowMoRunner` presents
     the **real + synthesised** frames through it paced by a wall-clock display-time FIFO (`startWall +
@@ -186,10 +197,11 @@ core both items reuse.
     black flash). Chose the Metal path over `AVSampleBufferDisplayLayer`/`CMTimebase` (lower blind-API risk,
     proven code). **v1 caveats / next tuning:** shares the blur's `AVPlayerItemVideoOutput` so *inline* (blur
     active) may drop frames while *fullscreen* (blur paused) is clean → give slow-mo its **own** video output;
-    zoom during slow-mo not mirrored on the overlay; higher interpolation factor for 0.25× (2× only today).
-    **Phase 2** — swap in Frame Rate Conversion with a per-rate
-    `interpolationPhase` for arbitrary-factor smoothness (`[0.5]`@0.5×, `[0.25,0.5,0.75]`@0.25×). **Phase 3
-    (optional)** — an "export smooth slow-mo clip" action (on-device or P40 plugin) for a saved max-quality
+    zoom during slow-mo not mirrored on the overlay. **Deferred tuning:** adaptive interpolation count per
+    playback rate (fixed 4× today — recreating the session on rate change would let 0.25× go 8×); the
+    standalone "0.25× won't play at all" bug. **Phase 2b (optional)** — swap the low-latency effect for Frame
+    Rate Conversion (quality path) with a per-rate `interpolationPhase` for arbitrary-factor smoothness.
+    **Phase 3 (optional)** — an "export smooth slow-mo clip" action (on-device or P40 plugin) for a max-quality
     result.
 - **Mini-player / undock the player (owner-requested 2026-07-04).** Let the player detach from the scene
   screen into a floating, draggable mini-player (à la Apple Podcasts / YouTube PiP) so it keeps playing
