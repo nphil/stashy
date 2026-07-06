@@ -34,6 +34,10 @@ struct ScenePlayerView: View {
     @State private var isScrubbing = false
     @State private var scrubTime: TimeInterval = 0
     @State private var hideTask: Task<Void, Never>?
+    /// False until the first `.onAppear`. A return here (popping back from a pushed performer / external
+    /// link, which tore the engine down via `.onDisappear`) is a re-appear — it resumes AT the position but
+    /// stays paused, per iOS norms. The first appear auto-plays.
+    @State private var didAppear = false
 
     init(scene: StashScene, apiKey: String, route: PlaybackRoute, safeArea: EdgeInsets = EdgeInsets(), isFullscreen: Binding<Bool>, quality: Binding<ServerQuality>, resumeTime: Binding<Double>, onBack: (() -> Void)? = nil) {
         self.scene = scene
@@ -215,7 +219,10 @@ struct ScenePlayerView: View {
         }
         .onAppear {
             UIDevice.current.beginGeneratingDeviceOrientationNotifications()
-            model.start()
+            // First open auto-plays; a re-appear (returned from a pushed performer / external link) resumes
+            // at the remembered position but stays paused — tap play to continue.
+            model.start(autoplay: !didAppear)
+            didAppear = true
         }
         .onDisappear {
             hideTask?.cancel()

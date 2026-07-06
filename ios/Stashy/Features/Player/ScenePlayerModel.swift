@@ -108,6 +108,11 @@ final class ScenePlayerModel {
     /// Guards re-entrant starts, and discards an engine built after the scene was already left.
     @ObservationIgnored private var startInProgress = false
     @ObservationIgnored private var stopped = false
+    /// When true, the first engine adopts paused instead of auto-playing. Set by `start(autoplay:)` so a
+    /// return-from-navigation (performer / external link) resumes AT the position but stays paused — the
+    /// user taps play to continue, matching iOS norms (a pushed-then-popped video shouldn't silently resume).
+    /// Consumed once, on the first `adopt`.
+    @ObservationIgnored private var startPaused = false
 
     // Loading-donut estimate: blend the real buffer fill with a time-based curve paced by a learned
     // per-tier average, so the ring never sits at 0 (server transcode) nor snaps 0→100.
@@ -181,9 +186,10 @@ final class ScenePlayerModel {
     /// Begin playback. Idempotent — safe to call on every `onAppear`. For `.localFFmpeg` routes this
     /// first decides (cached) whether Apple can decode the pixel format, so HEVC the device can't decode
     /// (4:2:2/4:4:4) skips the doomed remux and goes straight to HLS instead of stalling on it.
-    func start() {
+    func start(autoplay: Bool = true) {
         guard engine == nil, !startInProgress else { return }
         startInProgress = true
+        startPaused = !autoplay
         stopped = false
         RemoteLog.shared.log("▶︎ start: \(route.streamType) · \(route.reason) · engine=\(route.engine)")
         switch route.engine {
@@ -269,7 +275,16 @@ final class ScenePlayerModel {
         }
         self.engine = engine
         self.localStream = stream
-        isPlaying = true
+        // A return-from-navigation start adopts paused: keep the engine parked so the video resumes at the
+        // remembered position (via the first-ready seek) but doesn't silently start playing. The user taps
+        // play. Consumed here so any later engine rebuild (seek-reinit / quality / fallback) auto-plays.
+        if startPaused {
+            startPaused = false
+            engine.pause()
+            isPlaying = false
+        } else {
+            isPlaying = true
+        }
     }
 
     /// Apple's H.264/HEVC decoders handle only 4:2:0 (8/10-bit); 4:2:2, 4:4:4 and 12-bit need transcode.

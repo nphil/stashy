@@ -53,7 +53,11 @@ struct PlayerControlsView: View {
                     // loading/buffering — the loading donut shows there instead (so the icons never flicker
                     // on a stuttery start). Each button gives haptic feedback.
                     if model.isReady, !model.isLoading {
-                        HStack(spacing: 34) {
+                        // Landscape (fullscreen, held two-handed): spread the ±10s skips well away from the
+                        // centred play/pause so each falls under a thumb; portrait keeps the tight spacing.
+                        // The row is centred on the video, so a wider gap moves the skips outward symmetrically.
+                        let skipGap: CGFloat = proxy.size.width > proxy.size.height ? min(proxy.size.width * 0.34, 320) : 34
+                        HStack(spacing: skipGap) {
                             skipButton("gobackward.10") { model.seek(to: max(0, model.currentTime - 10)) }
                             Button {
                                 Haptics.tap()
@@ -87,6 +91,12 @@ struct PlayerControlsView: View {
                     // Fullscreen: an ✕ at top-right returns to portrait-inline (the player keeps playing — no
                     // teardown). Inline has no top button — swipe-back leaves the scene.
                     if isFullscreen {
+                        // In landscape the top and trailing safe-area insets are very different (a big notch
+                        // inset on the side, almost none on top), so a fixed 12/8 pad left the ✕ visibly
+                        // misaligned relative to the screen's rounded corner. Use one equal inset off both
+                        // edges (clearing the larger of the two insets) so it sits concentric to the corner.
+                        let landscape = proxy.size.width > proxy.size.height
+                        let corner = max(safeArea.top, safeArea.trailing) + 10
                         Button { isFullscreen = false } label: {
                             Image(systemName: "xmark")
                                 .font(.headline.weight(.semibold))
@@ -95,8 +105,8 @@ struct PlayerControlsView: View {
                                 .background(.black.opacity(0.4), in: Circle())
                                 .shadow(radius: 4)
                         }
-                        .padding(.trailing, safeArea.trailing + 12)
-                        .padding(.top, safeArea.top + 8)
+                        .padding(.trailing, landscape ? corner : safeArea.trailing + 12)
+                        .padding(.top, landscape ? corner : safeArea.top + 8)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                         .transition(.opacity)
                     }
