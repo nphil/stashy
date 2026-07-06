@@ -18,10 +18,16 @@ import VideoToolbox
 /// config's attributes and **convert** the player's decoded BGRA frames into that format (and up to the
 /// interpolation size) with CoreImage before handing them to VideoToolbox.
 ///
-/// **Resolution workaround (v1.0.197):** `VTLowLatencyFrameInterpolation` *hard-crashes* at 1280×720 on
-/// iOS 26.x (reproduced across multiple HEVC + H.264 files; 1920×1080 works fine). So sub-1080p frames are
-/// scaled up to a safe **1920×1080** interpolation size (in the same CoreImage pass) before being handed to
-/// VideoToolbox — 720p content gets smooth slow-mo instead of crashing. Content already ≥1080p is native.
+/// **Resolution cap (v1.0.206 — the real fix for -19730 at 1080p/4K):** the interpolation model has a
+/// *device-specific maximum dimension* that iOS 26 exposes **no API to query** (`maximumDimensions` returns
+/// nil; the query APIs only arrived in OS 27 — confirmed by an Apple engineer on the dev forums). Exceeding
+/// it throws the misleading `-19730 "Processor is not initialized"` — which is why 1080p, 4K, *and* our old
+/// "scale sub-1080p up to 1920×1080" workaround all failed. A developer measured the M1 Pro max at **720p**,
+/// so we **cap** interpolation at 1280×720 (downscaling anything larger, preserving aspect ratio; smaller
+/// content stays native) — the CoreImage pass that converts to the model format does the down-scale too. The
+/// interpolated frames are then upscaled for display by the render view (aspect-fit), so output quality
+/// tracks the display size, not 720p. (An earlier report of a 1280×720 *crash* was the BGRA-format bug — now
+/// that we feed the model its required 420v format, 720p is within the supported window.)
 ///
 /// Concurrency: `@unchecked Sendable`. All VideoToolbox calls (`startSession` + `process`) and the CoreImage
 /// conversions run on a dedicated serial queue (`vtQueue`) so the session's state/pools are never touched
@@ -39,7 +45,7 @@ final class SlowMoInterpolator: @unchecked Sendable {
     /// The decoded source size handed in by the caller.
     let nativeWidth: Int
     let nativeHeight: Int
-    /// The size interpolation actually runs at (native, or upscaled to dodge the 1280×720 crash).
+    /// The size interpolation actually runs at (native, or downscaled to stay under the model's max dimension).
     let width: Int
     let height: Int
     /// True when frames are scaled from native → interpolation size.
@@ -74,12 +80,18 @@ final class SlowMoInterpolator: @unchecked Sendable {
         self.interpolatedFrames = max(1, interpolatedFrames)
     }
 
-    /// The resolution to actually interpolate at. `VTLowLatencyFrameInterpolation` hard-crashes at 1280×720
-    /// (and likely other sub-1080p sizes) on iOS 26.x but works at 1920×1080, so anything smaller than 1080p
-    /// is bumped up to 1920×1080. (Content ≥1080p that the model can't handle throws — caught — rather than
-    /// crashing, so it's left native.)
+    /// The resolution to actually interpolate at. The model has a device-specific max dimension (~720p on
+    /// M1 Pro) that iOS 26 can't query; exceeding it throws -19730. So cap the frame so neither side exceeds
+    /// **1280×720** (long side ≤ 1280, short side ≤ 720), preserving aspect ratio and rounding to even
+    /// dimensions (biplanar YUV requires even width/height). Content already within the cap stays native.
     static func safeInterpolationSize(width: Int, height: Int) -> (width: Int, height: Int) {
-        (width < 1920 || height < 1080) ? (1920, 1080) : (width, height)
+        guard width > 0, height > 0 else { return (1280, 720) }
+        let longMax = 1280.0, shortMax = 720.0
+        let longSide = Double(max(width, height)), shortSide = Double(min(width, height))
+        let factor = min(1.0, longMax / longSide, shortMax / shortSide)
+        if factor >= 1.0 { return (width, height) }
+        func even(_ v: Double) -> Int { max(2, Int((v).rounded()) & ~1) }
+        return (even(Double(width) * factor), even(Double(height) * factor))
     }
 
     /// Start the VideoToolbox session and build the model-conforming pools (idempotent). Returns `false` if
