@@ -42,18 +42,34 @@ struct DownloadsView: View {
 
 /// Presents the full scene player for a downloaded item in its own navigation stack (so performer
 /// links etc. still work), reusing SceneDetailView — which prefers the local file for playback.
+///
+/// The scene is *pushed* onto the stack (over a theme-coloured root) rather than being the root, so the
+/// native left-edge swipe-back works exactly like it does in the Library: swiping right pops the player,
+/// revealing the backdrop, and popping past it dismisses the cover back to Downloads. The initial path
+/// already contains the scene, so there's no entry push animation — the cover still just shows the player.
+/// `SceneDetailView` hides the tab bar itself, so this looks identical to the old full-screen presentation.
 private struct DownloadPlayerCover: View {
     let item: DownloadItem
-    @State private var path: [Route] = []
+    @Environment(\.dismiss) private var dismiss
+    @Environment(ThemeManager.self) private var themeManager
+    @State private var path: [Route]
+
+    init(item: DownloadItem) {
+        self.item = item
+        _path = State(initialValue: item.scene.map { [Route.scene($0)] } ?? [])
+    }
 
     var body: some View {
-        if let scene = item.scene {
-            NavigationStack(path: $path) {
-                SceneDetailView(scene: scene, path: $path)
-                    .navigationDestination(for: Route.self) { RouteDestination(route: $0, path: $path) }
-            }
-        } else {
-            Color.black.ignoresSafeArea()
+        NavigationStack(path: $path) {
+            themeManager.current.backgroundColor.ignoresSafeArea()
+                .navigationDestination(for: Route.self) { RouteDestination(route: $0, path: $path) }
+        }
+        .onChange(of: path) { _, newPath in
+            // Swiped/popped back past the player → close the cover (cut, not slide — the revealed backdrop
+            // already matches the Downloads background, so it reads as a seamless pop back to the list).
+            guard newPath.isEmpty else { return }
+            var t = Transaction(); t.disablesAnimations = true
+            withTransaction(t) { dismiss() }
         }
     }
 }
