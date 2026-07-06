@@ -43,6 +43,7 @@ struct PerformersView: View {
             ZStack(alignment: .topTrailing) {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .dismissesPopover($filterExpanded)   // swipe/tap the list closes the panel AND scrolls
                 // Filter dropdown hosted from a stable sibling of `content` (not an overlay on it) so it
                 // survives `content`'s branch flips during reloads — see the detailed note in ScenesView.
                 FilterPopoverAnchor(isPresented: $filterExpanded) {

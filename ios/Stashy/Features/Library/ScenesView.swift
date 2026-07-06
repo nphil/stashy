@@ -161,6 +161,7 @@ struct ScenesView: View {
             ZStack(alignment: .topTrailing) {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .dismissesPopover($filterExpanded)   // swipe/tap the list closes the panel AND scrolls
                 // The filter dropdown is hosted from a *stable sibling* of `content`, never as an overlay on
                 // it. `content` flips its `@ViewBuilder` branch (grid ⇄ full-screen spinner ⇄ empty state)
                 // every time a reload clears `items`; a panel attached to that churning subtree is torn

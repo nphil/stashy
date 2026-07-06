@@ -42,17 +42,10 @@ struct FilterPopoverAnchor<Panel: View>: View {
     var body: some View {
         ZStack(alignment: .topTrailing) {
             if isPresented {
-                // Near-invisible catcher across the whole screen → tap OR scroll/drag outside the panel
-                // dismisses it (flick the grid away to close), while the list stays visible behind the panel.
-                Rectangle()
-                    .fill(.black.opacity(0.001))
-                    .ignoresSafeArea()
-                    .contentShape(Rectangle())
-                    .onTapGesture { isPresented = false }
-                    .gesture(DragGesture(minimumDistance: 8).onChanged { _ in
-                        if isPresented { isPresented = false }
-                    })
-
+                // No blocking catcher over the list: dismissal is driven by the list itself (see
+                // `dismissesPopover`), so a swipe both SCROLLS the list and closes the panel in one motion.
+                // Only the panel's own area is interactive here; the rest of the screen falls through to the
+                // list behind it.
                 panel()
                     // Re-inject the observables the panel/tag editor rely on (harmless if already inherited).
                     .environment(themeManager)
@@ -80,6 +73,21 @@ struct FilterPopoverAnchor<Panel: View>: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
         .animation(.snappy(duration: 0.28, extraBounce: 0.03), value: isPresented)
+    }
+}
+
+extension View {
+    /// Dismiss an open filter/sort popover when the user scrolls OR taps the list behind it. Applied to the
+    /// list content so a swipe both scrolls the list AND closes the panel in one gesture (there's no blocking
+    /// catcher over the list anymore). No-ops while the popover is closed. Works for scenes + performers.
+    func dismissesPopover(_ isPresented: Binding<Bool>) -> some View {
+        self
+            .onScrollPhaseChange { _, phase in
+                if phase != .idle, isPresented.wrappedValue { isPresented.wrappedValue = false }
+            }
+            .simultaneousGesture(TapGesture().onEnded {
+                if isPresented.wrappedValue { isPresented.wrappedValue = false }
+            })
     }
 }
 
