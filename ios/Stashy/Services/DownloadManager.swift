@@ -479,6 +479,10 @@ final class DownloadManager {
                 item.state = .serverProcessing      // reuse the existing server-processing card
                 item.serverJobProgress = 0
                 item.transcodeStatus = "Queued…"
+                // Persist the queued item (jobID nil = not yet started) + mark active so a kill/relaunch
+                // restores it and resumes the queue — fire-and-forget overnight transcoding.
+                persistServerSidecar(item, scene: scene, codec: codec)
+                markActive(item.id)
                 companionQueue.append(item.id)
             }
         }
@@ -1555,6 +1559,30 @@ final class DownloadManager {
             guard FileManager.default.fileExists(atPath: activeURL(id).path) else { continue }  // not active
             guard let sidecar = try? JSONDecoder().decode(Sidecar.self, from: Data(contentsOf: url)) else { continue }
             let scene = sidecar.scene
+            // A bulk companion transcode that was QUEUED but never started (jobID nil) when we were killed:
+            // rebuild it and re-enqueue so the serial pump resumes it — fire-and-forget survives relaunch.
+            if sidecar.serverProcessing == true, sidecar.companionJobID == nil {
+                let codec = StashCompanion.Codec(rawValue: sidecar.companionCodec ?? "hevc") ?? .hevc
+                let f = scene.files.first
+                let base = ((f?.basename ?? scene.title ?? "video") as NSString).deletingPathExtension
+                let item = DownloadItem(
+                    id: id, title: scene.title ?? base, url: scene.directFileURL(apiKey: sidecar.apiKey) ?? url,
+                    fileName: base, ext: "mp4", codec: f?.video_codec, width: f?.width, height: f?.height,
+                    bitRate: f?.bit_rate, totalBytes: 0, connectionCount: 1, scene: scene, apiKey: sidecar.apiKey,
+                    localThumb: {
+                        let t = metaDir.appendingPathComponent("\(id)-thumb.jpg")
+                        return FileManager.default.fileExists(atPath: t.path) ? t : nil
+                    }())
+                item.companionCodec = codec
+                item.serverResolution = ServerQuality(rawValue: sidecar.companionResolution ?? "p1080") ?? .p1080
+                item.companionQuality = CompanionQuality(rawValue: sidecar.companionQuality ?? "medium") ?? .medium
+                item.state = .serverProcessing
+                item.serverJobProgress = 0
+                item.transcodeStatus = "Queued…"
+                items.append(item)
+                companionQueue.append(item.id)
+                continue
+            }
             // A companion transcode that was in-flight when we were killed: the Stash job kept running.
             // Rebuild the item in .serverProcessing and reconnect to the SAME job by its persisted id.
             if sidecar.serverProcessing == true, let jobID = sidecar.companionJobID {
@@ -1573,6 +1601,7 @@ final class DownloadManager {
                 item.serverResolution = ServerQuality(rawValue: sidecar.companionResolution ?? "p1080") ?? .p1080
                 item.companionQuality = CompanionQuality(rawValue: sidecar.companionQuality ?? "medium") ?? .medium
                 items.append(item)
+                companionActiveID = item.id   // hold the serial slot so restored queued items wait their turn
                 reconnectCompanionTranscode(item, scene: scene, jobID: jobID, codec: codec)
                 continue
             }
@@ -1612,6 +1641,7 @@ final class DownloadManager {
             item.state = .paused   // reconnectTasks() flips this to .downloading if a live task is found
             items.append(item)
         }
+        pumpCompanionQueue()   // resume any restored bulk-transcode queue (serial; waits if a job reconnected)
     }
 
     /// After `loadInterrupted`, assemble any item whose every connection already has a complete part
