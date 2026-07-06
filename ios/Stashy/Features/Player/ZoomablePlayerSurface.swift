@@ -44,6 +44,11 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
     var isReady: Bool
     /// Zoom + swipe-to-dismiss are only enabled in fullscreen.
     var zoomEnabled: Bool
+    /// True while AI slow-mo is engaged. Its interpolated-frame render view is hosted **inside** this zoom
+    /// container (a sibling above the player view) so pinch/pan zoom transforms it identically to the video.
+    /// Kept as a single source of truth (the scroll view) rather than mirroring the transform onto a separate
+    /// overlay, which would desync from the live gesture.
+    var slowMoActive: Bool
     @Binding var zoomScale: CGFloat
     @Binding var isScrubbing: Bool
     @Binding var scrubTime: TimeInterval
@@ -95,6 +100,7 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
 
         coordinator.scrollView = scroll
         coordinator.attachPlayerView()
+        coordinator.syncSlowMoView()
         return scroll
     }
 
@@ -102,6 +108,7 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
         let coordinator = context.coordinator
         coordinator.parent = self
         coordinator.attachPlayerView()
+        coordinator.syncSlowMoView()
         scroll.maximumZoomScale = zoomEnabled ? 4 : 1
         if !coordinator.isScrubbing { scroll.isScrollEnabled = zoomEnabled }
         // Fully reset zoom/pan whenever zooming is disabled (e.g. leaving fullscreen) so the video
@@ -125,6 +132,9 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
         var parent: ZoomablePlayerSurface
         let container = UIView()
         weak var scrollView: ZoomScrollView?
+        /// The slow-mo render view currently hosted in `container` (tracked separately from
+        /// `model.slowMoRenderView`, which is niled on stop — so we can still remove the frozen overlay).
+        weak var hostedSlowView: UIView?
         /// Tracks the last zoom-enabled state so updateUIView only forces a relayout on the toggle.
         var lastZoomEnabled: Bool?
         private(set) var isScrubbing = false
@@ -145,6 +155,28 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
             }
             playerView.frame = container.bounds
             playerView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        }
+
+        /// Host (or remove) the AI slow-mo render view inside the zoom container so it shares the scroll
+        /// view's zoom/pan transform (pinch, double-tap, inertial pan all "just work"). It sits above the
+        /// player view; removing it on stop reveals the live `AVPlayerLayer` again. Non-interactive so it
+        /// never intercepts the scroll view's gestures.
+        func syncSlowMoView() {
+            let wanted = parent.slowMoActive ? parent.model.slowMoRenderView : nil
+            if hostedSlowView !== wanted {
+                hostedSlowView?.removeFromSuperview()
+                hostedSlowView = nil
+            }
+            guard let slow = wanted else { return }
+            if slow.superview !== container {
+                slow.removeFromSuperview()
+                slow.frame = container.bounds
+                slow.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                slow.isUserInteractionEnabled = false
+                container.addSubview(slow)
+            }
+            container.bringSubviewToFront(slow)
+            hostedSlowView = slow
         }
 
         /// Reset zoom and pan offset — used when zooming is disabled. Re-centring/sizing is handled

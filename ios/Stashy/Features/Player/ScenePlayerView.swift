@@ -106,10 +106,14 @@ struct ScenePlayerView: View {
                     .onTapGesture { toggleControls() }
                     .frame(width: avail.width, height: avail.height)
 
+                // AI slow-mo (≤0.5×, opt-in): the interpolated frame stream renders on a view hosted INSIDE
+                // this surface's zoom container (see `ZoomablePlayerSurface.syncSlowMoView`), so pinch/pan zoom
+                // it identically to the video — reading `slowMoActive` here also drives the attach/detach.
                 ZoomablePlayerSurface(
                     model: model,
                     isReady: model.isReady,
                     zoomEnabled: isFullscreen,
+                    slowMoActive: model.slowMoActive,
                     zoomScale: $zoomScale,
                     isScrubbing: $isScrubbing,
                     scrubTime: $scrubTime,
@@ -120,15 +124,6 @@ struct ScenePlayerView: View {
                     cueIndex: { sprites.cueIndex(at: $0) }
                 )
                 .frame(width: surfaceSize.width, height: surfaceSize.height)
-
-                // AI slow-mo (≤0.5×, opt-in): overlay the interpolated frame stream over the video surface
-                // so the slowed motion is smooth. Non-interactive — taps/zoom pass through to the surface
-                // below; the controls sit above this.
-                if model.slowMoActive, let renderView = model.slowMoRenderView {
-                    SlowMoRenderHost(view: renderView)
-                        .frame(width: surfaceSize.width, height: surfaceSize.height)
-                        .allowsHitTesting(false)
-                }
 
                 if model.didFail {
                     VStack(spacing: 10) {

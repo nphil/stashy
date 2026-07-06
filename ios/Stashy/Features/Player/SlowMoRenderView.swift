@@ -72,23 +72,3 @@ final class SlowMoRenderView: UIView, MTKViewDelegate {
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 }
-
-/// Hosts the slow-mo render view over the player surface (full-bleed within the video rect).
-struct SlowMoRenderHost: UIViewRepresentable {
-    let view: UIView
-
-    func makeUIView(context: Context) -> UIView {
-        let container = UIView()
-        container.backgroundColor = .clear
-        container.clipsToBounds = true
-        return container
-    }
-
-    func updateUIView(_ container: UIView, context: Context) {
-        guard view.superview !== container else { return }
-        view.removeFromSuperview()
-        view.frame = container.bounds
-        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        container.addSubview(view)
-    }
-}
