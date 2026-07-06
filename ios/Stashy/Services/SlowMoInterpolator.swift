@@ -50,8 +50,15 @@ final class SlowMoInterpolator: @unchecked Sendable {
     let height: Int
     /// True when frames are scaled from native → interpolation size.
     let scaled: Bool
-    /// Max synthesised frames per source pair (session config). Phase 1 uses 1 → 2× (one mid frame).
+    /// Max synthesised frames per source pair (session config). 3 → 4× (mids at 0.25/0.5/0.75) for silky
+    /// slow-mo (source-fps smoothness at 0.25×, ~2× source at 0.5×). Pure-temporal, so >1 phase is allowed.
     let interpolatedFrames: Int
+
+    /// The interpolation phases for this session — evenly spaced in (0,1), matching `interpolatedFrames`
+    /// (e.g. 3 → `[0.25, 0.5, 0.75]`). Callers pass this straight to `interpolate(phases:)`.
+    var phases: [Double] {
+        (1...interpolatedFrames).map { Double($0) / Double(interpolatedFrames + 1) }
+    }
 
     private let processor = VTFrameProcessor()
     /// VideoToolbox's frame-processor session is **thread-affine** — `startSession` and `process` must run

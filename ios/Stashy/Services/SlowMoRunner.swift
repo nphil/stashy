@@ -148,7 +148,7 @@ final class SlowMoRunner {
             // Create the interpolator but DON'T start the VideoToolbox session here on the main actor — the
             // session is context-affine, so it's started lazily inside interpolate() on the same background
             // task that calls process() (otherwise process throws -19730 "Processor is not initialized").
-            let interp = SlowMoInterpolator(width: width, height: height, interpolatedFrames: 1)
+            let interp = SlowMoInterpolator(width: width, height: height, interpolatedFrames: 3)
             telemetry.supported = true
             onTelemetry(telemetry)
             interpolator = interp
@@ -193,7 +193,7 @@ final class SlowMoRunner {
             let t0 = Date()
             let frames = await interp.interpolate(previous: pair.previous, previousPTS: pair.previousPTS,
                                                   current: pair.current, currentPTS: pair.currentPTS,
-                                                  phases: [0.5])
+                                                  phases: interp.phases)
             let ms = Date().timeIntervalSince(t0) * 1000
             let result = SlowMoFrameResult(interpolated: frames, current: pair.current,
                                            previousPTS: pair.previousPTS, currentPTS: pair.currentPTS)
