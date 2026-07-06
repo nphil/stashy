@@ -116,6 +116,20 @@ final class SlowMoRunner {
         let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
         guard width > 0, height > 0 else { return }
 
+        // Interpolation factor scales with how slow we're playing so smoothness is constant: ~2× the source
+        // frame rate at any rate (0.5× → 4× / 3 mids, 0.25× → 8× / 7 mids). Slower playback = more wall-time
+        // budget per source pair, so the extra frames stay within the NPU's headroom. Changing the factor
+        // needs a fresh session (the count is fixed at config time) — recreate when it changes, but only when
+        // no interpolation is in flight (the detached task holds the current session). A rate change is a
+        // deliberate, rare menu pick, so the one-frame re-seed hitch is unnoticeable.
+        let mids = Self.desiredMids(forRate: rateProvider())
+        if let interp = interpolator, interp.interpolatedFrames != mids, !inFlight {
+            interp.invalidate()
+            interpolator = nil
+            previous = nil; previousPTS = .invalid
+            displayQueue.removeAll()
+        }
+
         // Lazily create the interpolator sized to the ACTUAL decoded buffer (never presentationSize — for
         // anamorphic content that display size differs from the coded buffer and would mismatch VideoToolbox).
         if interpolator == nil {
@@ -148,7 +162,7 @@ final class SlowMoRunner {
             // Create the interpolator but DON'T start the VideoToolbox session here on the main actor — the
             // session is context-affine, so it's started lazily inside interpolate() on the same background
             // task that calls process() (otherwise process throws -19730 "Processor is not initialized").
-            let interp = SlowMoInterpolator(width: width, height: height, interpolatedFrames: 3)
+            let interp = SlowMoInterpolator(width: width, height: height, interpolatedFrames: mids)
             telemetry.supported = true
             onTelemetry(telemetry)
             interpolator = interp
@@ -242,6 +256,14 @@ final class SlowMoRunner {
         }
         if let toShow { renderView.present(toShow) }
         if displayQueue.count > 30 { displayQueue.removeFirst(displayQueue.count - 30) }   // safety bound
+    }
+
+    /// Mid frames to synthesise per source pair for a given playback rate — targets ~2× the source frame
+    /// rate (silky) at any slow speed, capped at 7 (8×). 0.5× → 3, 0.33× → 5, 0.25× → 7. Slow-mo only
+    /// engages ≤0.5×, so the input is always in that range.
+    static func desiredMids(forRate rate: Double) -> Int {
+        let mult = Int((2.0 / max(rate, 0.05)).rounded())   // 0.5→4, 0.25→8 (× factor)
+        return min(7, max(1, mult - 1))
     }
 
     /// A CoreVideo pixel-format `OSType` as its 4-character code (e.g. `'BGRA'`), for diagnostics.
