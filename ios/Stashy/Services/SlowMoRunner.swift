@@ -93,11 +93,15 @@ final class SlowMoRunner {
         displayLink = link
     }
 
-    /// Stop the frame pull. Any in-flight interpolation finishes (single-flight, so nothing races the
-    /// interpolator's state); the session is released when the runner deallocates.
+    /// Stop the frame pull and end the VideoToolbox session cleanly. `invalidate()` tears the session down
+    /// on the shared VT queue (single-flight upstream means nothing is mid-process); ending it here — rather
+    /// than letting the interpolator dealloc on the main actor — keeps `endSession` on the VT thread, which
+    /// is what prevents the crash when leaving slow-mo (e.g. switching back to normal speed).
     func stop() {
         displayLink?.invalidate()
         displayLink = nil
+        interpolator?.invalidate()
+        interpolator = nil
         previous = nil
         previousPTS = .invalid
         displayQueue.removeAll()

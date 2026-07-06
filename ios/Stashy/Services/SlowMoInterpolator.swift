@@ -61,10 +61,14 @@ final class SlowMoInterpolator: @unchecked Sendable {
     }
 
     private let processor = VTFrameProcessor()
-    /// VideoToolbox's frame-processor session is **thread-affine** — `startSession` and `process` must run
-    /// on the same thread (Swift concurrency hops threads across `await`, which throws -19730 "Processor is
-    /// not initialized"). So all VT calls — plus the CoreImage format conversion — are serialised here.
-    private let vtQueue = DispatchQueue(label: "com.stashy.slowmo.videotoolbox")
+    /// VideoToolbox's frame-processor session is **thread-affine** — `startSession`, `process`, AND
+    /// `endSession` must all run on the same thread (Swift concurrency hops threads across `await`, which
+    /// throws -19730; ending on the wrong thread corrupts VT's per-process state → crash or a wedged
+    /// processor). So every VT call — plus the CoreImage conversion — is serialised here. **Static/shared**
+    /// across all interpolator instances so that when the factor changes and we swap instances, the old
+    /// session's `endSession` is strictly ordered *before* the new session's `startSession` (a per-instance
+    /// queue would let them race across threads). Single-flight upstream means only one runs at a time anyway.
+    private static let vtQueue = DispatchQueue(label: "com.stashy.slowmo.videotoolbox")
     private var started = false
     private var config: VTLowLatencyFrameInterpolationConfiguration?   // retained for the session's lifetime
     /// Source/reference frame pool — built from the config's REQUIRED `sourcePixelBufferAttributes` (correct
@@ -172,7 +176,7 @@ final class SlowMoInterpolator: @unchecked Sendable {
                      phases: [Double]) async -> [CVPixelBuffer] {
         let inputs = SlowMoBox((previous, current))   // carry the non-Sendable buffers onto the VT queue
         return await withCheckedContinuation { (continuation: CheckedContinuation<[CVPixelBuffer], Never>) in
-            vtQueue.async { [self] in
+            Self.vtQueue.async { [self] in
                 let previous = inputs.value.0, current = inputs.value.1
                 // startSession + process must run in this one block (same thread) or process throws -19730.
                 guard started || startIfNeeded() else { logFail("no-session"); continuation.resume(returning: []); return }
@@ -224,12 +228,17 @@ final class SlowMoInterpolator: @unchecked Sendable {
         ])
     }
 
-    /// End the session and drop the pools.
+    /// End the session and drop the pools — **on the shared VT queue** so `endSession` runs on the same
+    /// thread as `startSession`/`process` (ending on the caller's thread, e.g. the main actor on a rate
+    /// change or dealloc, corrupts VideoToolbox → crash/wedge). The `[self]` capture keeps the instance alive
+    /// until the block runs, so the object is released *from the queue* → its deinit is queue-thread too.
     func invalidate() {
-        if started { processor.endSession(); started = false }
-        config = nil
-        sourcePool = nil
-        destinationPool = nil
+        Self.vtQueue.async { [self] in
+            if started { processor.endSession(); started = false }
+            config = nil
+            sourcePool = nil
+            destinationPool = nil
+        }
     }
 
     /// Convert a native decoded frame (any format, typically 32BGRA from `AVPlayerItemVideoOutput`) into a
