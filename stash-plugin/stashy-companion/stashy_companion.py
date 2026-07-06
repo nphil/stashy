@@ -1116,6 +1116,7 @@ def _quality(scene_file):
         fps = 30.0
     codec = (scene_file.get("video_codec") or "").lower()
     quality = "unknown"
+    adj = 0.0
     if w > 0 and h > 0 and br > 0:
         adj = (br / float(w * h * fps)) / CODEC_EFF.get(codec, 1.0)
         if adj >= 0.15:
@@ -1131,6 +1132,7 @@ def _quality(scene_file):
         "fps": round(fps, 3) if fps else None,
         "bitrate": br or None,
         "quality": quality,
+        "qscore": round(adj, 5),   # continuous score for the Quality sort
     }
 
 

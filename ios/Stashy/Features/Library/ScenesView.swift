@@ -55,16 +55,22 @@ struct ScenesView: View {
         guard !query.downloadedOnly else { return }
         guard let client = appState.client else { return }
         let q = query
-        // Report filters (playability / resolution / fps / quality): page over the plugin report's matching
-        // scene IDs (numeric-ascending), fetched by ID — no tags, no server-side custom-field filter needed.
-        if q.usesReport {
-            let ids = PlayabilityStore.shared.matchingIDs(
-                playability: q.playability, resolution: q.resolution, fps: q.fps, quality: q.quality)
+        // Report-backed filter (playability/resolution/fps/quality) OR report-backed sort (resolution/
+        // framerate/quality): page over the plugin report's scene IDs, reordered by the sort key. Fetched by
+        // ID and re-sorted after fetch (findScenesByIDs doesn't preserve order). Only when the report exists;
+        // otherwise a native Stash sort handles resolution/framerate below.
+        if (q.usesReport || q.sort.isReportSort), PlayabilityStore.shared.isAvailable {
+            let ids = PlayabilityStore.shared.ordered(
+                PlayabilityStore.shared.matchingIDs(
+                    playability: q.playability, resolution: q.resolution, fps: q.fps, quality: q.quality),
+                by: q.sort, direction: q.direction)
             await loader.reload { page, perPage in
                 let start = (page - 1) * perPage
                 guard start < ids.count else { return ([], ids.count) }
                 let slice = Array(ids[start..<min(start + perPage, ids.count)])
-                return (try await client.findScenesByIDs(slice), ids.count)
+                let fetched = try await client.findScenesByIDs(slice)
+                let byID = Dictionary(fetched.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+                return (slice.compactMap { byID[$0] }, ids.count)   // restore the sorted order
             }
             return
         }

@@ -350,11 +350,13 @@ struct StashClient: Sendable {
 // MARK: - Scene query model
 
 enum SceneSort: String, CaseIterable, Sendable, Identifiable, Hashable {
-    case date, createdAt, title, duration, size
+    case date, createdAt, title, duration, size, resolution, framerate, quality
 
     var id: String { rawValue }
 
-    /// Stash sort column name.
+    /// Stash sort column name. `resolution` / `framerate` are native Stash sort keys; `quality` has no
+    /// native equivalent (it's the plugin's bits-per-pixel score) — the app reorders by the report, and this
+    /// `bitrate` key is only the fallback when the report isn't loaded.
     var apiKey: String {
         switch self {
         case .date: return "date"
@@ -362,8 +364,15 @@ enum SceneSort: String, CaseIterable, Sendable, Identifiable, Hashable {
         case .title: return "title"
         case .duration: return "duration"
         case .size: return "filesize"
+        case .resolution: return "resolution"
+        case .framerate: return "framerate"
+        case .quality: return "bitrate"
         }
     }
+
+    /// True when the sort is computed from the Companion plugin's report (`PlayabilityStore`) rather than a
+    /// native Stash column — the scene list is then reordered client-side over the report's scene IDs.
+    var isReportSort: Bool { self == .resolution || self == .framerate || self == .quality }
 
     var label: String {
         switch self {
@@ -372,6 +381,9 @@ enum SceneSort: String, CaseIterable, Sendable, Identifiable, Hashable {
         case .title: return "Title"
         case .duration: return "Duration"
         case .size: return "File Size"
+        case .resolution: return "Resolution"
+        case .framerate: return "Frame Rate"
+        case .quality: return "Quality"
         }
     }
 
@@ -382,6 +394,9 @@ enum SceneSort: String, CaseIterable, Sendable, Identifiable, Hashable {
         case .title: return "textformat"
         case .duration: return "timer"
         case .size: return "internaldrive"
+        case .resolution: return "rectangle.on.rectangle"
+        case .framerate: return "speedometer"
+        case .quality: return "sparkles"
         }
     }
 }

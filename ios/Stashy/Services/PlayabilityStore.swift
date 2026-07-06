@@ -30,6 +30,7 @@ final class PlayabilityStore {
         var height: Int? = nil
         var fps: Double? = nil
         var quality: String = "unknown"
+        var qscore: Double = 0        // codec-normalized bits-per-pixel (continuous), for Quality sort
     }
 
     private struct Payload: Decodable { let scenes: [String: Info] }
@@ -62,6 +63,27 @@ final class PlayabilityStore {
             return true
         }
         .keys.sorted { (Int($0) ?? 0) < (Int($1) ?? 0) }
+    }
+
+    /// Reorder scene IDs by a report-derived sort key (resolution height / fps / quality score), applying
+    /// direction, with a stable numeric-id tiebreak. Non-report sorts are returned unchanged.
+    func ordered(_ ids: [String], by sort: SceneSort, direction: SortDirection) -> [String] {
+        guard sort.isReportSort else { return ids }
+        func key(_ id: String) -> Double {
+            guard let info = scenes[id] else { return -1 }
+            switch sort {
+            case .resolution: return Double(info.height ?? 0)
+            case .framerate: return info.fps ?? 0
+            case .quality: return info.qscore
+            default: return 0
+            }
+        }
+        let asc = direction == .asc
+        return ids.sorted { a, b in
+            let ka = key(a), kb = key(b)
+            if ka == kb { return (Int(a) ?? 0) < (Int(b) ?? 0) }
+            return asc ? ka < kb : ka > kb
+        }
     }
 
     /// Fetch the served file (skipped if fetched within ~5 min and already populated, unless `force`).
