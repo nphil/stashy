@@ -53,10 +53,11 @@ struct PlayerControlsView: View {
                     // loading/buffering — the loading donut shows there instead (so the icons never flicker
                     // on a stuttery start). Each button gives haptic feedback.
                     if model.isReady, !model.isLoading {
-                        // Landscape (fullscreen, held two-handed): spread the ±10s skips well away from the
-                        // centred play/pause so each falls under a thumb; portrait keeps the tight spacing.
-                        // The row is centred on the video, so a wider gap moves the skips outward symmetrically.
-                        let skipGap: CGFloat = proxy.size.width > proxy.size.height ? min(proxy.size.width * 0.34, 320) : 34
+                        // Landscape (fullscreen, held two-handed): spread the ±10s skips away from the centred
+                        // play/pause so each falls under a thumb — but not all the way to the edges (that read
+                        // as "stuck in the corners"). The row is centred on the video, so the gap moves them
+                        // outward symmetrically. Portrait keeps a modest spacing.
+                        let skipGap: CGFloat = proxy.size.width > proxy.size.height ? min(proxy.size.width * 0.13, 120) : 20
                         HStack(spacing: skipGap) {
                             skipButton("gobackward.10") { model.seek(to: max(0, model.currentTime - 10)) }
                             Button {
@@ -91,12 +92,13 @@ struct PlayerControlsView: View {
                     // Fullscreen: an ✕ at top-right returns to portrait-inline (the player keeps playing — no
                     // teardown). Inline has no top button — swipe-back leaves the scene.
                     if isFullscreen {
-                        // In landscape the top and trailing safe-area insets are very different (a big notch
-                        // inset on the side, almost none on top), so a fixed 12/8 pad left the ✕ visibly
-                        // misaligned relative to the screen's rounded corner. Use one equal inset off both
-                        // edges (clearing the larger of the two insets) so it sits concentric to the corner.
+                        // Landscape: the side safe-area inset is ~59pt (reserved symmetrically for the sensor
+                        // housing) but the top-RIGHT corner is visually clear — the Dynamic Island sits on a
+                        // side edge, vertically centred, not in the corner. So ignore that big side inset here
+                        // and hug the rounded corner with a small equal inset off both edges (concentric to
+                        // the corner arc), clearing the ~55pt corner radius. Portrait keeps the per-edge pad.
                         let landscape = proxy.size.width > proxy.size.height
-                        let corner = max(safeArea.top, safeArea.trailing) + 10
+                        let corner: CGFloat = 24
                         Button { isFullscreen = false } label: {
                             Image(systemName: "xmark")
                                 .font(.headline.weight(.semibold))
