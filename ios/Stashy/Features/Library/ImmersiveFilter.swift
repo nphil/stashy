@@ -42,21 +42,30 @@ struct FilterPopoverAnchor<Panel: View>: View {
     var body: some View {
         ZStack(alignment: .topTrailing) {
             if isPresented {
-                // Near-invisible tap-catcher across the whole screen → tap outside to dismiss, while the
-                // list stays visible behind the panel (the immersive look).
+                // Near-invisible catcher across the whole screen → tap OR scroll/drag outside the panel
+                // dismisses it (flick the grid away to close), while the list stays visible behind the panel.
                 Rectangle()
                     .fill(.black.opacity(0.001))
                     .ignoresSafeArea()
                     .contentShape(Rectangle())
                     .onTapGesture { isPresented = false }
+                    .gesture(DragGesture(minimumDistance: 8).onChanged { _ in
+                        if isPresented { isPresented = false }
+                    })
 
                 panel()
                     // Re-inject the observables the panel/tag editor rely on (harmless if already inherited).
                     .environment(themeManager)
                     .environment(appState)
                     .environment(edits)
-                    // The system popover used to supply the container chrome; provide it ourselves now.
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    // Container chrome: a frosted backdrop with the blur toned down (~30%) by a light theme
+                    // tint over the material, which also keeps the list from showing through during a reload.
+                    .background {
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .fill(.ultraThinMaterial)
+                            .overlay(themeManager.current.backgroundColor.opacity(0.30))
+                            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    }
                     .overlay(
                         RoundedRectangle(cornerRadius: 20, style: .continuous)
                             .stroke(.white.opacity(0.12), lineWidth: 1)
@@ -64,11 +73,13 @@ struct FilterPopoverAnchor<Panel: View>: View {
                     .shadow(color: .black.opacity(0.28), radius: 18, y: 10)
                     .padding(.trailing, 10)
                     .padding(.top, 6)
-                    .transition(.scale(scale: 0.94, anchor: .topTrailing).combined(with: .opacity))
+                    // Emerge from the funnel (top-trailing) with the system's own spring, so it matches
+                    // native menu/popover physics without any custom graphics.
+                    .transition(.scale(scale: 0.9, anchor: .topTrailing).combined(with: .opacity))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-        .animation(.spring(response: 0.30, dampingFraction: 0.84), value: isPresented)
+        .animation(.snappy(duration: 0.28, extraBounce: 0.03), value: isPresented)
     }
 }
 

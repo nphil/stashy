@@ -37,9 +37,22 @@ final class PaginatedLoader<T: Identifiable & Sendable> where T.ID: Hashable {
         isLoading = true
         errorMessage = nil
         page = 1
-        items = []
         hasMore = true
-        await fetchPage(gen: gen)
+        // Load page 1 WITHOUT clearing the current list first, so a filter/sort change (or pull-to-refresh)
+        // doesn't flash an empty grid / full-screen spinner — the old items stay visible until the new page
+        // replaces them. (A genuine cold start still shows the spinner, since there are no items yet.) This
+        // also removes the flash that showed through the translucent filter panel on a playability switch.
+        do {
+            let result = try await fetch(1, pageSize)
+            guard gen == generation else { return }        // superseded by a newer reload
+            items = result.items                            // replace atomically — no blank frame
+            hasMore = result.items.count < result.total && !result.items.isEmpty
+        } catch {
+            guard gen == generation else { return }
+            items = []
+            hasMore = false
+            errorMessage = error.localizedDescription
+        }
         if gen == generation { isLoading = false }
     }
 

@@ -166,41 +166,43 @@ struct ScenesView: View {
             .background(themeManager.current.backgroundColor.ignoresSafeArea())
             .navigationTitle("Scenes")
             .navigationBarTitleDisplayMode(.inline)
+            // Stable ToolbarItem identities with conditional CONTENT — swapping whole ToolbarItems behind an
+            // if/else makes SwiftUI's toolbar builder drop them (the "⋯ button vanished" bug).
             .toolbar {
-                if selectionMode {
-                    ToolbarItem(placement: .topBarLeading) {
+                ToolbarItem(placement: .topBarLeading) {
+                    if selectionMode {
                         Button("Cancel") { exitSelection() }
                     }
-                    ToolbarItem(placement: .topBarTrailing) {
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    if selectionMode {
                         Button("Download (\(selectedIDs.count))") { startSelectionDownload() }
                             .fontWeight(.semibold)
                             .disabled(selectedIDs.isEmpty)
-                    }
-                } else {
-                    if !query.downloadedOnly {
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Menu {
-                                Button {
-                                    startBulkDownload()
-                                } label: {
-                                    Label("Download all in filter", systemImage: "arrow.down.circle")
-                                }
-                                .disabled(bulkLoading)
-                                Button {
-                                    selectionMode = true
-                                } label: {
-                                    Label("Select…", systemImage: "checkmark.circle")
-                                }
+                    } else if !query.downloadedOnly {
+                        Menu {
+                            Button {
+                                startBulkDownload()
                             } label: {
-                                if bulkLoading {
-                                    ProgressView()
-                                } else {
-                                    Image(systemName: "ellipsis.circle")
-                                }
+                                Label("Download all in filter", systemImage: "arrow.down.circle")
+                            }
+                            .disabled(bulkLoading)
+                            Button {
+                                selectionMode = true
+                            } label: {
+                                Label("Select…", systemImage: "checkmark.circle")
+                            }
+                        } label: {
+                            if bulkLoading {
+                                ProgressView()
+                            } else {
+                                Image(systemName: "ellipsis.circle")
                             }
                         }
                     }
-                    ToolbarItem(placement: .topBarTrailing) {
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    if !selectionMode {
                         FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
                     }
                 }
