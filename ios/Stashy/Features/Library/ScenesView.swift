@@ -14,6 +14,10 @@ struct ScenesView: View {
     @State private var previewPresenter = ScenePreviewPresenter()
     @State private var filterExpanded = false
     @State private var reloadDebounce: Task<Void, Never>?
+    // Bulk download (additive): fetch the whole filtered set, then pick one quality for all.
+    @State private var bulkSheet = false
+    @State private var bulkScenes: [StashScene] = []
+    @State private var bulkLoading = false
 
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
@@ -65,6 +69,50 @@ struct ScenesView: View {
         }
     }
 
+    /// Fetch EVERY scene matching the current filter (all pages), for a bulk download. Run at initiation
+    /// (home WiFi), so paging the whole set is fine. Mirrors `reload`'s query paths (playability tier vs
+    /// normal query). Additive — reads only, changes nothing about normal browsing.
+    @MainActor
+    private func allMatchingScenes() async -> [StashScene] {
+        guard let client = appState.client else { return [] }
+        let q = query
+        if let tier = q.playability.tier {
+            let ids = PlayabilityStore.shared.ids(tier: tier)
+            var out: [StashScene] = []
+            let per = 100
+            var page = 0
+            while page * per < ids.count {
+                let slice = Array(ids[(page * per)..<min((page + 1) * per, ids.count)])
+                if let s = try? await client.findScenesByIDs(slice) { out += s }
+                page += 1
+            }
+            return out
+        }
+        var out: [StashScene] = []
+        var page = 1
+        let per = 100
+        while true {
+            guard let result = try? await client.findScenes(q, page: page, perPage: per) else { break }
+            out += result.scenes
+            if result.scenes.isEmpty || out.count >= result.count { break }
+            page += 1
+        }
+        return out
+    }
+
+    /// Gather the filtered set, then present the bulk options sheet (skips presenting on an empty result).
+    @MainActor
+    private func startBulkDownload() {
+        guard !bulkLoading else { return }
+        bulkLoading = true
+        Task { @MainActor in
+            let scenes = await allMatchingScenes()
+            bulkScenes = scenes
+            bulkLoading = false
+            if !scenes.isEmpty { bulkSheet = true }
+        }
+    }
+
     var body: some View {
         NavigationStack(path: $path) {
             ZStack(alignment: .topTrailing) {
@@ -85,8 +133,32 @@ struct ScenesView: View {
             .navigationTitle("Scenes")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                if !query.downloadedOnly {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Menu {
+                            Button {
+                                startBulkDownload()
+                            } label: {
+                                Label("Download all in filter", systemImage: "arrow.down.circle")
+                            }
+                            .disabled(bulkLoading)
+                        } label: {
+                            if bulkLoading {
+                                ProgressView()
+                            } else {
+                                Image(systemName: "ellipsis.circle")
+                            }
+                        }
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
+                }
+            }
+            .sheet(isPresented: $bulkSheet) {
+                BulkDownloadSheet(sceneCount: bulkScenes.count) { opts in
+                    downloads.bulkDownload(scenes: bulkScenes, options: opts,
+                                           apiKey: appState.client?.apiKey ?? "")
                 }
             }
             // While the sprite preview is up, hide the tab bar so its dim can darken the whole screen

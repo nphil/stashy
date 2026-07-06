@@ -443,6 +443,74 @@ final class DownloadManager {
         fetchSidecar(item, scene: scene, apiKey: apiKey)
     }
 
+    // MARK: - Bulk download (additive; reuses stage/beginStaged/runCompanionTranscode unchanged)
+
+    /// Companion transcodes run on a single server GPU/CPU, so they must go one at a time. `companionQueue`
+    /// holds item ids waiting their turn; `companionActiveID` is the one transcoding now. No new UI/state:
+    /// waiting items sit on the existing `.serverProcessing` card with a "Queued…" status.
+    @ObservationIgnored private var companionQueue: [String] = []
+    @ObservationIgnored private var companionActiveID: String?
+
+    /// Bulk-download a set of scenes with one shared option. Originals and Stash H.264 transcodes start
+    /// immediately (the byte engine already handles many at once, exactly as starting several by hand);
+    /// Companion (plugin) transcodes are QUEUED and pumped one at a time so we never hammer the server.
+    /// Purely additive: each scene flows through the same `stage`/`beginStaged`/`runCompanionTranscode` path
+    /// a single download uses. Scenes already in the list are skipped.
+    func bulkDownload(scenes: [StashScene], options: BulkDownloadOptions, apiKey: String) {
+        for scene in scenes {
+            guard !items.contains(where: { $0.id == scene.id }) else { continue }
+            stage(scene: scene, apiKey: apiKey)
+            guard let item = items.first(where: { $0.id == scene.id }) else { continue }
+            switch options.source {
+            case .original:
+                item.useServerTranscode = false
+                item.companionCodec = nil
+                item.multiThread = true
+                beginStaged(item)
+            case .serverH264(let res):
+                item.useServerTranscode = true
+                item.companionCodec = nil
+                item.serverResolution = res
+                beginStaged(item)
+            case .companion(let codec, let res, let quality):
+                item.companionCodec = codec
+                item.serverResolution = res
+                item.companionQuality = quality
+                item.state = .serverProcessing      // reuse the existing server-processing card
+                item.serverJobProgress = 0
+                item.transcodeStatus = "Queued…"
+                companionQueue.append(item.id)
+            }
+        }
+        pumpCompanionQueue()
+    }
+
+    /// Start the next queued Companion transcode when the server is free (serial). Robust to items that were
+    /// cancelled/removed while waiting (skipped).
+    private func pumpCompanionQueue() {
+        guard companionActiveID == nil else { return }
+        while !companionQueue.isEmpty {
+            let id = companionQueue.removeFirst()
+            guard let item = items.first(where: { $0.id == id }),
+                  item.state == .serverProcessing, let scene = item.scene,
+                  let codec = item.companionCodec else { continue }
+            companionActiveID = id
+            item.transcodeStatus = ""
+            runCompanionTranscode(item, scene: scene, codec: codec)
+            return
+        }
+    }
+
+    /// Free the serial slot when a bulk transcode finishes/fails/cancels and start the next. A no-op for a
+    /// single (non-bulk) download — its id is never `companionActiveID` and isn't in the queue.
+    private func releaseCompanionSlot(_ itemID: String) {
+        companionQueue.removeAll { $0 == itemID }
+        if companionActiveID == itemID {
+            companionActiveID = nil
+            pumpCompanionQueue()
+        }
+    }
+
     /// Kick off a Stashy Companion server-side transcode (HEVC/AV1 via the plugin's modern ffmpeg), then
     /// monitor it and hand the finished file to the normal byte-download engine. Robust across app
     /// switch/kill/crash: the job runs server-side, and we persist its id + params in a sidecar so a
@@ -479,6 +547,7 @@ final class DownloadManager {
                     item.state = .failed
                     item.error = "Companion plugin: \(error.localizedDescription)"
                     clearActive(item.id)
+                    releaseCompanionSlot(item.id)
                 }
             }
         }
@@ -554,7 +623,7 @@ final class DownloadManager {
                 || update.job?.status.uppercased() == "CANCELLED" {
                 item.state = .failed
                 item.error = update.job?.error ?? "Server transcode failed"
-                clearActive(item.id); return
+                clearActive(item.id); releaseCompanionSlot(item.id); return
             }
             // Job gone/finished but no ready result — tolerate a brief write race, then fail.
             let jobDone = update.job == nil || update.job?.status.uppercased() == "FINISHED"
@@ -563,7 +632,7 @@ final class DownloadManager {
                 if doneMisses > 6 {
                     item.state = .failed
                     item.error = "Server transcode ended without producing a file"
-                    clearActive(item.id); return
+                    clearActive(item.id); releaseCompanionSlot(item.id); return
                 }
             } else {
                 doneMisses = 0
@@ -577,6 +646,7 @@ final class DownloadManager {
                                           url: URL, codec: StashCompanion.Codec) {
         item.serverJobProgress = 1
         item.companionJobID = nil
+        releaseCompanionSlot(item.id)   // server is free now → let the next queued bulk transcode start
         item.url = url
         item.ext = result.container ?? "mp4"
         item.codec = result.video_codec ?? result.codec ?? codec.rawValue
@@ -751,6 +821,7 @@ final class DownloadManager {
 
     func stop(_ item: DownloadItem) {
         cancelCompanionJob(item)   // if a server transcode is still running, tell Stash to stop it
+        releaseCompanionSlot(item.id)   // free the serial bulk-transcode slot (no-op for non-bulk)
         cancelTasks(item, produceResumeData: false)
         item.state = .stopped
         cleanupParts(item.id)
