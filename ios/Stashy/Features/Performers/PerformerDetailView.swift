@@ -75,6 +75,11 @@ struct PerformerDetailView: View {
         .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: { path.openScene($0) }) }
         .navigationTitle(performer.name)
         .navigationBarTitleDisplayMode(.inline)
+        // No top-left back button (owner preference); rely on the edge-swipe, kept working via
+        // EnableSwipeBack. Harmless in the Downloads fullScreenCover context — there it's the stack root
+        // (swipe disabled by the helper's `count > 1` guard) and its own Close button is a separate item.
+        .navigationBarBackButtonHidden(true)
+        .background(EnableSwipeBack())
         .fullScreenCover(isPresented: $showImageViewer) {
             if let portrait {
                 FullScreenImageViewer(image: portrait)

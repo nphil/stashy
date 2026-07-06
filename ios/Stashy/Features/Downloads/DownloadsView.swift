@@ -30,6 +30,9 @@ struct DownloadsView: View {
         .background(themeManager.current.backgroundColor.ignoresSafeArea())
         .navigationTitle("Downloads")
         .navigationBarTitleDisplayMode(.inline)
+        // No top-left back button (owner preference); the edge-swipe (kept alive by EnableSwipeBack) goes back.
+        .navigationBarBackButtonHidden(true)
+        .background(EnableSwipeBack())
         .onAppear { downloads.pruneStopped(); downloads.downloadsScreenVisible = true }
         // Leaving the screen wipes finished transcode diagnostics, so returning shows a clean card. An
         // in-flight transcode keeps its box.
