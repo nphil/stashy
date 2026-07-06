@@ -18,6 +18,9 @@ struct ScenesView: View {
     @State private var bulkSheet = false
     @State private var bulkScenes: [StashScene] = []
     @State private var bulkLoading = false
+    // Multi-select download (additive; off by default → zero cost during normal browsing).
+    @State private var selectionMode = false
+    @State private var selectedIDs: Set<String> = []
 
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
@@ -100,6 +103,24 @@ struct ScenesView: View {
         return out
     }
 
+    private func toggleSelection(_ id: String) {
+        if selectedIDs.contains(id) { selectedIDs.remove(id) } else { selectedIDs.insert(id) }
+    }
+
+    private func exitSelection() {
+        selectionMode = false
+        selectedIDs.removeAll()
+    }
+
+    /// Download the selected scenes via the same options sheet as "Download all in filter".
+    @MainActor
+    private func startSelectionDownload() {
+        let chosen = displayedScenes.filter { selectedIDs.contains($0.id) }
+        guard !chosen.isEmpty else { return }
+        bulkScenes = chosen
+        bulkSheet = true
+    }
+
     /// Gather the filtered set, then present the bulk options sheet (skips presenting on an empty result).
     @MainActor
     private func startBulkDownload() {
@@ -133,32 +154,49 @@ struct ScenesView: View {
             .navigationTitle("Scenes")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                if !query.downloadedOnly {
+                if selectionMode {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Cancel") { exitSelection() }
+                    }
                     ToolbarItem(placement: .topBarTrailing) {
-                        Menu {
-                            Button {
-                                startBulkDownload()
+                        Button("Download (\(selectedIDs.count))") { startSelectionDownload() }
+                            .fontWeight(.semibold)
+                            .disabled(selectedIDs.isEmpty)
+                    }
+                } else {
+                    if !query.downloadedOnly {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Menu {
+                                Button {
+                                    startBulkDownload()
+                                } label: {
+                                    Label("Download all in filter", systemImage: "arrow.down.circle")
+                                }
+                                .disabled(bulkLoading)
+                                Button {
+                                    selectionMode = true
+                                } label: {
+                                    Label("Select…", systemImage: "checkmark.circle")
+                                }
                             } label: {
-                                Label("Download all in filter", systemImage: "arrow.down.circle")
-                            }
-                            .disabled(bulkLoading)
-                        } label: {
-                            if bulkLoading {
-                                ProgressView()
-                            } else {
-                                Image(systemName: "ellipsis.circle")
+                                if bulkLoading {
+                                    ProgressView()
+                                } else {
+                                    Image(systemName: "ellipsis.circle")
+                                }
                             }
                         }
                     }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
+                    ToolbarItem(placement: .topBarTrailing) {
+                        FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
+                    }
                 }
             }
             .sheet(isPresented: $bulkSheet) {
                 BulkDownloadSheet(sceneCount: bulkScenes.count) { opts in
                     downloads.bulkDownload(scenes: bulkScenes, options: opts,
                                            apiKey: appState.client?.apiKey ?? "")
+                    exitSelection()
                 }
             }
             // While the sprite preview is up, hide the tab bar so its dim can darken the whole screen
@@ -238,10 +276,25 @@ struct ScenesView: View {
                         SceneGridCell(
                             scene: scene,
                             apiKey: appState.client?.apiKey ?? "",
-                            onOpen: { path.append(.scene($0)) }
+                            // In selection mode a tap toggles selection instead of opening the scene.
+                            onOpen: { s in
+                                if selectionMode { toggleSelection(s.id) } else { path.append(.scene(s)) }
+                            }
                         ) {
                             Task { await loader.loadNextIfNeeded(triggerID: scene.id) }
                             prefetchThumbnails(around: scene)
+                        }
+                        // Selection affordance — the `if selectionMode` short-circuits before reading
+                        // `selectedIDs`, so normal browsing takes on no selection-tracking cost.
+                        .overlay(alignment: .topTrailing) {
+                            if selectionMode {
+                                let on = selectedIDs.contains(scene.id)
+                                Image(systemName: on ? "checkmark.circle.fill" : "circle")
+                                    .font(.title3)
+                                    .symbolRenderingMode(.palette)
+                                    .foregroundStyle(.white, on ? Color.accentColor : Color.black.opacity(0.35))
+                                    .padding(6)
+                            }
                         }
                     }
                 }
