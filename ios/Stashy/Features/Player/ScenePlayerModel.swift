@@ -71,6 +71,9 @@ final class ScenePlayerModel {
     var slowMoStats: SlowMoTelemetry { slowMoTelemetry }
     /// Runs the frame-interpolation pipeline while slow-mo is engaged (nil when disengaged).
     @ObservationIgnored private var slowMoRunner: SlowMoRunner?
+    /// Pending auto re-engage after a seek/pause suspended slow-mo (debounced; cancelled by the next
+    /// suspension or teardown).
+    @ObservationIgnored private var slowMoReengage: Task<Void, Never>?
     /// True while the AI slow-mo render overlay should be shown — drives `ScenePlayerView` to overlay the
     /// interpolated frame stream on top of the (hidden) player surface.
     var slowMoActive = false
@@ -443,6 +446,7 @@ final class ScenePlayerModel {
         if currentTime > 1 { pendingResume = currentTime }
         stopped = true
         startInProgress = false
+        slowMoReengage?.cancel(); slowMoReengage = nil
         slowMoRunner?.stop()
         slowMoRunner = nil
         slowMoRenderView = nil
@@ -537,23 +541,48 @@ final class ScenePlayerModel {
             seek(to: 0)
         }
         engine?.play()
+        // Resuming after a pause (which suspended slow-mo) re-arms the fresh engage.
+        scheduleSlowMoReengage()
     }
     func pause() {
         engine?.pause()
-        // Pausing during AI slow-mo drops back to 1× normal speed (so resuming plays normally and the
-        // interpolation disengages). Done AFTER pausing so the rate change can't force playback to restart.
-        exitSlowMoForInteraction()
+        // Pausing suspends AI slow-mo (runner torn down, RATE KEPT — the pill stays at 0.25×/0.5×);
+        // play() re-arms a fresh engage once playback stabilises.
+        suspendSlowMo()
     }
     func togglePlayPause() { isPlaying ? pause() : play() }
 
-    /// Seeking or pausing while AI slow-mo is engaged snaps playback back to 1× normal speed — which also
-    /// disengages the interpolation and updates the speed pill to "1×". The owner then re-selects a slow
-    /// speed to resume slow-mo. This deliberately avoids re-engaging interpolation across a seek/pause
-    /// discontinuity (which was fragile and jittery); starting fresh from normal speed is predictable.
-    /// No-op unless AI slow-mo is currently engaged.
-    private func exitSlowMoForInteraction() {
-        guard slowMoActive else { return }
-        setPlaybackRate(1.0)
+    /// Suspend AI slow-mo across a user interaction (seek/pause): tear the runner down exactly like the
+    /// manual toggle-off does, keeping the playback rate. Re-engagement goes through
+    /// `scheduleSlowMoReengage` — a FRESH runner on stabilised playback is the one proven-smooth path;
+    /// the in-place pipeline repairs this replaces were fragile and jittery (three attempts, all reverted).
+    private func suspendSlowMo() {
+        slowMoReengage?.cancel(); slowMoReengage = nil
+        guard slowMoRunner != nil else { return }
+        slowMoRunner?.stop()
+        slowMoRunner = nil
+        slowMoRenderView = nil
+        slowMoActive = false
+        slowMoTelemetry = SlowMoTelemetry()
+    }
+
+    /// Debounced auto re-engage — the programmatic equivalent of toggling AI slow-mo off/on: once playback
+    /// has stabilised (playing, ready, not buffering) build a brand-new runner. The 0.4s poll debounces
+    /// rapid scrubbing into a single engage after the last seek settles; it gives up after ~6s (the next
+    /// play()/seek re-arms). No-op unless the AI toggle is on and the rate is a slow-mo rung.
+    private func scheduleSlowMoReengage() {
+        slowMoReengage?.cancel()
+        guard aiSlowMoEnabled, playbackRate > 0, playbackRate <= 0.5, slowMoRunner == nil else { return }
+        slowMoReengage = Task { @MainActor [weak self] in
+            for _ in 0..<15 {
+                try? await Task.sleep(for: .milliseconds(400))
+                guard let self, !Task.isCancelled, !self.stopped else { return }
+                if self.isPlaying, self.isReady, !self.isBuffering {
+                    self.updateSlowMo()   // re-checks the toggle/rate/engine at fire time
+                    return
+                }
+            }
+        }
     }
 
     /// Set the linear volume (from the volume slider); applies to the live engine immediately.
@@ -618,10 +647,10 @@ final class ScenePlayerModel {
     }
 
     func seek(to time: TimeInterval) {
-        // Seeking during AI slow-mo snaps back to 1× normal speed first (disengages the interpolation and
-        // resets the speed pill) — the owner re-selects a slow speed to resume slow-mo. Avoids the fragile
-        // interpolation re-engagement across a seek.
-        exitSlowMoForInteraction()
+        // Seeking suspends AI slow-mo (rate kept) and re-arms a fresh engage once playback stabilises at
+        // the target — debounced, so rapid scrubbing collapses into one re-engage after the last seek.
+        suspendSlowMo()
+        scheduleSlowMoReengage()
         reachedEnd = false   // any seek means we're no longer parked at EOF
         // Mark this (and any re-buffer it triggers) as a warm seek so the loading donut fills on the
         // per-seek estimate/curve. Purely bookkeeping — it does NOT affect the seekTarget hold below that
