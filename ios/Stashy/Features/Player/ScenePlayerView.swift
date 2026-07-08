@@ -181,6 +181,9 @@ struct ScenePlayerView: View {
                 }
             }
             .frame(width: avail.width, height: avail.height)
+            // Matches SceneDetailView's fullscreen-flip animation so the surface box, backdrop swap and
+            // control positions glide with the rotation instead of snapping a frame ahead of it.
+            .animation(.easeInOut(duration: 0.3), value: isFullscreen)
         }
         // Live window geometry for fullscreen layout (independent of the presenting screen's context).
         .background(WindowMetricsReader(bounds: $windowBounds, safeArea: $windowSafeArea))
