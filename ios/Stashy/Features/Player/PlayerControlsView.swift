@@ -218,12 +218,15 @@ struct PlayerControlsView: View {
                             .modifier(ControlIcon())
                     }
                 }
-                // Volume: last item on the left. Landscape expands rightward inline (wider track when
-                // fullscreen); portrait floats a vertical slider upward so it can't clip a narrow row.
+                // Volume: last item on the left. Only fullscreen-LANDSCAPE has the room to expand the slider
+                // rightward inline; every other case (inline portrait — whose video box is itself wide, so
+                // `landscape` is true — and fullscreen portrait video) floats a compact vertical slider upward
+                // so it never widens the row or clips off a narrow screen. Gate on `isFullscreen && landscape`,
+                // not the video box's aspect, so the inline portrait player stays vertical.
                 VolumeControl(volume: model.volume, isMuted: model.isMuted,
                               onChange: { model.setVolume($0) }, onInteract: { scheduleHide() },
                               trackWidth: (isFullscreen && landscape) ? 120 : 54,
-                              vertical: !landscape)
+                              vertical: !(isFullscreen && landscape))
                 Spacer(minLength: 6)
                 Text(Self.timeString(model.duration))
                     .font(.caption2.weight(.semibold).monospacedDigit())
