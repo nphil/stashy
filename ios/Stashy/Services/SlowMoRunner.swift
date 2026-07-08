@@ -109,6 +109,17 @@ final class SlowMoRunner {
         onTelemetry(telemetry)
     }
 
+    /// Tear down and drop the interpolator + free the single-flight slot after a seek, so the next frame
+    /// lazily rebuilds a fresh VideoToolbox session (identical to what a slow-mo off→on toggle does). The
+    /// old session's `endSession` is serialised on the shared VT queue *before* the new one's `startSession`,
+    /// and any still-in-flight interpolation resumes normally (its stale output lands in the cleared queue
+    /// and is dropped) — so this can't wedge or crash. Guarded by the caller to fire once per seek.
+    private func resetInterpolationAfterSeek() {
+        inFlight = false
+        interpolator?.invalidate()
+        interpolator = nil
+    }
+
     fileprivate func step() {
         presentDue()   // pace the display FIFO every tick, independent of new-frame arrival
 
@@ -184,6 +195,12 @@ final class SlowMoRunner {
         // instead of freezing on the last pre-seek frame. Otherwise it's black/frozen after any seek.
         let jump = previousPTS.isValid ? (now - previousPTS).seconds : 0
         if previous == nil || !previousPTS.isValid || jump < -0.05 || jump > 0.75 {
+            // A real seek (not the first-frame seed) also fully resets the interpolation pipeline the way
+            // toggling AI slow-mo off/on does — because feeding VideoToolbox across a seek can wedge the
+            // session (its process() completion never fires → the single-flight slot never frees → only
+            // real frames show = the "stutters after seek until I toggle AI off/on" bug). Rebuilding the
+            // VT session (lazily, next frame) + freeing the in-flight slot makes it re-engage cleanly.
+            if previous != nil { resetInterpolationAfterSeek() }
             displayQueue.removeAll()
             previous = buffer; previousPTS = now
             anchorItem = now
