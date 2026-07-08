@@ -42,11 +42,13 @@ private struct SlowMoFrameResult: @unchecked Sendable {
 /// new pair to `SlowMoInterpolator`, and presents the **real + synthesised** frames on a `SlowMoRenderView`
 /// (overlaying the hidden `AVPlayerLayer`) so the slowed motion actually looks smooth.
 ///
-/// Pacing: each frame (real or synthesised) is enqueued with a wall-clock **display time** derived from its
-/// item time — `startWall + (itemTime − anchor)/rate + latency` — into a time-ordered FIFO; each display
-/// tick presents the newest frame that's due. The small `latency` gives interpolation (which is causal —
-/// the mid frame is only known once *both* neighbours arrive) headroom so mid frames aren't already late.
-/// Single-flight (one interpolation outstanding) so it can never pile up or stall real playback.
+/// Pacing: each frame (real or synthesised) is enqueued keyed by its **item time**, and every display tick
+/// presents the newest frame whose item time the **live playback clock** has reached (minus a small `latency`
+/// lead so interpolation, which is causal — the mid frame is only known once *both* neighbours arrive — has
+/// headroom). Driving pacing off the item clock (`AVPlayerItemVideoOutput.itemTime(forHostTime:)`) rather than
+/// a wall-clock anchor set once at engage means it can't drift as AVPlayer's real rate wanders from nominal,
+/// and it self-heals across pause/stall/seek (the timebase freezes on pause and jumps on seek — we just
+/// follow it). Single-flight (one interpolation outstanding) so it can never pile up or stall real playback.
 @MainActor
 final class SlowMoRunner {
     /// The view that shows the interpolated stream (overlaid on the player surface while engaged).
@@ -68,11 +70,13 @@ final class SlowMoRunner {
     private var inFlight = false
     private var telemetry = SlowMoTelemetry()
 
-    // Display FIFO: frames waiting to be shown, ordered by wall-clock display time.
-    private var displayQueue: [(buffer: CVPixelBuffer, time: Double)] = []
-    private var anchorItem: CMTime?     // item time of the first frame (display-time origin)
-    private var startWall = 0.0         // wall clock (CACurrentMediaTime) at the first frame
-    private var lastFrameWall = 0.0     // wall clock when a NEW frame was last processed — for gap detection
+    // Display FIFO: synthesised + real frames waiting to be shown, keyed by their ITEM time (seconds) and
+    // ordered by it. Pacing is driven off the live playback clock in presentDue — there's no wall-clock
+    // anchor to drift, and it self-heals across pause / stall / seek.
+    private var displayQueue: [(buffer: CVPixelBuffer, itemTime: Double)] = []
+    /// Bumped on every seek/discontinuity so an interpolation that was in flight across the seek is dropped
+    /// (its frames belong to the old position) instead of being enqueued at a stale item time.
+    private var epoch = 0
 
     init(outputProvider: @escaping () -> AVPlayerItemVideoOutput?,
          rateProvider: @escaping () -> Double,
@@ -180,27 +184,16 @@ final class SlowMoRunner {
             return
         }
 
-        // Seed on the first frame OR re-anchor after ANY discontinuity, so the display clock stays honest.
-        // Two kinds, both of which strand the pacing anchor:
-        //   • SEEK — item time jumps (backward, or far forward).
-        //   • PAUSE / STALL / post-seek rebuffer — wall clock advances while item time barely moves.
-        // The FIFO maps item-time → wall-time through a FIXED (startWall, anchorItem); after a gap that map
-        // is stale, so every later frame computes a display time far in the past and is dumped the instant it
-        // arrives — frames still synthesise (the counter keeps climbing) but present unpaced = the jitter that
-        // only cleared by toggling AI off/on. Re-anchoring both cases re-syncs the clock. It's a pure pacing
-        // reset — the interpolator/session is untouched (proven fine: synthesised frames keep flowing).
-        // The wall-gap threshold sits above any real slow-play frame interval ((1/fps)/rate ≤ ~0.27s for
-        // typical content at ≤0.5×), so normal playback never trips it; a stray hitch that does costs only
-        // one un-interpolated frame.
-        let wallNow = CACurrentMediaTime()
+        // Seed on the first frame, OR flush on a SEEK (item time jumps far forward or backward). Pauses and
+        // stalls need NO special handling now that pacing follows the live item clock (see presentDue): the
+        // timebase simply freezes, so nothing drifts and the frame on screen holds. A seek DOES need a flush —
+        // the queued frames belong to the old position — plus a fresh anchor pair and an epoch bump so an
+        // interpolation still in flight from before the seek is dropped rather than enqueued stale.
         let itemJump = previousPTS.isValid ? (now - previousPTS).seconds : 0
-        let wallGap = lastFrameWall > 0 ? wallNow - lastFrameWall : 0
-        lastFrameWall = wallNow
-        if previous == nil || !previousPTS.isValid || itemJump < -0.05 || itemJump > 0.75 || wallGap > 0.4 {
+        if previous == nil || !previousPTS.isValid || itemJump < -0.05 || itemJump > 0.75 {
+            epoch &+= 1
             displayQueue.removeAll()
             previous = buffer; previousPTS = now
-            anchorItem = now
-            startWall = wallNow
             renderView.present(buffer)
             return
         }
@@ -219,8 +212,9 @@ final class SlowMoRunner {
         }
         inFlight = true
         onTelemetry(telemetry)
+        let epoch = self.epoch   // tag this interpolation so a seek mid-flight discards its stale output
 
-        Task.detached { [weak self, interp, pair] in
+        Task.detached { [weak self, interp, pair, epoch] in
             let t0 = Date()
             let frames = await interp.interpolate(previous: pair.previous, previousPTS: pair.previousPTS,
                                                   current: pair.current, currentPTS: pair.currentPTS,
@@ -228,14 +222,17 @@ final class SlowMoRunner {
             let ms = Date().timeIntervalSince(t0) * 1000
             let result = SlowMoFrameResult(interpolated: frames, current: pair.current,
                                            previousPTS: pair.previousPTS, currentPTS: pair.currentPTS)
-            await self?.onInterpolated(result, ms: ms)
+            await self?.onInterpolated(result, ms: ms, epoch: epoch)
         }
     }
 
     /// Fold a completed interpolation into telemetry + the display FIFO (main actor), free the single-flight
     /// slot, and enqueue the synthesised mid frame(s) followed by the real current frame in display order.
-    private func onInterpolated(_ result: SlowMoFrameResult, ms: Double) {
+    private func onInterpolated(_ result: SlowMoFrameResult, ms: Double, epoch: Int) {
         inFlight = false
+        // Discard an interpolation that finished after a seek — its frames are for the old position and would
+        // enqueue at a stale item time (a wrong flash). The next fresh pair repopulates the FIFO.
+        guard epoch == self.epoch else { return }
         telemetry.synthesized += result.interpolated.count
         telemetry.lastMs = ms
         onTelemetry(telemetry)
@@ -250,24 +247,30 @@ final class SlowMoRunner {
         enqueueDisplay(result.current, itemTime: result.currentPTS)
     }
 
-    /// Insert a frame into the display FIFO at its wall-clock display time (time-ordered).
+    /// Insert a frame into the display FIFO keyed by its ITEM time (seconds), ordered by it.
     private func enqueueDisplay(_ buffer: CVPixelBuffer, itemTime: CMTime) {
-        guard let anchor = anchorItem else { return }
-        let rate = max(0.05, rateProvider())
-        let displayTime = startWall + (itemTime - anchor).seconds / rate + Self.latency
-        let entry = (buffer: buffer, time: displayTime)
-        if let idx = displayQueue.firstIndex(where: { $0.time > displayTime }) {
+        let t = itemTime.seconds
+        guard t.isFinite else { return }
+        let entry = (buffer: buffer, itemTime: t)
+        if let idx = displayQueue.firstIndex(where: { $0.itemTime > t }) {
             displayQueue.insert(entry, at: idx)
         } else {
             displayQueue.append(entry)
         }
     }
 
-    /// Present the newest frame whose display time has passed; drop older ones (self-correcting if behind).
+    /// Present the newest queued frame whose ITEM time the live playback clock has reached, minus a small
+    /// `latency` lead (in item time) so causal mid frames aren't already overdue. Because `cur` comes from
+    /// the output's own timebase, pacing can't drift, and pause/stall/seek are handled for free: the timebase
+    /// freezes on a pause (so the current frame simply holds) and jumps on a seek (handled by the flush in
+    /// step()). Older due frames are dropped so it self-corrects if it ever falls behind.
     private func presentDue() {
-        let now = CACurrentMediaTime()
+        guard let output = outputProvider() else { return }
+        let cur = output.itemTime(forHostTime: CACurrentMediaTime()).seconds
+        guard cur.isFinite else { return }
+        let due = cur - Self.latency * max(0.05, rateProvider())   // wall latency → item-time lead
         var toShow: CVPixelBuffer?
-        while let first = displayQueue.first, first.time <= now {
+        while let first = displayQueue.first, first.itemTime <= due {
             toShow = first.buffer
             displayQueue.removeFirst()
         }
