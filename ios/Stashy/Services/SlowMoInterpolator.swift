@@ -79,6 +79,11 @@ final class SlowMoInterpolator: @unchecked Sendable {
     private var destinationPool: CVPixelBufferPool?
     /// Reused for BGRA→(model format) conversion + up-scale. Thread-safe; created once.
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
+    /// The last converted source frame, identity-keyed. Consecutive pairs share a frame (this pair's
+    /// `previous` IS last pair's `current`, held by the runner throughout, so identity is safe), which
+    /// otherwise gets converted twice — at 4K→720p that duplicate GPU pass was the single biggest per-pair
+    /// cost and the main reason interpolation couldn't keep up with the pair rate (dropped pairs = stutter).
+    private var lastConverted: (source: CVPixelBuffer, converted: CVPixelBuffer)?
     private var loggedConfig = false
 
     init(width: Int, height: Int, interpolatedFrames: Int = 1) {
@@ -182,9 +187,16 @@ final class SlowMoInterpolator: @unchecked Sendable {
                 guard started || startIfNeeded() else { logFail("no-session"); continuation.resume(returning: []); return }
                 // Convert the player's BGRA frames into the model's required format (and up to the crash-safe
                 // interpolation size) — the model rejects raw BGRA, which is what threw -19730 before.
-                guard let previousSized = convertToModelFormat(previous),
-                      let currentSized  = convertToModelFormat(current)
+                // The previous frame is normally last pair's current — reuse its cached conversion.
+                let previousSized: CVPixelBuffer
+                if let cached = lastConverted, cached.source === previous {
+                    previousSized = cached.converted
+                } else if let converted = convertToModelFormat(previous) {
+                    previousSized = converted
+                } else { logFail("convert-nil"); continuation.resume(returning: []); return }
+                guard let currentSized = convertToModelFormat(current)
                 else { logFail("convert-nil"); continuation.resume(returning: []); return }
+                lastConverted = (current, currentSized)
                 guard let previousFrame = VTFrameProcessorFrame(buffer: previousSized, presentationTimeStamp: previousPTS),
                       let currentFrame = VTFrameProcessorFrame(buffer: currentSized, presentationTimeStamp: currentPTS)
                 else { logFail("frame-nil"); continuation.resume(returning: []); return }
@@ -238,6 +250,7 @@ final class SlowMoInterpolator: @unchecked Sendable {
             config = nil
             sourcePool = nil
             destinationPool = nil
+            lastConverted = nil
         }
     }
 

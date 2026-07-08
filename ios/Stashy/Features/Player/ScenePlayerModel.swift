@@ -723,6 +723,7 @@ final class ScenePlayerModel {
                 StatLine(label: "Color", value: sm.sourceColor.isEmpty ? "—" : sm.sourceColor),
                 StatLine(label: "Source frames", value: "\(sm.sourceFrames)"),
                 StatLine(label: "Synthesized frames", value: "\(sm.synthesized)"),
+                StatLine(label: "Dropped pairs", value: "\(sm.droppedPairs)"),
                 StatLine(label: "Last interp", value: String(format: "%.1f ms", sm.lastMs)),
             ]))
         }

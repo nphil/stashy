@@ -17,6 +17,7 @@ struct SlowMoTelemetry: Sendable {
     var sourceColor = ""      // color primaries / transfer function of the decoded buffer — diagnostics
     var interpSize = ""       // resolution interpolation runs at ("native" or upscaled to dodge the 720p crash)
     var skipReason = ""       // why interpolation was skipped (e.g. "HDR"), empty if running
+    var droppedPairs = 0      // pairs discarded because interpolation ran >1 pair behind — reliability gauge
 }
 
 /// A snapshot pair of consecutive decoded frames handed off the main actor to the interpolator.
@@ -66,6 +67,10 @@ final class SlowMoRunner {
     private var previous: CVPixelBuffer?
     private var previousPTS: CMTime = .invalid
     private var inFlight = false
+    /// One-deep hold for the newest pair that arrived while an interpolation was still running — started the
+    /// moment the current one returns (back-to-back NPU use) instead of being discarded. A discarded pair
+    /// presented its real frame at uneven spacing, which was the visible stutter on heavy (4K) sources.
+    private var pendingPair: SlowMoFramePair?
     private var telemetry = SlowMoTelemetry()
 
     // Display FIFO: frames waiting to be shown, ordered by wall-clock display time.
@@ -104,6 +109,7 @@ final class SlowMoRunner {
         interpolator = nil
         previous = nil
         previousPTS = .invalid
+        pendingPair = nil
         displayQueue.removeAll()
         telemetry.active = false
         onTelemetry(telemetry)
@@ -127,7 +133,7 @@ final class SlowMoRunner {
         // no interpolation is in flight (the detached task holds the current session). A rate change is a
         // deliberate, rare menu pick, so the one-frame re-seed hitch is unnoticeable.
         let mids = Self.desiredMids(forRate: rateProvider())
-        if let interp = interpolator, interp.interpolatedFrames != mids, !inFlight {
+        if let interp = interpolator, interp.interpolatedFrames != mids, !inFlight, pendingPair == nil {
             interp.invalidate()
             interpolator = nil
             previous = nil; previousPTS = .invalid
@@ -192,21 +198,44 @@ final class SlowMoRunner {
             return
         }
         guard let prev = previous, now > previousPTS else { return }
+        // Pacing-drift correction: AVPlayer's true rate is never exactly the nominal 0.5×/0.25×, so the fixed
+        // (startWall, anchorItem) map slowly desyncs from when frames actually arrive — over a minute the FIFO
+        // presents progressively early/late = creeping judder. Nudge startWall toward the observed arrival
+        // time (10% per frame; full snap past 0.5s, e.g. after a stall). Unlike the abandoned re-anchor
+        // attempts this NEVER flushes the queue or re-seeds the pair pipeline — it only trims timing — so a
+        // correction is invisible on screen.
+        if let anchor = anchorItem {
+            let rate = max(0.05, rateProvider())
+            let err = CACurrentMediaTime() - (startWall + (now - anchor).seconds / rate)
+            startWall += abs(err) > 0.5 ? err : 0.1 * err
+        }
         telemetry.sourceFrames += 1
         let pair = SlowMoFramePair(previous: prev, previousPTS: previousPTS, current: buffer, currentPTS: now)
         previous = buffer
         previousPTS = now
 
-        // Single-flight: if the previous interpolation hasn't returned, drop this pair (never stall) — but
-        // still show the real frame so playback doesn't freeze.
-        guard !inFlight, let interp = interpolator else {
+        // Single-flight into VideoToolbox, with a one-deep pending slot: if an interpolation is still
+        // running, hold the newest pair and start it the moment the current one returns, instead of
+        // discarding it (the FIFO's +latency headroom comfortably absorbs the one-pair delay). Only a
+        // pending pair replaced before it ran is a genuine drop (interpolation >1 pair behind) — counted.
+        guard let interp = interpolator else {
             enqueueDisplay(buffer, itemTime: now)
             onTelemetry(telemetry)
             return
         }
-        inFlight = true
+        if inFlight {
+            if pendingPair != nil { telemetry.droppedPairs += 1 }
+            pendingPair = pair
+            onTelemetry(telemetry)
+            return
+        }
+        beginInterpolation(pair, using: interp)
         onTelemetry(telemetry)
+    }
 
+    /// Kick one pair into the interpolator on a detached task (caller guarantees `!inFlight`).
+    private func beginInterpolation(_ pair: SlowMoFramePair, using interp: SlowMoInterpolator) {
+        inFlight = true
         Task.detached { [weak self, interp, pair] in
             let t0 = Date()
             let frames = await interp.interpolate(previous: pair.previous, previousPTS: pair.previousPTS,
@@ -235,6 +264,12 @@ final class SlowMoRunner {
             enqueueDisplay(mid, itemTime: midItem)
         }
         enqueueDisplay(result.current, itemTime: result.currentPTS)
+
+        // A pair queued up while we were busy — start it immediately (back-to-back NPU utilisation).
+        if let next = pendingPair, let interp = interpolator {
+            pendingPair = nil
+            beginInterpolation(next, using: interp)
+        }
     }
 
     /// Insert a frame into the display FIFO at its wall-clock display time (time-ordered).
