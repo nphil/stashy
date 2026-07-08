@@ -22,6 +22,9 @@ struct LibraryView: View {
             }
         }
         .tint(themeManager.current.accentColor)
+        // Theme the tab-bar chrome to the palette (reactively — updates the instant the theme changes).
+        .toolbarBackground(themeManager.current.backgroundColor, for: .tabBar)
+        .toolbarBackground(.visible, for: .tabBar)
         // Keep the display awake while watching Downloads or while a download/transcode runs (a
         // foreground-only transcode would otherwise pause when the screen sleeps and the app backgrounds).
         .onChange(of: downloads.keepScreenAwake, initial: true) { _, awake in

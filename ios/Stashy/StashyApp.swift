@@ -28,7 +28,7 @@ struct StashyApp: App {
                 .environment(libraryEdits)
                 .environment(downloadManager)
                 .environment(\.imageCache, imageCache)
-                .preferredColorScheme(themeManager.current.preferredColorScheme)
+                .preferredColorScheme(themeManager.enforcedColorScheme)
                 .tint(themeManager.current.accentColor)
                 .appLock()
         }
@@ -74,6 +74,11 @@ final class AppState {
 
 struct ContentView: View {
     @Environment(AppState.self) private var appState
+    @Environment(ThemeManager.self) private var themeManager
+    // In system mode `enforcedColorScheme` is nil, so this reflects the real OS appearance; the manager
+    // resolves `current` to the matching light/dark palette. (When manual, this equals the forced scheme
+    // and is simply ignored.)
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         Group {
@@ -84,5 +89,8 @@ struct ContentView: View {
             }
         }
         .debugScreenshotOverlay()
+        .onChange(of: colorScheme, initial: true) { _, scheme in
+            themeManager.systemIsDark = (scheme == .dark)
+        }
     }
 }

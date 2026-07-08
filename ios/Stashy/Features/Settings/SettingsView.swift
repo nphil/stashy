@@ -23,6 +23,27 @@ struct SettingsView: View {
 
     private let swatchColumns = [GridItem(.adaptive(minimum: 64), spacing: 12)]
 
+    /// A horizontal row of swatches limited to one light/dark variant — used in System mode to pick the
+    /// palette for each OS appearance.
+    @ViewBuilder
+    private func variantPicker(title: String, variant: AppTheme.Variant,
+                               selected: AppTheme, onPick: @escaping (AppTheme) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            ScrollView(.horizontal) {
+                HStack(spacing: 14) {
+                    ForEach(AppTheme.allCases.filter { $0.variant == variant }) { theme in
+                        ThemeSwatch(theme: theme, isSelected: selected == theme) { onPick(theme) }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
     private var isConnected: Bool { appState.isAuthenticated }
     private var hasChanges: Bool {
         editingURL.trimmed != savedURL || editingKey.trimmed != savedKey
@@ -125,18 +146,37 @@ struct SettingsView: View {
                 }
 
                 // Theme section
-                Section("Theme") {
-                    LazyVGrid(columns: swatchColumns, spacing: 16) {
-                        ForEach(AppTheme.allCases) { theme in
-                            ThemeSwatch(
-                                theme: theme,
-                                isSelected: themeManager.current == theme
-                            ) {
-                                themeManager.set(theme)
+                Section {
+                    Toggle("Match system appearance", isOn: Binding(
+                        get: { themeManager.systemMode },
+                        set: { themeManager.setSystemMode($0) }
+                    ))
+
+                    if themeManager.systemMode {
+                        // System mode: pick the palette used for each OS appearance.
+                        variantPicker(title: "Light appearance", variant: .light,
+                                      selected: themeManager.lightTheme) { themeManager.setLight($0) }
+                        variantPicker(title: "Dark appearance", variant: .dark,
+                                      selected: themeManager.darkTheme) { themeManager.setDark($0) }
+                    } else {
+                        LazyVGrid(columns: swatchColumns, spacing: 16) {
+                            ForEach(AppTheme.allCases) { theme in
+                                ThemeSwatch(
+                                    theme: theme,
+                                    isSelected: !themeManager.systemMode && themeManager.fixedTheme == theme
+                                ) {
+                                    themeManager.set(theme)
+                                }
                             }
                         }
+                        .padding(.vertical, 8)
                     }
-                    .padding(.vertical, 8)
+                } header: {
+                    Text("Theme")
+                } footer: {
+                    Text(themeManager.systemMode
+                         ? "Stashy follows your device's Light/Dark setting, using the palette you pick for each."
+                         : "Pick any of \(AppTheme.allCases.count) palettes, or turn on “Match system appearance” to switch automatically.")
                 }
 
                 // Scenes section
