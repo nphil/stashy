@@ -181,9 +181,10 @@ struct ScenePlayerView: View {
                 }
             }
             .frame(width: avail.width, height: avail.height)
-            // Matches SceneDetailView's fullscreen-flip animation so the surface box, backdrop swap and
-            // control positions glide with the rotation instead of snapping a frame ahead of it.
-            .animation(.easeInOut(duration: 0.3), value: isFullscreen)
+            // NB: no `.animation(value: isFullscreen)` here. Animating this subtree animated the
+            // ZoomablePlayerSurface's frame during fullscreen entry, racing the scroll view's zoom /
+            // contentSize setup — which settled correctly only *sometimes*, so pinch-zoom died on ~8 of 10
+            // playbacks (per-session, not per-pinch — the tell). Instant flip = deterministic zoom setup.
         }
         // Live window geometry for fullscreen layout (independent of the presenting screen's context).
         .background(WindowMetricsReader(bounds: $windowBounds, safeArea: $windowSafeArea))

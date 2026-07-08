@@ -87,12 +87,10 @@ struct SceneDetailView: View {
                 .frame(maxWidth: .infinity, maxHeight: isFullscreen ? .infinity : boxHeight + topInset, alignment: .top)
                 .ignoresSafeArea(edges: isFullscreen ? .all : .top)
             }
-            // Glide the fullscreen flip instead of snapping it. Entering via tilt used to jump in two
-            // visually separate stages — an instant SwiftUI snap (player box → full height, metadata
-            // vanishing) followed by UIKit's animated rotation — which read as "not seamless". Animating
-            // the isFullscreen-driven layout (player frame, metadata fade, safe-area change) at roughly
-            // the rotation's own duration merges the stages. Value-scoped, so nothing else is affected.
-            .animation(.easeInOut(duration: 0.3), value: isFullscreen)
+            // Fullscreen flip is instant (no `.animation(value: isFullscreen)`): animating the player
+            // box's frame animated the embedded ZoomablePlayerSurface, which raced the scroll view's zoom
+            // setup and intermittently killed fullscreen pinch-zoom (a core feature). The seamless-tilt
+            // polish will be re-added surgically — excluding the video surface — once zoom is confirmed.
         }
         .background(themeManager.current.backgroundColor.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
