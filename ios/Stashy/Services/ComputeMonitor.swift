@@ -227,6 +227,7 @@ private final class UIFPSLinkProxy: NSObject {
     init(target: ComputeMonitor) { self.target = target; super.init() }
     @objc func tick(_ link: CADisplayLink) {
         guard let target else { self.link?.invalidate(); self.link = nil; return }
-        MainActor.assumeIsolated { target.uiTick(link.timestamp) }
+        let ts = link.timestamp   // read the Double out before the closure — CADisplayLink isn't Sendable
+        MainActor.assumeIsolated { target.uiTick(ts) }
     }
 }
