@@ -538,8 +538,23 @@ final class ScenePlayerModel {
         }
         engine?.play()
     }
-    func pause() { engine?.pause() }
+    func pause() {
+        engine?.pause()
+        // Pausing during AI slow-mo drops back to 1× normal speed (so resuming plays normally and the
+        // interpolation disengages). Done AFTER pausing so the rate change can't force playback to restart.
+        exitSlowMoForInteraction()
+    }
     func togglePlayPause() { isPlaying ? pause() : play() }
+
+    /// Seeking or pausing while AI slow-mo is engaged snaps playback back to 1× normal speed — which also
+    /// disengages the interpolation and updates the speed pill to "1×". The owner then re-selects a slow
+    /// speed to resume slow-mo. This deliberately avoids re-engaging interpolation across a seek/pause
+    /// discontinuity (which was fragile and jittery); starting fresh from normal speed is predictable.
+    /// No-op unless AI slow-mo is currently engaged.
+    private func exitSlowMoForInteraction() {
+        guard slowMoActive else { return }
+        setPlaybackRate(1.0)
+    }
 
     /// Set the linear volume (from the volume slider); applies to the live engine immediately.
     /// Quantised to whole-percent steps so the control is a true 0–100 in-1-increments scale.
@@ -603,6 +618,10 @@ final class ScenePlayerModel {
     }
 
     func seek(to time: TimeInterval) {
+        // Seeking during AI slow-mo snaps back to 1× normal speed first (disengages the interpolation and
+        // resets the speed pill) — the owner re-selects a slow speed to resume slow-mo. Avoids the fragile
+        // interpolation re-engagement across a seek.
+        exitSlowMoForInteraction()
         reachedEnd = false   // any seek means we're no longer parked at EOF
         // Mark this (and any re-buffer it triggers) as a warm seek so the loading donut fills on the
         // per-seek estimate/curve. Purely bookkeeping — it does NOT affect the seekTarget hold below that
