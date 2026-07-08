@@ -13,6 +13,10 @@ struct ScenesView: View {
     @State private var path: [Route] = []
     @State private var previewPresenter = ScenePreviewPresenter()
     @State private var filterExpanded = false
+    // Native list search (replaces the Search tab): hidden until revealed by a pull-down from the top
+    // (system drawer behaviour) or the top-left magnifier. Debounced into query.search.
+    @State private var searchText = ""
+    @State private var searchPresented = false
     @State private var reloadDebounce: Task<Void, Never>?
     // Bulk download (additive): fetch the whole filtered set, then pick one quality for all.
     @State private var bulkSheet = false
@@ -273,12 +277,31 @@ struct ScenesView: View {
             .background(themeManager.current.backgroundColor.ignoresSafeArea())
             .navigationTitle("Scenes")
             .navigationBarTitleDisplayMode(.inline)
+            // Native search: collapsed until a pull-down from the top of the list (system drawer) or the
+            // magnifier button. Costs nothing while collapsed — it's the UIKit search controller, no
+            // per-frame work — and typing is debounced below so it never lags input or spams the server.
+            .searchable(text: $searchText, isPresented: $searchPresented,
+                        placement: .navigationBarDrawer(displayMode: .automatic),
+                        prompt: "Search scenes")
+            .task(id: searchText) {
+                guard searchText != query.search else { return }
+                try? await Task.sleep(for: .milliseconds(350))   // debounce; cancelled by the next keystroke
+                guard !Task.isCancelled else { return }
+                query.search = searchText                        // triggers the existing query reload
+            }
             // Stable ToolbarItem identities with conditional CONTENT — swapping whole ToolbarItems behind an
             // if/else makes SwiftUI's toolbar builder drop them (the "⋯ button vanished" bug).
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     if selectionMode {
                         Button("Cancel") { exitSelection() }
+                    } else {
+                        // Top-left search entry — same field the pull-down drawer reveals.
+                        Button { searchPresented = true } label: {
+                            Image(systemName: "magnifyingglass")
+                                .font(.body.weight(.semibold))
+                                .foregroundStyle(themeManager.current.foregroundColor)
+                        }
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {

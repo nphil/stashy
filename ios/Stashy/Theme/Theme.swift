@@ -186,25 +186,32 @@ final class ThemeManager {
 /// `toolbarBackground`, and list surfaces via `scrollContentBackground` — both reactive.)
 enum ThemeChrome {
     static func apply(_ theme: AppTheme) {
-        let bg = UIColor(theme.backgroundColor)
         let fg = UIColor(theme.foregroundColor)
         let accent = UIColor(theme.accentColor)
 
+        // Translucent, NOT opaque: an opaque themed bar killed the native scroll-under-glass
+        // ("immersive") look. Standard = system blur (adapts to the enforced light/dark scheme) with
+        // themed title/button colors; scroll-edge = fully transparent so the bar disappears at rest and
+        // gains glass only once content scrolls behind it. Zero render cost — bar materials are
+        // UIKit-native.
         let nav = UINavigationBarAppearance()
-        nav.configureWithOpaqueBackground()
-        nav.backgroundColor = bg
-        nav.shadowColor = UIColor(theme.foregroundColor.opacity(0.12))
+        nav.configureWithDefaultBackground()
         nav.titleTextAttributes = [.foregroundColor: fg]
         nav.largeTitleTextAttributes = [.foregroundColor: fg]
         let button = UIBarButtonItemAppearance()
         button.normal.titleTextAttributes = [.foregroundColor: accent]
         nav.buttonAppearance = button
-        nav.doneButtonAppearance = button
+
+        let edge = UINavigationBarAppearance()
+        edge.configureWithTransparentBackground()
+        edge.titleTextAttributes = [.foregroundColor: fg]
+        edge.largeTitleTextAttributes = [.foregroundColor: fg]
+        edge.buttonAppearance = button
 
         let proxy = UINavigationBar.appearance()
         proxy.standardAppearance = nav
         proxy.compactAppearance = nav
-        proxy.scrollEdgeAppearance = nav
+        proxy.scrollEdgeAppearance = edge
         proxy.tintColor = accent
     }
 }

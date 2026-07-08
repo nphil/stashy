@@ -71,14 +71,6 @@ struct SettingsView: View {
                     .padding(.vertical, 2)
                 }
 
-                Section {
-                    NavigationLink {
-                        DownloadsView()
-                    } label: {
-                        Label("Downloads", systemImage: "arrow.down.circle")
-                    }
-                }
-
                 // Server connection fields
                 Section {
                     VStack(alignment: .leading, spacing: 4) {

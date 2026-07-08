@@ -14,17 +14,17 @@ struct LibraryView: View {
             Tab("Performers", systemImage: "person.2.fill", value: AppTab.performers) {
                 PerformersView()
             }
-            Tab("Search", systemImage: "magnifyingglass", value: AppTab.search) {
-                SearchView()
+            Tab("Downloads", systemImage: "arrow.down.circle", value: AppTab.downloads) {
+                NavigationStack { DownloadsView() }
             }
             Tab("Settings", systemImage: "gearshape.fill", value: AppTab.settings) {
                 SettingsView()
             }
         }
         .tint(themeManager.current.accentColor)
-        // Theme the tab-bar chrome to the palette (reactively — updates the instant the theme changes).
-        .toolbarBackground(themeManager.current.backgroundColor, for: .tabBar)
-        .toolbarBackground(.visible, for: .tabBar)
+        // NO forced toolbarBackground on the tab bar: pinning it opaque killed the native scroll-under
+        // glass ("immersive") look on Scenes/Performers. The palette still reads through the accent tint
+        // and the themed page background beneath the translucent bar.
         // Keep the display awake while watching Downloads or while a download/transcode runs (a
         // foreground-only transcode would otherwise pause when the screen sleeps and the app backgrounds).
         .onChange(of: downloads.keepScreenAwake, initial: true) { _, awake in

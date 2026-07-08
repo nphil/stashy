@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum AppTab: Hashable {
-    case scenes, performers, search, settings
+    case scenes, performers, downloads, settings
 }
 
 /// Typed navigation entries for the per-tab `NavigationStack`s. Using an explicit `[Route]` path

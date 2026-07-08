@@ -111,6 +111,12 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
         coordinator.syncSlowMoView()
         scroll.maximumZoomScale = zoomEnabled ? 4 : 1
         if !coordinator.isScrubbing { scroll.isScrollEnabled = zoomEnabled }
+        // Defensive: UIScrollView's built-in pinch recogniser can be left disabled by isScrollEnabled
+        // toggles (an interrupted hold-scrub, an engine swap mid-gesture) and then never zooms again.
+        // Re-assert it on every update — a no-op when already correct, so zero cost. The AI slow-mo /
+        // upscale overlay is hosted INSIDE this zoom container, so pinch transforms it identically and
+        // is entirely independent of that pipeline.
+        scroll.pinchGestureRecognizer?.isEnabled = zoomEnabled
         // Fully reset zoom/pan whenever zooming is disabled (e.g. leaving fullscreen) so the video
         // never returns to the inline player still zoomed or offset. The actual re-sizing happens in
         // ZoomScrollView.layoutSubviews once UIKit applies the new bounds.

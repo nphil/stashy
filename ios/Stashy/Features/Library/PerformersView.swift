@@ -7,6 +7,8 @@ struct PerformersView: View {
     @Environment(\.imageCache) private var imageCache
     @State private var loader = PaginatedLoader<Performer>(pageSize: 30)
     @State private var query = PerformerQuery()
+    @State private var searchText = ""
+    @State private var searchPresented = false
     @State private var filterExpanded = false
     @State private var path: [Route] = []
     @State private var reloadDebounce: Task<Void, Never>?
@@ -55,9 +57,27 @@ struct PerformersView: View {
             .navigationTitle("Performers")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    // Top-left search entry — same field the pull-down drawer reveals.
+                    Button { searchPresented = true } label: {
+                        Image(systemName: "magnifyingglass")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(themeManager.current.foregroundColor)
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
                 }
+            }
+            // Native search — see ScenesView note (collapsed = free; debounced = no input lag).
+            .searchable(text: $searchText, isPresented: $searchPresented,
+                        placement: .navigationBarDrawer(displayMode: .automatic),
+                        prompt: "Search performers")
+            .task(id: searchText) {
+                guard searchText != query.search else { return }
+                try? await Task.sleep(for: .milliseconds(350))
+                guard !Task.isCancelled else { return }
+                query.search = searchText
             }
             .navigationDestination(for: Route.self) { route in
                 RouteDestination(route: route, path: $path)
