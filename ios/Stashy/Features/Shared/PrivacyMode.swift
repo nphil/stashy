@@ -15,7 +15,15 @@ private struct PrivacyBlurModifier: ViewModifier {
     let radius: CGFloat
     @AppStorage(Privacy.key) private var privacyMode = false
     func body(content: Content) -> some View {
-        content.blur(radius: privacyMode ? radius : 0)
+        // Structural on/off, NOT `.blur(radius: 0)`: a zero-radius blur still inserts a Gaussian filter
+        // node per view, and this modifier sits on EVERY grid thumbnail and title — hundreds of no-op
+        // filter layers during scrolling. With privacy off the content now renders filter-free; the
+        // identity change on toggle is irrelevant (flipping Privacy Mode is a rare Settings action).
+        if privacyMode {
+            content.blur(radius: radius)
+        } else {
+            content
+        }
     }
 }
 

@@ -58,12 +58,17 @@ struct FilterPopoverAnchor<Panel: View>: View {
                             .fill(.ultraThinMaterial)
                             .overlay(themeManager.current.backgroundColor.opacity(0.30))
                             .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                            // Shadow on the background SHAPE, not the composed panel: shadowing the whole
+                            // panel (material + rows + text) forces an offscreen render of the entire
+                            // composite every frame while the material re-samples the scrolling list
+                            // beneath — a measurable 120Hz killer. The shape's silhouette is identical, so
+                            // the shadow looks the same at a fraction of the cost.
+                            .shadow(color: .black.opacity(0.28), radius: 18, y: 10)
                     }
                     .overlay(
                         RoundedRectangle(cornerRadius: 20, style: .continuous)
                             .stroke(.white.opacity(0.12), lineWidth: 1)
                     )
-                    .shadow(color: .black.opacity(0.28), radius: 18, y: 10)
                     .padding(.trailing, 10)
                     .padding(.top, 6)
                     // Emerge from the funnel (top-trailing) with the system's own spring, so it matches
