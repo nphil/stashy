@@ -98,11 +98,11 @@ jobs:
       - name: Build (unsigned)
         run: |
           cd ios
-          set -o pipefail
-          # xcodebuild's final "Validate" step can reject embedded dynamic frameworks for underscored
-          # CFBundleIdentifiers. Our FFmpeg links statically (no embedded frameworks), so this normally
-          # no longer fires — but we keep tolerating a non-zero exit here as a safety net; the .app is
-          # already complete by then, and the executable + IPA-size gates in Package catch real failures.
+          # Tee the RAW xcodebuild output to a log (xcpretty only prettifies the console). We deliberately
+          # DON'T fail on the pipeline exit code: xcodebuild's final "Validate" step can reject embedded
+          # dynamic frameworks for underscored CFBundleIdentifiers and exit non-zero even though the .app
+          # compiled fine (FFmpeg links statically so this rarely fires now, but we still tolerate it).
+          set +e
           xcodebuild build \
             -project      "$PROJECT" \
             -scheme       "$SCHEME" \
@@ -112,7 +112,28 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            | xcpretty || true
+            2>&1 | tee xcodebuild.log | xcpretty
+          set -e
+
+          # Fail fast + clearly on a real compiler diagnostic, instead of letting a broken compile slip
+          # through to the Package step (which only notices later, via a missing executable). Match the
+          # precise Swift/clang format "<path>:<line>:<col>: error: <msg>" — this can't false-positive on
+          # benign "error:" prose or on the tolerated framework-validation exit (which carries no line:col
+          # diagnostic). A pure linker error (no line:col, rare) is still caught by the executable gate in
+          # the Package step below.
+          if grep -qE ':[0-9]+:[0-9]+: error: ' xcodebuild.log; then
+            echo "──────────────────────────────────────────────────────────────"
+            echo "❌ COMPILE FAILED — errors below (also annotated on the diff):"
+            echo "──────────────────────────────────────────────────────────────"
+            grep -E ':[0-9]+:[0-9]+: error: ' xcodebuild.log | sort -u
+            # Emit GitHub inline annotations so each error shows at the top of the run + on the file/line,
+            # no log-digging required. Paths are made repo-relative so the annotation links correctly.
+            grep -E '\.swift:[0-9]+:[0-9]+: error: ' xcodebuild.log | sort -u \
+              | sed -E "s#^${GITHUB_WORKSPACE}/##" \
+              | sed -E 's#^(.+):([0-9]+):([0-9]+): error: (.*)$#::error file=\1,line=\2,col=\3::\4#'
+            exit 1
+          fi
+          echo "✅ No compile errors."
 
       - name: Package into IPA
         run: |

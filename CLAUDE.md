@@ -15,10 +15,15 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
 ## Build loop — internalize this first
 - CI: `.github/workflows/ios-build.yml` (macos-15), every push to `main`. **`.md`-only pushes do NOT
   trigger a build** (`paths-ignore`) — doc commits are free.
-- **#1 gotcha: the Build step pipes xcodebuild through `| xcpretty || true`, swallowing the exit
-  code — a compile error still shows ✅.** Only the "Package into IPA" step catches it. Green build
-  step ≠ compiled; only a published release proves it. On failure no release publishes, so the
-  installed IPA keeps working (broken push = low blast radius).
+- **Build step now fails FAST on compile errors** (since v1.0.233-era): it tees raw xcodebuild output
+  and, after the tolerated framework-validation exit, greps for `file:line:col: error:` diagnostics —
+  printing them up front + emitting GitHub inline annotations, then `exit 1` at the **Build** step. So
+  a red Build step with annotated errors = compile failure (no more digging logs / waiting for Package).
+  The old `| xcpretty || true` swallow-the-exit-code trap is gone for compile errors. Still true: a
+  green *run* only fully proves out once a release publishes; on failure no release publishes, so the
+  installed IPA keeps working (broken push = low blast radius). Recurring failure class = Swift 6
+  strict-concurrency (deinit touching non-Sendable, sending non-Sendable into @Sendable/assumeIsolated
+  closures, @ViewBuilder on multi-branch bodies) — self-review every diff for these before pushing.
 - On success CI pushes a version-bump commit `[skip ci]` and a tagged Release with the IPA, so
   `origin/main` moves without you: **always `git fetch origin main && git rebase origin/main` before
   `git push`.**
