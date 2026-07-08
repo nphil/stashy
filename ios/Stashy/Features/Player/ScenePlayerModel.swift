@@ -753,6 +753,9 @@ final class ScenePlayerModel {
                 StatLine(label: "Source frames", value: "\(sm.sourceFrames)"),
                 StatLine(label: "Synthesized frames", value: "\(sm.synthesized)"),
                 StatLine(label: "Dropped pairs", value: "\(sm.droppedPairs)"),
+                // The felt smoothness: real+synthesised frames/sec actually hitting the Metal overlay.
+                // Compare with target ≈ source fps × (mids+1) × rate (e.g. 24fps · 0.5× · 3 mids → 48).
+                StatLine(label: "Rendered fps", value: sm.renderFPS > 0 ? String(format: "%.0f", sm.renderFPS) : "—"),
                 StatLine(label: "Last interp", value: String(format: "%.1f ms", sm.lastMs)),
             ]))
         }

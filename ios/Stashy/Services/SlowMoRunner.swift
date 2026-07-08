@@ -18,6 +18,7 @@ struct SlowMoTelemetry: Sendable {
     var interpSize = ""       // resolution interpolation runs at ("native" or upscaled to dodge the 720p crash)
     var skipReason = ""       // why interpolation was skipped (e.g. "HDR"), empty if running
     var droppedPairs = 0      // pairs discarded because interpolation ran >1 pair behind — reliability gauge
+    var renderFPS = 0.0       // frames actually presented to the Metal overlay per second (the felt smoothness)
 }
 
 /// A snapshot pair of consecutive decoded frames handed off the main actor to the interpolator.
@@ -94,6 +95,10 @@ final class SlowMoRunner {
         let proxy = SlowMoLinkProxy(target: self)
         let link = CADisplayLink(target: proxy, selector: #selector(SlowMoLinkProxy.tick))
         proxy.link = link
+        // Without an explicit range a CADisplayLink defaults to 60 Hz — on the 120 Hz panel that halves
+        // the pacing granularity (frames can only be presented on 16.7ms boundaries) and visibly coarsens
+        // high-factor slow-mo. Ask for the full 120.
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
         link.add(to: .main, forMode: .common)
         displayLink = link
     }
@@ -293,9 +298,24 @@ final class SlowMoRunner {
             toShow = first.buffer
             displayQueue.removeFirst()
         }
-        if let toShow { renderView.present(toShow) }
+        if let toShow {
+            renderView.present(toShow)
+            presentCount += 1
+        }
         if displayQueue.count > 30 { displayQueue.removeFirst(displayQueue.count - 30) }   // safety bound
+        // Roll the presented-frame count into a once-a-second rendered-fps telemetry figure — the honest
+        // "how smooth does it FEEL" number (real+synthesised frames actually hitting the screen).
+        if now - fpsWindowStart >= 1.0 {
+            if fpsWindowStart > 0 {
+                telemetry.renderFPS = Double(presentCount) / (now - fpsWindowStart)
+                onTelemetry(telemetry)
+            }
+            fpsWindowStart = now
+            presentCount = 0
+        }
     }
+    private var presentCount = 0
+    private var fpsWindowStart = 0.0
 
     /// Mid frames to synthesise per source pair for a given playback rate — targets ~2× the source frame
     /// rate (silky) at any slow speed, capped at 7 (8×). 0.5× → 3, 0.33× → 5, 0.25× → 7. Slow-mo only

@@ -56,8 +56,22 @@ final class SlowMoRenderView: UIView, MTKViewDelegate {
         let scale = min(target.width / extent.width, target.height / extent.height)
         let tx = (target.width - extent.width * scale) / 2 - extent.minX * scale
         let ty = (target.height - extent.height * scale) / 2 - extent.minY * scale
-        let scaled = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale)
-            .concatenating(CGAffineTransform(translationX: tx, y: ty)))
+        // Upscaling (interpolation runs at ≤720p while the screen/zoom wants more): Lanczos resampling is
+        // visibly sharper than the default bilinear `transformed(by:)`, at trivial GPU cost on this class of
+        // device. Downscale/1:1 keeps the plain transform. (True AI upscale — VTLowLatencySuperResolution
+        // Scaler, same VTFrameProcessor family as the interpolator — is the planned follow-up feature.)
+        let scaled: CIImage
+        if scale > 1.001 {
+            scaled = image
+                .applyingFilter("CILanczosScaleTransform", parameters: [
+                    kCIInputScaleKey: scale,
+                    kCIInputAspectRatioKey: 1.0
+                ])
+                .transformed(by: CGAffineTransform(translationX: tx, y: ty))
+        } else {
+            scaled = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale)
+                .concatenating(CGAffineTransform(translationX: tx, y: ty)))
+        }
 
         ciContext.render(
             scaled,
