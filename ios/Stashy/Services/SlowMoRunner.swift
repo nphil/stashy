@@ -72,6 +72,7 @@ final class SlowMoRunner {
     private var displayQueue: [(buffer: CVPixelBuffer, time: Double)] = []
     private var anchorItem: CMTime?     // item time of the first frame (display-time origin)
     private var startWall = 0.0         // wall clock (CACurrentMediaTime) at the first frame
+    private var lastFrameWall = 0.0     // wall clock when a NEW frame was last processed — for gap detection
 
     init(outputProvider: @escaping () -> AVPlayerItemVideoOutput?,
          rateProvider: @escaping () -> Double,
@@ -107,17 +108,6 @@ final class SlowMoRunner {
         displayQueue.removeAll()
         telemetry.active = false
         onTelemetry(telemetry)
-    }
-
-    /// Tear down and drop the interpolator + free the single-flight slot after a seek, so the next frame
-    /// lazily rebuilds a fresh VideoToolbox session (identical to what a slow-mo off→on toggle does). The
-    /// old session's `endSession` is serialised on the shared VT queue *before* the new one's `startSession`,
-    /// and any still-in-flight interpolation resumes normally (its stale output lands in the cleared queue
-    /// and is dropped) — so this can't wedge or crash. Guarded by the caller to fire once per seek.
-    private func resetInterpolationAfterSeek() {
-        inFlight = false
-        interpolator?.invalidate()
-        interpolator = nil
     }
 
     fileprivate func step() {
@@ -190,21 +180,27 @@ final class SlowMoRunner {
             return
         }
 
-        // Seed on the first frame OR re-anchor after a seek/discontinuity (item time jumps backward, or far
-        // forward): clear the pipeline and present the new frame immediately, so the overlay follows the seek
-        // instead of freezing on the last pre-seek frame. Otherwise it's black/frozen after any seek.
-        let jump = previousPTS.isValid ? (now - previousPTS).seconds : 0
-        if previous == nil || !previousPTS.isValid || jump < -0.05 || jump > 0.75 {
-            // A real seek (not the first-frame seed) also fully resets the interpolation pipeline the way
-            // toggling AI slow-mo off/on does — because feeding VideoToolbox across a seek can wedge the
-            // session (its process() completion never fires → the single-flight slot never frees → only
-            // real frames show = the "stutters after seek until I toggle AI off/on" bug). Rebuilding the
-            // VT session (lazily, next frame) + freeing the in-flight slot makes it re-engage cleanly.
-            if previous != nil { resetInterpolationAfterSeek() }
+        // Seed on the first frame OR re-anchor after ANY discontinuity, so the display clock stays honest.
+        // Two kinds, both of which strand the pacing anchor:
+        //   • SEEK — item time jumps (backward, or far forward).
+        //   • PAUSE / STALL / post-seek rebuffer — wall clock advances while item time barely moves.
+        // The FIFO maps item-time → wall-time through a FIXED (startWall, anchorItem); after a gap that map
+        // is stale, so every later frame computes a display time far in the past and is dumped the instant it
+        // arrives — frames still synthesise (the counter keeps climbing) but present unpaced = the jitter that
+        // only cleared by toggling AI off/on. Re-anchoring both cases re-syncs the clock. It's a pure pacing
+        // reset — the interpolator/session is untouched (proven fine: synthesised frames keep flowing).
+        // The wall-gap threshold sits above any real slow-play frame interval ((1/fps)/rate ≤ ~0.27s for
+        // typical content at ≤0.5×), so normal playback never trips it; a stray hitch that does costs only
+        // one un-interpolated frame.
+        let wallNow = CACurrentMediaTime()
+        let itemJump = previousPTS.isValid ? (now - previousPTS).seconds : 0
+        let wallGap = lastFrameWall > 0 ? wallNow - lastFrameWall : 0
+        lastFrameWall = wallNow
+        if previous == nil || !previousPTS.isValid || itemJump < -0.05 || itemJump > 0.75 || wallGap > 0.4 {
             displayQueue.removeAll()
             previous = buffer; previousPTS = now
             anchorItem = now
-            startWall = CACurrentMediaTime()
+            startWall = wallNow
             renderView.present(buffer)
             return
         }
