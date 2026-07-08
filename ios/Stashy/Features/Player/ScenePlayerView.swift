@@ -128,6 +128,12 @@ struct ScenePlayerView: View {
                     cueIndex: { sprites.cueIndex(at: $0) }
                 )
                 .frame(width: surfaceSize.width, height: surfaceSize.height)
+                // Best of both: the parent player box animates the fullscreen flip (smooth), but strip the
+                // animation transaction from THIS scroll-view-backed surface so its zoom/contentSize setup
+                // commits instantly & deterministically — the frame still follows the animated box each
+                // tick, it just isn't wrapped in the Core-Animation transaction that raced (and killed)
+                // pinch-zoom. Zero effect on slow-mo/upscale (hosted inside this same container).
+                .transaction { $0.animation = nil }
 
                 if model.didFail {
                     VStack(spacing: 10) {

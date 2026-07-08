@@ -87,10 +87,11 @@ struct SceneDetailView: View {
                 .frame(maxWidth: .infinity, maxHeight: isFullscreen ? .infinity : boxHeight + topInset, alignment: .top)
                 .ignoresSafeArea(edges: isFullscreen ? .all : .top)
             }
-            // Fullscreen flip is instant (no `.animation(value: isFullscreen)`): animating the player
-            // box's frame animated the embedded ZoomablePlayerSurface, which raced the scroll view's zoom
-            // setup and intermittently killed fullscreen pinch-zoom (a core feature). The seamless-tilt
-            // polish will be re-added surgically — excluding the video surface — once zoom is confirmed.
+            // Smooth fullscreen flip: animate the player box + metadata fade with the rotation. The
+            // embedded ZoomablePlayerSurface opts OUT of this animation via `.transaction { $0.animation
+            // = nil }` (see ScenePlayerView), so its zoom setup stays deterministic and pinch-zoom keeps
+            // working — the box glides while the scroll internals commit instantly.
+            .animation(.easeInOut(duration: 0.3), value: isFullscreen)
         }
         .background(themeManager.current.backgroundColor.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
