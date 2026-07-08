@@ -13,6 +13,14 @@ import UIKit
 /// So re-assert on every reveal (`viewWillAppear`/`viewDidAppear`), on SwiftUI updates, and on foreground —
 /// not just once at insert time.
 struct EnableSwipeBack: UIViewControllerRepresentable {
+    /// Globally park the edge-swipe while the fullscreen player is up. The always-armed edge-pan (the
+    /// re-assert below is what keeps it reliable) CLAIMS any touch starting near the left screen edge —
+    /// exactly where a thumb lands when pinch-zooming a landscape fullscreen video — cancelling the
+    /// scroll view's pinch (the "zoom only works some of the time" bug; it depended on finger placement,
+    /// not the video). Fullscreen has no back-swipe anyway (exit is the ✕ / swipe-down), so it's safe to
+    /// suppress outright; ScenePlayerView flips this with isFullscreen.
+    @MainActor static var suppressed = false
+
     func makeUIViewController(context: Context) -> UIViewController { Proxy() }
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
         (uiViewController as? Proxy)?.reassert()
@@ -53,12 +61,13 @@ struct EnableSwipeBack: UIViewControllerRepresentable {
             guard let nav = navigationController,
                   let gesture = nav.interactivePopGestureRecognizer else { return }
             if gesture.delegate !== self { gesture.delegate = self }
-            gesture.isEnabled = true
+            gesture.isEnabled = !EnableSwipeBack.suppressed
         }
 
-        // Only allow the swipe when there's somewhere to pop back to (not on the stack root).
+        // Only allow the swipe when there's somewhere to pop back to (not on the stack root) and the
+        // fullscreen player isn't up (see `suppressed` — it would steal fullscreen pinch-zoom touches).
         func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-            (navigationController?.viewControllers.count ?? 0) > 1
+            !EnableSwipeBack.suppressed && (navigationController?.viewControllers.count ?? 0) > 1
         }
     }
 }

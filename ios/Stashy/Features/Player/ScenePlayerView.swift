@@ -210,6 +210,9 @@ struct ScenePlayerView: View {
             }
         }
         .onChange(of: isFullscreen) { _, now in
+            // Park the edge-swipe-back while fullscreen: its always-armed edge-pan claims pinch touches
+            // that start near the left edge (thumbs do, in landscape), killing zoom. Restored on exit.
+            EnableSwipeBack.suppressed = now
             if now {
                 // Portrait (vertical) videos go fullscreen in portrait; everything else forces landscape.
                 OrientationController.lock(isPortraitVideo ? .portrait : [.landscapeLeft, .landscapeRight])
@@ -228,6 +231,7 @@ struct ScenePlayerView: View {
             didAppear = true
         }
         .onDisappear {
+            EnableSwipeBack.suppressed = false   // never leave the app-wide back-swipe parked
             hideTask?.cancel()
             // Leaving the scene: stop playback so audio can't keep running in the background.
             // NOTE: no orientation reset here — this view is rebuilt (`.id(route.url)`) on every
