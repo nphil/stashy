@@ -41,6 +41,7 @@ struct StatsOverlayView: View {
     private func panel(_ stats: PlaybackStats) -> some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 10) {
+                Group {
                 // Live hardware graphic — proves which compute blocks are working (decode / GPU render /
                 // AI Neural-Engine interpolation / transcode) and how hard.
                 ComputeMetersView(monitor: compute, model: model)
@@ -63,6 +64,13 @@ struct StatsOverlayView: View {
                         }
                     }
                 }
+                }
+                // Flatten the meters + stat rows into ONE rasterized layer. Un-flattened, this panel is
+                // dozens of translucent text/bar layers composited OVER the video every display frame —
+                // which knocks the compositor off the cheap direct-video path and reads as an fps drop the
+                // moment the debug menu opens. Rasterizing costs one redraw per 1 Hz data tick instead.
+                // (The Toggle stays outside — interactive controls don't rasterize well.)
+                .drawingGroup()
 
                 // Debug log streaming to ntfy (off by default — broadcasts to a public topic).
                 Toggle(isOn: $debugLogging) {
@@ -85,7 +93,8 @@ struct StatsOverlayView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(.white.opacity(0.12), lineWidth: 1)
         )
-        .shadow(color: .black.opacity(0.4), radius: 8, y: 2)
+        // No drop shadow: over video it was invisible anyway, and shadowing a translucent panel forces an
+        // offscreen pass composited at video frame rate — part of the debug-menu fps drop.
     }
 }
 
@@ -110,6 +119,14 @@ private struct ComputeMetersView: View {
             Text("COMPUTE")
                 .font(.system(size: 9, weight: .bold))
                 .foregroundStyle(.white.opacity(0.55))
+
+            // Game-style UI fps: the link requests 120 Hz while this panel is open, so any lower reading
+            // is real main-thread hitching; "worst" is the single longest frame in the last second.
+            MeterRow(label: "UI", fraction: min(1, monitor.uiFPS / 120),
+                     value: "\(Int(monitor.uiFPS)) fps",
+                     detail: monitor.worstFrameMs > 0 ? String(format: "worst %.0f ms", monitor.worstFrameMs) : nil,
+                     history: monitor.uiHistory,
+                     tint: monitor.uiFPS >= 110 ? .green : (monitor.uiFPS >= 80 ? .yellow : .red))
 
             MeterRow(label: "CPU", fraction: monitor.cpuFraction,
                      value: "\(Int(monitor.cpuPercent))%", history: monitor.cpuHistory, tint: .orange)

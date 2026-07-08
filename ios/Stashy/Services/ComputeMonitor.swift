@@ -73,12 +73,23 @@ final class ComputeMonitor {
     private(set) var decodeHistory: [Double] = []
     private(set) var dropHistory: [Double] = []
 
+    // UI frame rate — a game-style fps counter for the interface itself. The display link requests a
+    // steady 120 Hz while the overlay is open, so a reading under ~120 means real main-thread hitching
+    // (not just ProMotion idling down); `worstFrameMs` names the single worst frame gap in the window.
+    private(set) var uiFPS = 0.0
+    private(set) var worstFrameMs = 0.0
+    private(set) var uiHistory: [Double] = []
+
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var lastSample = CACurrentMediaTime()
     @ObservationIgnored private var frameSource: (() -> FrameHealthSample?)?
     @ObservationIgnored private var lastPresented = 0
     @ObservationIgnored private var lastDropped = 0
     @ObservationIgnored private var haveFrameBaseline = false
+    @ObservationIgnored private var uiLink: CADisplayLink?
+    @ObservationIgnored private var uiFrames = 0
+    @ObservationIgnored private var uiLastTick = 0.0
+    @ObservationIgnored private var uiWorstGap = 0.0
     private let historyCap = 40
     private let coreCount = Double(max(1, ProcessInfo.processInfo.activeProcessorCount))
 
@@ -94,19 +105,41 @@ final class ComputeMonitor {
         GPUProbe.active = true
         GPUTimeAccumulator.shared.reset()
         lastSample = CACurrentMediaTime()
+        // UI-fps display link: counts real UI frame callbacks; requests 120 so any lower reading is honest
+        // main-thread hitching. Debug-only (armed with the overlay), so the battery cost is accepted.
+        let proxy = UIFPSLinkProxy(target: self)
+        let link = CADisplayLink(target: proxy, selector: #selector(UIFPSLinkProxy.tick))
+        proxy.link = link
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
+        link.add(to: .main, forMode: .common)
+        uiLink = link
+        uiLastTick = 0; uiFrames = 0; uiWorstGap = 0
+        // One 1 Hz cadence for ALL sampling (was 2 Hz) — matches the panel's own refresh, so the overlay
+        // invalidates once a second total instead of interleaving two update streams.
         task = Task { @MainActor [weak self] in
             while let self, !Task.isCancelled {
                 self.sample()
-                try? await Task.sleep(for: .milliseconds(500))
+                try? await Task.sleep(for: .milliseconds(1000))
             }
         }
     }
 
     func stop() {
         task?.cancel(); task = nil
+        uiLink?.invalidate(); uiLink = nil
         frameSource = nil
         GPUProbe.active = false
         GPUTimeAccumulator.shared.reset()
+    }
+
+    /// One UI frame callback — count it and track the worst inter-frame gap (a hitch shows as a spike).
+    fileprivate func uiTick(_ timestamp: CFTimeInterval) {
+        if uiLastTick > 0 {
+            let gap = timestamp - uiLastTick
+            if gap > uiWorstGap { uiWorstGap = gap }
+        }
+        uiLastTick = timestamp
+        uiFrames &+= 1
     }
 
     private func sample() {
@@ -122,6 +155,11 @@ final class ComputeMonitor {
 
         push(&cpuHistory, cpuFraction)
         push(&gpuHistory, gpuFraction)
+
+        uiFPS = Double(uiFrames) / elapsed
+        worstFrameMs = uiWorstGap * 1000
+        uiFrames = 0; uiWorstGap = 0
+        push(&uiHistory, min(1, uiFPS / 120))
 
         sampleFrameHealth(elapsed: elapsed)
     }
@@ -178,5 +216,17 @@ final class ComputeMonitor {
             }
         }
         return total
+    }
+}
+
+/// Weak-target proxy for the UI-fps `CADisplayLink` (the run loop retains the link, and the link retains
+/// its target — targeting the monitor directly would leak it).
+private final class UIFPSLinkProxy: NSObject {
+    weak var target: ComputeMonitor?
+    var link: CADisplayLink?
+    init(target: ComputeMonitor) { self.target = target; super.init() }
+    @objc func tick(_ link: CADisplayLink) {
+        guard let target else { self.link?.invalidate(); self.link = nil; return }
+        MainActor.assumeIsolated { target.uiTick(link.timestamp) }
     }
 }

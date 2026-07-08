@@ -322,6 +322,9 @@ final class AVPlaybackEngine: PlaybackEngine {
             let proxy = FrameProbeLinkProxy(target: self)
             let link = CADisplayLink(target: proxy, selector: #selector(FrameProbeLinkProxy.tick))
             proxy.link = link
+            // 60 Hz polling counts every distinct frame of ≤60fps content at half the main-thread wakeups
+            // of the default cadence — the probe is part of the debug overlay, so it must stay featherweight.
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
             link.add(to: .main, forMode: .common)
             probeLink = link
         } else {
