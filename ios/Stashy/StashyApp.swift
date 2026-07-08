@@ -92,5 +92,9 @@ struct ContentView: View {
         .onChange(of: colorScheme, initial: true) { _, scheme in
             themeManager.systemIsDark = (scheme == .dark)
         }
+        // Recolor UIKit chrome (nav bars) to the active palette at launch and on every theme change.
+        .onChange(of: themeManager.current, initial: true) { _, theme in
+            ThemeChrome.apply(theme)
+        }
     }
 }

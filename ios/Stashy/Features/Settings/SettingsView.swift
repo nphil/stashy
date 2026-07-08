@@ -276,6 +276,7 @@ struct SettingsView: View {
                 }
             }
             .scrollContentBackground(.hidden)
+            .listRowBackground(themeManager.current.surfaceColor)   // themed cells, not system grey
             .background(themeManager.current.backgroundColor.ignoresSafeArea())
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
