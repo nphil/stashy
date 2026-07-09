@@ -694,6 +694,8 @@ final class ScenePlayerModel {
             )
             // Live zoom geometry from the surface coordinator (installed when the surface is built).
             runner.geometryProvider = { [weak self] in self?.upscaleGeometryProvider?() }
+            // Paused ⇒ the runner arms a one-shot neural enhance of the settled visible crop.
+            runner.pausedProvider = { [weak self] in !(self?.isPlaying ?? true) }
             upscaleRunner = runner
             upscaleRenderView = runner.renderView
             upscaleTelemetry = UpscaleTelemetry(active: true)

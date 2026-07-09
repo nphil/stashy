@@ -61,6 +61,164 @@ struct UpscaleGeometry {
     let viewportSize: CGSize
 }
 
+// MARK: - Neural still enhancer (pause-to-enhance)
+
+/// One `VTLowLatencySuperResolutionScaler` session at a fixed input size, used **one-shot** on the
+/// paused frame's visible crop — the only place the neural model is structurally sound on iOS 26 (fixed
+/// dims per session + slow model load make it wrong for live zoom; see the file-header postmortem).
+/// `@unchecked Sendable`: every VT call and the CoreImage conversion run on the shared serial `vtQueue`
+/// (the session is thread-affine — startSession/process/endSession must share one thread).
+final class SuperResolutionScaler: @unchecked Sendable {
+    let width: Int
+    let height: Int
+
+    private let processor = VTFrameProcessor()
+    /// Shared across instances so one shot's endSession is strictly ordered before the next startSession.
+    private static let vtQueue = DispatchQueue(label: "com.stashy.upscale.videotoolbox")
+    private var started = false
+    private var failedStart = false
+    private var config: VTLowLatencySuperResolutionScalerConfiguration?
+    private var sourcePool: CVPixelBufferPool?
+    private var destinationPool: CVPixelBufferPool?
+    private let ciContext = CIContext(options: [.cacheIntermediates: false])
+    private var didLogFail = false
+
+    init(width: Int, height: Int) {
+        self.width = width
+        self.height = height
+    }
+
+    /// Start the session + build model-conforming pools (idempotent; runs on vtQueue via callers).
+    /// **Green-screen landmine:** the scale factor MUST come from `supportedScaleFactors` — a hardcoded
+    /// unsupported factor fails silently and the zeroed YUV destination renders as a solid green frame.
+    private func startIfNeeded() -> Bool {
+        if started { return true }
+        if failedStart { return false }
+        failedStart = true    // cleared on success below
+
+        guard VTLowLatencySuperResolutionScalerConfiguration.isSupported else {
+            logFail("unsupported-device"); return false
+        }
+        let maxDims = VTLowLatencySuperResolutionScalerConfiguration.maximumDimensions   // optional
+        let maxLabel = maxDims.map { "\($0.width)×\($0.height)" } ?? "?"
+        let factors = VTLowLatencySuperResolutionScalerConfiguration
+            .supportedScaleFactors(frameWidth: width, frameHeight: height)
+        guard let factor = factors.filter({ $0 <= 2.001 }).max() ?? factors.min() else {
+            logFail("dims-unsupported max=\(maxLabel) factors=[] in=\(width)×\(height)")
+            return false
+        }
+        func even(_ v: Float) -> Int { max(2, Int(v.rounded()) & ~1) }
+        let ow = even(Float(width) * factor), oh = even(Float(height) * factor)
+
+        let cfg = VTLowLatencySuperResolutionScalerConfiguration(
+            frameWidth: width, frameHeight: height, scaleFactor: factor)
+        do {
+            try processor.startSession(configuration: cfg)
+        } catch {
+            logFail("startSession:\(error)")
+            return false
+        }
+        config = cfg
+        sourcePool = makePool(from: cfg.sourcePixelBufferAttributes, width: width, height: height)
+        destinationPool = makePool(from: cfg.destinationPixelBufferAttributes, width: ow, height: oh)
+        guard sourcePool != nil, destinationPool != nil else {
+            logFail("pool-nil")
+            processor.endSession()
+            return false
+        }
+        started = true
+        failedStart = false
+        RemoteLog.shared.event("⚙︎ upscale-still", [("in", "\(width)×\(height)"), ("out", "\(ow)×\(oh)"), ("×", String(format: "%.2f", factor))])
+        return true
+    }
+
+    /// Upscale the region of `source` bounded by `cropRect` (top-left pixel coords, ≈ this session's
+    /// input size — the model sees the crop's native pixels). Returns the upscaled buffer, or nil.
+    func upscale(_ source: CVPixelBuffer, cropRect: CGRect, pts: CMTime) async -> CVPixelBuffer? {
+        let input = UpscaleBox((source, cropRect))
+        return await withCheckedContinuation { (continuation: CheckedContinuation<CVPixelBuffer?, Never>) in
+            Self.vtQueue.async { [self] in
+                guard started || startIfNeeded() else { continuation.resume(returning: nil); return }
+                guard let converted = convertToModelFormat(input.value.0, cropRect: input.value.1) else {
+                    logFail("convert-nil"); continuation.resume(returning: nil); return
+                }
+                guard let dstPool = destinationPool else { continuation.resume(returning: nil); return }
+                var out: CVPixelBuffer?
+                guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, dstPool, &out) == kCVReturnSuccess,
+                      let destination = out else { logFail("dest-buf-nil"); continuation.resume(returning: nil); return }
+                guard let srcFrame = VTFrameProcessorFrame(buffer: converted, presentationTimeStamp: pts),
+                      let dstFrame = VTFrameProcessorFrame(buffer: destination, presentationTimeStamp: pts)
+                else { logFail("frame-nil"); continuation.resume(returning: nil); return }
+                let params = VTLowLatencySuperResolutionScalerParameters(
+                    sourceFrame: srcFrame, destinationFrame: dstFrame)
+
+                let result = UpscaleBox(destination)
+                processor.process(parameters: params, completionHandler: { [self] _, error in
+                    if let error { logFail("process:\(error)"); continuation.resume(returning: nil) }
+                    else { continuation.resume(returning: result.value) }
+                })
+            }
+        }
+    }
+
+    /// End the session on the VT queue (thread-affine teardown — ending elsewhere wedges VideoToolbox).
+    func invalidate() {
+        Self.vtQueue.async { [self] in
+            if started { processor.endSession(); started = false }
+            config = nil
+            sourcePool = nil
+            destinationPool = nil
+        }
+    }
+
+    private func makePool(from attributes: [String: Any]?, width: Int, height: Int) -> CVPixelBufferPool? {
+        var merged = attributes ?? [:]
+        merged[kCVPixelBufferWidthKey as String] = width
+        merged[kCVPixelBufferHeightKey as String] = height
+        if merged[kCVPixelBufferIOSurfacePropertiesKey as String] == nil {
+            merged[kCVPixelBufferIOSurfacePropertiesKey as String] = [String: Any]()
+        }
+        // The SR config can list SEVERAL acceptable formats (an array) — a pool needs exactly one.
+        let fmtKey = kCVPixelBufferPixelFormatTypeKey as String
+        if let list = merged[fmtKey] as? [Any], let first = list.first {
+            merged[fmtKey] = first
+        } else if merged[fmtKey] == nil {
+            merged[fmtKey] = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        }
+        var pool: CVPixelBufferPool?
+        CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, merged as CFDictionary, &pool)
+        return pool
+    }
+
+    /// Crop `source` to `cropRect` (top-left pixel coords) and render that region into the model's input
+    /// buffer (format conversion + the tiny /8-rounding resample in one GPU pass). CoreImage's origin is
+    /// **bottom-left**, so the crop's Y is flipped from the UIKit-style rect the caller computes.
+    private func convertToModelFormat(_ source: CVPixelBuffer, cropRect: CGRect) -> CVPixelBuffer? {
+        guard let pool = sourcePool else { return nil }
+        var out: CVPixelBuffer?
+        guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &out) == kCVReturnSuccess,
+              let destination = out else { return nil }
+        let sw = CGFloat(CVPixelBufferGetWidth(source))
+        let sh = CGFloat(CVPixelBufferGetHeight(source))
+        let cx = max(0, min(cropRect.minX, sw - 2))
+        let cw = max(2, min(cropRect.width, sw - cx))
+        let cyTop = max(0, min(cropRect.minY, sh - 2))
+        let ch = max(2, min(cropRect.height, sh - cyTop))
+        let ciCrop = CGRect(x: cx, y: sh - (cyTop + ch), width: cw, height: ch)
+        var image = CIImage(cvPixelBuffer: source).cropped(to: ciCrop)
+        image = image.transformed(by: CGAffineTransform(translationX: -ciCrop.minX, y: -ciCrop.minY))
+        image = image.transformed(by: CGAffineTransform(scaleX: CGFloat(width) / cw, y: CGFloat(height) / ch))
+        ciContext.render(image, to: destination)
+        return destination
+    }
+
+    private func logFail(_ reason: String) {
+        guard !didLogFail else { return }
+        didLogFail = true
+        RemoteLog.shared.event("⚙︎ upscale-fail", [("where", reason), ("in", "\(width)×\(height)")])
+    }
+}
+
 // MARK: - MetalFX full-frame upscaler
 
 /// Wraps one `MTLFXSpatialScaler` at a fixed input→output size (rebuilt only when the DECODED size
@@ -272,13 +430,23 @@ final class UpscaleRunner {
     private let onTelemetry: (UpscaleTelemetry) -> Void
     /// Live zoom geometry from the zoom surface's coordinator; nil when not zoomed in far enough.
     var geometryProvider: (@MainActor () -> UpscaleGeometry?)?
+    /// True while playback is paused — arms the one-shot neural enhance of the visible crop.
+    var pausedProvider: (@MainActor () -> Bool)?
 
     private var upscaler: MetalFXFrameUpscaler?
     private var upscalerFailed = false
     private var displayLink: CADisplayLink?
     private var latestUpscaled: CVPixelBuffer?
-    private var lastRawBuffer: CVPixelBuffer?      // kept for the coming pause-to-enhance phase
+    private var lastRawBuffer: CVPixelBuffer?      // raw decoded frame, the neural still's input
     private var telemetry = UpscaleTelemetry()
+
+    // Pause-to-enhance state: the neural still, valid only for the exact geometry it was rendered at.
+    private var stillBuffer: CVPixelBuffer?
+    private var stillGeometry: UpscaleGeometry?
+    private var stillTask: Task<Void, Never>?
+    private var stillTriedGeometry: UpscaleGeometry?   // don't relaunch for a geometry that already ran/skipped
+    private var lastGeometry: UpscaleGeometry?
+    private var geometryStableSince = 0.0
 
     init(outputProvider: @escaping () -> AVPlayerItemVideoOutput?,
          onTelemetry: @escaping (UpscaleTelemetry) -> Void) {
@@ -305,6 +473,10 @@ final class UpscaleRunner {
         upscaler = nil
         latestUpscaled = nil
         lastRawBuffer = nil
+        stillTask?.cancel()
+        stillTask = nil
+        stillBuffer = nil
+        stillGeometry = nil
         renderView.isHidden = true
         telemetry.active = false
         telemetry.presenting = false
@@ -316,8 +488,24 @@ final class UpscaleRunner {
         guard let geo = geometryProvider?(),
               geo.videoCrop.width > 0.01, geo.videoCrop.height > 0.01,
               geo.placement.width > 1, geo.placement.height > 1 else {
+            dropStill()
             setPresenting(false, reason: "zoom in to upscale")
             return
+        }
+        let paused = pausedProvider?() ?? false
+
+        // Geometry stability (arms the paused enhance only once the gesture has settled).
+        if let last = lastGeometry, Self.approxEqual(last, geo) {
+            // still stable
+        } else {
+            geometryStableSince = CACurrentMediaTime()
+            stillTriedGeometry = nil
+        }
+        lastGeometry = geo
+
+        // A neural still is only valid for the exact geometry it was rendered at, and only while paused.
+        if stillBuffer != nil, let sg = stillGeometry, !paused || !Self.approxEqual(sg, geo) {
+            dropStill()
         }
 
         // Pull a newly-decoded frame if there is one; otherwise keep re-drawing the last upscaled frame
@@ -330,9 +518,85 @@ final class UpscaleRunner {
             }
         }
 
-        guard let frame = latestUpscaled else { return }
-        renderView.present(frame: frame, cropNorm: geo.videoCrop, placement: geo.placement)
-        setPresenting(true, reason: "")
+        // Paused + settled + nothing running → fire the one-shot neural enhance of the visible crop.
+        if paused, stillBuffer == nil, stillTask == nil, stillTriedGeometry == nil,
+           CACurrentMediaTime() - geometryStableSince > 0.35, let raw = lastRawBuffer {
+            launchStillEnhance(geometry: geo, raw: raw)
+        }
+
+        // Present: the neural still wins while it matches the live geometry; else the MetalFX live crop.
+        if paused, let still = stillBuffer, let sg = stillGeometry, Self.approxEqual(sg, geo) {
+            renderView.present(frame: still, cropNorm: CGRect(x: 0, y: 0, width: 1, height: 1),
+                               placement: geo.placement)
+            setPresenting(true, reason: "")
+        } else if let frame = latestUpscaled {
+            renderView.present(frame: frame, cropNorm: geo.videoCrop, placement: geo.placement)
+            setPresenting(true, reason: "")
+        }
+    }
+
+    // MARK: Pause-to-enhance
+
+    /// One-shot neural 2× of the visible crop's NATIVE pixels (no pre-scaling — the model gets the real
+    /// data, unlike the dead live-path design). Runs on the VT queue; the result replaces the MetalFX
+    /// crop on screen until the geometry moves or playback resumes.
+    private func launchStillEnhance(geometry geo: UpscaleGeometry, raw: CVPixelBuffer) {
+        stillTriedGeometry = geo
+        let fw = CVPixelBufferGetWidth(raw), fh = CVPixelBufferGetHeight(raw)
+        guard fw > 0, fh > 0 else { return }
+        let cropPx = CGRect(x: geo.videoCrop.minX * CGFloat(fw), y: geo.videoCrop.minY * CGFloat(fh),
+                            width: geo.videoCrop.width * CGFloat(fw), height: geo.videoCrop.height * CGFloat(fh))
+        // Session dims: the crop's native size snapped to /8 (biplanar-even + model-friendly), and both
+        // sides must fit the model's ~960×960 input cap — outside that the MetalFX crop simply stays.
+        let cw = max(8, Int((cropPx.width / 8).rounded()) * 8)
+        let ch = max(8, Int((cropPx.height / 8).rounded()) * 8)
+        guard cw >= 64, ch >= 64, cw <= 960, ch <= 960 else { return }
+
+        let scaler = SuperResolutionScaler(width: cw, height: ch)
+        let input = UpscaleBox((raw, cropPx))
+        stillTask = Task.detached { [weak self, scaler, input] in
+            let t0 = Date()
+            let out = await scaler.upscale(input.value.0, cropRect: input.value.1, pts: .zero)
+            scaler.invalidate()
+            let ms = Date().timeIntervalSince(t0) * 1000
+            let box = UpscaleBox(out)
+            await self?.stillCompleted(box, ms: ms)
+        }
+    }
+
+    private func stillCompleted(_ box: UpscaleBox<CVPixelBuffer?>, ms: Double) {
+        stillTask = nil
+        guard let out = box.value else { return }   // model declined — MetalFX crop stays, no state change
+        // Adopt only if the user hasn't moved since the shot was taken (step() re-checks per tick too).
+        guard let tried = stillTriedGeometry, let live = lastGeometry, Self.approxEqual(tried, live) else { return }
+        stillBuffer = out
+        stillGeometry = tried
+        telemetry.mode = "Neural 2× (still)"
+        telemetry.lastMs = ms
+        onTelemetry(telemetry)
+    }
+
+    private func dropStill() {
+        guard stillBuffer != nil || stillGeometry != nil else { return }
+        stillBuffer = nil
+        stillGeometry = nil
+        if telemetry.mode != "MetalFX 2×", upscaler != nil {
+            telemetry.mode = "MetalFX 2×"
+            onTelemetry(telemetry)
+        }
+    }
+
+    /// Geometry equality loose enough to ignore float jitter, tight enough that any real pan/zoom differs.
+    private static func approxEqual(_ a: UpscaleGeometry, _ b: UpscaleGeometry) -> Bool {
+        func close(_ x: CGFloat, _ y: CGFloat, _ eps: CGFloat) -> Bool { abs(x - y) < eps }
+        return close(a.videoCrop.minX, b.videoCrop.minX, 0.004)
+            && close(a.videoCrop.minY, b.videoCrop.minY, 0.004)
+            && close(a.videoCrop.width, b.videoCrop.width, 0.004)
+            && close(a.videoCrop.height, b.videoCrop.height, 0.004)
+            && close(a.placement.minX, b.placement.minX, 1.5)
+            && close(a.placement.minY, b.placement.minY, 1.5)
+            && close(a.placement.width, b.placement.width, 1.5)
+            && close(a.placement.height, b.placement.height, 1.5)
     }
 
     /// Full-frame upscale a newly-decoded frame (rebuilding the fixed-size scaler only if the DECODED
