@@ -53,7 +53,10 @@ final class SuperResolutionScaler: @unchecked Sendable {
     /// Shared across instances so a rebuild's endSession is strictly ordered before the next startSession.
     private static let vtQueue = DispatchQueue(label: "com.stashy.upscale.videotoolbox")
     private var started = false
+    private var failedStart = false        // don't re-run the (expensive) query/start per frame after a failure
     private var config: VTLowLatencySuperResolutionScalerConfiguration?
+    private var outWidth = 0
+    private var outHeight = 0
     private var sourcePool: CVPixelBufferPool?
     private var destinationPool: CVPixelBufferPool?
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
@@ -65,12 +68,43 @@ final class SuperResolutionScaler: @unchecked Sendable {
     }
 
     /// Start the session + build model-conforming pools (idempotent; runs on vtQueue via callers).
+    ///
+    /// **Green-screen postmortem (v1.0.208):** the scale factor MUST come from
+    /// `supportedScaleFactors(frameWidth:frameHeight:)` — the docs are explicit. A hardcoded `2` that the
+    /// device/model doesn't support for these dimensions fails *silently*: startSession succeeds, process
+    /// "succeeds", but the model never writes the destination buffer → a zeroed YUV buffer renders as a
+    /// solid green screen. So: query the supported factors, pick the best ≤2, and log the whole config
+    /// (factors, device max dims, pixel formats) once so ntfy shows exactly what this device accepts.
     private func startIfNeeded() -> Bool {
         if started { return true }
-        // Non-failable init (unlike the frame-interpolation config, whose init IS optional) — build errors
-        // surface from `startSession` below, not here.
+        if failedStart { return false }
+        failedStart = true    // cleared on success below
+
+        guard VTLowLatencySuperResolutionScalerConfiguration.isSupported else {
+            logFail("unsupported-device"); return false
+        }
+        let maxDims = VTLowLatencySuperResolutionScalerConfiguration.maximumDimensions
+        let factors = VTLowLatencySuperResolutionScalerConfiguration
+            .supportedScaleFactors(frameWidth: width, frameHeight: height)
+        // Best supported factor ≤2 (display never needs more; keeps ANE cost sane); if the model only
+        // offers larger ones, take the smallest it has. Empty list ⇒ these dimensions are unsupported.
+        guard let factor = factors.filter({ $0 <= 2.001 }).max() ?? factors.min() else {
+            logFail("dims-unsupported max=\(maxDims.width)×\(maxDims.height) factors=[]")
+            return false
+        }
+        // Even output dims (YUV requires them); the factor is the model's own, so rounding is cosmetic.
+        func even(_ v: Float) -> Int { max(2, Int(v.rounded()) & ~1) }
+        let ow = even(Float(width) * factor), oh = even(Float(height) * factor)
+
         let cfg = VTLowLatencySuperResolutionScalerConfiguration(
-            frameWidth: width, frameHeight: height, scaleFactor: 2)
+            frameWidth: width, frameHeight: height, scaleFactor: factor)
+        RemoteLog.shared.event("⚙︎ upscale-cfg", [
+            ("factors", factors.map { String(format: "%.2f", $0) }.joined(separator: ",")),
+            ("chosen", String(format: "%.2f", factor)),
+            ("max", "\(maxDims.width)×\(maxDims.height)"),
+            ("srcFmt", Self.formatLabel(of: cfg.sourcePixelBufferAttributes)),
+            ("dstFmt", Self.formatLabel(of: cfg.destinationPixelBufferAttributes))
+        ])
         do {
             try processor.startSession(configuration: cfg)
         } catch {
@@ -78,15 +112,18 @@ final class SuperResolutionScaler: @unchecked Sendable {
             return false
         }
         config = cfg
+        outWidth = ow
+        outHeight = oh
         sourcePool = makePool(from: cfg.sourcePixelBufferAttributes, width: width, height: height)
-        destinationPool = makePool(from: cfg.destinationPixelBufferAttributes, width: width * 2, height: height * 2)
+        destinationPool = makePool(from: cfg.destinationPixelBufferAttributes, width: ow, height: oh)
         guard sourcePool != nil, destinationPool != nil else {
             logFail("pool-nil")
             processor.endSession()
             return false
         }
         started = true
-        RemoteLog.shared.event("⚙︎ upscale-start", [("in", "\(width)×\(height)"), ("out", "\(width * 2)×\(height * 2)")])
+        failedStart = false
+        RemoteLog.shared.event("⚙︎ upscale-start", [("in", "\(width)×\(height)"), ("out", "\(ow)×\(oh)"), ("×", String(format: "%.2f", factor))])
         return true
     }
 
@@ -135,12 +172,34 @@ final class SuperResolutionScaler: @unchecked Sendable {
         if merged[kCVPixelBufferIOSurfacePropertiesKey as String] == nil {
             merged[kCVPixelBufferIOSurfacePropertiesKey as String] = [String: Any]()
         }
-        if merged[kCVPixelBufferPixelFormatTypeKey as String] == nil {
-            merged[kCVPixelBufferPixelFormatTypeKey as String] = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        // The SR config's attributes can list SEVERAL acceptable formats (an array) — a pool needs exactly
+        // one, so pick the first. (The slow-mo config pins a single format; this one is more permissive.)
+        let fmtKey = kCVPixelBufferPixelFormatTypeKey as String
+        if let list = merged[fmtKey] as? [Any], let first = list.first {
+            merged[fmtKey] = first
+        } else if merged[fmtKey] == nil {
+            merged[fmtKey] = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         }
         var pool: CVPixelBufferPool?
         CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, merged as CFDictionary, &pool)
         return pool
+    }
+
+    /// The pixel format(s) an attributes dictionary pins, as 4-char codes — for the one-shot config log.
+    private static func formatLabel(of attributes: [String: Any]?) -> String {
+        guard let value = attributes?[kCVPixelBufferPixelFormatTypeKey as String] else { return "none" }
+        let numbers: [NSNumber]
+        if let list = value as? [NSNumber] { numbers = list }
+        else if let one = value as? NSNumber { numbers = [one] }
+        else { return "?" }
+        return numbers.map { fourCC(OSType(truncating: $0)) }.joined(separator: "|")
+    }
+
+    /// A CoreVideo pixel-format `OSType` as its 4-character code (e.g. `'BGRA'`, `'420v'`), for diagnostics.
+    private static func fourCC(_ type: OSType) -> String {
+        let bytes = [UInt8((type >> 24) & 0xff), UInt8((type >> 16) & 0xff),
+                     UInt8((type >> 8) & 0xff), UInt8(type & 0xff)]
+        return String(bytes: bytes, encoding: .ascii)?.trimmingCharacters(in: .whitespaces) ?? "\(type)"
     }
 
     /// BGRA → the model's required format (420v), one GPU pass. Same conversion the interpolator uses.
@@ -221,11 +280,12 @@ final class UpscaleRunner {
         }
 
         if scaler == nil {
-            // Runtime input gates (metadata can lie, so gate on the REAL decoded buffer): the model has a
-            // device-specific max input (~720p-class, unqueryable on iOS 26 — exceeding it throws the
-            // misleading -19730), and HDR/wide-gamut is out of scope like the interpolator.
-            guard w <= 1280, h <= 1280, min(w, h) <= 736 else {
-                markSkip("source >720p-class"); present(buffer); return
+            // Runtime input gates (metadata can lie, so gate on the REAL decoded buffer). Sources above
+            // 1080p-class don't need AI help (and cost too much at frame rate); the authoritative
+            // dimension check is the scaler's own `supportedScaleFactors` query at session start —
+            // unsupported sizes fail cleanly there and playback falls back to raw frames.
+            guard w <= 1920, h <= 1920, min(w, h) <= 1100 else {
+                markSkip("source >1080p-class"); present(buffer); return
             }
             let attach = (CVBufferCopyAttachments(buffer, .shouldPropagate) as? [String: Any]) ?? [:]
             let transfer = (attach[kCVImageBufferTransferFunctionKey as String] as? String) ?? "?"
@@ -236,7 +296,7 @@ final class UpscaleRunner {
             scaler = SuperResolutionScaler(width: w, height: h)
             configW = w; configH = h
             telemetry.inSize = "\(w)×\(h)"
-            telemetry.outSize = "\(w * 2)×\(h * 2)"
+            telemetry.outSize = "…"       // real value comes from the first upscaled buffer (factor is queried)
             telemetry.skipReason = ""
             onTelemetry(telemetry)
         }
@@ -267,12 +327,14 @@ final class UpscaleRunner {
             present(out)
             telemetry.frames += 1
             telemetry.lastMs = ms
+            telemetry.outSize = "\(CVPixelBufferGetWidth(out))×\(CVPixelBufferGetHeight(out))"
             onTelemetry(telemetry)
         } else {
             // Model failed this frame (or permanently) — show the raw frame and surface the state once.
             present(result.value.1)
             if telemetry.supported {
                 telemetry.supported = false
+                telemetry.skipReason = "scaler unavailable (see log)"
                 onTelemetry(telemetry)
             }
         }
