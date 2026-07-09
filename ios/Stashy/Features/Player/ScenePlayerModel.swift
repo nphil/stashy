@@ -92,13 +92,22 @@ final class ScenePlayerModel {
     @ObservationIgnored private var upscaleTelemetry = UpscaleTelemetry()
     /// Live upscaler telemetry for the Stats overlay (read ~1 Hz; storage ignored so it never churns views).
     var upscaleStats: UpscaleTelemetry { upscaleTelemetry }
+    /// True while the upscale runner is engaged (toggle on + a player exists). Its render view is hosted
+    /// **outside** the zoom container (see `upscalePresenting`).
     var upscaleActive = false
+    /// True while the runner is *actively showing* upscaled crops (i.e. the video is zoomed in far enough).
+    /// Drives `ScenePlayerView` to reveal the upscale overlay ON TOP of the (soft) zoomed video; when false
+    /// the overlay is hidden and the native `AVPlayerLayer` shows through. Published so SwiftUI reacts.
+    var upscalePresenting = false
     @ObservationIgnored var upscaleRenderView: UIView?
+    /// Set by `ZoomablePlayerSurface`'s coordinator: returns the currently-visible region of the video as a
+    /// normalised (0…1) rect in frame coords while zoomed in, else nil. The upscale runner reads it to crop.
+    @ObservationIgnored var visibleVideoCropProvider: (@MainActor () -> CGRect?)?
 
-    /// The one overlay the zoom surface hosts (slow-mo wins when both engage — it already shows the
-    /// synthesised stream; upscaling that stream is a future phase).
-    var overlayActive: Bool { slowMoActive || upscaleActive }
-    var overlayRenderView: UIView? { slowMoActive ? slowMoRenderView : (upscaleActive ? upscaleRenderView : nil) }
+    /// The overlay the zoom surface hosts INSIDE its zoom container: slow-mo only (its full-frame synthesised
+    /// stream must zoom identically to the video). Upscaling hosts its crop overlay OUTSIDE the zoom instead.
+    var overlayActive: Bool { slowMoActive }
+    var overlayRenderView: UIView? { slowMoActive ? slowMoRenderView : nil }
 
     /// True once playback has run to the end (player parked there). The next play() restarts from 0.
     @ObservationIgnored private var reachedEnd = false
@@ -473,6 +482,7 @@ final class ScenePlayerModel {
         upscaleRunner = nil
         upscaleRenderView = nil
         upscaleActive = false
+        upscalePresenting = false
         slowMoRunner?.stop()
         slowMoRunner = nil
         slowMoRenderView = nil
@@ -683,8 +693,14 @@ final class ScenePlayerModel {
             guard upscaleRunner == nil else { return }
             let runner = UpscaleRunner(
                 outputProvider: { [weak self] in self?.engine?.frameOutput },
-                onTelemetry: { [weak self] t in self?.upscaleTelemetry = t }
+                onTelemetry: { [weak self] t in
+                    guard let self else { return }
+                    self.upscaleTelemetry = t
+                    if self.upscalePresenting != t.presenting { self.upscalePresenting = t.presenting }
+                }
             )
+            // Crop from the live zoom state (the surface coordinator installs the provider).
+            runner.cropProvider = { [weak self] in self?.visibleVideoCropProvider?() }
             upscaleRunner = runner
             upscaleRenderView = runner.renderView
             upscaleTelemetry = UpscaleTelemetry(active: true)
@@ -695,6 +711,7 @@ final class ScenePlayerModel {
             upscaleRunner = nil
             upscaleRenderView = nil
             upscaleActive = false
+            upscalePresenting = false
             upscaleTelemetry = UpscaleTelemetry()
         }
     }

@@ -5,33 +5,44 @@ import CoreMedia
 import CoreVideo
 import VideoToolbox
 
-/// On-device AI video upscaling (Phase 1): while engaged, every decoded frame is run through
-/// VideoToolbox's **low-latency super-resolution scaler** (`VTLowLatencySuperResolutionScaler`, iOS 26,
-/// Neural-Engine accelerated, fixed 2×) and presented on a Metal overlay (`SlowMoRenderView` — reused;
-/// it's a generic "present a pixel buffer" view whose Lanczos pass then covers any remaining scale to
-/// screen). The overlay lives INSIDE the player's zoom container, so pinch-zoom transforms it identically
-/// to the video — which is the whole point: zoomed-in playback stops looking soft.
+/// On-device AI video upscaling (Phase 1 — **zoom-crop**): while engaged AND the fullscreen video is
+/// zoomed in, the *visible cropped region* of each decoded frame is run through VideoToolbox's
+/// **low-latency super-resolution scaler** (`VTLowLatencySuperResolutionScaler`, iOS 26, Neural-Engine)
+/// and presented, sharp, on a Metal overlay hosted **outside** the zoom transform (so it isn't just
+/// stretched like the underlying `AVPlayerLayer`).
 ///
-/// Design notes (hard-won from the slow-mo -19730 saga — same VTFrameProcessor family, same landmines):
-///  • The session is thread-affine: startSession/process/endSession all happen on ONE serial queue.
-///  • Buffers must conform to the configuration's own source/destination pixel-buffer attributes
-///    (biplanar 420v, IOSurface-backed) — the player's BGRA frames are CoreImage-converted first.
-///  • The models have device-specific input caps iOS 26 can't query — engage only for ≤720p-class
-///    sources (which is also exactly the "this video needs help" case).
-///  • Stateless per frame: no pairing, no pacing FIFO — so seeks/pauses need NO special handling.
-///  • Single-flight: if a frame arrives while one is processing, it's dropped (the overlay holds the
-///    last upscaled frame); an anti-freeze fallback presents the raw frame if nothing has been shown
-///    for a while, so a wedged session can never freeze playback.
+/// **Why crop, not full-frame (the 960 cap):** on-device the SR model caps its INPUT at ~960×960
+/// (`maximumDimensions`). A full 1280×720 frame is already too big — `supportedScaleFactors` returns `[]`
+/// and there is nothing to upscale. But when you zoom ≥~1.33×, the *visible* region is ≤960px, fits the
+/// model, and native playback is soft there (the player just magnifies the same pixels) — exactly where AI
+/// upscaling helps. So we feed only the visible crop and show the result over the zoomed video.
+///
+/// **Fixed session, variable crop:** the SR session is a fixed input size (loading an ML model per frame
+/// is a non-starter — Apple's docs warn startSession "may take longer than a frame time"). The session is
+/// sized from the crop's *aspect* (which equals the viewport aspect, so it's constant across zoom — see
+/// `SuperResolutionScaler` for why), capped at 960 on the long side. Every frame's crop (whatever its
+/// pixel size at the current zoom) is CoreImage-cropped + scaled into that fixed input, then upscaled 2×.
+/// The session only rebuilds when the aspect changes (orientation flip).
+///
+/// **The -19730 / green-screen landmines (shared with slow-mo — same VTFrameProcessor family):**
+///  • The session is thread-affine: startSession/process/endSession all on ONE serial queue (`vtQueue`).
+///  • `scaleFactor` MUST come from `supportedScaleFactors(frameWidth:frameHeight:)` — a hardcoded factor
+///    the model doesn't support fails *silently* (session starts, process "succeeds", but the destination
+///    buffer is never written → a zeroed YUV buffer renders as a solid **green screen**).
+///  • Buffers must conform to the config's own source/destination pixel-buffer attributes (biplanar 420v,
+///    IOSurface-backed) — the player's BGRA frames are CoreImage-converted first.
+///  • Single-flight: a frame arriving while one is processing is dropped (the overlay holds the last crop).
 
 /// Live telemetry for the Stats overlay. All value types → Sendable.
 struct UpscaleTelemetry: Sendable {
     var supported = true      // false ⇒ the scaler couldn't start / rejected input on this device
-    var active = false        // runner engaged
+    var active = false        // runner engaged (toggle on)
+    var presenting = false    // actively showing upscaled crops right now (i.e. zoomed in far enough)
     var frames = 0            // frames successfully upscaled since engaging
     var lastMs = 0.0          // wall-clock of the most recent upscale
-    var inSize = ""           // source frame size fed to the model
-    var outSize = ""          // model output size (2×)
-    var skipReason = ""       // why upscaling is skipped (e.g. "HDR", "source >720p-class")
+    var inSize = ""           // fixed model input size (session)
+    var outSize = ""          // model output size (input × factor)
+    var skipReason = ""       // why upscaling is idle (e.g. "zoom in to upscale", "HDR")
 }
 
 /// Tiny `@unchecked Sendable` box to carry non-Sendable CVPixelBuffers across task/queue boundaries —
@@ -44,7 +55,11 @@ private final class UpscaleBox<T>: @unchecked Sendable {
 // MARK: - VideoToolbox scaler
 
 /// One 2× super-resolution session at a fixed input size. `@unchecked Sendable`: every VT call and the
-/// CoreImage conversion run on the shared serial `vtQueue` (see the thread-affinity note above).
+/// CoreImage crop/convert run on the shared serial `vtQueue` (see the thread-affinity note above).
+///
+/// `width`/`height` are the **fixed model input** dimensions (≤960, the crop's aspect). Each `upscale`
+/// call takes a *crop rect* in the source frame's pixels; the source is cropped to it and scaled into this
+/// fixed input before the model runs — so a moving/zooming crop never rebuilds the session.
 final class SuperResolutionScaler: @unchecked Sendable {
     let width: Int
     let height: Int
@@ -55,8 +70,6 @@ final class SuperResolutionScaler: @unchecked Sendable {
     private var started = false
     private var failedStart = false        // don't re-run the (expensive) query/start per frame after a failure
     private var config: VTLowLatencySuperResolutionScalerConfiguration?
-    private var outWidth = 0
-    private var outHeight = 0
     private var sourcePool: CVPixelBufferPool?
     private var destinationPool: CVPixelBufferPool?
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
@@ -68,13 +81,6 @@ final class SuperResolutionScaler: @unchecked Sendable {
     }
 
     /// Start the session + build model-conforming pools (idempotent; runs on vtQueue via callers).
-    ///
-    /// **Green-screen postmortem (v1.0.208):** the scale factor MUST come from
-    /// `supportedScaleFactors(frameWidth:frameHeight:)` — the docs are explicit. A hardcoded `2` that the
-    /// device/model doesn't support for these dimensions fails *silently*: startSession succeeds, process
-    /// "succeeds", but the model never writes the destination buffer → a zeroed YUV buffer renders as a
-    /// solid green screen. So: query the supported factors, pick the best ≤2, and log the whole config
-    /// (factors, device max dims, pixel formats) once so ntfy shows exactly what this device accepts.
     private func startIfNeeded() -> Bool {
         if started { return true }
         if failedStart { return false }
@@ -90,10 +96,9 @@ final class SuperResolutionScaler: @unchecked Sendable {
         // Best supported factor ≤2 (display never needs more; keeps ANE cost sane); if the model only
         // offers larger ones, take the smallest it has. Empty list ⇒ these dimensions are unsupported.
         guard let factor = factors.filter({ $0 <= 2.001 }).max() ?? factors.min() else {
-            logFail("dims-unsupported max=\(maxLabel) factors=[]")
+            logFail("dims-unsupported max=\(maxLabel) factors=[] in=\(width)×\(height)")
             return false
         }
-        // Even output dims (YUV requires them); the factor is the model's own, so rounding is cosmetic.
         func even(_ v: Float) -> Int { max(2, Int(v.rounded()) & ~1) }
         let ow = even(Float(width) * factor), oh = even(Float(height) * factor)
 
@@ -113,8 +118,6 @@ final class SuperResolutionScaler: @unchecked Sendable {
             return false
         }
         config = cfg
-        outWidth = ow
-        outHeight = oh
         sourcePool = makePool(from: cfg.sourcePixelBufferAttributes, width: width, height: height)
         destinationPool = makePool(from: cfg.destinationPixelBufferAttributes, width: ow, height: oh)
         guard sourcePool != nil, destinationPool != nil else {
@@ -128,13 +131,14 @@ final class SuperResolutionScaler: @unchecked Sendable {
         return true
     }
 
-    /// Upscale one frame. Returns the 2× buffer, or nil on any failure (caller shows the raw frame).
-    func upscale(_ source: CVPixelBuffer, pts: CMTime) async -> CVPixelBuffer? {
-        let input = UpscaleBox(source)
+    /// Upscale the region of `source` bounded by `cropRect` (top-left pixel coords). The crop is scaled into
+    /// this session's fixed input and run through the model. Returns the 2× buffer, or nil on any failure.
+    func upscale(_ source: CVPixelBuffer, cropRect: CGRect, pts: CMTime) async -> CVPixelBuffer? {
+        let input = UpscaleBox((source, cropRect))
         return await withCheckedContinuation { (continuation: CheckedContinuation<CVPixelBuffer?, Never>) in
             Self.vtQueue.async { [self] in
                 guard started || startIfNeeded() else { continuation.resume(returning: nil); return }
-                guard let converted = convertToModelFormat(input.value) else {
+                guard let converted = convertToModelFormat(input.value.0, cropRect: input.value.1) else {
                     logFail("convert-nil"); continuation.resume(returning: nil); return
                 }
                 guard let dstPool = destinationPool else { continuation.resume(returning: nil); return }
@@ -203,13 +207,27 @@ final class SuperResolutionScaler: @unchecked Sendable {
         return String(bytes: bytes, encoding: .ascii)?.trimmingCharacters(in: .whitespaces) ?? "\(type)"
     }
 
-    /// BGRA → the model's required format (420v), one GPU pass. Same conversion the interpolator uses.
-    private func convertToModelFormat(_ source: CVPixelBuffer) -> CVPixelBuffer? {
+    /// Crop `source` to `cropRect` (top-left pixel coords) and scale that region into the model's fixed
+    /// input size + required format (420v), one GPU pass. CoreImage's origin is **bottom-left**, so the
+    /// crop's Y is flipped from the UIKit-style rect the caller computes.
+    private func convertToModelFormat(_ source: CVPixelBuffer, cropRect: CGRect) -> CVPixelBuffer? {
         guard let pool = sourcePool else { return nil }
         var out: CVPixelBuffer?
         guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &out) == kCVReturnSuccess,
               let destination = out else { return nil }
-        ciContext.render(CIImage(cvPixelBuffer: source), to: destination)
+        let sh = CGFloat(CVPixelBufferGetHeight(source))
+        // Clamp the crop to the buffer and flip Y (top-left → bottom-left).
+        let sw = CGFloat(CVPixelBufferGetWidth(source))
+        let cx = max(0, min(cropRect.minX, sw - 2))
+        let cw = max(2, min(cropRect.width, sw - cx))
+        let cyTop = max(0, min(cropRect.minY, sh - 2))
+        let ch = max(2, min(cropRect.height, sh - cyTop))
+        let ciCrop = CGRect(x: cx, y: sh - (cyTop + ch), width: cw, height: ch)
+        var image = CIImage(cvPixelBuffer: source).cropped(to: ciCrop)
+        // Move the crop to the origin, then scale it up to the fixed model input size.
+        image = image.transformed(by: CGAffineTransform(translationX: -ciCrop.minX, y: -ciCrop.minY))
+        image = image.transformed(by: CGAffineTransform(scaleX: CGFloat(width) / cw, y: CGFloat(height) / ch))
+        ciContext.render(image, to: destination)
         return destination
     }
 
@@ -222,22 +240,27 @@ final class SuperResolutionScaler: @unchecked Sendable {
 
 // MARK: - Runner
 
-/// Pulls decoded frames from the player's video output on a display link, upscales each (single-flight),
-/// and presents the result on the reused `SlowMoRenderView` overlay.
+/// Pulls decoded frames on a display link, crops each to the currently-visible (zoomed) region, upscales
+/// that crop (single-flight), and presents the result on a Metal overlay (`SlowMoRenderView`, reused).
+///
+/// The overlay is hosted OUTSIDE the player's zoom container (unlike slow-mo), so the upscaled crop shows
+/// at full viewport resolution instead of being stretched by the scroll view's zoom transform.
 @MainActor
 final class UpscaleRunner {
     let renderView = SlowMoRenderView(frame: .zero)
 
     private let outputProvider: () -> AVPlayerItemVideoOutput?
     private let onTelemetry: (UpscaleTelemetry) -> Void
+    /// Returns the currently-visible region of the video as a normalised (0…1) rect in frame coords, or
+    /// nil when the video isn't zoomed in far enough for upscaling to help (→ overlay hides, native shows).
+    /// `@MainActor` (read from `step()` on the main actor; the provider touches UIKit/scroll-view state).
+    var cropProvider: (@MainActor () -> CGRect?)?
 
     private var scaler: SuperResolutionScaler?
-    private var configW = 0
-    private var configH = 0
+    private var sessionAspect = 0.0        // input aspect the current session was built for (crop/viewport aspect)
     private var displayLink: CADisplayLink?
     private var inFlight = false
-    private var seeded = false
-    private var lastPresent = 0.0
+    private var presenting = false
     private var telemetry = UpscaleTelemetry()
 
     init(outputProvider: @escaping () -> AVPlayerItemVideoOutput?,
@@ -248,6 +271,7 @@ final class UpscaleRunner {
 
     func start() {
         telemetry.active = true
+        telemetry.skipReason = "zoom in to upscale"
         onTelemetry(telemetry)
         let proxy = UpscaleLinkProxy(target: self)
         let link = CADisplayLink(target: proxy, selector: #selector(UpscaleLinkProxy.tick))
@@ -263,94 +287,104 @@ final class UpscaleRunner {
         scaler?.invalidate()
         scaler = nil
         telemetry.active = false
+        telemetry.presenting = false
         onTelemetry(telemetry)
     }
 
     fileprivate func step() {
+        // No zoom / not zoomed enough → hide the overlay (reveal the native, correctly-positioned video).
+        guard let nrect = cropProvider?(), nrect.width > 0.02, nrect.height > 0.02 else {
+            if presenting { presenting = false; telemetry.presenting = false; telemetry.skipReason = "zoom in to upscale"; onTelemetry(telemetry) }
+            return
+        }
         guard let output = outputProvider() else { return }
         let t = output.itemTime(forHostTime: CACurrentMediaTime())
         guard output.hasNewPixelBuffer(forItemTime: t),
-              let buffer = output.copyPixelBuffer(forItemTime: t, itemTimeForDisplay: nil) else { return }
+              let buffer = output.copyPixelBuffer(forItemTime: t, itemTimeForDisplay: nil) else {
+            // No new frame this tick: keep showing the last crop if we're already presenting.
+            return
+        }
         let w = CVPixelBufferGetWidth(buffer), h = CVPixelBufferGetHeight(buffer)
         guard w > 0, h > 0 else { return }
 
-        // Engine swap / quality switch changed the decoded size — rebuild the fixed-size session lazily.
-        if scaler != nil, w != configW || h != configH, !inFlight {
-            scaler?.invalidate()
-            scaler = nil
-        }
+        // Pixel crop rect in the source frame (top-left origin). Its aspect equals the viewport aspect.
+        let crop = CGRect(x: nrect.minX * CGFloat(w), y: nrect.minY * CGFloat(h),
+                          width: nrect.width * CGFloat(w), height: nrect.height * CGFloat(h))
+        let cropAspect = Double(crop.width / max(crop.height, 1))
 
+        // (Re)build the fixed-size session when the aspect changes (orientation flip) — NOT on zoom, since
+        // the crop's aspect is constant across zoom. Input long side capped at the model's ~960 max.
+        if scaler != nil, abs(cropAspect - sessionAspect) / max(sessionAspect, 0.01) > 0.05, !inFlight {
+            scaler?.invalidate(); scaler = nil
+        }
         if scaler == nil {
-            // Runtime input gates (metadata can lie, so gate on the REAL decoded buffer). Sources above
-            // 1080p-class don't need AI help (and cost too much at frame rate); the authoritative
-            // dimension check is the scaler's own `supportedScaleFactors` query at session start —
-            // unsupported sizes fail cleanly there and playback falls back to raw frames.
-            guard w <= 1920, h <= 1920, min(w, h) <= 1100 else {
-                markSkip("source >1080p-class"); present(buffer); return
-            }
             let attach = (CVBufferCopyAttachments(buffer, .shouldPropagate) as? [String: Any]) ?? [:]
             let transfer = (attach[kCVImageBufferTransferFunctionKey as String] as? String) ?? "?"
             let primaries = (attach[kCVImageBufferColorPrimariesKey as String] as? String) ?? "?"
             if transfer.contains("2084") || transfer.uppercased().contains("HLG") || primaries.contains("2020") {
-                markSkip("HDR/wide-gamut"); present(buffer); return
+                markSkip("HDR/wide-gamut"); return
             }
-            scaler = SuperResolutionScaler(width: w, height: h)
-            configW = w; configH = h
-            telemetry.inSize = "\(w)×\(h)"
-            telemetry.outSize = "…"       // real value comes from the first upscaled buffer (factor is queried)
+            let (iw, ih) = Self.sessionInput(aspect: cropAspect)
+            scaler = SuperResolutionScaler(width: iw, height: ih)
+            sessionAspect = cropAspect
+            telemetry.inSize = "\(iw)×\(ih)"
+            telemetry.outSize = "…"
             telemetry.skipReason = ""
             onTelemetry(telemetry)
         }
 
-        // First frame shows immediately (raw) so engaging never blanks the video while upscale #1 runs.
-        if !seeded { present(buffer); seeded = true }
-
         guard !inFlight, let scaler else {
-            // Busy: drop this frame and hold the last upscaled one (consistent sharpness) — but never
-            // freeze: if nothing has been presented for a while (wedged session), show the raw frame.
-            if CACurrentMediaTime() - lastPresent > 0.25 { present(buffer) }
+            // Busy: drop this frame, hold the last crop (single-flight). No freeze risk — a paused/idle
+            // display link just stops calling us; the overlay simply holds until the next result.
             return
         }
         inFlight = true
-        let input = UpscaleBox((buffer, t))
+        let input = UpscaleBox((buffer, crop, t))
         Task.detached { [weak self, scaler, input] in
             let t0 = Date()
-            let out = await scaler.upscale(input.value.0, pts: input.value.1)
+            let out = await scaler.upscale(input.value.0, cropRect: input.value.1, pts: input.value.2)
             let ms = Date().timeIntervalSince(t0) * 1000
-            let result = UpscaleBox((out, input.value.0))
-            await self?.onUpscaled(result, ms: ms)
+            await self?.onUpscaled(UpscaleBox(out), ms: ms)
         }
     }
 
-    private func onUpscaled(_ result: UpscaleBox<(CVPixelBuffer?, CVPixelBuffer)>, ms: Double) {
+    private func onUpscaled(_ result: UpscaleBox<CVPixelBuffer?>, ms: Double) {
         inFlight = false
-        if let out = result.value.0 {
-            present(out)
+        if let out = result.value {
+            renderView.present(out)
             telemetry.frames += 1
             telemetry.lastMs = ms
             telemetry.outSize = "\(CVPixelBufferGetWidth(out))×\(CVPixelBufferGetHeight(out))"
+            if !presenting { presenting = true; telemetry.presenting = true }
             onTelemetry(telemetry)
         } else {
-            // Model failed this frame (or permanently) — show the raw frame and surface the state once.
-            present(result.value.1)
+            // Model failed (permanently, e.g. dims unsupported) — hide the overlay so native video shows,
+            // and surface the state once.
+            if presenting { presenting = false; telemetry.presenting = false }
             if telemetry.supported {
                 telemetry.supported = false
                 telemetry.skipReason = "scaler unavailable (see log)"
-                onTelemetry(telemetry)
             }
+            onTelemetry(telemetry)
         }
     }
 
-    private func present(_ buffer: CVPixelBuffer) {
-        renderView.present(buffer)
-        lastPresent = CACurrentMediaTime()
-    }
-
     private func markSkip(_ reason: String) {
+        if presenting { presenting = false; telemetry.presenting = false }
         guard telemetry.skipReason != reason else { return }
         telemetry.skipReason = reason
-        telemetry.supported = false
         onTelemetry(telemetry)
+    }
+
+    /// The fixed model input size for a given crop aspect: long side capped at 960 (the model max), aspect
+    /// preserved, dimensions snapped to a multiple of 8 (biplanar YUV needs even dims, and ML models often
+    /// want multiples of 8/16 — snapping to 8 is a cheap hedge; the on-device `upscale-cfg` log reveals the
+    /// true supported set).
+    static func sessionInput(aspect: Double) -> (Int, Int) {
+        func snap(_ v: Double) -> Int { max(8, Int((v / 8).rounded()) * 8) }
+        let a = max(0.2, min(5.0, aspect))
+        if a >= 1 { return (960, snap(960 / a)) }
+        return (snap(960 * a), 960)
     }
 }
 

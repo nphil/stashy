@@ -99,6 +99,9 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
         scroll.addGestureRecognizer(swipe)
 
         coordinator.scrollView = scroll
+        // Install the visible-region provider so the AI upscaler can crop to exactly what's on screen while
+        // zoomed. Weak so a rebuilt surface's stale coordinator just returns nil.
+        model.visibleVideoCropProvider = { [weak coordinator] in coordinator?.visibleVideoCrop() }
         coordinator.attachPlayerView()
         coordinator.syncSlowMoView()
         return scroll
@@ -183,6 +186,39 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
             }
             container.bringSubviewToFront(slow)
             hostedSlowView = slow
+        }
+
+        /// The currently-visible region of the video as a normalised (0…1) rect in frame coords, while
+        /// zoomed in — else nil (below a small zoom threshold native playback is already sharp, so the
+        /// upscale overlay stays hidden). Used by `UpscaleRunner` to crop each frame to what's on screen.
+        func visibleVideoCrop() -> CGRect? {
+            guard parent.zoomEnabled, let scroll = scrollView else { return nil }
+            guard scroll.zoomScale >= 1.3 else { return nil }   // below this, the crop would exceed the model cap anyway
+            let bounds = container.bounds
+            guard bounds.width > 1, bounds.height > 1 else { return nil }
+            let aspect = parent.model.videoAspect ?? 16.0 / 9.0
+            let vRect = Self.aspectFit(aspect: aspect, in: bounds.size)   // where the video pixels sit in the container
+            guard vRect.width > 1, vRect.height > 1 else { return nil }
+            let visible = scroll.convert(scroll.bounds, to: container)     // visible portion, in container coords
+            let inter = visible.intersection(vRect)
+            guard !inter.isNull, inter.width > 1, inter.height > 1 else { return nil }
+            let nx = (inter.minX - vRect.minX) / vRect.width
+            let ny = (inter.minY - vRect.minY) / vRect.height
+            let nw = inter.width / vRect.width
+            let nh = inter.height / vRect.height
+            return CGRect(x: max(0, min(1, nx)), y: max(0, min(1, ny)),
+                          width: max(0, min(1, nw)), height: max(0, min(1, nh)))
+        }
+
+        /// Aspect-fit a video of `aspect` (w/h) inside `size`, returning the centred rect it occupies.
+        static func aspectFit(aspect: CGFloat, in size: CGSize) -> CGRect {
+            guard size.width > 0, size.height > 0, aspect > 0 else { return CGRect(origin: .zero, size: size) }
+            let containerAspect = size.width / size.height
+            let s: CGSize = aspect > containerAspect
+                ? CGSize(width: size.width, height: size.width / aspect)
+                : CGSize(width: size.height * aspect, height: size.height)
+            return CGRect(x: (size.width - s.width) / 2, y: (size.height - s.height) / 2,
+                          width: s.width, height: s.height)
         }
 
         /// Reset zoom and pan offset — used when zooming is disabled. Re-centring/sizing is handled
