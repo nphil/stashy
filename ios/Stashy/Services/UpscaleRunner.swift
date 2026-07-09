@@ -61,6 +61,13 @@ struct UpscaleGeometry {
     let viewportSize: CGSize
 }
 
+/// Tiny `@unchecked Sendable` box to carry non-Sendable CVPixelBuffers across task/queue boundaries —
+/// safe because they're treated as immutable snapshots (same pattern as the slow-mo pipeline).
+private final class UpscaleBox<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
+}
+
 // MARK: - Neural still enhancer (pause-to-enhance)
 
 /// One `VTLowLatencySuperResolutionScaler` session at a fixed input size, used **one-shot** on the
