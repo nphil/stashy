@@ -138,9 +138,10 @@ struct ScenePlayerView: View {
 
                 // AI upscale (zoom-crop) overlay: hosted OUTSIDE the zoom transform so the upscaled visible
                 // crop shows at full viewport resolution instead of being stretched by the scroll view's
-                // zoom (which would defeat the point). Present only while zoomed in far enough to engage
-                // (`upscalePresenting`); otherwise the native zoomed video shows through underneath.
-                if isFullscreen, model.upscalePresenting, let upscaleView = model.upscaleRenderView {
+                // zoom (which would defeat the point). Hosted on the STABLE flags only (fullscreen + toggle);
+                // per-tick show/hide is the runner's own UIKit `isHidden` — flipping SwiftUI state at a zoom
+                // threshold mid-gesture is what broke pinch in v1.0.241.
+                if isFullscreen, model.upscaleActive, let upscaleView = model.upscaleRenderView {
                     UpscaleOverlayHost(view: upscaleView)
                         .frame(width: surfaceSize.width, height: surfaceSize.height)
                         .allowsHitTesting(false)

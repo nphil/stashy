@@ -79,8 +79,8 @@ final class ScenePlayerModel {
     var slowMoActive = false
     /// The runner's render view (interpolated frame stream). Read by `ScenePlayerView` when `slowMoActive`.
     @ObservationIgnored var slowMoRenderView: UIView?
-    /// **Opt-in** on-device AI upscaling (default OFF): 2× super-resolution on ≤720p-class sources via
-    /// `VTLowLatencySuperResolutionScaler` (same VTFrameProcessor family as slow-mo, same device caps).
+    /// **Opt-in** on-device upscaling (default OFF): while zoomed in fullscreen, the visible crop is drawn
+    /// from a MetalFX 2× full-frame upscale (see `UpscaleRunner` for the architecture + VT postmortem).
     /// Persisted; toggling re-evaluates engagement. Slow-mo takes precedence when both are active.
     var aiUpscaleEnabled: Bool = UserDefaults.standard.bool(forKey: "player.aiUpscale") {
         didSet {
@@ -93,16 +93,14 @@ final class ScenePlayerModel {
     /// Live upscaler telemetry for the Stats overlay (read ~1 Hz; storage ignored so it never churns views).
     var upscaleStats: UpscaleTelemetry { upscaleTelemetry }
     /// True while the upscale runner is engaged (toggle on + a player exists). Its render view is hosted
-    /// **outside** the zoom container (see `upscalePresenting`).
+    /// **outside** the zoom container; the runner shows/hides it with plain UIKit `isHidden` per display
+    /// tick (NOT via SwiftUI state — inserting/removing the overlay at a zoom threshold mid-pinch is what
+    /// broke pinch in v1.0.241), so SwiftUI only ever hosts/unhosts on this stable flag.
     var upscaleActive = false
-    /// True while the runner is *actively showing* upscaled crops (i.e. the video is zoomed in far enough).
-    /// Drives `ScenePlayerView` to reveal the upscale overlay ON TOP of the (soft) zoomed video; when false
-    /// the overlay is hidden and the native `AVPlayerLayer` shows through. Published so SwiftUI reacts.
-    var upscalePresenting = false
     @ObservationIgnored var upscaleRenderView: UIView?
-    /// Set by `ZoomablePlayerSurface`'s coordinator: returns the currently-visible region of the video as a
-    /// normalised (0…1) rect in frame coords while zoomed in, else nil. The upscale runner reads it to crop.
-    @ObservationIgnored var visibleVideoCropProvider: (@MainActor () -> CGRect?)?
+    /// Set by `ZoomablePlayerSurface`'s coordinator: live zoom geometry (visible crop + viewport placement)
+    /// while zoomed in past the threshold, else nil. The upscale runner reads it every display tick.
+    @ObservationIgnored var upscaleGeometryProvider: (@MainActor () -> UpscaleGeometry?)?
 
     /// The overlay the zoom surface hosts INSIDE its zoom container: slow-mo only (its full-frame synthesised
     /// stream must zoom identically to the video). Upscaling hosts its crop overlay OUTSIDE the zoom instead.
@@ -482,7 +480,6 @@ final class ScenePlayerModel {
         upscaleRunner = nil
         upscaleRenderView = nil
         upscaleActive = false
-        upscalePresenting = false
         slowMoRunner?.stop()
         slowMoRunner = nil
         slowMoRenderView = nil
@@ -693,14 +690,10 @@ final class ScenePlayerModel {
             guard upscaleRunner == nil else { return }
             let runner = UpscaleRunner(
                 outputProvider: { [weak self] in self?.engine?.frameOutput },
-                onTelemetry: { [weak self] t in
-                    guard let self else { return }
-                    self.upscaleTelemetry = t
-                    if self.upscalePresenting != t.presenting { self.upscalePresenting = t.presenting }
-                }
+                onTelemetry: { [weak self] t in self?.upscaleTelemetry = t }
             )
-            // Crop from the live zoom state (the surface coordinator installs the provider).
-            runner.cropProvider = { [weak self] in self?.visibleVideoCropProvider?() }
+            // Live zoom geometry from the surface coordinator (installed when the surface is built).
+            runner.geometryProvider = { [weak self] in self?.upscaleGeometryProvider?() }
             upscaleRunner = runner
             upscaleRenderView = runner.renderView
             upscaleTelemetry = UpscaleTelemetry(active: true)
@@ -711,7 +704,6 @@ final class ScenePlayerModel {
             upscaleRunner = nil
             upscaleRenderView = nil
             upscaleActive = false
-            upscalePresenting = false
             upscaleTelemetry = UpscaleTelemetry()
         }
     }
@@ -830,19 +822,19 @@ final class ScenePlayerModel {
             ]))
         }
 
-        // AI upscaling (VTLowLatencySuperResolutionScaler) — opt-in via the gear menu. Shown whenever
-        // enabled so the working/skipped state and live throughput are visible in the debug menu.
+        // AI/GPU upscaling (MetalFX zoom-crop; neural still on pause is the follow-up phase) — opt-in via
+        // the gear menu. Shown whenever enabled so state and live throughput are visible in the debug menu.
         let up = upscaleTelemetry
         if aiUpscaleEnabled || up.frames > 0 {
             sections.append(StatSection(title: "Upscale (AI · beta)", lines: [
-                StatLine(label: "Status", value: !up.skipReason.isEmpty ? "Skipped (\(up.skipReason))"
-                              : !up.supported ? "Failed on this input"
-                              : (up.active ? (up.frames > 0 ? "Active" : "Starting…")
-                                           : (slowMoActive ? "Paused (slow-mo owns overlay)" : "Idle"))),
-                StatLine(label: "Engine", value: "VTSuperResolution (low-latency 2×)"),
+                StatLine(label: "Status", value: !up.supported ? "Unavailable (\(up.skipReason))"
+                              : up.presenting ? "Presenting"
+                              : !up.skipReason.isEmpty ? "Idle (\(up.skipReason))"
+                              : (up.active ? "Ready" : (slowMoActive ? "Paused (slow-mo owns frames)" : "Idle"))),
+                StatLine(label: "Engine", value: up.mode.isEmpty ? "MetalFX spatial" : up.mode),
                 StatLine(label: "Size", value: up.inSize.isEmpty ? "—" : "\(up.inSize) → \(up.outSize)"),
                 StatLine(label: "Upscaled frames", value: "\(up.frames)"),
-                StatLine(label: "Last upscale", value: up.frames > 0 ? String(format: "%.1f ms", up.lastMs) : "—"),
+                StatLine(label: "Encode cost", value: up.frames > 0 ? String(format: "%.1f ms", up.lastMs) : "—"),
             ]))
         }
 

@@ -101,7 +101,7 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
         coordinator.scrollView = scroll
         // Install the visible-region provider so the AI upscaler can crop to exactly what's on screen while
         // zoomed. Weak so a rebuilt surface's stale coordinator just returns nil.
-        model.visibleVideoCropProvider = { [weak coordinator] in coordinator?.visibleVideoCrop() }
+        model.upscaleGeometryProvider = { [weak coordinator] in coordinator?.upscaleGeometry() }
         coordinator.attachPlayerView()
         coordinator.syncSlowMoView()
         return scroll
@@ -188,26 +188,34 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
             hostedSlowView = slow
         }
 
-        /// The currently-visible region of the video as a normalised (0…1) rect in frame coords, while
-        /// zoomed in — else nil (below a small zoom threshold native playback is already sharp, so the
-        /// upscale overlay stays hidden). Used by `UpscaleRunner` to crop each frame to what's on screen.
-        func visibleVideoCrop() -> CGRect? {
+        /// Live zoom geometry for the AI upscale overlay: which region of the video is visible (normalised
+        /// frame coords) and where it sits in the viewport (points) — nil while not zoomed in far enough
+        /// (below the threshold native playback is close to display density; the overlay stays hidden).
+        /// Pure math over rects already computed per-tick, no coordinate-space conversions to race.
+        func upscaleGeometry() -> UpscaleGeometry? {
             guard parent.zoomEnabled, let scroll = scrollView else { return nil }
-            guard scroll.zoomScale >= 1.3 else { return nil }   // below this, the crop would exceed the model cap anyway
+            guard scroll.zoomScale >= 1.3 else { return nil }
             let bounds = container.bounds
             guard bounds.width > 1, bounds.height > 1 else { return nil }
             let aspect = parent.model.videoAspect ?? 16.0 / 9.0
-            let vRect = Self.aspectFit(aspect: aspect, in: bounds.size)   // where the video pixels sit in the container
+            let vRect = Self.aspectFit(aspect: aspect, in: bounds.size)   // where the video sits in the container
             guard vRect.width > 1, vRect.height > 1 else { return nil }
-            let visible = scroll.convert(scroll.bounds, to: container)     // visible portion, in container coords
+            let visible = scroll.convert(scroll.bounds, to: container)     // visible portion, container coords
+            guard visible.width > 1, visible.height > 1 else { return nil }
             let inter = visible.intersection(vRect)
             guard !inter.isNull, inter.width > 1, inter.height > 1 else { return nil }
-            let nx = (inter.minX - vRect.minX) / vRect.width
-            let ny = (inter.minY - vRect.minY) / vRect.height
-            let nw = inter.width / vRect.width
-            let nh = inter.height / vRect.height
-            return CGRect(x: max(0, min(1, nx)), y: max(0, min(1, ny)),
-                          width: max(0, min(1, nw)), height: max(0, min(1, nh)))
+            // Normalised crop within the video.
+            let crop = CGRect(x: (inter.minX - vRect.minX) / vRect.width,
+                              y: (inter.minY - vRect.minY) / vRect.height,
+                              width: inter.width / vRect.width,
+                              height: inter.height / vRect.height)
+            // The visible rect maps linearly onto the viewport → placement of the intersection in points.
+            let viewport = scroll.bounds.size
+            let placement = CGRect(x: (inter.minX - visible.minX) / visible.width * viewport.width,
+                                   y: (inter.minY - visible.minY) / visible.height * viewport.height,
+                                   width: inter.width / visible.width * viewport.width,
+                                   height: inter.height / visible.height * viewport.height)
+            return UpscaleGeometry(videoCrop: crop, placement: placement, viewportSize: viewport)
         }
 
         /// Aspect-fit a video of `aspect` (w/h) inside `size`, returning the centred rect it occupies.
