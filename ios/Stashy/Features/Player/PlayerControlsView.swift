@@ -159,7 +159,7 @@ struct PlayerControlsView: View {
     }
 
     /// Half the fixed width of the quality menu (see `qualityMenu`), used to clamp its pop-up position.
-    private static let menuHalfWidth: CGFloat = 89
+    private static let menuHalfWidth: CGFloat = 100
     /// Half the fixed width of the speed menu (see `speedMenu`).
     private static let speedMenuHalfWidth: CGFloat = 110
 
@@ -209,8 +209,7 @@ struct PlayerControlsView: View {
                 Text(Self.timeString(isScrubbing ? scrubTime : model.currentTime))
                     .font(.caption2.weight(.semibold).monospacedDigit())
                     .fixedSize()
-                PlayerStatusBadges(scene: scene, presentationSize: model.presentationSize,
-                                   tier: model.playbackTier)
+                // (Status badges moved into the gear/quality menu header — see qualityMenu.)
                 // Debug Stats toggle — fullscreen only (no clutter in the inline app view).
                 if isFullscreen {
                     Button { showStats.toggle() } label: {
@@ -269,10 +268,14 @@ struct PlayerControlsView: View {
     /// Custom translucent quality picker that blends with the video behind it but stays legible.
     private var qualityMenu: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Server Quality")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.6))
-                .padding(.horizontal, 14).padding(.top, 11).padding(.bottom, 5)
+            // Status badges header (replaces the old "Server Quality" title): what's actually on screen
+            // (resolution + codec, left) and how it's being played (cost tier, right).
+            HStack {
+                QualityBadge(scene: scene, presentationSize: model.presentationSize)
+                Spacer(minLength: 10)
+                MethodBadge(tier: model.playbackTier)
+            }
+            .padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 4)
             ForEach(ServerQuality.allCases) { q in
                 Button {
                     // Remember exactly where we are so the rebuilt player resumes here, not from 0.
@@ -292,8 +295,29 @@ struct PlayerControlsView: View {
                 }
                 .buttonStyle(.plain)
             }
+            Divider().overlay(.white.opacity(0.15))
+            // Opt-in on-device AI upscaling (2× super-resolution, ≤720p-class sources). Same beta caveats
+            // as AI slow-mo — VTFrameProcessor device limits — so it must be explicitly enabled.
+            Button {
+                Haptics.tap(soft: true)
+                model.aiUpscaleEnabled.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "sparkles.tv").frame(width: 18)
+                    Text("AI upscale (beta)")
+                    Spacer(minLength: 12)
+                    Image(systemName: model.aiUpscaleEnabled ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(model.aiUpscaleEnabled ? .white : .white.opacity(0.4))
+                }
+                .font(.subheadline)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14).padding(.vertical, 9)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.bottom, 2)
         }
-        .frame(width: 178)
+        .frame(width: 200)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(.white.opacity(0.15), lineWidth: 1))
         .shadow(color: .black.opacity(0.5), radius: 16, y: 6)

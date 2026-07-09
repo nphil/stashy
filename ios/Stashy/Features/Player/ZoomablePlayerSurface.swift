@@ -44,11 +44,11 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
     var isReady: Bool
     /// Zoom + swipe-to-dismiss are only enabled in fullscreen.
     var zoomEnabled: Bool
-    /// True while AI slow-mo is engaged. Its interpolated-frame render view is hosted **inside** this zoom
-    /// container (a sibling above the player view) so pinch/pan zoom transforms it identically to the video.
-    /// Kept as a single source of truth (the scroll view) rather than mirroring the transform onto a separate
-    /// overlay, which would desync from the live gesture.
-    var slowMoActive: Bool
+    /// True while an AI overlay (slow-mo interpolation OR upscaling) is engaged. Its render view is hosted
+    /// **inside** this zoom container (a sibling above the player view) so pinch/pan zoom transforms it
+    /// identically to the video. Kept as a single source of truth (the scroll view) rather than mirroring
+    /// the transform onto a separate overlay, which would desync from the live gesture.
+    var overlayActive: Bool
     @Binding var zoomScale: CGFloat
     @Binding var isScrubbing: Bool
     @Binding var scrubTime: TimeInterval
@@ -168,7 +168,7 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
         /// player view; removing it on stop reveals the live `AVPlayerLayer` again. Non-interactive so it
         /// never intercepts the scroll view's gestures.
         func syncSlowMoView() {
-            let wanted = parent.slowMoActive ? parent.model.slowMoRenderView : nil
+            let wanted = parent.overlayActive ? parent.model.overlayRenderView : nil
             if hostedSlowView !== wanted {
                 hostedSlowView?.removeFromSuperview()
                 hostedSlowView = nil

@@ -48,44 +48,41 @@ enum PlaybackBadgeStyle {
     }
 }
 
-/// The two status pills — **quality** (resolution + codec) on top, **method** (playback tier) below —
-/// stacked vertically so they take one pill's width instead of two, leaving room in the narrow portrait
-/// control row. Fixed-size + single-line so text never truncates or wraps.
-struct PlayerStatusBadges: View {
+/// The **quality** pill (resolution + codec of what's actually on screen). Lives at the top-left of the
+/// gear (quality) menu. Fixed-size + single-line so text never truncates or wraps.
+struct QualityBadge: View {
     let scene: StashScene
     let presentationSize: CGSize
-    let tier: PlaybackTier
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            qualityBadge
-            methodBadge
-        }
-        .lineLimit(1)
-        .fixedSize()
-        .shadow(color: .black.opacity(0.45), radius: 1.5, y: 1)
-    }
-
-    private var qualityBadge: some View {
         let q = PlaybackBadgeStyle.quality(presentationSize: presentationSize, scene: scene)
-        return HStack(spacing: 4) {
+        HStack(spacing: 4) {
             Text(q.label).foregroundStyle(q.color)
             if let codec = PlaybackBadgeStyle.codec(scene.codecLabel) {
                 Text(codec).foregroundStyle(.white.opacity(0.82))
             }
         }
         .font(.system(size: 9.5, weight: .bold))
+        .lineLimit(1)
+        .fixedSize()
         .padding(.horizontal, 6).padding(.vertical, 2)
         .background(.black.opacity(0.38), in: Capsule())
         .overlay(Capsule().strokeBorder(q.color.opacity(0.55), lineWidth: 0.75))
     }
+}
 
-    private var methodBadge: some View {
+/// The **method** pill (playback cost tier, colour-coded green→red). Top-right of the gear menu.
+struct MethodBadge: View {
+    let tier: PlaybackTier
+
+    var body: some View {
         HStack(spacing: 3) {
             Image(systemName: tier.symbol).font(.system(size: 8, weight: .black))
             Text(tier.label).font(.system(size: 9.5, weight: .bold))
         }
         .foregroundStyle(tier.color)
+        .lineLimit(1)
+        .fixedSize()
         .padding(.horizontal, 6).padding(.vertical, 2)
         .background(tier.color.opacity(0.16), in: Capsule())
         .overlay(Capsule().strokeBorder(tier.color.opacity(0.5), lineWidth: 0.75))

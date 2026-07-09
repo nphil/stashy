@@ -79,6 +79,27 @@ final class ScenePlayerModel {
     var slowMoActive = false
     /// The runner's render view (interpolated frame stream). Read by `ScenePlayerView` when `slowMoActive`.
     @ObservationIgnored var slowMoRenderView: UIView?
+    /// **Opt-in** on-device AI upscaling (default OFF): 2× super-resolution on ≤720p-class sources via
+    /// `VTLowLatencySuperResolutionScaler` (same VTFrameProcessor family as slow-mo, same device caps).
+    /// Persisted; toggling re-evaluates engagement. Slow-mo takes precedence when both are active.
+    var aiUpscaleEnabled: Bool = UserDefaults.standard.bool(forKey: "player.aiUpscale") {
+        didSet {
+            UserDefaults.standard.set(aiUpscaleEnabled, forKey: "player.aiUpscale")
+            updateUpscale()
+        }
+    }
+    @ObservationIgnored private var upscaleRunner: UpscaleRunner?
+    @ObservationIgnored private var upscaleTelemetry = UpscaleTelemetry()
+    /// Live upscaler telemetry for the Stats overlay (read ~1 Hz; storage ignored so it never churns views).
+    var upscaleStats: UpscaleTelemetry { upscaleTelemetry }
+    var upscaleActive = false
+    @ObservationIgnored var upscaleRenderView: UIView?
+
+    /// The one overlay the zoom surface hosts (slow-mo wins when both engage — it already shows the
+    /// synthesised stream; upscaling that stream is a future phase).
+    var overlayActive: Bool { slowMoActive || upscaleActive }
+    var overlayRenderView: UIView? { slowMoActive ? slowMoRenderView : (upscaleActive ? upscaleRenderView : nil) }
+
     /// True once playback has run to the end (player parked there). The next play() restarts from 0.
     @ObservationIgnored private var reachedEnd = false
 
@@ -380,7 +401,8 @@ final class ScenePlayerModel {
             if self.presentationSize != size { self.presentationSize = size }
             if firstFrame {
                 // Now that the decoded frame size is known, engage slow-mo if the user is already ≤0.5×
-                // (e.g. the rate was set before the first frame, or the engine was just rebuilt).
+                // (e.g. the rate was set before the first frame, or the engine was just rebuilt) — and
+                // the AI upscaler if it's enabled (updateSlowMo chains into updateUpscale).
                 self.updateSlowMo()
             }
         }
@@ -447,6 +469,10 @@ final class ScenePlayerModel {
         stopped = true
         startInProgress = false
         slowMoReengage?.cancel(); slowMoReengage = nil
+        upscaleRunner?.stop()
+        upscaleRunner = nil
+        upscaleRenderView = nil
+        upscaleActive = false
         slowMoRunner?.stop()
         slowMoRunner = nil
         slowMoRenderView = nil
@@ -644,6 +670,33 @@ final class ScenePlayerModel {
             slowMoActive = false
             slowMoTelemetry = SlowMoTelemetry()
         }
+        // Slow-mo takes the overlay when engaged; hand it (back) to the upscaler otherwise.
+        updateUpscale()
+    }
+
+    /// Engage/disengage the AI upscaler. Stateless per frame (no pacing, no pairing), so seeks and pauses
+    /// need no special handling — the runner just upscales whatever frame arrives next. The runner also
+    /// re-gates on the REAL decoded buffer (size/HDR), so this only handles lifecycle.
+    private func updateUpscale() {
+        let engage = aiUpscaleEnabled && !slowMoActive && engine != nil && !stopped && presentationSize.width > 0
+        if engage {
+            guard upscaleRunner == nil else { return }
+            let runner = UpscaleRunner(
+                outputProvider: { [weak self] in self?.engine?.frameOutput },
+                onTelemetry: { [weak self] t in self?.upscaleTelemetry = t }
+            )
+            upscaleRunner = runner
+            upscaleRenderView = runner.renderView
+            upscaleTelemetry = UpscaleTelemetry(active: true)
+            upscaleActive = true
+            runner.start()
+        } else if upscaleRunner != nil {
+            upscaleRunner?.stop()
+            upscaleRunner = nil
+            upscaleRenderView = nil
+            upscaleActive = false
+            upscaleTelemetry = UpscaleTelemetry()
+        }
     }
 
     func seek(to time: TimeInterval) {
@@ -757,6 +810,22 @@ final class ScenePlayerModel {
                 // Compare with target ≈ source fps × (mids+1) × rate (e.g. 24fps · 0.5× · 3 mids → 48).
                 StatLine(label: "Rendered fps", value: sm.renderFPS > 0 ? String(format: "%.0f", sm.renderFPS) : "—"),
                 StatLine(label: "Last interp", value: String(format: "%.1f ms", sm.lastMs)),
+            ]))
+        }
+
+        // AI upscaling (VTLowLatencySuperResolutionScaler) — opt-in via the gear menu. Shown whenever
+        // enabled so the working/skipped state and live throughput are visible in the debug menu.
+        let up = upscaleTelemetry
+        if aiUpscaleEnabled || up.frames > 0 {
+            sections.append(StatSection(title: "Upscale (AI · beta)", lines: [
+                StatLine(label: "Status", value: !up.skipReason.isEmpty ? "Skipped (\(up.skipReason))"
+                              : !up.supported ? "Failed on this input"
+                              : (up.active ? (up.frames > 0 ? "Active" : "Starting…")
+                                           : (slowMoActive ? "Paused (slow-mo owns overlay)" : "Idle"))),
+                StatLine(label: "Engine", value: "VTSuperResolution (low-latency 2×)"),
+                StatLine(label: "Size", value: up.inSize.isEmpty ? "—" : "\(up.inSize) → \(up.outSize)"),
+                StatLine(label: "Upscaled frames", value: "\(up.frames)"),
+                StatLine(label: "Last upscale", value: up.frames > 0 ? String(format: "%.1f ms", up.lastMs) : "—"),
             ]))
         }
 
