@@ -67,9 +67,10 @@ final class SuperResolutionScaler: @unchecked Sendable {
     /// Start the session + build model-conforming pools (idempotent; runs on vtQueue via callers).
     private func startIfNeeded() -> Bool {
         if started { return true }
-        guard let cfg = VTLowLatencySuperResolutionScalerConfiguration(
+        // Non-failable init (unlike the frame-interpolation config, whose init IS optional) — build errors
+        // surface from `startSession` below, not here.
+        let cfg = VTLowLatencySuperResolutionScalerConfiguration(
             frameWidth: width, frameHeight: height, scaleFactor: 2)
-        else { logFail("cfg-nil"); return false }
         do {
             try processor.startSession(configuration: cfg)
         } catch {
@@ -105,9 +106,8 @@ final class SuperResolutionScaler: @unchecked Sendable {
                 guard let srcFrame = VTFrameProcessorFrame(buffer: converted, presentationTimeStamp: pts),
                       let dstFrame = VTFrameProcessorFrame(buffer: destination, presentationTimeStamp: pts)
                 else { logFail("frame-nil"); continuation.resume(returning: nil); return }
-                guard let params = VTLowLatencySuperResolutionScalerParameters(
+                let params = VTLowLatencySuperResolutionScalerParameters(
                     sourceFrame: srcFrame, destinationFrame: dstFrame)
-                else { logFail("params-nil"); continuation.resume(returning: nil); return }
 
                 let result = UpscaleBox(destination)
                 processor.process(parameters: params, completionHandler: { [self] _, error in
