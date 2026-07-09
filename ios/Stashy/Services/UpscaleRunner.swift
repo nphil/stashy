@@ -83,13 +83,14 @@ final class SuperResolutionScaler: @unchecked Sendable {
         guard VTLowLatencySuperResolutionScalerConfiguration.isSupported else {
             logFail("unsupported-device"); return false
         }
-        let maxDims = VTLowLatencySuperResolutionScalerConfiguration.maximumDimensions
+        let maxDims = VTLowLatencySuperResolutionScalerConfiguration.maximumDimensions   // optional
+        let maxLabel = maxDims.map { "\($0.width)×\($0.height)" } ?? "?"
         let factors = VTLowLatencySuperResolutionScalerConfiguration
             .supportedScaleFactors(frameWidth: width, frameHeight: height)
         // Best supported factor ≤2 (display never needs more; keeps ANE cost sane); if the model only
         // offers larger ones, take the smallest it has. Empty list ⇒ these dimensions are unsupported.
         guard let factor = factors.filter({ $0 <= 2.001 }).max() ?? factors.min() else {
-            logFail("dims-unsupported max=\(maxDims.width)×\(maxDims.height) factors=[]")
+            logFail("dims-unsupported max=\(maxLabel) factors=[]")
             return false
         }
         // Even output dims (YUV requires them); the factor is the model's own, so rounding is cosmetic.
@@ -101,7 +102,7 @@ final class SuperResolutionScaler: @unchecked Sendable {
         RemoteLog.shared.event("⚙︎ upscale-cfg", [
             ("factors", factors.map { String(format: "%.2f", $0) }.joined(separator: ",")),
             ("chosen", String(format: "%.2f", factor)),
-            ("max", "\(maxDims.width)×\(maxDims.height)"),
+            ("max", maxLabel),
             ("srcFmt", Self.formatLabel(of: cfg.sourcePixelBufferAttributes)),
             ("dstFmt", Self.formatLabel(of: cfg.destinationPixelBufferAttributes))
         ])
