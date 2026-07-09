@@ -351,10 +351,24 @@ SR model per video on the server (CUDA/CPU), ship the low-res stream + the tiny 
 high quality on-device (refs: NAS / NEMO / LiveNAS). The compact "data" = **per-video model weights**
 (~tens of KB–few MB), NOT per-frame residuals.
 
+**SHIPPED (2026-07-09, v1.0.242-era) — zoom-crop upscaling, two engines** (`Services/UpscaleRunner.swift`;
+read its header postmortem before touching):
+- **Live:** MetalFX spatial 2× on the FULL decoded frame once per video frame; a crop overlay outside the
+  zoom transform redraws the visible region every display tick. (Phase A below is effectively done —
+  render path + thermal envelope proven by this.)
+- **Paused:** one-shot `VTLowLatencySuperResolutionScaler` neural 2× of the settled visible crop's native
+  pixels (its on-device input cap is ~960×960, hence crop-only + paused-only).
+- **iOS 27 (OS 27) follow-up — revisit the neural live path:** OS 27 adds the capability-query APIs this
+  generation lacks (max dimensions per processor, proper support checks — the iOS 26 workarounds were
+  guessed caps + a supportedScaleFactors probe). When the app targets OS 27: query real input caps (they
+  may be >960 on new silicon), consider neural full-frame live for ≤540p sources (the low-bandwidth case
+  below), and re-evaluate session-rebuild cost — if model load gets cheap enough, a live variable-crop
+  neural path may become viable. Until then: MetalFX live + neural stills only.
+
 Sequencing so nothing is wasted (slots into the existing AVPlayerItemVideoOutput frame-tap that
 currently feeds the live blur):
-- **Phase A (cheap, validates pipeline):** optional **MetalFX spatial upscale** toggle — generic,
-  hardware, no server/training. Proves the real-time render path + thermal/battery envelope.
+- **Phase A (cheap, validates pipeline):** ~~optional **MetalFX spatial upscale** toggle~~ **done** (see
+  SHIPPED above — zoom-gated rather than always-on; an always-on full-frame mode is a small follow-up).
 - **Phase B (the full idea):** a **Stash plugin** trains tiny per-video SR models; the app swaps that
   model into the *same* Core ML inference slot from Phase A. Identical render path, only the model
   source changes.
