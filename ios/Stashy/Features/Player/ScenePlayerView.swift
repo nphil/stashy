@@ -212,8 +212,14 @@ struct ScenePlayerView: View {
             let orientation = UIDevice.current.orientation
             if orientation.isLandscape {
                 if !suppressReentry { isFullscreen = true }
-            } else if orientation.isPortrait {
-                suppressReentry = false                  // back to portrait → allow tilt-to-enter again
+            } else if orientation != .unknown {
+                // ANY recognised non-landscape orientation (portrait, upside-down, faceUp/faceDown) means
+                // the phone is no longer held landscape → re-arm tilt-to-enter. Clearing only on a strict
+                // `.portrait` reading was the "rotate does nothing the first time" bug: handling the phone
+                // often passes through faceUp without ever posting .portrait, so the suppression latched
+                // from the last ✕-exit ate the first landscape tilt (the retry worked because the portrait
+                // reading had landed by then).
+                suppressReentry = false
             }
         }
         .onChange(of: isFullscreen) { _, now in
@@ -236,6 +242,12 @@ struct ScenePlayerView: View {
             // at the remembered position but stays paused — tap play to continue.
             model.start(autoplay: !didAppear)
             didAppear = true
+            // Already held landscape when the player opened: no orientation-CHANGE notification will ever
+            // fire, so the tilt-to-enter handler never runs — check once here so fullscreen engages on the
+            // first attempt instead of after a rotate-away-and-back.
+            if !isFullscreen, !isPortraitVideo, UIDevice.current.orientation.isLandscape {
+                isFullscreen = true
+            }
         }
         .onDisappear {
             EnableSwipeBack.suppressed = false   // never leave the app-wide back-swipe parked
