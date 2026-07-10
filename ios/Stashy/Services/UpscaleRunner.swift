@@ -321,6 +321,134 @@ final class MetalFXFrameUpscaler {
     }
 }
 
+// MARK: - MetalFX pass 2 (crop refine)
+
+/// Second MetalFX pass **on the visible crop** of the pass-1 output. One 2× pass diluted by a big
+/// bilinear stretch to the viewport looked barely different from Lanczos (the v1.0.243 feedback) —
+/// chaining a second 2× on just the crop closes most of that gap (effective 4× from the source at deep
+/// zoom, so the viewport gets scaled pixels instead of stretch).
+///
+/// The scaler's textures are a **fixed canvas** (rebuild-free — the VT lesson); the variable crop is
+/// CI-copied into the canvas each pass and its true size set via `inputContentWidth/Height` (the
+/// game-style dynamic-resolution mechanism, designed to change per frame).
+@MainActor
+final class MetalFXCropUpscaler {
+    let canvasWidth: Int
+    let canvasHeight: Int
+    let outWidth: Int
+    let outHeight: Int
+
+    private let queue: MTLCommandQueue
+    private let scaler: any MTLFXSpatialScaler
+    private let ciContext: CIContext
+    private var inputBuffer: CVPixelBuffer?
+    private var textureCache: CVMetalTextureCache?
+    private var outputPool: CVPixelBufferPool?
+    private var recentTextures: [CVMetalTexture] = []
+
+    init?(canvasWidth: Int, canvasHeight: Int, device: MTLDevice, queue: MTLCommandQueue) {
+        guard MTLFXSpatialScalerDescriptor.supportsDevice(device) else { return nil }
+        self.canvasWidth = canvasWidth
+        self.canvasHeight = canvasHeight
+        self.outWidth = canvasWidth * 2
+        self.outHeight = canvasHeight * 2
+        self.queue = queue
+        ciContext = CIContext(mtlDevice: device, options: [.cacheIntermediates: false])
+
+        let desc = MTLFXSpatialScalerDescriptor()
+        desc.inputWidth = canvasWidth
+        desc.inputHeight = canvasHeight
+        desc.outputWidth = outWidth
+        desc.outputHeight = outHeight
+        desc.colorTextureFormat = .bgra8Unorm
+        desc.outputTextureFormat = .bgra8Unorm
+        desc.colorProcessingMode = .perceptual
+        guard let scaler = desc.makeSpatialScaler(device: device) else { return nil }
+        self.scaler = scaler
+
+        CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &textureCache)
+        // Reusable input canvas (single buffer — same-queue ordering serialises write-after-read), and
+        // an output pool (results are held by the presenter across ticks, so those must rotate).
+        let inAttrs: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: canvasWidth,
+            kCVPixelBufferHeightKey as String: canvasHeight,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any](),
+            kCVPixelBufferMetalCompatibilityKey as String: true,
+        ]
+        var inBuf: CVPixelBuffer?
+        CVPixelBufferCreate(kCFAllocatorDefault, canvasWidth, canvasHeight, kCVPixelFormatType_32BGRA,
+                            inAttrs as CFDictionary, &inBuf)
+        let outAttrs: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: outWidth,
+            kCVPixelBufferHeightKey as String: outHeight,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any](),
+            kCVPixelBufferMetalCompatibilityKey as String: true,
+        ]
+        CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, outAttrs as CFDictionary, &outputPool)
+        guard let inBuf, textureCache != nil, outputPool != nil else { return nil }
+        inputBuffer = inBuf
+    }
+
+    /// Refine `cropPx` (pixel rect in `frame`, top-left origin) with a second 2× pass. Returns the output
+    /// buffer and the content rect within it (top-left origin) holding the 2× crop. nil ⇒ caller falls
+    /// back to presenting the pass-1 frame directly.
+    func refine(frame: CVPixelBuffer, cropPx: CGRect) -> (buffer: CVPixelBuffer, content: CGRect)? {
+        guard let cache = textureCache, let pool = outputPool, let inBuf = inputBuffer else { return nil }
+        let fw = CGFloat(CVPixelBufferGetWidth(frame)), fh = CGFloat(CVPixelBufferGetHeight(frame))
+        // Integer, even, clamped crop that must fit the canvas.
+        let cw = min(CGFloat(canvasWidth), (cropPx.width / 2).rounded(.up) * 2)
+        let ch = min(CGFloat(canvasHeight), (cropPx.height / 2).rounded(.up) * 2)
+        let cx = max(0, min(cropPx.minX.rounded(), fw - cw))
+        let cy = max(0, min(cropPx.minY.rounded(), fh - ch))
+        guard cw >= 32, ch >= 32 else { return nil }
+
+        var outBuffer: CVPixelBuffer?
+        guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &outBuffer) == kCVReturnSuccess,
+              let output = outBuffer else { return nil }
+
+        let usageAttrs = [kCVMetalTextureUsage as String:
+                            NSNumber(value: MTLTextureUsage([.renderTarget, .shaderRead, .shaderWrite]).rawValue)] as CFDictionary
+        var cvIn: CVMetalTexture?
+        var cvOut: CVMetalTexture?
+        CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, cache, inBuf, usageAttrs, .bgra8Unorm,
+                                                  canvasWidth, canvasHeight, 0, &cvIn)
+        CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, cache, output, usageAttrs, .bgra8Unorm,
+                                                  outWidth, outHeight, 0, &cvOut)
+        guard let cvIn, let cvOut,
+              let inTex = CVMetalTextureGetTexture(cvIn),
+              let outTex = CVMetalTextureGetTexture(cvOut),
+              let commandBuffer = queue.makeCommandBuffer() else { return nil }
+
+        // 1) Copy the crop into the canvas at the origin (CI, on OUR command buffer so pass ordering holds).
+        //    CI's origin is bottom-left: content at extent-origin lands at the canvas' BOTTOM; mirror that
+        //    when telling MetalFX where the content is? No — MetalFX content regions anchor at texture
+        //    (0,0) = TOP-left. So place the crop at the TOP of the canvas: CI y-origin = canvasH - ch.
+        let src = CIImage(cvPixelBuffer: frame)
+        let ciCrop = CGRect(x: cx, y: fh - (cy + ch), width: cw, height: ch)
+        let placed = src.cropped(to: ciCrop)
+            .transformed(by: CGAffineTransform(translationX: -ciCrop.minX,
+                                               y: CGFloat(canvasHeight) - ch - ciCrop.minY))
+        ciContext.render(placed, to: inTex, commandBuffer: commandBuffer,
+                         bounds: CGRect(x: 0, y: 0, width: CGFloat(canvasWidth), height: CGFloat(canvasHeight)),
+                         colorSpace: CGColorSpaceCreateDeviceRGB())
+
+        // 2) Scale: content region (top-left anchored) → 2× at the output's top-left.
+        scaler.inputContentWidth = Int(cw)
+        scaler.inputContentHeight = Int(ch)
+        scaler.colorTexture = inTex
+        scaler.outputTexture = outTex
+        scaler.encode(commandBuffer: commandBuffer)
+        commandBuffer.commit()
+
+        recentTextures.append(cvIn)
+        recentTextures.append(cvOut)
+        if recentTextures.count > 8 { recentTextures.removeFirst(recentTextures.count - 8) }
+        return (output, CGRect(x: 0, y: 0, width: cw * 2, height: ch * 2))
+    }
+}
+
 // MARK: - Crop render view
 
 /// Minimal Metal view that draws a *crop* of the latest upscaled frame into a *placement rect*, both
@@ -366,11 +494,17 @@ final class UpscaleCropRenderView: UIView, MTKViewDelegate {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// Unsharp-mask intensity applied to the composited output (0 = off). Set per-present by the runner:
+    /// on for MetalFX live frames (restores the "pop" a conservative spatial scaler lacks), off for the
+    /// neural still (already crisp; sharpening it invites halos).
+    private var sharpenAmount: Double = 0
+
     /// Draw `cropNorm` (normalised, top-left origin) of `frame` into `placement` (view points) now.
-    func present(frame: CVPixelBuffer, cropNorm: CGRect, placement: CGRect) {
+    func present(frame: CVPixelBuffer, cropNorm: CGRect, placement: CGRect, sharpen: Double = 0) {
         currentImage = CIImage(cvPixelBuffer: frame)
         self.cropNorm = cropNorm
         self.placement = placement
+        self.sharpenAmount = sharpen
         mtkView.draw()
     }
 
@@ -397,11 +531,21 @@ final class UpscaleCropRenderView: UIView, MTKViewDelegate {
                           width: placement.width * px,
                           height: placement.height * py)
 
-        let scaled = image.cropped(to: crop)
+        var scaled = image.cropped(to: crop)
             .transformed(by: CGAffineTransform(translationX: -crop.minX, y: -crop.minY))
             .transformed(by: CGAffineTransform(scaleX: dest.width / crop.width,
                                                y: dest.height / crop.height))
             .transformed(by: CGAffineTransform(translationX: dest.minX, y: dest.minY))
+        // Display-resolution unsharp mask (clamped so edge pixels don't fringe against transparency).
+        if sharpenAmount > 0.01 {
+            let extent = scaled.extent
+            scaled = scaled.clampedToExtent()
+                .applyingFilter("CIUnsharpMask", parameters: [
+                    kCIInputRadiusKey: 2.0,
+                    kCIInputIntensityKey: sharpenAmount
+                ])
+                .cropped(to: extent)
+        }
 
         ciContext.render(
             scaled,
@@ -447,6 +591,16 @@ final class UpscaleRunner {
     private var lastRawBuffer: CVPixelBuffer?      // raw decoded frame, the neural still's input
     private var telemetry = UpscaleTelemetry()
 
+    // MetalFX pass 2 (crop refine): result cached per (frame, geometry) so static playback re-presents
+    // without re-encoding, while pans/new frames re-refine.
+    private var cropUpscaler: MetalFXCropUpscaler?
+    private var cropUpscalerFailed = false
+    private var pass2Buffer: CVPixelBuffer?
+    private var pass2Content = CGRect.zero
+    private var pass2Geometry: UpscaleGeometry?
+    private var pass2FrameStamp = 0                // ingest counter the cached pass-2 was refined from
+    private var frameStamp = 0                     // bumps on every newly-ingested video frame
+
     // Pause-to-enhance state: the neural still, valid only for the exact geometry it was rendered at.
     private var stillBuffer: CVPixelBuffer?
     private var stillGeometry: UpscaleGeometry?
@@ -454,6 +608,7 @@ final class UpscaleRunner {
     private var stillTriedGeometry: UpscaleGeometry?   // don't relaunch for a geometry that already ran/skipped
     private var lastGeometry: UpscaleGeometry?
     private var geometryStableSince = 0.0
+    private var wasPaused = false
 
     init(outputProvider: @escaping () -> AVPlayerItemVideoOutput?,
          onTelemetry: @escaping (UpscaleTelemetry) -> Void) {
@@ -478,6 +633,9 @@ final class UpscaleRunner {
         displayLink?.invalidate()
         displayLink = nil
         upscaler = nil
+        cropUpscaler = nil
+        pass2Buffer = nil
+        pass2Geometry = nil
         latestUpscaled = nil
         lastRawBuffer = nil
         stillTask?.cancel()
@@ -500,6 +658,9 @@ final class UpscaleRunner {
             return
         }
         let paused = pausedProvider?() ?? false
+        // A fresh pause re-arms the enhance even at identical geometry (pause → play → pause retries).
+        if paused, !wasPaused { stillTriedGeometry = nil }
+        wasPaused = paused
 
         // Geometry stability (arms the paused enhance only once the gesture has settled).
         if let last = lastGeometry, Self.approxEqual(last, geo) {
@@ -531,43 +692,156 @@ final class UpscaleRunner {
             launchStillEnhance(geometry: geo, raw: raw)
         }
 
-        // Present: the neural still wins while it matches the live geometry; else the MetalFX live crop.
+        // Present: the neural still wins while it matches the live geometry; else the refined (pass-2)
+        // crop when the zoom is deep enough for it; else the pass-1 frame.
         if paused, let still = stillBuffer, let sg = stillGeometry, Self.approxEqual(sg, geo) {
             renderView.present(frame: still, cropNorm: CGRect(x: 0, y: 0, width: 1, height: 1),
-                               placement: geo.placement)
+                               placement: geo.placement, sharpen: 0)
             setPresenting(true, reason: "")
         } else if let frame = latestUpscaled {
-            renderView.present(frame: frame, cropNorm: geo.videoCrop, placement: geo.placement)
+            if let refined = refinedCrop(of: frame, geometry: geo) {
+                renderView.present(frame: refined.buffer, cropNorm: refined.cropNorm,
+                                   placement: geo.placement, sharpen: 0.45)
+                setMode("MetalFX 4× (crop)")
+            } else {
+                renderView.present(frame: frame, cropNorm: geo.videoCrop,
+                                   placement: geo.placement, sharpen: 0.45)
+                setMode("MetalFX 2×")
+            }
             setPresenting(true, reason: "")
         }
+    }
+
+    private func setMode(_ mode: String) {
+        guard telemetry.mode != mode else { return }
+        telemetry.mode = mode
+        onTelemetry(telemetry)
+    }
+
+    /// MetalFX pass 2 over the visible crop of the pass-1 output — the fix for "one 2× pass diluted by a
+    /// big bilinear stretch looks like Lanczos". Only refines when the crop fits the fixed canvas (deep
+    /// zoom — exactly when the residual stretch would be worst); re-encodes only on a new frame or moved
+    /// geometry, so static playback costs one encode per video frame and holds are free.
+    private func refinedCrop(of frame: CVPixelBuffer, geometry geo: UpscaleGeometry) -> (buffer: CVPixelBuffer, cropNorm: CGRect)? {
+        guard !cropUpscalerFailed else { return nil }
+        let fw = CVPixelBufferGetWidth(frame), fh = CVPixelBufferGetHeight(frame)
+        guard fw > 0, fh > 0 else { return nil }
+        if cropUpscaler == nil {
+            // Fixed canvas ≈ 0.625× of the pass-1 output (2560×1440 → 1600×896): covers zoom ≳1.6×,
+            // textures stay modest. /8-aligned; orientation follows the source automatically.
+            let cw = max(256, (fw * 5 / 8) & ~7)
+            let ch = max(256, (fh * 5 / 8) & ~7)
+            cropUpscaler = MetalFXCropUpscaler(canvasWidth: cw, canvasHeight: ch,
+                                               device: renderView.metalDevice,
+                                               queue: renderView.sharedQueue)
+            if cropUpscaler == nil { cropUpscalerFailed = true; return nil }
+        }
+        guard let refiner = cropUpscaler else { return nil }
+        let cropPx = CGRect(x: geo.videoCrop.minX * CGFloat(fw), y: geo.videoCrop.minY * CGFloat(fh),
+                            width: geo.videoCrop.width * CGFloat(fw), height: geo.videoCrop.height * CGFloat(fh))
+        // Shallow zoom → crop exceeds the canvas → pass-1 + sharpen is already close to display density.
+        guard cropPx.width <= CGFloat(refiner.canvasWidth), cropPx.height <= CGFloat(refiner.canvasHeight) else {
+            return nil
+        }
+        let stale = pass2Buffer == nil || pass2FrameStamp != frameStamp
+            || pass2Geometry.map { !Self.approxEqual($0, geo) } ?? true
+        if stale {
+            guard let result = refiner.refine(frame: frame, cropPx: cropPx) else { return nil }
+            pass2Buffer = result.buffer
+            pass2Content = result.content
+            pass2Geometry = geo
+            pass2FrameStamp = frameStamp
+        }
+        guard let buffer = pass2Buffer else { return nil }
+        let ow = CGFloat(refiner.outWidth), oh = CGFloat(refiner.outHeight)
+        let cropNorm = CGRect(x: pass2Content.minX / ow, y: pass2Content.minY / oh,
+                              width: pass2Content.width / ow, height: pass2Content.height / oh)
+        return (buffer, cropNorm)
     }
 
     // MARK: Pause-to-enhance
 
     /// One-shot neural 2× of the visible crop's NATIVE pixels (no pre-scaling — the model gets the real
-    /// data, unlike the dead live-path design). Runs on the VT queue; the result replaces the MetalFX
-    /// crop on screen until the geometry moves or playback resumes.
+    /// data, unlike the dead live-path design). Crops bigger than the model's ~960×960 input cap are
+    /// **tiled** through one session and composited, so the enhance works at ANY zoom past the overlay
+    /// threshold (previously it silently skipped below ~1.34× — the "works sometimes" complaint). Runs on
+    /// the VT queue; the result replaces the MetalFX crop until the geometry moves or playback resumes.
     private func launchStillEnhance(geometry geo: UpscaleGeometry, raw: CVPixelBuffer) {
         stillTriedGeometry = geo
         let fw = CVPixelBufferGetWidth(raw), fh = CVPixelBufferGetHeight(raw)
         guard fw > 0, fh > 0 else { return }
         let cropPx = CGRect(x: geo.videoCrop.minX * CGFloat(fw), y: geo.videoCrop.minY * CGFloat(fh),
                             width: geo.videoCrop.width * CGFloat(fw), height: geo.videoCrop.height * CGFloat(fh))
-        // Session dims: the crop's native size snapped to /8 (biplanar-even + model-friendly), and both
-        // sides must fit the model's ~960×960 input cap — outside that the MetalFX crop simply stays.
-        let cw = max(8, Int((cropPx.width / 8).rounded()) * 8)
-        let ch = max(8, Int((cropPx.height / 8).rounded()) * 8)
-        guard cw >= 64, ch >= 64, cw <= 960, ch <= 960 else { return }
+        let cw = Int(cropPx.width.rounded()), ch = Int(cropPx.height.rounded())
+        guard cw >= 64, ch >= 64 else { return }
 
-        let scaler = SuperResolutionScaler(width: cw, height: ch)
-        let input = UpscaleBox((raw, cropPx))
+        // Tile grid: equal-size tiles, each ≤960 on both sides, /8-aligned, ≤2×2 (enough for a 1080p crop).
+        let nx = (cw + 959) / 960, ny = (ch + 959) / 960
+        guard nx <= 2, ny <= 2 else { return }
+        let tw = min(960, min(cw, ((cw + nx - 1) / nx + 7) & ~7))
+        let th = min(960, min(ch, ((ch + ny - 1) / ny + 7) & ~7))
+        var tiles: [CGRect] = []   // source-pixel rects, top-left origin, clamped inside the crop
+        for iy in 0..<ny {
+            for ix in 0..<nx {
+                let x = min(cropPx.minX + CGFloat(ix * tw), cropPx.minX + CGFloat(cw - tw))
+                let y = min(cropPx.minY + CGFloat(iy * th), cropPx.minY + CGFloat(ch - th))
+                tiles.append(CGRect(x: x, y: y, width: CGFloat(tw), height: CGFloat(th)))
+            }
+        }
+
+        let scaler = SuperResolutionScaler(width: tw, height: th)
+        let input = UpscaleBox((raw, cropPx, tiles))
         stillTask = Task.detached { [weak self, scaler, input] in
             let t0 = Date()
-            let out = await scaler.upscale(input.value.0, cropRect: input.value.1, pts: .zero)
+            let (raw, cropPx, tiles) = input.value
+            var outputs: [CVPixelBuffer] = []
+            for (i, tile) in tiles.enumerated() {
+                guard let out = await scaler.upscale(raw, cropRect: tile,
+                                                     pts: CMTime(value: CMTimeValue(i), timescale: 30)) else {
+                    scaler.invalidate()
+                    await self?.stillCompleted(UpscaleBox<CVPixelBuffer?>(nil), ms: 0)
+                    return
+                }
+                outputs.append(out)
+            }
             scaler.invalidate()
+
+            let final: CVPixelBuffer?
+            if outputs.count == 1 {
+                final = outputs[0]
+            } else {
+                // Composite the scaled tiles into one buffer. The scale comes from the ACTUAL output dims
+                // (the factor is queried, not assumed); overlapping edge tiles just overwrite — the model
+                // is local enough that seams don't show.
+                let s = CGFloat(CVPixelBufferGetWidth(outputs[0])) / tiles[0].width
+                let compW = Int((cropPx.width * s).rounded()), compH = Int((cropPx.height * s).rounded())
+                var dest: CVPixelBuffer?
+                let attrs: [String: Any] = [
+                    kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any](),
+                    kCVPixelBufferMetalCompatibilityKey as String: true,
+                ]
+                CVPixelBufferCreate(kCFAllocatorDefault, compW, compH, kCVPixelFormatType_32BGRA,
+                                    attrs as CFDictionary, &dest)
+                if let dest {
+                    var composite: CIImage?
+                    for (i, out) in outputs.enumerated() {
+                        let dx = (tiles[i].minX - cropPx.minX) * s
+                        let dyTop = (tiles[i].minY - cropPx.minY) * s
+                        let tileOutH = CGFloat(CVPixelBufferGetHeight(out))
+                        // CI origin is bottom-left; tile tops are measured from the crop's top.
+                        let image = CIImage(cvPixelBuffer: out).transformed(by: CGAffineTransform(
+                            translationX: dx, y: CGFloat(compH) - dyTop - tileOutH))
+                        composite = composite.map { image.composited(over: $0) } ?? image
+                    }
+                    if let composite {
+                        let context = CIContext(options: [.cacheIntermediates: false])
+                        context.render(composite, to: dest)
+                    }
+                }
+                final = dest
+            }
             let ms = Date().timeIntervalSince(t0) * 1000
-            let box = UpscaleBox(out)
-            await self?.stillCompleted(box, ms: ms)
+            await self?.stillCompleted(UpscaleBox(final), ms: ms)
         }
     }
 
@@ -581,6 +855,8 @@ final class UpscaleRunner {
         telemetry.mode = "Neural 2× (still)"
         telemetry.lastMs = ms
         onTelemetry(telemetry)
+        // A soft tick marks the enhanced still landing (camera-focus-style "locked on" cue).
+        Haptics.selectionTick()
     }
 
     private func dropStill() {
@@ -613,9 +889,14 @@ final class UpscaleRunner {
         let w = CVPixelBufferGetWidth(buffer), h = CVPixelBufferGetHeight(buffer)
         guard w > 0, h > 0 else { return }
 
+        frameStamp &+= 1
         if let up = upscaler, up.inputWidth != w || up.inputHeight != h {
             upscaler = nil
             upscalerFailed = false
+            cropUpscaler = nil
+            cropUpscalerFailed = false
+            pass2Buffer = nil
+            pass2Geometry = nil
         }
         if upscaler == nil, !upscalerFailed {
             // Gates: >1080p-class sources don't need help (and 2× output would be huge); HDR is out of
