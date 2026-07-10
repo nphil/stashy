@@ -112,8 +112,7 @@ struct ScenePlayerView: View {
 
                 // AI slow-mo (opt-in): the synthesised frame stream renders on a view hosted INSIDE this
                 // surface's zoom container (see `syncSlowMoView`), so pinch/pan zoom it identically to the
-                // video — reading `overlayActive` here also drives attach/detach. (AI upscaling instead hosts
-                // its crop overlay OUTSIDE the zoom — see the `UpscaleOverlayHost` below.)
+                // video — reading `overlayActive` here also drives attach/detach.
                 ZoomablePlayerSurface(
                     model: model,
                     isReady: model.isReady,
@@ -133,19 +132,8 @@ struct ScenePlayerView: View {
                 // animation transaction from THIS scroll-view-backed surface so its zoom/contentSize setup
                 // commits instantly & deterministically — the frame still follows the animated box each
                 // tick, it just isn't wrapped in the Core-Animation transaction that raced (and killed)
-                // pinch-zoom. Zero effect on slow-mo/upscale (hosted inside this same container).
+                // pinch-zoom. Zero effect on slow-mo (hosted inside this same container).
                 .transaction { $0.animation = nil }
-
-                // AI upscale (zoom-crop) overlay: hosted OUTSIDE the zoom transform so the upscaled visible
-                // crop shows at full viewport resolution instead of being stretched by the scroll view's
-                // zoom (which would defeat the point). Hosted on the STABLE flags only (fullscreen + toggle);
-                // per-tick show/hide is the runner's own UIKit `isHidden` — flipping SwiftUI state at a zoom
-                // threshold mid-gesture is what broke pinch in v1.0.241.
-                if isFullscreen, model.upscaleActive, let upscaleView = model.upscaleRenderView {
-                    UpscaleOverlayHost(view: upscaleView)
-                        .frame(width: surfaceSize.width, height: surfaceSize.height)
-                        .allowsHitTesting(false)
-                }
 
                 if model.didFail {
                     VStack(spacing: 10) {
@@ -283,30 +271,5 @@ struct ScenePlayerView: View {
     private func toggleControls() {
         showControls.toggle()
         if showControls { scheduleHide() }
-    }
-}
-
-/// Hosts the AI-upscale render view as a plain, non-interactive overlay filling its bounds — OUTSIDE the
-/// zoom scroll view, so the upscaled crop is shown at native viewport resolution (touches pass through to
-/// the scroll view underneath for pinch/pan).
-private struct UpscaleOverlayHost: UIViewRepresentable {
-    let view: UIView
-
-    func makeUIView(context: Context) -> UIView {
-        let container = UIView()
-        container.backgroundColor = .clear
-        container.isUserInteractionEnabled = false
-        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        view.frame = container.bounds
-        container.addSubview(view)
-        return container
-    }
-
-    func updateUIView(_ uiView: UIView, context: Context) {
-        if view.superview !== uiView {
-            view.removeFromSuperview()
-            view.frame = uiView.bounds
-            uiView.addSubview(view)
-        }
     }
 }

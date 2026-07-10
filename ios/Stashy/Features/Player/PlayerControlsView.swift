@@ -295,27 +295,6 @@ struct PlayerControlsView: View {
                 }
                 .buttonStyle(.plain)
             }
-            Divider().overlay(.white.opacity(0.15))
-            // Opt-in on-device AI upscaling (2× super-resolution, ≤720p-class sources). Same beta caveats
-            // as AI slow-mo — VTFrameProcessor device limits — so it must be explicitly enabled.
-            Button {
-                Haptics.tap(soft: true)
-                model.aiUpscaleEnabled.toggle()
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "sparkles.tv").frame(width: 18)
-                    Text("AI upscale (beta)")
-                    Spacer(minLength: 12)
-                    Image(systemName: model.aiUpscaleEnabled ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(model.aiUpscaleEnabled ? .white : .white.opacity(0.4))
-                }
-                .font(.subheadline)
-                .foregroundStyle(.white)
-                .padding(.horizontal, 14).padding(.vertical, 9)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .padding(.bottom, 2)
         }
         .frame(width: 200)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))

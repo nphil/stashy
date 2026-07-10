@@ -44,10 +44,10 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
     var isReady: Bool
     /// Zoom + swipe-to-dismiss are only enabled in fullscreen.
     var zoomEnabled: Bool
-    /// True while an AI overlay (slow-mo interpolation OR upscaling) is engaged. Its render view is hosted
-    /// **inside** this zoom container (a sibling above the player view) so pinch/pan zoom transforms it
-    /// identically to the video. Kept as a single source of truth (the scroll view) rather than mirroring
-    /// the transform onto a separate overlay, which would desync from the live gesture.
+    /// True while the AI slow-mo overlay is engaged. Its render view is hosted **inside** this zoom
+    /// container (a sibling above the player view) so pinch/pan zoom transforms it identically to the
+    /// video. Kept as a single source of truth (the scroll view) rather than mirroring the transform onto
+    /// a separate overlay, which would desync from the live gesture.
     var overlayActive: Bool
     @Binding var zoomScale: CGFloat
     @Binding var isScrubbing: Bool
@@ -99,9 +99,6 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
         scroll.addGestureRecognizer(swipe)
 
         coordinator.scrollView = scroll
-        // Install the visible-region provider so the AI upscaler can crop to exactly what's on screen while
-        // zoomed. Weak so a rebuilt surface's stale coordinator just returns nil.
-        model.upscaleGeometryProvider = { [weak coordinator] in coordinator?.upscaleGeometry() }
         coordinator.attachPlayerView()
         coordinator.syncSlowMoView()
         return scroll
@@ -116,8 +113,8 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
         if !coordinator.isScrubbing { scroll.isScrollEnabled = zoomEnabled }
         // Defensive: UIScrollView's built-in pinch recogniser can be left disabled by isScrollEnabled
         // toggles (an interrupted hold-scrub, an engine swap mid-gesture) and then never zooms again.
-        // Re-assert it on every update — a no-op when already correct, so zero cost. The AI slow-mo /
-        // upscale overlay is hosted INSIDE this zoom container, so pinch transforms it identically and
+        // Re-assert it on every update — a no-op when already correct, so zero cost. The AI slow-mo
+        // overlay is hosted INSIDE this zoom container, so pinch transforms it identically and
         // is entirely independent of that pipeline.
         scroll.pinchGestureRecognizer?.isEnabled = zoomEnabled
         // Fully reset zoom/pan whenever zooming is disabled (e.g. leaving fullscreen) so the video
@@ -186,47 +183,6 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
             }
             container.bringSubviewToFront(slow)
             hostedSlowView = slow
-        }
-
-        /// Live zoom geometry for the AI upscale overlay: which region of the video is visible (normalised
-        /// frame coords) and where it sits in the viewport (points) — nil while not zoomed in far enough
-        /// (below the threshold native playback is close to display density; the overlay stays hidden).
-        /// Pure math over rects already computed per-tick, no coordinate-space conversions to race.
-        func upscaleGeometry() -> UpscaleGeometry? {
-            guard parent.zoomEnabled, let scroll = scrollView else { return nil }
-            guard scroll.zoomScale >= 1.3 else { return nil }
-            let bounds = container.bounds
-            guard bounds.width > 1, bounds.height > 1 else { return nil }
-            let aspect = parent.model.videoAspect ?? 16.0 / 9.0
-            let vRect = Self.aspectFit(aspect: aspect, in: bounds.size)   // where the video sits in the container
-            guard vRect.width > 1, vRect.height > 1 else { return nil }
-            let visible = scroll.convert(scroll.bounds, to: container)     // visible portion, container coords
-            guard visible.width > 1, visible.height > 1 else { return nil }
-            let inter = visible.intersection(vRect)
-            guard !inter.isNull, inter.width > 1, inter.height > 1 else { return nil }
-            // Normalised crop within the video.
-            let crop = CGRect(x: (inter.minX - vRect.minX) / vRect.width,
-                              y: (inter.minY - vRect.minY) / vRect.height,
-                              width: inter.width / vRect.width,
-                              height: inter.height / vRect.height)
-            // The visible rect maps linearly onto the viewport → placement of the intersection in points.
-            let viewport = scroll.bounds.size
-            let placement = CGRect(x: (inter.minX - visible.minX) / visible.width * viewport.width,
-                                   y: (inter.minY - visible.minY) / visible.height * viewport.height,
-                                   width: inter.width / visible.width * viewport.width,
-                                   height: inter.height / visible.height * viewport.height)
-            return UpscaleGeometry(videoCrop: crop, placement: placement, viewportSize: viewport)
-        }
-
-        /// Aspect-fit a video of `aspect` (w/h) inside `size`, returning the centred rect it occupies.
-        static func aspectFit(aspect: CGFloat, in size: CGSize) -> CGRect {
-            guard size.width > 0, size.height > 0, aspect > 0 else { return CGRect(origin: .zero, size: size) }
-            let containerAspect = size.width / size.height
-            let s: CGSize = aspect > containerAspect
-                ? CGSize(width: size.width, height: size.width / aspect)
-                : CGSize(width: size.height * aspect, height: size.height)
-            return CGRect(x: (size.width - s.width) / 2, y: (size.height - s.height) / 2,
-                          width: s.width, height: s.height)
         }
 
         /// Reset zoom and pan offset — used when zooming is disabled. Re-centring/sizing is handled
