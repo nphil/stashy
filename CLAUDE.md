@@ -86,18 +86,20 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   checklist; plus playback engineering learnings.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.242-era** (AI upscale v2: MetalFX zoom-crop live + neural pause-enhance)
-  — verify the newest release/IPA size each push.
-- **AI upscaling shipped (two engines — read `Services/UpscaleRunner.swift`'s header postmortem before
-  touching):** gear-menu toggle; while fullscreen-zoomed ≥1.3×, **MetalFX** upscales the FULL frame 2×
-  per video frame and a crop overlay hosted OUTSIDE the zoom transform redraws the visible region every
-  display tick (never insert/remove that overlay via SwiftUI state at a zoom threshold — that raced
-  pinch in v1.0.241); on **pause**, the settled crop's native pixels get a one-shot **neural** 2×
-  (`VTLowLatencySuperResolutionScaler`; on-device input cap ~960×960; the scale factor MUST come from
-  `supportedScaleFactors` — an unsupported factor silently renders a green screen). A live neural path
-  is a dead end on iOS 26 (fixed-dims sessions + slow model load vs a continuously-variable crop =
-  rebuild storm; ROADMAP §AI-upscaling has the OS 27 revisit). Slow-mo owns the frame tap at ≤0.5×
-  (two `copyPixelBuffer` consumers steal frames from each other — never run both).
+- Latest release: **v1.0.245-era** (AI upscaling reverted; tilt-to-fullscreen fix) — verify the newest
+  release/IPA size each push.
+- **AI upscaling REVERTED (2026-07-10)** after two shipped iterations (VT zoom-crop v1.0.241, MetalFX
+  2×/4× + neural pause-stills v1.0.242–244): owner called it buggy + not visually worth it on 720p
+  sources. `UpscaleRunner.swift` deleted; gear toggle/stats/overlay/geometry-provider removed. Pinch-zoom,
+  AI slow-mo and the slow-mo Lanczos pass are untouched. **Read ROADMAP §AI-upscaling before any new
+  attempt** — full postmortem (960×960 VT input cap, silent green-screen on unqueried scale factors,
+  session-rebuild storms on variable crops, frame-tap competition, SwiftUI-overlay-races-pinch) plus the
+  researched revival plan: iOS 27 VT query APIs; **Real-ESRGAN Core ML paused-frame enhance** on A19 Pro
+  (reuses the proven tiling design); **Snapdragon 8 Elite live NPU SR** (0.96 ms/tile) for the future
+  Android app; server P40 Real-ESRGAN as max-quality offline option.
+- **Tilt-to-fullscreen made reliable**: `suppressReentry` now re-arms on ANY recognised non-landscape
+  orientation (faceUp used to eat the next tilt), and opening the player while already held landscape
+  enters fullscreen from `onAppear` (no orientation-change notification fires in that case).
 - **AI slow-mo shipped & working** (`Services/SlowMoInterpolator.swift` + `SlowMoRunner.swift` +
   `Features/Player/SlowMoRenderView.swift`): on-device Neural-Engine frame interpolation via `VTFrameProcessor`
   (`VTLowLatencyFrameInterpolation`, iOS 26). While playback ≤0.5× (gated, `aiSlowMoEnabled` off by default),

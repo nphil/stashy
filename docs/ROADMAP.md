@@ -351,24 +351,47 @@ SR model per video on the server (CUDA/CPU), ship the low-res stream + the tiny 
 high quality on-device (refs: NAS / NEMO / LiveNAS). The compact "data" = **per-video model weights**
 (~tens of KB–few MB), NOT per-frame residuals.
 
-**SHIPPED (2026-07-09, v1.0.242-era) — zoom-crop upscaling, two engines** (`Services/UpscaleRunner.swift`;
-read its header postmortem before touching):
-- **Live:** MetalFX spatial 2× on the FULL decoded frame once per video frame; a crop overlay outside the
-  zoom transform redraws the visible region every display tick. (Phase A below is effectively done —
-  render path + thermal envelope proven by this.)
-- **Paused:** one-shot `VTLowLatencySuperResolutionScaler` neural 2× of the settled visible crop's native
-  pixels (its on-device input cap is ~960×960, hence crop-only + paused-only).
-- **iOS 27 (OS 27) follow-up — revisit the neural live path:** OS 27 adds the capability-query APIs this
-  generation lacks (max dimensions per processor, proper support checks — the iOS 26 workarounds were
-  guessed caps + a supportedScaleFactors probe). When the app targets OS 27: query real input caps (they
-  may be >960 on new silicon), consider neural full-frame live for ≤540p sources (the low-bandwidth case
-  below), and re-evaluate session-rebuild cost — if model load gets cheap enough, a live variable-crop
-  neural path may become viable. Until then: MetalFX live + neural stills only.
+**BUILT & REVERTED (2026-07-09/10, v1.0.241–244 → reverted)** — the full postmortem, so the next
+attempt doesn't re-learn it:
+- **What shipped then came out:** zoom-gated live upscaling (MetalFX spatial 2×, later a second crop
+  pass ≈4×, + unsharp mask) plus a one-shot `VTLowLatencySuperResolutionScaler` neural 2× of the paused
+  crop (tiled past its cap). Owner verdict: still buggy in the field and visually not worth the
+  complexity on a 720p source — everything removed; pinch-zoom / AI slow-mo / Lanczos untouched. The
+  code lives in git history (`Services/UpscaleRunner.swift`, deleted ~v1.0.245).
+- **Hard-won facts (iOS 26):** VT low-latency SR input caps at **960×960 on-device** and needs a fixed
+  input size per session (model load > frame time ⇒ a live variable crop = session-rebuild storm; the
+  visible rect's aspect changes continuously while panning). `scaleFactor` MUST come from
+  `supportedScaleFactors(…)` — unsupported values fail SILENTLY into a green screen. Two
+  `copyPixelBuffer` consumers on one `AVPlayerItemVideoOutput` steal frames from each other (slow-mo
+  conflict). Never insert/remove an overlay via SwiftUI state at a zoom threshold — it races pinch.
+  MetalFX spatial 2× diluted by a residual bilinear stretch reads ≈Lanczos (imperceptible).
+- **iOS 27 revisit (the plan):** OS 27 adds the VTFrameProcessor capability-query APIs this generation
+  lacks (real max dims, proper support checks). Re-attempt then, with what we now know.
+
+**On-device generative SR — researched 2026-07-10 (the real "wow" path, both platforms):**
+Qualcomm ships **Real-ESRGAN pre-optimised for Hexagon NPUs** (AI Hub / HuggingFace `qualcomm/…`),
+benchmarked per 128×128→512×512 (4×) tile:
+- **iOS (iPhone 17 Pro / A19 Pro), paused-frame enhance — the recommended next attempt:** convert
+  Real-ESRGAN (x4plus for stills) to Core ML via coremltools (fixed 128 or 256 input, fp16/int8),
+  ANE-dispatch, and drop it into the *tiled pause-enhance architecture from the reverted build* (tiling,
+  overlap-composite, geometry latch, haptic — all proven; only the per-tile model call changes).
+  Expect a few hundred ms–1 s per zoomed crop = fine for a paused still. True generative detail
+  (hallucinated texture/skin), unlike spatial scalers. Ship the `.mlpackage` on-demand (~16–64 MB), not
+  in the IPA. Avoids live-video flicker entirely (generative SR has no temporal consistency frame to
+  frame — stills first is deliberate, not a compromise).
+- **Android (Snapdragon 8 Elite), live generative SR — when the Android app exists:** 8 Elite runs
+  compact Real-ESRGAN-General-x4v3 **w8a8 in 0.96 ms/tile** on the NPU (x4plus 12.6 ms/tile; 8 Elite
+  Gen 5 is ~30% faster still) via QNN/ONNX-Runtime or LiteRT. A ~480×270 crop ≈ 15 tiles ≈ 15 ms ⇒
+  60 fps live generative upscaling is genuinely feasible — stronger than anything iOS 26 can do live.
+  Design note: budget for tile-seam blending + temporal shimmer mitigation before calling it shippable.
+- **Server-side Real-ESRGAN (P40, companion plugin)** remains the max-quality option (x4 offline,
+  ~1.5–3 h per 20-min 720p video): "enhance this scene once, keep forever" for favourites, riding the
+  existing Companion transcode→progress→download infra.
 
 Sequencing so nothing is wasted (slots into the existing AVPlayerItemVideoOutput frame-tap that
 currently feeds the live blur):
-- **Phase A (cheap, validates pipeline):** ~~optional **MetalFX spatial upscale** toggle~~ **done** (see
-  SHIPPED above — zoom-gated rather than always-on; an always-on full-frame mode is a small follow-up).
+- **Phase A (validates pipeline):** attempted via MetalFX (see revert postmortem above) — the render
+  path and thermal envelope ARE proven; the visual payoff at 720p wasn't there for a spatial scaler.
 - **Phase B (the full idea):** a **Stash plugin** trains tiny per-video SR models; the app swaps that
   model into the *same* Core ML inference slot from Phase A. Identical render path, only the model
   source changes.
