@@ -64,6 +64,49 @@ core both items reuse.
   server-side override the user selects. Wire through `ScenePlayerModel` route override + `Player
   ControlsView` overlay.
 
+### ★ Adaptive bitrate streaming (ABR) over flaky / cellular networks (owner-requested 2026-07-10)
+**Goal:** robust playback on poor/variable links — auto-adapt the stream up/down with measured bandwidth
+so it never stalls on a bad connection and uses full quality on a good one, with **zero manual fiddling**.
+This is the automatic sibling of M-B (which is a *manual* server-quality override).
+
+**The gap today.** Every current path is single-rendition: direct-play (no adaptation), remux, on-device
+transcode (fixed target), or M-B's manual Stash HLS at one chosen resolution. None adapts mid-stream — a
+flaky link means either a stall (rung too high) or a manual downshift. AVPlayer does ABR *natively and
+well*, but **only when handed a multi-variant HLS master playlist** (`#EXT-X-STREAM-INF` variants with
+`BANDWIDTH`/`RESOLUTION`/`CODECS`). Stash serves only per-resolution single streams, so AVPlayer has
+nothing to switch between.
+
+**Options, cheapest → most robust:**
+- **A — synthetic master over Stash's existing renditions (cheap, fragile).** App (or a tiny plugin
+  endpoint) synthesises a master `.m3u8` listing Stash's LOW/STANDARD/STANDARD_HD/FULL_HD HLS endpoints
+  as variants with estimated `BANDWIDTH`. AVPlayer picks by throughput. **Why it's fragile:** each Stash
+  rendition is an *independent on-the-fly transcode* → GOP/segment boundaries and PTS are **not aligned**
+  across renditions, so a mid-stream switch glitches/seeks (AVPlayer ABR assumes timestamp-aligned
+  segments from one packaging), and every probe/switch spins a fresh ffmpeg on the server (thrash, slow
+  switches). Okay for coarse up/down, not truly seamless.
+- **B — plugin pre-generates a proper aligned HLS ladder (robust; the real answer).** A **Companion
+  plugin** task pre-transcodes a scene into a multi-bitrate ladder (e.g. 480p/720p/1080p) with **aligned
+  keyframes + identical segment duration** (`-force_key_frames`/fixed GOP, same `hls_time`) + a master
+  playlist, written to the plugin's served `cache/` dir (Range-capable — reuses the exact companion
+  transcode→`findJob` progress→served-file delivery already shipped). App plays the master; AVPlayer does
+  true seamless ABR because segments align. **Cost:** encode time + storage per scene → opt-in per
+  scene / favourites, or a background library pass; cheap on the **P40 (NVENC)**, which the plugin
+  already drives. This is where "leverage the Stash plugin to make it robust" pays off.
+- **C — on-the-fly aligned packager (hard, probably skip).** Plugin endpoint that decodes once and fans
+  out to N aligned encodes on a shared keyframe grid, streaming. Basically reimplementing an HLS packager
+  — not worth it vs. pre-gen (B) unless storage is the blocker.
+
+**App-side pieces (needed for any option, ties into pending "Cellular data-saver" task):**
+- Add an **"Auto" rung** to the M-B quality menu (selects the ABR master); keep the manual rungs as a hard
+  override.
+- **Data-saver cap:** per-`AVPlayerItem` `preferredPeakBitRate` / `preferredMaximumResolution` to ceiling
+  the rung on cellular; persist a "max quality on cellular" setting.
+- **Fast start:** bias the first segment to a low rung, then ramp (AVPlayer mostly handles this given a
+  good master).
+- Honest framing (same as AI-upscaling): on a **LAN/Tailscale** setup direct-play is already pristine →
+  ABR earns its keep on **cellular / remote / congested** links, exactly the case the manual M-B menu
+  half-covers today.
+
 ### ★ PRIORITY — Player UI rework + playback speed / AI slow-motion (owner-requested 2026-07-04)
 
 - **Netflix-style fullscreen player UI + finish the portrait-controls polish (owner-requested; partially
