@@ -182,6 +182,19 @@ struct SettingsView: View {
                     Text("Show an animated preview when you press and hold a scene card. Turn off for thumbnails only.")
                 }
 
+                // Player section
+                Section {
+                    Toggle("Watch heat on scrubber", isOn: $watchHeatEnabled)
+                    Button("Clear Watch Heat Data", role: .destructive) {
+                        WatchHeat.shared.clearAll()
+                    }
+                    .disabled(!watchHeatEnabled)
+                } header: {
+                    Text("Player")
+                } footer: {
+                    Text("While scrubbing, a YouTube-style curve shows the parts you rewatch most. Tracked entirely on this device — nothing is sent anywhere. Turning it off also stops tracking.")
+                }
+
                 // Privacy section
                 Section {
                     Toggle("Require Face ID", isOn: $appLockEnabled)

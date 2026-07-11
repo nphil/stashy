@@ -186,9 +186,11 @@ final class ScenePlayerModel {
     /// The engine is created exactly once in `start()`, from `.onAppear`.
     /// `startAt` > 0 resumes playback at that timestamp once the new engine is ready — used to keep the
     /// exact position when the source is rebuilt (e.g. switching server-transcode quality via the gear).
-    init(route: PlaybackRoute, startAt: Double = 0, loadProfile: LoadProfile = LoadProfile()) {
+    init(route: PlaybackRoute, startAt: Double = 0, loadProfile: LoadProfile = LoadProfile(),
+         sceneID: String? = nil) {
         self.route = route
         self.loadProfile = loadProfile
+        self.sceneID = sceneID
         self.resumeAt = max(0, startAt)
         // Seed the scrubber's duration from Stash metadata. The local-HLS path is a growing EVENT
         // playlist (no ENDLIST until the remux finishes), so AVPlayer reports an *indefinite* duration
@@ -198,6 +200,11 @@ final class ScenePlayerModel {
         // Show the scrubber at the resume point immediately so it doesn't flash 0:00 before the seek lands.
         self.currentTime = self.resumeAt
     }
+
+    /// Scene identity for watch-heat accumulation (the route itself carries no scene ID). nil ⇒ no heat.
+    @ObservationIgnored private let sceneID: String?
+    /// Last tick's playhead, for deriving the per-tick watched delta (−1 until the first tick).
+    @ObservationIgnored private var lastHeatPosition: Double = -1
 
     /// One-time resume seek target (set at init); consumed the first time the engine reports ready.
     private let resumeAt: Double
@@ -355,6 +362,17 @@ final class ScenePlayerModel {
             // Never let the reported time exceed the known duration (a zero-based remux can produce a
             // hair past the end, and rounding at the very end could otherwise show > total).
             self.currentTime = self.duration > 0 ? min(absolute, self.duration) : absolute
+            // Watch-heat: accumulate natural forward playback only. The delta window rejects seeks,
+            // scrub landings and engine rebuilds (any jump larger than a couple of tick intervals — or
+            // backwards — records nothing; the next tick just re-anchors).
+            if let sceneID = self.sceneID, self.duration > 0 {
+                let delta = absolute - self.lastHeatPosition
+                if self.isPlaying, self.lastHeatPosition >= 0, delta > 0.05, delta < 2.5 {
+                    WatchHeat.shared.record(sceneID: sceneID, position: absolute,
+                                            duration: self.duration, seconds: delta)
+                }
+                self.lastHeatPosition = absolute
+            }
         }
         engine.onReady = { [weak self] ready in
             guard let self, self.isReady != ready else { return }

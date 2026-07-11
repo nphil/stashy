@@ -49,8 +49,9 @@ struct ScenePlayerView: View {
         self.onBack = onBack
         // Seed the (rebuilt) model with the position captured just before the source changed, plus the
         // file's load weight so the loading donut's expected time scales with how heavy this scene is.
+        // The scene ID feeds watch-heat accumulation (the route itself carries no scene identity).
         _model = State(initialValue: ScenePlayerModel(route: route, startAt: resumeTime.wrappedValue,
-                                                      loadProfile: scene.loadProfile))
+                                                      loadProfile: scene.loadProfile, sceneID: scene.id))
     }
 
     /// The video's display aspect. Prefer the *actual* decoded size reported by the player (correct

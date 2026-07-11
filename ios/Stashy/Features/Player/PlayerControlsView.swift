@@ -38,6 +38,8 @@ struct PlayerControlsView: View {
     var spritePreviewTopLeading = false
     let scheduleHide: () -> Void
     var onBack: (() -> Void)? = nil
+    /// Watch-heat curve shown on the scrubber while dragging (Settings → Player toggle).
+    @AppStorage("watchHeatEnabled") private var watchHeatEnabled = true
 
     var body: some View {
         GeometryReader { proxy in
@@ -197,6 +199,7 @@ struct PlayerControlsView: View {
                 currentTime: model.currentTime,
                 sprites: sprites,
                 showSpritePreview: !spritePreviewTopLeading, // top-left variant renders separately
+                heat: watchHeatEnabled ? WatchHeat.shared.curve(sceneID: scene.id) : nil,
                 isScrubbing: $isScrubbing,
                 scrubTime: $scrubTime,
                 onSeek: { model.seek(to: $0); scheduleHide() }
@@ -446,6 +449,8 @@ struct ScrubBar: View {
     let currentTime: TimeInterval
     let sprites: SpriteThumbnails
     var showSpritePreview = true
+    /// Watch-heat curve (normalised 0…1 bins) drawn above the track while scrubbing — nil hides it.
+    var heat: [Double]? = nil
     @Binding var isScrubbing: Bool
     @Binding var scrubTime: TimeInterval
     let onSeek: (TimeInterval) -> Void
@@ -462,6 +467,18 @@ struct ScrubBar: View {
             let clampedProgress = max(0, min(1, progress))
 
             ZStack(alignment: .leading) {
+                // Watch-heat ("most replayed") curve: rises from the track's top edge, YouTube-style.
+                // Revealed only while scrubbing so the resting controls stay clean; unclipped, so it
+                // extends into the empty space above the bar.
+                if let heat {
+                    WatchHeatShape(samples: heat)
+                        .fill(.white.opacity(0.32))
+                        .frame(width: width, height: 14)
+                        .offset(y: -9)   // baseline sits on the track's top edge (track = 4pt centred in 22)
+                        .opacity(isScrubbing ? 1 : 0)
+                        .animation(.easeInOut(duration: 0.18), value: isScrubbing)
+                        .allowsHitTesting(false)
+                }
                 Capsule().fill(.white.opacity(0.3)).frame(height: 4)
                 Capsule().fill(.white).frame(width: width * clampedProgress, height: 4)
                 Circle()
@@ -505,5 +522,32 @@ struct ScrubBar: View {
             }
         }
         .frame(height: 22)
+    }
+}
+
+/// The watch-heat area shape: a smoothed filled curve over normalised (0…1) bins, baseline at the rect's
+/// bottom. Quad-curves through bin midpoints so the (already 3-tap-smoothed) samples read as rolling
+/// hills rather than a jagged polyline — the YouTube "most replayed" look.
+private struct WatchHeatShape: Shape {
+    let samples: [Double]
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        guard samples.count > 2, rect.width > 1, rect.height > 1 else { return path }
+        let step = rect.width / CGFloat(samples.count - 1)
+        let points: [CGPoint] = samples.enumerated().map { i, v in
+            CGPoint(x: CGFloat(i) * step, y: rect.maxY - CGFloat(max(0, min(1, v))) * rect.height)
+        }
+        path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.addLine(to: points[0])
+        for i in 1..<(points.count - 1) {
+            let mid = CGPoint(x: (points[i].x + points[i + 1].x) / 2,
+                              y: (points[i].y + points[i + 1].y) / 2)
+            path.addQuadCurve(to: mid, control: points[i])
+        }
+        path.addLine(to: points[points.count - 1])
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.closeSubpath()
+        return path
     }
 }
