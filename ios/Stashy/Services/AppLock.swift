@@ -75,6 +75,34 @@ private struct AppLockModifier: ViewModifier {
     }
 }
 
+/// Covers the app the moment the scene leaves `.active` (App Switcher, Control Center pull-down,
+/// incoming call, notification shade) so the multitasking snapshot iOS captures never shows media —
+/// the same heavy-blur treatment as the lock screen, minus the lock. Independent of Face ID app lock
+/// (which only covers a *backgrounded* return) and of Privacy Mode (which blurs in-app media): this one
+/// is purely about what leaks into system UI. No animation on purpose — the cover must be fully drawn
+/// in the frame the system snapshots, so it appears/disappears instantly.
+private struct SnapshotPrivacyModifier: ViewModifier {
+    @AppStorage("appSwitcherBlurEnabled") private var enabled = true
+    @Environment(\.scenePhase) private var scenePhase
+
+    func body(content: Content) -> some View {
+        ZStack {
+            content
+            if enabled && scenePhase != .active {
+                ZStack {
+                    Rectangle().fill(.thickMaterial).ignoresSafeArea()
+                    Image(systemName: "eye.slash.fill")
+                        .font(.system(size: 34, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .allowsHitTesting(false)
+            }
+        }
+    }
+}
+
 extension View {
     func appLock() -> some View { modifier(AppLockModifier()) }
+    /// Blur the app in the App Switcher / whenever the scene isn't active (see `SnapshotPrivacyModifier`).
+    func snapshotPrivacy() -> some View { modifier(SnapshotPrivacyModifier()) }
 }

@@ -31,6 +31,7 @@ struct StashyApp: App {
                 .preferredColorScheme(themeManager.enforcedColorScheme)
                 .tint(themeManager.current.accentColor)
                 .appLock()
+                .snapshotPrivacy()   // outermost: covers everything (incl. the lock screen) in snapshots
         }
     }
 }

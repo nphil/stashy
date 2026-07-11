@@ -17,6 +17,8 @@ struct SettingsView: View {
     @AppStorage("animatedPreviews") private var animatedPreviews = true
     @AppStorage("appLockEnabled") private var appLockEnabled = false
     @AppStorage("privacyMode") private var privacyMode = false
+    @AppStorage("appSwitcherBlurEnabled") private var appSwitcherBlur = true
+    @AppStorage("watchHeatEnabled") private var watchHeatEnabled = true
     @State private var debugLogging = RemoteLog.isLoggingEnabled
     @State private var debugServer = RemoteLog.server
     @State private var debugTopic = RemoteLog.topic
@@ -185,12 +187,13 @@ struct SettingsView: View {
                     Toggle("Require Face ID", isOn: $appLockEnabled)
                         .disabled(!AppLock.isAvailable)
                     Toggle("Privacy Mode", isOn: $privacyMode)
+                    Toggle("Blur in App Switcher", isOn: $appSwitcherBlur)
                 } header: {
                     Text("Privacy")
                 } footer: {
                     Text(AppLock.isAvailable
-                         ? "Require Face ID, Touch ID, or your passcode to open Stashy. Privacy Mode blurs all media — thumbnails, names, sprites, and video (press and hold to peek)."
-                         : "Set up Face ID, Touch ID, or a passcode in iOS Settings to enable app lock. Privacy Mode blurs all media — thumbnails, names, sprites, and video (press and hold to peek).")
+                         ? "Require Face ID, Touch ID, or your passcode to open Stashy. Privacy Mode blurs all media — thumbnails, names, sprites, and video (press and hold to peek). Blur in App Switcher covers the app whenever you leave it, so the multitasking snapshot never shows what was on screen."
+                         : "Set up Face ID, Touch ID, or a passcode in iOS Settings to enable app lock. Privacy Mode blurs all media — thumbnails, names, sprites, and video (press and hold to peek). Blur in App Switcher covers the app whenever you leave it, so the multitasking snapshot never shows what was on screen.")
                 }
 
                 // Cache section
