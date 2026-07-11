@@ -86,8 +86,17 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   checklist; plus playback engineering learnings.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.245-era** (AI upscaling reverted; tilt-to-fullscreen fix) — verify the newest
+- Latest release: **v1.0.246** (app-switcher privacy blur + watch-heat scrubber) — verify the newest
   release/IPA size each push.
+- **App-switcher privacy blur shipped** (`SnapshotPrivacyModifier` in `Services/AppLock.swift`, outermost
+  in `StashyApp`): thick-material cover whenever `scenePhase != .active` so the multitasking snapshot
+  never shows media. Deliberately unanimated (cover must be drawn in the snapshotted frame). Settings →
+  Privacy toggle, default ON. Independent of Face ID lock and in-app Privacy Mode.
+- **Watch-heat shipped** (`Services/WatchHeat.swift`): per-scene 100-bin watched-seconds accumulation
+  (host-scoped keys, JSON in App Support, debounced off-main writes), fed from `ScenePlayerModel`'s time
+  tick (model now takes `sceneID`; delta window rejects seeks). `ScrubBar` draws the outlier-capped,
+  smoothed, normalised curve above the track **only while scrubbing**. Settings → Player: toggle
+  (default ON; off = stops tracking too) + Clear data.
 - **AI upscaling REVERTED (2026-07-10)** after two shipped iterations (VT zoom-crop v1.0.241, MetalFX
   2×/4× + neural pause-stills v1.0.242–244): owner called it buggy + not visually worth it on 720p
   sources. `UpscaleRunner.swift` deleted; gear toggle/stats/overlay/geometry-provider removed. Pinch-zoom,
