@@ -96,10 +96,8 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   checklist; plus playback engineering learnings.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.248** (exact-frame scrub preview + variable-speed scrubbing). One more push in
-  flight: the **scrub speed-gear label + variable-speed on the video hold-scrub** (commit `1069758`) —
-  verify it produced v1.0.249 (an unverified scheduled wakeup was checking CI). Verify the newest
-  release/IPA size each push.
+- Latest release: **v1.0.249** (scrub speed-gear label + variable-speed on the video hold-scrub, commit
+  `1069758`, ~8.60 MB — built green). Verify the newest release/IPA size each push.
 - **Scrubbing upgrades shipped this session** (all in `Features/Player/PlayerControlsView.swift` +
   `ZoomablePlayerSurface.swift` + new `Services/ScrubFrameProvider.swift`): (1) **exact-frame preview**
   on downloaded (local) files — `AVAssetImageGenerator` (zero tolerance, `cancelAllCGImageGeneration`
