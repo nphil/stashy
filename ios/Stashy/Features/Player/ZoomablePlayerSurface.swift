@@ -52,6 +52,8 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
     @Binding var zoomScale: CGFloat
     @Binding var isScrubbing: Bool
     @Binding var scrubTime: TimeInterval
+    /// Current variable-scrub gear (0 = full … 3 = fine) — shared with the scrub bar for the speed label.
+    @Binding var scrubSpeedTier: Int
     let onSingleTap: () -> Void
     let onScrubStart: () -> Void
     let onScrubEnd: () -> Void
@@ -145,8 +147,10 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
         var lastZoomEnabled: Bool?
         private(set) var isScrubbing = false
         private let haptic = UIImpactFeedbackGenerator(style: .medium)
-        private var scrubStartX: CGFloat = 0
-        private var scrubAnchorTime: TimeInterval = 0
+        private var scrubStartY: CGFloat = 0        // reference for variable-speed vertical distance
+        private var lastScrubX: CGFloat = 0         // incremental horizontal delta anchor
+        private var scrubSpeedTier = 0
+        private var scrubAccumTime: TimeInterval = 0   // running scrub position (own accumulator, no read-back)
         private var lastCueIndex = -1
 
         init(_ parent: ZoomablePlayerSurface) { self.parent = parent }
@@ -236,15 +240,31 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
                 lastCueIndex = -1
                 isScrubbing = true
                 scroll.isScrollEnabled = false // don't pan the zoomed video while scrubbing
-                scrubStartX = gr.location(in: scroll).x
-                scrubAnchorTime = parent.model.currentTime
+                let loc = gr.location(in: scroll)
+                lastScrubX = loc.x
+                scrubStartY = loc.y                       // vertical reference for variable speed
+                scrubSpeedTier = 0
+                scrubAccumTime = parent.model.currentTime // start scrubbing from the current position
+                parent.scrubSpeedTier = 0
+                parent.scrubTime = scrubAccumTime
                 parent.isScrubbing = true
                 parent.onScrubStart()
             case .changed:
-                let x = gr.location(in: scroll).x
+                // Incremental + variable-speed: horizontal travel scrubs, scaled down as the finger moves
+                // vertically away from where the press began (same gears + label as the scrub bar). Purely
+                // the time math — the scroll view's own pinch/pan/tap recognisers are untouched.
+                let loc = gr.location(in: scroll)
                 let span = max(parent.model.duration, 1)
-                let delta = Double((x - scrubStartX) / width) * span
-                parent.scrubTime = max(0, min(parent.model.duration, scrubAnchorTime + delta))
+                let (rate, tier) = ScrubSpeed.tier(verticalDistance: loc.y - scrubStartY)
+                if tier != scrubSpeedTier {
+                    scrubSpeedTier = tier
+                    parent.scrubSpeedTier = tier
+                    Haptics.selectionTick()
+                }
+                let dx = loc.x - lastScrubX
+                lastScrubX = loc.x
+                scrubAccumTime = max(0, min(parent.model.duration, scrubAccumTime + Double(dx / width) * span * rate))
+                parent.scrubTime = scrubAccumTime
                 // One haptic tick each time the scrub crosses into a new preview frame.
                 let idx = parent.cueIndex(parent.scrubTime)
                 if idx != lastCueIndex {
@@ -255,6 +275,8 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
                 if isScrubbing {
                     parent.model.seek(to: parent.scrubTime)
                     isScrubbing = false
+                    scrubSpeedTier = 0
+                    parent.scrubSpeedTier = 0
                     scroll.isScrollEnabled = parent.zoomEnabled
                     parent.isScrubbing = false
                     parent.onScrubEnd()

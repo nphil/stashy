@@ -14,6 +14,8 @@ struct PlayerControlsView: View {
     @Binding var showStats: Bool
     @Binding var isScrubbing: Bool
     @Binding var scrubTime: TimeInterval
+    /// Current variable-scrub gear, shared with the video hold-scrub so both drive the same label.
+    @Binding var scrubSpeedTier: Int
     /// Manual server-transcode quality (gear menu, M-B). Changing it re-routes to the Stash HLS stream.
     @Binding var quality: ServerQuality
     /// Captured right before a quality switch so the rebuilt player resumes at the exact position.
@@ -212,6 +214,7 @@ struct PlayerControlsView: View {
                 showSpritePreview: !spritePreviewTopLeading, // top-left variant renders separately
                 heat: watchHeatEnabled ? WatchHeat.shared.curve(sceneID: scene.id) : nil,
                 exactFrame: scrubFrames?.image,
+                speedTier: $scrubSpeedTier,
                 isScrubbing: $isScrubbing,
                 scrubTime: $scrubTime,
                 onSeek: { model.seek(to: $0); scheduleHide() }
@@ -465,6 +468,9 @@ struct ScrubBar: View {
     var heat: [Double]? = nil
     /// Exact decoded frame at the scrub position (local downloads) — preferred over the sprite tile.
     var exactFrame: UIImage? = nil
+    /// Current variable-scrub gear (0 = full … 3 = fine). A binding so the video hold-scrub can drive the
+    /// same on-screen label (both scrub methods share it).
+    @Binding var speedTier: Int
     @Binding var isScrubbing: Bool
     @Binding var scrubTime: TimeInterval
     let onSeek: (TimeInterval) -> Void
@@ -472,23 +478,9 @@ struct ScrubBar: View {
     @State private var lastCueIndex = -1
     /// Last horizontal touch position (nil = drag not begun) — variable-speed scrubbing is incremental.
     @State private var lastDragX: CGFloat?
-    /// Current speed tier (0 = full … 3 = fine), tracked to fire a haptic notch when the gear changes.
-    @State private var speedTier = 0
 
     private let previewWidth: CGFloat = 160
     private let previewHeight: CGFloat = 90
-
-    /// Apple-style variable scrub speed: full speed on the bar, easing to fine as the finger moves
-    /// vertically away, so a long video is quick to traverse yet you can still nudge to a single frame.
-    /// Returns (rate multiplier, tier index for the haptic notch).
-    private static func scrubSpeed(verticalDistance d: CGFloat) -> (Double, Int) {
-        switch abs(d) {
-        case ..<44:  return (1.0, 0)    // Hi-Speed — on/near the bar
-        case ..<90:  return (0.5, 1)    // Half-Speed
-        case ..<150: return (0.25, 2)   // Quarter
-        default:     return (0.1, 3)    // Fine
-        }
-    }
 
     var body: some View {
         GeometryReader { geo in
@@ -531,7 +523,7 @@ struct ScrubBar: View {
                         } else {
                             // Incremental, speed-scaled by how far the finger has moved off the bar
                             // (bar centre ≈ 11pt within the 22pt track). Fine control without a huge bar.
-                            let (rate, tier) = Self.scrubSpeed(verticalDistance: value.location.y - 11)
+                            let (rate, tier) = ScrubSpeed.tier(verticalDistance: value.location.y - 11)
                             if tier != speedTier { speedTier = tier; Haptics.selectionTick() }
                             let dx = value.location.x - (lastDragX ?? value.location.x)
                             scrubTime = max(0, min(duration, scrubTime + Double(dx / width) * duration * rate))
@@ -548,6 +540,7 @@ struct ScrubBar: View {
                         isScrubbing = false
                         lastCueIndex = -1
                         lastDragX = nil
+                        speedTier = 0
                     }
             )
             .overlay(alignment: .topLeading) {
@@ -563,8 +556,48 @@ struct ScrubBar: View {
                         .offset(x: x, y: -(previewHeight + 16))
                 }
             }
+            // Subtle current-gear label, centred just above the track — only past full speed, so normal
+            // scrubbing stays label-free. Shared with the video hold-scrub via the `speedTier` binding.
+            // Opacity-driven (not a conditional) so its fade is scoped here and never animates the thumb.
+            .overlay(alignment: .top) {
+                let label = ScrubSpeed.label(speedTier)
+                Text(label ?? "")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .padding(.horizontal, 9).padding(.vertical, 3)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .environment(\.colorScheme, .dark)
+                    .opacity(isScrubbing && label != nil ? 1 : 0)
+                    .offset(y: -28)
+                    .allowsHitTesting(false)
+                    .animation(.easeOut(duration: 0.15), value: speedTier)
+                    .animation(.easeOut(duration: 0.15), value: isScrubbing)
+            }
         }
         .frame(height: 22)
+    }
+}
+
+/// Shared variable-scrub-speed model used by BOTH the scrub bar and the video hold-scrub: full speed when
+/// the finger is near its reference line, easing to fine as it moves vertically away.
+enum ScrubSpeed {
+    /// (rate multiplier, tier index 0…3) for a vertical distance in points.
+    static func tier(verticalDistance d: CGFloat) -> (rate: Double, tier: Int) {
+        switch abs(d) {
+        case ..<44:  return (1.0, 0)    // Hi-Speed
+        case ..<90:  return (0.5, 1)    // Half
+        case ..<150: return (0.25, 2)   // Quarter
+        default:     return (0.1, 3)    // Fine
+        }
+    }
+    /// Subtle label for the current gear, or nil at full speed (no label needed).
+    static func label(_ tier: Int) -> String? {
+        switch tier {
+        case 1: return "Half-Speed"
+        case 2: return "Quarter-Speed"
+        case 3: return "Fine"
+        default: return nil
+        }
     }
 }
 

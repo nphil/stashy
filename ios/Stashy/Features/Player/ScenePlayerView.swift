@@ -35,6 +35,9 @@ struct ScenePlayerView: View {
     @State private var showStats = false
     @State private var isScrubbing = false
     @State private var scrubTime: TimeInterval = 0
+    /// Variable-scrub gear (0 = full … 3 = fine), shared by the bar drag and the video hold-scrub so the
+    /// on-screen speed label is the same for both.
+    @State private var scrubSpeedTier = 0
     @State private var hideTask: Task<Void, Never>?
     /// False until the first `.onAppear`. A return here (popping back from a pushed performer / external
     /// link, which tore the engine down via `.onDisappear`) is a re-appear — it resumes AT the position but
@@ -124,6 +127,7 @@ struct ScenePlayerView: View {
                     zoomScale: $zoomScale,
                     isScrubbing: $isScrubbing,
                     scrubTime: $scrubTime,
+                    scrubSpeedTier: $scrubSpeedTier,
                     onSingleTap: { toggleControls() },
                     onScrubStart: { hideTask?.cancel(); showControls = true },
                     onScrubEnd: { scheduleHide() },
@@ -170,6 +174,7 @@ struct ScenePlayerView: View {
                     showStats: $showStats,
                     isScrubbing: $isScrubbing,
                     scrubTime: $scrubTime,
+                    scrubSpeedTier: $scrubSpeedTier,
                     quality: $quality,
                     resumeTime: $resumeTime,
                     videoRect: videoRect,
