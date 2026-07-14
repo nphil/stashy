@@ -46,7 +46,12 @@ struct SettingsView: View {
         .padding(.vertical, 4)
     }
 
+    /// True once the user taps **Edit** on a saved connection. A saved server is otherwise shown as
+    /// read-only (greyed) rows so it can't be changed by accident. A not-yet-connected server is always
+    /// editable (first-time setup).
+    @State private var isEditing = false
     private var isConnected: Bool { appState.isAuthenticated }
+    private var connectionEditable: Bool { !isConnected || isEditing }
     private var hasChanges: Bool {
         editingURL.trimmed != savedURL || editingKey.trimmed != savedKey
     }
@@ -79,11 +84,18 @@ struct SettingsView: View {
                         Text("Server URL")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        TextField("https://stash.example.com:9999", text: $editingURL)
-                            .keyboardType(.URL)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .submitLabel(.next)
+                        if connectionEditable {
+                            TextField("https://stash.example.com:9999", text: $editingURL)
+                                .keyboardType(.URL)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .submitLabel(.next)
+                        } else {
+                            Text(savedURL.isEmpty ? "—" : savedURL)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
                     }
                     .padding(.vertical, 2)
 
@@ -91,21 +103,26 @@ struct SettingsView: View {
                         Text("API Key")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        SecureField("Leave blank if your server has no login", text: $editingKey)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .submitLabel(.go)
-                            .onSubmit { if canSave { saveServer() } }
+                        if connectionEditable {
+                            SecureField("Leave blank if your server has no login", text: $editingKey)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .submitLabel(.go)
+                                .onSubmit { if canSave { saveServer() } }
+                        } else {
+                            Text(savedKey.isEmpty ? "None" : "••••••••••")
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     .padding(.vertical, 2)
 
-                    if let err = saveError {
+                    if let err = saveError, connectionEditable {
                         Label(err, systemImage: "exclamationmark.circle")
                             .font(.caption)
                             .foregroundStyle(.red)
                     }
 
-                    if hasChanges {
+                    if connectionEditable && hasChanges {
                         Button(action: saveServer) {
                             HStack {
                                 Spacer()
@@ -124,7 +141,23 @@ struct SettingsView: View {
                         .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
                     }
                 } header: {
-                    Text("Connection")
+                    HStack {
+                        Text("Connection")
+                        Spacer()
+                        // Standard "Edit"/"Cancel" affordance so a saved server can't be changed by accident.
+                        if isConnected {
+                            Button(isEditing ? "Cancel" : "Edit") {
+                                if isEditing {                 // Cancel: discard edits, back to read-only
+                                    editingURL = savedURL
+                                    editingKey = savedKey
+                                    saveError = nil
+                                }
+                                withAnimation(.easeInOut(duration: 0.2)) { isEditing.toggle() }
+                            }
+                            .font(.subheadline.weight(.semibold))
+                        }
+                    }
+                    .textCase(nil)   // keep the button (and title) title-case, not the header's default caps
                 } footer: {
                     Text("Your Stash server address (including http:// or https:// and port). The API key lives in Stash under Settings → Security → API Key — only needed if your server requires a login.")
                 }
@@ -293,6 +326,7 @@ struct SettingsView: View {
                     appState.disconnect()
                     savedURL = ""; savedKey = ""
                     editingURL = ""; editingKey = ""
+                    isEditing = false
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
@@ -335,6 +369,7 @@ struct SettingsView: View {
                 savedKey = KeychainService.read("apiKey") ?? editingKey.trimmed
                 editingURL = savedURL
                 editingKey = savedKey
+                isEditing = false   // back to the greyed read-only view
             } catch {
                 saveError = error.localizedDescription
             }
