@@ -55,11 +55,12 @@ items from this session are listed at the bottom for context.
       re-seek's ring races to near-full instead of crawling on the cold-start estimate, and seek times no
       longer pollute the first-load learning. (Note: reinit debounce still deferred — seek fires only on
       drag release, so mid-drag thrash isn't a concern.)
-- [ ] **Hybrid scrub preview** — show the instant Stash/offline sprite tile while dragging, then refine
-      with an on-device decoded frame at the exact position when the user pauses on it.
-- [ ] **Watch-heat / "most replayed" overlay** on the scrubber — YouTube-style heat curve built locally
-      (per-scene bins of accumulated real-time watch seconds, persisted per server, drawn behind the
-      ScrubBar; decay/cap; settings toggle to show/clear). *(User explicitly asked for this.)*
+- [x] **Hybrid scrub preview** — SHIPPED v1.0.248 (`Services/ScrubFrameProvider.swift`): exact decoded
+      frame under the finger for local downloads, sprite tile as placeholder. Plus **variable-speed
+      scrubbing** (bar + video hold-scrub) with a speed label. (ENGINEERING_NOTES §6.)
+- [x] **Watch-heat / "most replayed" overlay** — SHIPPED v1.0.246 (`Services/WatchHeat.swift`): per-scene
+      100-bin watched-seconds curve, host-scoped, drawn above the ScrubBar while scrubbing; Settings →
+      Player toggle + Clear.
 - [ ] **Revive segmented HLS** only if driven by one continuous muxer (per-segment muxing was choppy).
 - [ ] **Quality / gear selector** — Auto / Direct / On-device / Server transcode + resolution picker.
 - [ ] **Server-side transcode controls** — quality/resolution for the HLS path.
@@ -91,10 +92,9 @@ items from this session are listed at the bottom for context.
       action" chaptering, motion-peak scrub thumbnails, smart previews.
 
 ## Privacy & security
-- [ ] **App-switcher / background privacy blur** — cover content on `scenePhase != .active` (App
-      Switcher, Control Center, calls) so the multitasking snapshot never shows video/thumbnails.
-      Independent of the Face ID lock; settings toggle. *(User asked to blur the paused frame on OS
-      switch — this is the consistent, lock-independent version.)*
+- [x] **App-switcher / background privacy blur** — SHIPPED v1.0.246 (`SnapshotPrivacyModifier` in
+      `Services/AppLock.swift`): thick-material cover on `scenePhase != .active`, Settings → Privacy
+      toggle (default ON), independent of Face ID lock. Deliberately unanimated (snapshotted frame).
 - [ ] **⚠️ REMOVE ALL TELEMETRY before any wider release** — `RemoteLog` → ntfy is off by default but
       present. Deletion checklist in optimization plan §5. The one intentionally-open tech-debt item.
 

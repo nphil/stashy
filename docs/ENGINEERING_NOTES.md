@@ -25,6 +25,24 @@ Consequences:
   `tail_lines: ~230`. Swift `error:` lines appear just before the Package-step echo. Look for
   `❌ .../File.swift:LINE:COL: <message>` and `** BUILD FAILED **`.
 
+### Verify Apple API signatures BEFORE you push (CI is the only compiler)
+Every unverified API guess is a ~6–8 min round trip. Before using an unfamiliar Apple symbol, fetch its
+exact Swift declaration from the **doc-JSON endpoint** (works from the sandbox; HTML doc pages are
+JS-rendered and return only the title):
+```
+curl -sL "https://developer.apple.com/tutorials/data/documentation/<framework>/<symbol>.json" \
+  | python3 -c "import json,sys; d=json.load(sys.stdin);
+[print(''.join(f['text'] for f in v['fragments'])) for v in d['references'].values()
+ if v.get('kind')=='symbol' and v.get('fragments')]"
+```
+(objc-only detail sometimes only appears on the child page `.../<symbol>/<member>.json`.) This session it
+pinned down MetalFX (`MTLFXSpatialScalerDescriptor.makeSpatialScaler`, `colorProcessingMode`),
+`AVAssetImageGenerator.generateCGImageAsynchronously(for:completionHandler:)`, and the VT super-res inits.
+**Sharpest gotcha — failable-vs-not differs across sibling APIs:** `VTLowLatencyFrameInterpolation`
+config init is *optional* (`guard let`), but `VTLowLatencySuperResolutionScaler` config **and** params
+inits are **non-optional** (plain `let`), and `maximumDimensions` imports as `CMVideoDimensions?`
+(unwrap it). Guessing these cost three separate red builds before the doc-JSON habit stuck.
+
 ### Auto-versioning and the push sequence
 On success, CI commits a version bump to `main` with `[skip ci]` (bumps `MARKETING_VERSION` /
 `CURRENT_PROJECT_VERSION` / `CFBundleShortVersionString` in `ios/project.yml` + `Info.plist`, and
@@ -228,6 +246,31 @@ churns.** History on the filter/sort panel:
 Filters reset on launch; **sort field+direction persist** (UserDefaults). Blur toggles for
 thumbnails/titles. Face ID is immediate (minimal privacy blur, no splash). Videos start muted unless
 on AirPods/private audio route.
+
+### Scrubbing (two gestures, one model) — v1.0.248-era
+There are **two** scrub gestures and they must feel identical:
+1. **Bar drag** — `ScrubBar.body` `DragGesture` in `PlayerControlsView.swift`. Touch anywhere on the
+   full-width, 22 pt-tall track (not just the thumb); first touch jumps to position (tap-to-seek).
+2. **Video hold-scrub** — `ZoomablePlayerSurface.Coordinator.handleLongPress`. **This lives in the
+   pinch/zoom gesture file — a landmine.** Only ever touch the *time-math* inside `.changed`; leave the
+   gesture setup, delegates, `scroll.isScrollEnabled` toggling, and lifecycle alone, or you risk pinch/pan.
+- **Variable speed:** shared `ScrubSpeed` enum (module-level in `PlayerControlsView.swift`) →
+  `tier(verticalDistance:)` returns (rate, tier 0–3): full speed near the reference line (bar centre, or
+  the press-start Y), easing to Fine (0.1×) as the finger moves vertically away. Both gestures are
+  **incremental** (accumulate Δx·rate onto the position); the video path keeps its **own accumulator**
+  (`scrubAccumTime`) rather than reading the `scrubTime` binding back (avoids propagation-timing bugs).
+- **`speedTier` is a shared `@Binding`** owned by `ScenePlayerView`, passed to both the surface and
+  `PlayerControlsView`→`ScrubBar`, so the one subtle speed label (opacity-driven, scoped so it never
+  animates the thumb) reads the same regardless of which gesture is active.
+- **Exact-frame preview** (`Services/ScrubFrameProvider.swift`, `@Observable @MainActor`): decodes the
+  real frame under the finger for **local downloads only** (`ScenePlayerModel.scrubFrameURL` =
+  `route.url` when `isFileURL`). `AVAssetImageGenerator` with zero tolerance; coalesce by calling
+  `cancelAllCGImageGeneration()` before each request so only the latest completes; capped `maximumSize`;
+  carry the decoded `UIImage` back to the main actor in an `@unchecked Sendable` box. `PlayerControlsView`
+  feeds it from `.onChange(of: scrubTime)` (covers both gestures) and `ScrubBar` prefers it over the
+  sprite tile. Release seek is already frame-exact for local media (`ScenePlayerModel.seekPrecise`).
+- **Pitfall that cost a build:** adding `speedTier`/`exactFrame` to `ScrubBar` — a SwiftUI `View`'s
+  synthesized init requires call-site args in **declaration order** (Swift won't reorder labelled args).
 
 ---
 

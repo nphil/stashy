@@ -66,6 +66,16 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
 - FFmpeg = SPM package `nphil/stashy-videoengine`, LGPL-minimal (**no AV1 encode**). Capability
   changes happen by rebuilding that package, not in this repo. (§5)
 - Adding a `DownloadState` case = updating the exhaustive switches in `DownloadsView`. (§7)
+- **Verify Apple API signatures BEFORE pushing** — CI is the only compiler and each guess costs a
+  ~6–8 min cycle. Fetch the exact Swift declaration from the doc-JSON endpoint (`curl
+  developer.apple.com/tutorials/data/documentation/<framework>/<symbol>.json`, parse `fragments`).
+  This session that caught: MetalFX (`MTLFXSpatialScalerDescriptor`), `AVAssetImageGenerator`, and the
+  VT super-res inits. Gotcha class: **failable vs non-failable inits differ across sibling APIs** — VT
+  *frame-interpolation* config init is optional (`guard let`), but *super-res scaler* config+params
+  inits are **non**-optional, and `maximumDimensions` is `CMVideoDimensions?`. (§1)
+- **SwiftUI View arg order:** adding a property (esp. a `@Binding`) to a `View` struct means the call
+  site's labelled args must be in the **same order as declaration** — Swift won't reorder them, and the
+  error is cryptic. Cost a CI cycle this session (`ScrubBar.speedTier`). Match them. (§6)
 - **`VTFrameProcessor` (AI slow-mo):** `-19730 "Processor is not initialized"` is a **misleading** error —
   it means the input is unsupported, NOT that startSession failed. Two real causes, both bit us: (1) feed
   buffers in the config's own `sourcePixelBufferAttributes` format (**420v biplanar YUV**, NOT BGRA —
@@ -86,8 +96,22 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   checklist; plus playback engineering learnings.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.246** (app-switcher privacy blur + watch-heat scrubber) — verify the newest
+- Latest release: **v1.0.248** (exact-frame scrub preview + variable-speed scrubbing). One more push in
+  flight: the **scrub speed-gear label + variable-speed on the video hold-scrub** (commit `1069758`) —
+  verify it produced v1.0.249 (an unverified scheduled wakeup was checking CI). Verify the newest
   release/IPA size each push.
+- **Scrubbing upgrades shipped this session** (all in `Features/Player/PlayerControlsView.swift` +
+  `ZoomablePlayerSurface.swift` + new `Services/ScrubFrameProvider.swift`): (1) **exact-frame preview**
+  on downloaded (local) files — `AVAssetImageGenerator` (zero tolerance, `cancelAllCGImageGeneration`
+  coalesce-to-latest, capped `maximumSize`), gated to `route.url.isFileURL`; sprite tile is the instant
+  placeholder. Release seek was already frame-exact for local (`seekPrecise`). (2) **Variable-speed
+  scrubbing** — shared `ScrubSpeed` enum (Hi/Half/Quarter/Fine by vertical finger distance), incremental
+  accumulator (never read the `scrubTime` binding back), on BOTH the bar drag and the **video hold-scrub**
+  (`ZoomablePlayerSurface.handleLongPress` — changed ONLY the time-math, gestures untouched). `speedTier`
+  is a shared `@Binding` owned by `ScenePlayerView`, driving one subtle speed label. See ENGINEERING_NOTES §6.
+- **Settings connection is edit-locked** (v1.0.247): a saved server shows greyed read-only URL + masked
+  key with a standard header **Edit** button (Cancel discards, Update & Reconnect commits); not-connected
+  stays editable for first setup. `isEditing` @State in `SettingsView`.
 - **App-switcher privacy blur shipped** (`SnapshotPrivacyModifier` in `Services/AppLock.swift`, outermost
   in `StashyApp`): thick-material cover whenever `scenePhase != .active` so the multitasking snapshot
   never shows media. Deliberately unanimated (cover must be drawn in the snapshotted frame). Settings →
