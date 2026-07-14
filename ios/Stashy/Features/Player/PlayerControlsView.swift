@@ -7,6 +7,8 @@ struct PlayerControlsView: View {
     let sprites: SpriteThumbnails
     /// The scene, for the quality/codec status badge (resolution + codec of what's playing).
     let scene: StashScene
+    /// Exact-frame scrub previews for downloaded (local) files; falls back to sprite tiles otherwise.
+    var scrubFrames: ScrubFrameProvider? = nil
     @Binding var isFullscreen: Bool
     @Binding var showControls: Bool
     @Binding var showStats: Bool
@@ -141,7 +143,7 @@ struct PlayerControlsView: View {
                 }
 
                 // Portrait-fullscreen scrub preview, pinned top-left (shows whenever scrubbing).
-                if spritePreviewTopLeading, isScrubbing, let image = sprites.thumbnail(at: scrubTime) {
+                if spritePreviewTopLeading, isScrubbing, let image = scrubFrames?.image ?? sprites.thumbnail(at: scrubTime) {
                     Image(uiImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
@@ -158,6 +160,15 @@ struct PlayerControlsView: View {
         }
         .animation(.easeInOut(duration: 0.2), value: showControls)
         .onAppear { scheduleHide() }
+        // Feed the exact-frame decoder from the live scrub position (covers BOTH the bar drag and the
+        // video hold-scrub, which both write `scrubTime`). Cleared when the scrub ends so the next one
+        // doesn't flash the last frame.
+        .onChange(of: scrubTime) { _, t in
+            if isScrubbing { scrubFrames?.request(t) }
+        }
+        .onChange(of: isScrubbing) { _, scrubbing in
+            if scrubbing { scrubFrames?.request(scrubTime) } else { scrubFrames?.clear() }
+        }
     }
 
     /// Half the fixed width of the quality menu (see `qualityMenu`), used to clamp its pop-up position.
@@ -200,6 +211,7 @@ struct PlayerControlsView: View {
                 sprites: sprites,
                 showSpritePreview: !spritePreviewTopLeading, // top-left variant renders separately
                 heat: watchHeatEnabled ? WatchHeat.shared.curve(sceneID: scene.id) : nil,
+                exactFrame: scrubFrames?.image,
                 isScrubbing: $isScrubbing,
                 scrubTime: $scrubTime,
                 onSeek: { model.seek(to: $0); scheduleHide() }
@@ -451,6 +463,8 @@ struct ScrubBar: View {
     var showSpritePreview = true
     /// Watch-heat curve (normalised 0…1 bins) drawn above the track while scrubbing — nil hides it.
     var heat: [Double]? = nil
+    /// Exact decoded frame at the scrub position (local downloads) — preferred over the sprite tile.
+    var exactFrame: UIImage? = nil
     @Binding var isScrubbing: Bool
     @Binding var scrubTime: TimeInterval
     let onSeek: (TimeInterval) -> Void
@@ -509,7 +523,8 @@ struct ScrubBar: View {
                     }
             )
             .overlay(alignment: .topLeading) {
-                if showSpritePreview, isScrubbing, let image = sprites.thumbnail(at: scrubTime) {
+                // Prefer the exact decoded frame (local downloads); fall back to the instant sprite tile.
+                if showSpritePreview, isScrubbing, let image = exactFrame ?? sprites.thumbnail(at: scrubTime) {
                     let x = min(max(width * clampedProgress - previewWidth / 2, 0), width - previewWidth)
                     Image(uiImage: image)
                         .resizable()

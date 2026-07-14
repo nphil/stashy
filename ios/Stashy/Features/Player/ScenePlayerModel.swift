@@ -118,6 +118,9 @@ final class ScenePlayerModel {
         if route.engine == .localFFmpeg { return true }
         return route.url.pathExtension.lowercased() != "m3u8"
     }
+    /// The on-disk file to decode exact scrub-preview frames from — non-nil only for a downloaded (local)
+    /// file, where decoding arbitrary frames is cheap. nil for streaming (would need the network per frame).
+    var scrubFrameURL: URL? { route.url.isFileURL ? route.url : nil }
     /// Guards re-entrant starts, and discards an engine built after the scene was already left.
     @ObservationIgnored private var startInProgress = false
     @ObservationIgnored private var stopped = false

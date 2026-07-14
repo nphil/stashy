@@ -25,6 +25,8 @@ struct ScenePlayerView: View {
     /// fullscreen until the device returns to portrait (so ✕ doesn't immediately bounce back to landscape).
     @State private var suppressReentry = false
     @State private var zoomScale: CGFloat = 1
+    /// Decodes exact frames for the scrubber preview on downloaded (local) files.
+    @State private var scrubFrames = ScrubFrameProvider()
     /// Live window geometry, used for fullscreen layout so it's identical regardless of the screen that
     /// presented the player (a plain stack vs a `.searchable` list report different ambient geometry).
     @State private var windowBounds: CGRect = .zero
@@ -162,6 +164,7 @@ struct ScenePlayerView: View {
                     model: model,
                     sprites: sprites,
                     scene: scene,
+                    scrubFrames: scrubFrames,
                     isFullscreen: $isFullscreen,
                     showControls: $showControls,
                     showStats: $showStats,
@@ -243,6 +246,8 @@ struct ScenePlayerView: View {
             // at the remembered position but stays paused — tap play to continue.
             model.start(autoplay: !didAppear)
             didAppear = true
+            // Frame-exact scrub previews for a downloaded (local) file; nil for streaming → sprites only.
+            scrubFrames.configure(url: model.scrubFrameURL)
             // Already held landscape when the player opened: no orientation-CHANGE notification will ever
             // fire, so the tilt-to-enter handler never runs — check once here so fullscreen engages on the
             // first attempt instead of after a rotate-away-and-back.
