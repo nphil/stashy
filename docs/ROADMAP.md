@@ -586,6 +586,30 @@ blocks, both first-class iOS APIs:
       is grounded. (Rejected alternative — single-file segment-and-concat split: feasible via the resumable-
       transcode segment primitive, but ~1–2× ceiling for HEVC only, negative for AV1, plus rate-control seams
       at joins → low ROI. Don't build it unless a Self-Test probe proves HEVC is the bottleneck.)
+  - **★ Encode-quality validation (VMAF / SSIM) — owner-requested 2026-07-11.** "Make sure the encoded
+    file makes sense" — don't ship a transcode that's collapsed to mush. Two tiers, because the right tool
+    differs by where the encode runs:
+    - **Server (Stash companion plugin) — the primary, do-this-first.** The P40 has the source locally, a
+      GPU, and no thermal/battery limit → this is where full **VMAF** belongs. Two levels: (1) **measure**
+      — after a transcode, run `libvmaf` (encode vs source) and record the score to the served progress/
+      `custom_fields` JSON so the app can show "encoded at VMAF 94" (and optionally auto-reject/re-encode
+      below a floor); (2) **target** — quality-targeted encoding: with x265/SVT-AV1's real CRF control,
+      binary-search CRF to hit a target (e.g. VMAF 93) instead of the current bitrate-fraction presets, so
+      "Balanced/Small" become perceptual targets, not guesses. `libvmaf` is BSD-3 (no GPL); jellyfin-ffmpeg
+      already bundles it, and it has CUDA on the P40. Sampled VMAF (score a few segments) keeps it cheap.
+      Cleanly rides the existing Job→`findJob`→served-file infra.
+    - **On-device — a cheap SANITY GUARD, not full VMAF.** Full VMAF on the phone is a bad fit: it's a
+      full-reference metric (needs the source decoded alongside the output) and is often as slow as or
+      slower than the encode itself → doubles the work + cooks the battery, defeating the point of local
+      transcode; and the corrective lever is weak anyway (VideoToolbox HW encode has only coarse quality
+      control, no CRF). So the on-device guard is: **structural checks** (output opens, expected duration/
+      frame-count/resolution, bitrate/size ratio in a sane band — catches "garbage" for ~free) **+ optional
+      sampled SSIM** (SSIM ≫ cheaper than VMAF, built into FFmpeg, no model/GPL; score ~3–5 short 2s
+      segments, not the whole file). **Blocked on a `stash-videoengine` rebuild** — the current lean build
+      enables only `scale,format,aresample,anull,null`, so it has NO `ssim`/`psnr`/`libvmaf` filter; adding
+      SSIM = enable `--enable-filter=ssim` (built-in, trivial), adding on-device VMAF = cross-compile
+      libvmaf + bundle a model (heavier, not worth it vs. SSIM). Failing the guard → warn / offer re-encode
+      at a higher quality / fall back to Original.
   - **On-device transcode on the fly** (reuse the FFmpeg engine to produce a smaller/compatible file
     locally). ✅ H.264/HEVC (VideoToolbox) with resolution + quality presets.
 - **Downloaded Videos management screen** — list/manage offline videos (size, source, delete, play
