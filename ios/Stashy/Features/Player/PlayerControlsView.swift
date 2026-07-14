@@ -470,9 +470,25 @@ struct ScrubBar: View {
     let onSeek: (TimeInterval) -> Void
 
     @State private var lastCueIndex = -1
+    /// Last horizontal touch position (nil = drag not begun) — variable-speed scrubbing is incremental.
+    @State private var lastDragX: CGFloat?
+    /// Current speed tier (0 = full … 3 = fine), tracked to fire a haptic notch when the gear changes.
+    @State private var speedTier = 0
 
     private let previewWidth: CGFloat = 160
     private let previewHeight: CGFloat = 90
+
+    /// Apple-style variable scrub speed: full speed on the bar, easing to fine as the finger moves
+    /// vertically away, so a long video is quick to traverse yet you can still nudge to a single frame.
+    /// Returns (rate multiplier, tier index for the haptic notch).
+    private static func scrubSpeed(verticalDistance d: CGFloat) -> (Double, Int) {
+        switch abs(d) {
+        case ..<44:  return (1.0, 0)    // Hi-Speed — on/near the bar
+        case ..<90:  return (0.5, 1)    // Half-Speed
+        case ..<150: return (0.25, 2)   // Quarter
+        default:     return (0.1, 3)    // Fine
+        }
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -505,21 +521,33 @@ struct ScrubBar: View {
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
-                        if !isScrubbing { Haptics.prepareSelection() }   // drag just began — warm the engine
-                        isScrubbing = true
-                        let p = max(0, min(1, value.location.x / width))
-                        scrubTime = Double(p) * duration
-                        // One haptic tick each time the scrub crosses into a new preview frame.
-                        let idx = sprites.cueIndex(at: scrubTime)
-                        if idx != lastCueIndex {
-                            lastCueIndex = idx
-                            if idx >= 0 { Haptics.selectionTick() }
+                        if lastDragX == nil {
+                            // Drag begins: warm haptics and jump to the touched position (tap-to-seek feel).
+                            Haptics.prepareSelection()
+                            isScrubbing = true
+                            speedTier = 0
+                            scrubTime = Double(max(0, min(1, value.location.x / width))) * duration
+                            lastCueIndex = sprites.cueIndex(at: scrubTime)
+                        } else {
+                            // Incremental, speed-scaled by how far the finger has moved off the bar
+                            // (bar centre ≈ 11pt within the 22pt track). Fine control without a huge bar.
+                            let (rate, tier) = Self.scrubSpeed(verticalDistance: value.location.y - 11)
+                            if tier != speedTier { speedTier = tier; Haptics.selectionTick() }
+                            let dx = value.location.x - (lastDragX ?? value.location.x)
+                            scrubTime = max(0, min(duration, scrubTime + Double(dx / width) * duration * rate))
+                            let idx = sprites.cueIndex(at: scrubTime)
+                            if idx != lastCueIndex {
+                                lastCueIndex = idx
+                                if idx >= 0 { Haptics.selectionTick() }
+                            }
                         }
+                        lastDragX = value.location.x
                     }
                     .onEnded { _ in
                         onSeek(scrubTime)
                         isScrubbing = false
                         lastCueIndex = -1
+                        lastDragX = nil
                     }
             )
             .overlay(alignment: .topLeading) {
