@@ -7,7 +7,8 @@ direct-play first, minimal server load, privacy*:
 
 | Feature | What it does | Why Stash can't do it today |
 |---|---|---|
-| **Transcode for iPhone** | Turns one scene into an iPhone-native MP4 — **HEVC via `hevc_nvenc`** (NVIDIA GPU, e.g. Tesla P40), CPU `libx265` fallback, or optional CPU **AV1** (SVT-AV1). Tagged `hvc1` + `+faststart` so AVPlayer direct-plays it. | Stash's own transcoder is hard-coded to **H.264 / libx264** — no HEVC, no AV1, no per-request quality. |
+| **Transcode for iPhone** | Turns one scene into an iPhone-native MP4 — **HEVC via `hevc_nvenc`** (NVIDIA GPU, e.g. Tesla P40), CPU `libx265` fallback, or optional CPU **AV1** (SVT-AV1). Tagged `hvc1` + `+faststart` so AVPlayer direct-plays it. Quality is set by **VMAF perceptual targeting** (below), not a fixed CRF. | Stash's own transcoder is hard-coded to **H.264 / libx264** — no HEVC, no AV1, no per-request quality. |
+| **VMAF quality targeting** | Picks the encoder's CRF/CQ by **binary-searching short samples to hit a target VMAF** (Netflix's perceptual metric), measured with the **phone-viewing model** — the smallest file that still looks good to the eye on a phone. Default on; falls back to a fixed preset if libvmaf is missing. | Stash has no perceptual-quality control at all — quality is whatever the server config's H.264 CRF happens to be. |
 | **Library Codec Report** | ffprobes every scene and records codec / profile / **pixel format** / **HDR transfer** / 10-bit / direct-play into each scene's `custom_fields`, plus an aggregate summary to the job log. | Stash's GraphQL `VideoFile` exposes only codec/res/bitrate — never profile, pix_fmt, or HDR. |
 | **Tag iPhone-Ready Scenes** | Auto-tags `Stashy:Direct-Play`, `Stashy:Needs-Transcode`, `Stashy:HDR`, `Stashy:10-bit`, `Stashy:HEVC`, `Stashy:AV1` so the app and the Stash UI can filter by playability. | — |
 | **Purge Transcode Cache** | Deletes the companion cache, or trims it to a size cap (LRU). | — |
@@ -22,7 +23,8 @@ direct-play first, minimal server load, privacy*:
    ```json
    { "path": "/plugin/stashy-companion/assets/cache/scene42_hevc_1080p.mp4",
      "size": 734003200, "codec": "hevc", "resolution": 1080,
-     "container": "mp4", "source_scene": "42", "status": "ready" }
+     "container": "mp4", "source_scene": "42", "status": "ready",
+     "cq": 27, "vmaf": 94.3, "vmaf_target": 94 }
    ```
 4. The app reads that `path`, prepends its Stash base URL (+ API key), and downloads
    the file. Stash serves `/plugin/stashy-companion/assets/*` through `http.FileServer`
@@ -63,6 +65,8 @@ Settings → Plugins → **Reload Plugins**.
 | Allow AV1 | bool | off | Permit AV1 output when the app requests it. |
 | AV1 speed preset (0–10) | number | `8` | SVT-AV1 preset — the main AV1 speed knob. Higher = much faster / slightly larger. 6 = slower/smaller, 10 = fastest. |
 | Transcode cache cap (GB) | number | `0` | LRU-trim the served cache; 0 = unlimited. |
+| VMAF quality targeting | bool | **on** | Encode to a target VMAF (phone model) instead of a fixed CRF. Off = old preset behaviour. Needs libvmaf; falls back safely if absent. |
+| VMAF target — High / Balanced / Small | number | `97` / `94` / `91` | Per-preset target VMAF (0–100, phone model). Blank = default. |
 | ffmpeg directory override | string | — | Absolute dir holding an NVENC-enabled ffmpeg/ffprobe. |
 | ffmpeg version | string | pinned tag | Which pinned build to use: a BtbN tag, `latest`, or `system`. |
 | ffmpeg sha256 | string | — | Advanced: verify the download tarball against this hash. |
@@ -96,6 +100,30 @@ NVENC is the intended default. Each scene tries, in order, until one succeeds:
 3. `libx265` CPU (only if `hevc_nvenc` is absent from the ffmpeg build)
 
 Output is always tagged `hvc1` with `+faststart` for AVFoundation direct-play.
+
+## VMAF perceptual quality targeting
+
+Instead of guessing a CRF/CQ, the plugin encodes to a **target VMAF** — the score that reflects how the
+video actually looks to the human eye — so every download is the *smallest* file that still looks good:
+
+1. It extracts a few short **sample windows** from the scene.
+2. For a candidate quality knob (`-cq` for NVENC, `-crf` for x265/SVT-AV1) it encodes just those samples
+   and measures **VMAF** (encoded vs source) with `libvmaf`.
+3. It **binary-searches** the knob for the largest value (smallest file) whose VMAF still meets the target,
+   then does the full encode at that value. The source bitrate cap stays on as a ceiling.
+
+VMAF is measured with the **phone-viewing model**, which accounts for the small, high-PPI iPhone screen —
+artifacts you can't see at phone size don't count, so files come out smaller for the same *perceived*
+quality. Presets map to targets: **High 97 / Balanced 94 / Small 91** (tunable in settings).
+
+Details:
+- **Default on.** Adds a minute or so of short sample encodes per transcode. Turn off (*VMAF quality
+  targeting*) to always use the fixed preset CRF.
+- **Needs libvmaf** in the ffmpeg build (jellyfin-ffmpeg bundles it). If it's missing, or any sample step
+  fails, the transcode **safely falls back** to the preset CRF — it never fails because of VMAF. Run
+  **Self-Test** to confirm libvmaf is present (it runs a real measurement and prints the score).
+- **HDR** sources skip the search (VMAF's model is SDR-trained) and use the preset.
+- The achieved VMAF, target, and chosen knob are recorded in the result JSON (`vmaf` / `vmaf_target` / `cq`).
 
 ---
 *Part of the [Stashy](https://github.com/nphil/stashy) project. App: `ios/`. This plugin: `stash-plugin/`.*

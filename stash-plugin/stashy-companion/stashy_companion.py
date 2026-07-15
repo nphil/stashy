@@ -7,7 +7,11 @@ capabilities vanilla Stash does not have, all aligned with the app's tenets
 
   * Transcode for iPhone  — turn one scene into an iPhone-native MP4
     (HEVC via hevc_nvenc on an NVIDIA GPU, or libx265 on CPU; optional AV1 via
-    SVT-AV1). Output is written into this plugin's own served `cache/` dir and
+    SVT-AV1). Quality is chosen by VMAF PERCEPTUAL TARGETING (default on): sample
+    windows are encoded + scored with libvmaf's phone model, and the encoder's
+    CRF/CQ is binary-searched to hit a target VMAF — so each file is the smallest
+    that still looks good to the eye on a phone, instead of a guessed bitrate
+    fraction. Output is written into this plugin's own served `cache/` dir and
     the download path is recorded on the SOURCE scene's `custom_fields`, so the
     app can pull it back over Stash's own HTTP (Range-capable, resumable).
     Vanilla Stash only live-transcodes to H.264 — HEVC/AV1 is new here.
@@ -266,6 +270,35 @@ QUALITY_PRESETS = {
     "balanced": (28, 0.60), "low": (32, 0.35), "small": (32, 0.35),
 }
 
+# --- VMAF perceptual quality targeting (default on) ---------------------------------------------------
+# Instead of GUESSING a CRF/CQ (the presets above), we encode a few short SAMPLE windows, measure VMAF
+# (Netflix's perceptual metric — quality as the human eye actually sees it) on each, and binary-search the
+# encoder's own quality knob (-cq for nvenc, -crf for x265/SVT-AV1) for the SMALLEST file whose VMAF still
+# meets the target. So "High/Balanced/Small" become perceptual targets, not fixed numbers. The source
+# bitrate cap still applies to the FINAL encode as a ceiling. See run_transcode + _vmaf_search.
+#
+# Targets are tuned for VMAF's PHONE model (see VMAF_PHONE_MODEL): these files play on an iPhone, whose
+# small high-PPI screen hides artifacts the default 1080p/HDTV model would penalize, so the same PERCEIVED
+# quality lands at a smaller file. Phone-model scores run a few points higher than the default model, so
+# these numbers are higher than the usual "93 = Netflix sweet spot" (default-model equivalents ≈ 93/90/87).
+VMAF_TARGETS = {
+    "high": 97.0, "medium": 94.0, "med": 94.0, "standard": 94.0, "balanced": 94.0,
+    "low": 91.0, "small": 91.0,
+}
+VMAF_PHONE_MODEL = True   # measure with the phone-viewing model (enable_transform / phone_model=1)
+# Per-engine search bounds for the quality knob (lower = higher quality + bigger; higher = smaller). HEVC
+# -cq/-crf and AV1 -crf live on different scales, so bound each. We never go below/above these regardless
+# of target (a safety clamp on file size + a floor on quality).
+VMAF_Q_BOUNDS = {
+    "hevc_nvenc": (19, 40),   # NVENC -cq
+    "libx265":    (18, 38),   # x265 -crf
+    "libsvtav1":  (24, 50),   # SVT-AV1 -crf (higher scale than HEVC)
+}
+VMAF_SAMPLES = 3          # short windows sampled across the scene (more = more representative, slower)
+VMAF_SAMPLE_SECS = 5      # seconds per sample window
+VMAF_SUBSAMPLE = 3        # score every Nth frame (libvmaf n_subsample) — ~3x cheaper, negligible accuracy loss
+VMAF_TOLERANCE = 0.5      # "meets target" slack, in VMAF points
+
 
 def _src_bitrate(sprobe, sv, scene_file):
     """Best source VIDEO bitrate (bps): stream bit_rate → container bit_rate → Stash's stored bit_rate."""
@@ -329,13 +362,25 @@ def _detect_hdr(sv, preserve):
     return None
 
 
-def build_transcode_cmd(src, dst, codec, target_h, cq, ffmpeg, engine, gpu_decode,
-                        av1_preset=DEFAULT_AV1_PRESET, cfr_fps=None, hdr=None, maxrate=0):
-    """engine ∈ {"hevc_nvenc","libx265","libsvtav1"}. gpu_decode adds NVDEC. hdr ∈ {None,"pq","hlg"}.
+def _source_is_hdr(sv):
+    """True if the SOURCE stream is HDR (PQ/HLG transfer) or Dolby Vision — cases where VMAF's SDR-trained
+    model would misjudge quality, so VMAF targeting must skip them. Deliberately independent of the
+    `preserveHDR` OUTPUT setting (that only affects how we ENCODE, not how the source scores): even when the
+    user chooses to down-convert HDR→SDR, the SOURCE is still HDR and its VMAF score is unreliable."""
+    for sd in (sv.get("side_data_list") or []):
+        if "dovi" in (sd.get("side_data_type") or "").lower() or sd.get("dv_profile") is not None:
+            return True
+    return (sv.get("color_transfer") or "").lower() in HDR_TRANSFERS
 
-    `target_h` is the already-resolved (downscaled, even) output height, so the `-vf` is a plain
-    `scale=-2:<int>`. For the NVENC path we NVDEC-decode on the GPU (`-hwaccel cuda`) but scale/format on
-    the CPU (frames land in system memory) before NVENC re-encodes.
+
+def _video_chain(engine, cq, target_h, av1_preset, cfr_fps, hdr, maxrate):
+    """The `-vf … -c:v …` portion of an encode (video filters + encoder + quality knob + VBV cap + HDR
+    color tags), SHARED by the full transcode and the short VMAF sample encodes so the two stay identical
+    (the sample encodes must mirror the final encoder settings for the measured VMAF to be valid).
+
+    engine ∈ {"hevc_nvenc","libx265","libsvtav1"}. hdr ∈ {None,"pq","hlg"}. `target_h` is the already-
+    resolved (downscaled, even) output height, so the `-vf` is a plain `scale=-2:<int>`. `maxrate`>0 adds a
+    VBV peak-bitrate cap (the search passes 0 so the quality knob → VMAF curve stays monotonic).
 
     HDR (hdr != None): keep 10-bit and carry BT.2020 + PQ/HLG color tags so the output displays as HDR
     (verified: NVENC Main10 emits these into the HEVC VUI + MP4 colr atom; mastering SEI auto-passes on
@@ -359,22 +404,28 @@ def build_transcode_cmd(src, dst, codec, target_h, cq, ffmpeg, engine, gpu_decod
         chain = [f for f in filters if f]
         return ["-vf", ",".join(chain)] if chain else []
 
+    if engine == "libsvtav1":
+        return vf(scale_f, fmt_f) + ["-c:v", "libsvtav1", "-preset", str(av1_preset),
+                                     "-crf", str(cq), "-pix_fmt", pix] + cap + color_args
+    if engine == "hevc_nvenc":
+        fps_f = "fps={0}".format(cfr_fps) if cfr_fps else None
+        # -bf 0: Pascal (Tesla P40) NVENC has no HEVC B-frame support; forcing 0 avoids a config reject.
+        return vf(fps_f, scale_f, fmt_f) + ["-c:v", "hevc_nvenc", "-preset", "p5",
+                                            "-rc", "vbr", "-cq", str(cq), "-b:v", "0", "-bf", "0"] \
+            + cap + main10 + ["-tag:v", "hvc1", "-pix_fmt", pix] + color_args
+    # libx265 — CPU HEVC, last-resort fallback only
+    return vf(scale_f, fmt_f) + ["-c:v", "libx265", "-preset", "medium", "-crf", str(cq)] \
+        + cap + main10 + ["-tag:v", "hvc1", "-pix_fmt", pix] + color_args
+
+
+def build_transcode_cmd(src, dst, codec, target_h, cq, ffmpeg, engine, gpu_decode,
+                        av1_preset=DEFAULT_AV1_PRESET, cfr_fps=None, hdr=None, maxrate=0):
+    """Full transcode command. gpu_decode adds NVDEC (NVENC path). See `_video_chain` for the encoder args."""
     pre = [ffmpeg, "-y", "-hide_banner"]
     if engine == "hevc_nvenc" and gpu_decode:
         pre += ["-hwaccel", "cuda"]  # NVDEC decode; frames land in system mem for the CPU scale/format
     cmd = pre + ["-i", src]
-    if engine == "libsvtav1":
-        cmd += vf(scale_f, fmt_f) + ["-c:v", "libsvtav1", "-preset", str(av1_preset),
-                                     "-crf", str(cq), "-pix_fmt", pix] + cap + color_args
-    elif engine == "hevc_nvenc":
-        fps_f = "fps={0}".format(cfr_fps) if cfr_fps else None
-        # -bf 0: Pascal (Tesla P40) NVENC has no HEVC B-frame support; forcing 0 avoids a config reject.
-        cmd += vf(fps_f, scale_f, fmt_f) + ["-c:v", "hevc_nvenc", "-preset", "p5",
-                                            "-rc", "vbr", "-cq", str(cq), "-b:v", "0", "-bf", "0"] \
-            + cap + main10 + ["-tag:v", "hvc1", "-pix_fmt", pix] + color_args
-    else:  # libx265 — CPU HEVC, last-resort fallback only
-        cmd += vf(scale_f, fmt_f) + ["-c:v", "libx265", "-preset", "medium", "-crf", str(cq)] \
-            + cap + main10 + ["-tag:v", "hvc1", "-pix_fmt", pix] + color_args
+    cmd += _video_chain(engine, cq, target_h, av1_preset, cfr_fps, hdr, maxrate)
     cmd += ["-c:a", "aac", "-b:a", "160k", "-ac", "2",
             "-movflags", "+faststart",
             # Force the MP4 muxer: the output is written to a `.part` temp name, and ffmpeg can't infer
@@ -383,6 +434,239 @@ def build_transcode_cmd(src, dst, codec, target_h, cq, ffmpeg, engine, gpu_decod
             "-f", "mp4",
             "-progress", "pipe:1", "-nostats", dst]
     return cmd
+
+
+def _sample_encode_cmd(src, dst, engine, cq, ffmpeg, gpu_decode, target_h, av1_preset, cfr_fps, hdr, ss, t):
+    """A SHORT, video-only encode of one [ss, ss+t] window at quality knob `cq` — the same encoder/filters
+    as the full transcode (via `_video_chain`) but with NO bitrate cap (so the knob → VMAF curve stays
+    monotonic for the search) and no audio. Input-side `-ss/-t` keep the decode bounded to the window."""
+    pre = [ffmpeg, "-y", "-hide_banner"]
+    if engine == "hevc_nvenc" and gpu_decode:
+        pre += ["-hwaccel", "cuda"]
+    return (pre + ["-ss", str(ss), "-t", str(t), "-i", src]
+            + _video_chain(engine, cq, target_h, av1_preset, cfr_fps, hdr, 0)
+            + ["-an", "-f", "mp4", dst])
+
+
+# ----------------------------------------------------------------------------
+# VMAF perceptual quality targeting (see the VMAF_* constants above).
+# ----------------------------------------------------------------------------
+def _truthy(val, default=False):
+    """Interpret a plugin setting (may be a bool, number, or free-typed string) as a boolean."""
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() not in ("false", "0", "no", "off", "")
+
+
+def _filter_available(ffmpeg, name):
+    """True if this ffmpeg build lists filter `name` (e.g. libvmaf / libvmaf_cuda)."""
+    try:
+        out = subprocess.run([ffmpeg, "-hide_banner", "-filters"],
+                             capture_output=True, text=True, timeout=30)
+        return name in out.stdout
+    except (subprocess.SubprocessError, OSError):
+        return False
+
+
+def _vmaf_ffmpeg(ff_sw, ff_hw):
+    """The first ffmpeg binary that has the libvmaf filter (jellyfin + BtbN-gpl both ship it), or None.
+    Measurement is decode-only, so either build works; we just need one with libvmaf compiled in."""
+    for ff in (ff_hw, ff_sw):   # prefer the hw/jellyfin build (bundles libvmaf, CUDA-capable on the P40)
+        if ff and _filter_available(ff, "libvmaf"):
+            return ff
+    return None
+
+
+def _libvmaf_new_api(ffmpeg):
+    """The libvmaf ffmpeg filter changed its model API. Newer builds take `model=version=…`; older ones
+    expose a boolean `phone_model` option. Detect which by inspecting the filter help. Assume new on error."""
+    try:
+        out = subprocess.run([ffmpeg, "-hide_banner", "-h", "filter=libvmaf"],
+                             capture_output=True, text=True, timeout=30).stdout.lower()
+    except (subprocess.SubprocessError, OSError):
+        return True
+    if "phone_model" in out:   # only the OLD API exposes this option
+        return False
+    return True
+
+
+def _vmaf_model_arg(ffmpeg):
+    """The libvmaf `model` clause selecting the PHONE model, matched to this build's API. New: the model
+    value's inner `:` is escaped `\\:` because `:` separates filter options. Old: the `phone_model=1` flag."""
+    new_api = _libvmaf_new_api(ffmpeg)
+    if VMAF_PHONE_MODEL:
+        return "model=version=vmaf_v0.6.1\\:enable_transform=true" if new_api else "phone_model=1"
+    return "model=version=vmaf_v0.6.1" if new_api else ""
+
+
+def _parse_vmaf_json(path):
+    """Pull the pooled mean VMAF out of libvmaf's JSON log (schema varies by version), or None."""
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    pooled = ((data.get("pooled_metrics") or {}).get("vmaf")) or {}
+    for k in ("mean", "harmonic_mean"):
+        v = pooled.get(k)
+        if isinstance(v, (int, float)):
+            return float(v)
+    vals = []   # fall back to averaging the per-frame scores
+    for fr in (data.get("frames") or []):
+        mv = (fr.get("metrics") or {}).get("vmaf")
+        if isinstance(mv, (int, float)):
+            vals.append(mv)
+    if vals:
+        return sum(vals) / len(vals)
+    v = data.get("vmaf") or data.get("VMAF score")
+    return float(v) if isinstance(v, (int, float)) else None
+
+
+def _vmaf_sample_windows(duration, n, secs):
+    """`n` short [ss, t] windows spread across the INTERIOR of the video (skipping the very start/end),
+    so the search sees representative content, not just the opening. Short clips → a single window."""
+    secs = float(min(secs, max(1.0, duration))) if duration > 0 else float(secs)
+    if duration <= 0 or duration <= secs * 1.5:
+        return [(0.0, secs if duration <= 0 else float(min(secs, duration)))]
+    wins = []
+    for i in range(n):
+        frac = (i + 1.0) / (n + 1.0)                 # e.g. n=3 → 0.25, 0.50, 0.75
+        ss = max(0.0, min(duration - secs, frac * duration - secs / 2.0))
+        wins.append((round(ss, 2), secs))
+    return wins
+
+
+def _measure_vmaf(ffmpeg, src, dist, ss, t, src_w, src_h, cfr_fps, model_arg, log_json):
+    """Measure mean VMAF of one distorted sample (`dist`, already just the [ss,ss+t] window) vs the matching
+    source excerpt. The distorted is upscaled to the SOURCE resolution and BOTH sides are conformed to a
+    common frame grid (fps=`cfr_fps`) so libvmaf pairs frames correctly regardless of source VFR/resolution."""
+    _safe_unlink(log_json)
+    n_threads = max(1, (os.cpu_count() or 4))
+    fps_pre = "fps={0},".format(cfr_fps) if cfr_fps else ""
+    # Force BOTH branches to a single pixel format: VMAF only runs on SDR sources (HDR is skipped upstream)
+    # and the distorted output is 8-bit yuv420p, but the source reference may be 4:2:2 / 4:4:4 / 10-bit —
+    # libvmaf needs its two inputs in one negotiated format, so conform the reference down to match (else the
+    # filtergraph either fails to configure → None, or an unspecified swscale conversion decides the compare).
+    lavfi = ("[0:v]{fps}scale={w}:{h}:flags=bicubic,format=yuv420p,setpts=PTS-STARTPTS[dist];"
+             "[1:v]{fps}scale={w}:{h}:flags=bicubic,format=yuv420p,setpts=PTS-STARTPTS[ref];"
+             "[dist][ref]libvmaf={model}:n_subsample={sub}:n_threads={nt}:log_fmt=json:log_path={log}"
+             ).format(fps=fps_pre, w=int(src_w), h=int(src_h), model=model_arg,
+                      sub=VMAF_SUBSAMPLE, nt=n_threads, log=log_json)
+    cmd = [ffmpeg, "-y", "-hide_banner",
+           "-i", dist,                                   # input 0 = distorted (the encoded window)
+           "-ss", str(ss), "-t", str(t), "-i", src,      # input 1 = source reference excerpt
+           "-lavfi", lavfi, "-f", "null", "-"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if r.returncode != 0:
+        return None
+    return _parse_vmaf_json(log_json)
+
+
+def _search_quality_knob(lo, hi, target, tol, score_fn, on_stage=None):
+    """Binary-search integer knobs in [lo, hi] for the LARGEST value whose `score_fn(q)` still meets
+    `target` (within `tol`), assuming score decreases as q rises (higher knob = lower quality). Returns
+    (q, score) for the chosen knob, or None if the highest-quality end (`lo`) can't even be scored.
+
+    `score_fn(q)` returns a float, or None for a FAILED evaluation. A None at `lo` → give up (None). A None
+    at an interior knob is treated as 'below target' → search the higher-quality (lower-knob) half; this is
+    safe because a knob we can't score can't be trusted to meet the target. Pure/deterministic: the only
+    I/O is inside `score_fn`, so this is unit-tested with a synthetic score function."""
+    s_lo = score_fn(lo)
+    if s_lo is None:
+        return None
+    if s_lo < target - tol:            # even max quality misses the target — best effort = lo
+        if on_stage:
+            on_stage("VMAF {0:.1f} at max quality (cq {1}) < target {2} — using max quality".format(
+                s_lo, lo, target))
+        return lo, s_lo
+    best_q, best_v = lo, s_lo
+    a, b = lo, hi
+    while a <= b:
+        mid = (a + b) // 2
+        if mid == lo:                  # already evaluated the lo bound above
+            a = mid + 1
+            continue
+        v = score_fn(mid)
+        if v is None:                  # can't score this knob → don't trust it; search higher quality
+            b = mid - 1
+            continue
+        if on_stage:
+            on_stage("VMAF search cq {0} → {1:.1f} (target {2})".format(mid, v, target))
+        if v >= target - tol:
+            best_q, best_v = mid, v     # meets target — try for a smaller file (higher knob)
+            a = mid + 1
+        else:
+            b = mid - 1
+    return best_q, best_v
+
+
+def _vmaf_search(src, engine, gpu_decode, ff_encode, ff_measure, target_h, av1_preset, cfr_fps, hdr,
+                 duration, src_w, src_h, target_vmaf, model_arg, workdir, on_stage):
+    """Binary-search the encoder's quality knob (`-cq`/`-crf`) for the LARGEST value (smallest file) whose
+    sample VMAF still meets `target_vmaf`. Returns (chosen_q, measured_vmaf), or None if VMAF couldn't be
+    measured at max quality (any sample encode / measurement failure → the caller keeps the preset CQ).
+    Bounded to a few evaluations; assumes VMAF decreases monotonically as the knob rises."""
+    lo, hi = VMAF_Q_BOUNDS.get(engine, (18, 40))
+    windows = _vmaf_sample_windows(duration, VMAF_SAMPLES, VMAF_SAMPLE_SECS)
+    cache = {}
+
+    def score_at(q):
+        if q in cache:
+            return cache[q]
+        scores = []
+        for i, (ss, t) in enumerate(windows):
+            sample = os.path.join(workdir, "s{0}_{1}.mp4".format(q, i))
+            enc = _sample_encode_cmd(src, sample, engine, q, ff_encode, gpu_decode,
+                                     target_h, av1_preset, cfr_fps, hdr, ss, t)
+            try:
+                r = subprocess.run(enc, capture_output=True, text=True, timeout=1800)
+            except (subprocess.SubprocessError, OSError):
+                r = None
+            if not r or r.returncode != 0 or not os.path.isfile(sample) or os.path.getsize(sample) == 0:
+                _safe_unlink(sample)
+                cache[q] = None
+                return None
+            v = _measure_vmaf(ff_measure, src, sample, ss, t, src_w, src_h, cfr_fps,
+                              model_arg, os.path.join(workdir, "vmaf.json"))
+            _safe_unlink(sample)
+            if v is None:
+                cache[q] = None
+                return None
+            scores.append(v)
+        m = sum(scores) / len(scores)
+        cache[q] = m
+        return m
+
+    return _search_quality_knob(lo, hi, target_vmaf, VMAF_TOLERANCE, score_at, on_stage)
+
+
+# Map the app's quality preset → a target VMAF, overridable per-preset via plugin settings.
+_VMAF_SETTING_KEY = {"high": "vmafHigh", "medium": "vmafBalanced", "med": "vmafBalanced",
+                     "standard": "vmafBalanced", "balanced": "vmafBalanced",
+                     "low": "vmafSmall", "small": "vmafSmall"}
+
+
+def _target_vmaf(settings, quality):
+    default = VMAF_TARGETS.get(quality, 94.0)
+    key = _VMAF_SETTING_KEY.get(quality)
+    if key is not None:
+        try:
+            v = float(settings.get(key))
+            if 60.0 <= v <= 100.0:   # ignore nonsense; VMAF is 0..100 and <60 is meaningless as a target
+                return v
+        except (TypeError, ValueError):
+            pass
+    return default
+
+
+def _rmtree(path):
+    import shutil
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def _run_ffmpeg(cmd, duration, on_status=None):
@@ -557,6 +841,64 @@ def run_transcode(stash, args, settings):
     dst = os.path.join(CACHE_DIR, out_name)
     tmp = dst + ".part"
 
+    # --- VMAF perceptual quality targeting (default on) ----------------------------------------------
+    # Replace the preset's fixed CQ/CRF with a value CHOSEN to hit a target VMAF (quality as the eye sees
+    # it) by sample-encoding + measuring on the PRIMARY engine. Skipped (→ preset cq) for HDR/DoVi SOURCES
+    # (VMAF's model is SDR-trained, so the score would mislead the search — keyed off the source itself, NOT
+    # the preserveHDR output setting), when no ffmpeg build has libvmaf, or when probe dims are missing — and
+    # any failure mid-search also falls back. The transcode NEVER fails because of VMAF. The chosen knob is
+    # calibrated for the PRIMARY engine only; if the encode ladder later falls back to a DIFFERENT engine
+    # (whose -cq/-crf scale differs), that attempt uses the engine's own preset cq and we don't report a VMAF
+    # we never measured. The FINAL encode still applies the source bitrate cap; the search runs uncapped.
+    primary_engine = attempts[0][0]
+    chosen_cq = cq
+    vmaf_score = None
+    vmaf_target = None
+    vmaf_engine = None                       # engine chosen_cq/vmaf_score were calibrated for (None = search off/failed)
+    src_w = int(sv.get("width") or 0)
+    src_h_probe = int(sv.get("height") or src_h or 0)
+    if _truthy(settings.get("vmafTargeting"), True) and not _source_is_hdr(sv) and duration > 0 \
+            and src_w > 0 and src_h_probe > 0:
+        target = _target_vmaf(settings, str(args.get("quality") or "medium").lower())
+        ff_measure = _vmaf_ffmpeg(ffmpeg, ffmpeg_hw)
+        if not ff_measure:
+            log_warn("VMAF targeting is on but no ffmpeg build here has libvmaf — using preset cq {}. "
+                     "Install/switch to a build that bundles it (jellyfin does) to enable it.".format(cq))
+        else:
+            ff_encode = ffmpeg_hw if primary_engine == "hevc_nvenc" else ffmpeg
+            model_arg = _vmaf_model_arg(ff_measure)
+            # PID-scoped workdir so concurrent transcodes of the SAME scene never share sample files.
+            work = os.path.join(CACHE_DIR, ".vmaf-{}-{}".format(scene_id, os.getpid()))
+
+            def _vmaf_stage(msg):
+                log_info(msg)
+                _write_progress_file(scene_id, {
+                    "status": "running", "stage": "analyzing", "codec": codec,
+                    "resolution": res_label, "engine": primary_engine, "note": msg,
+                    "vmaf_target": target})
+
+            res = None
+            try:                             # the WHOLE setup is guarded — a workdir/makedirs hiccup must
+                _rmtree(work)                # not fail an otherwise-fine transcode (never fail over VMAF).
+                os.makedirs(work, exist_ok=True)
+                _vmaf_stage("Analyzing quality — targeting VMAF {} ({} model)…".format(
+                    target, "phone" if VMAF_PHONE_MODEL else "default"))
+                res = _vmaf_search(src, primary_engine, attempts[0][1], ff_encode, ff_measure,
+                                   target_h, av1_preset, cfr_fps, hdr, duration,
+                                   src_w, src_h_probe, target, model_arg, work, _vmaf_stage)
+            except Exception as e:
+                log_warn("VMAF search errored ({}) — using preset cq {}".format(e, cq))
+            finally:
+                _rmtree(work)
+            if res:
+                chosen_cq, vmaf_score = res
+                vmaf_target = target
+                vmaf_engine = primary_engine
+                log_info("VMAF targeting: chose cq {} → ~VMAF {:.1f} (target {}) for {}".format(
+                    chosen_cq, vmaf_score, target, primary_engine))
+            else:
+                log_warn("VMAF targeting couldn't measure quality — using preset cq {}.".format(cq))
+
     # Live rich stats (size/ETA/fps/speed) go to a SERVED FILE the app polls over HTTP — NOT to
     # custom_fields — so a running transcode never fires sceneUpdate/Scene.Update hooks (which were
     # queuing "sync" tasks). custom_fields is written exactly TWICE per transcode: the early "running"
@@ -593,16 +935,23 @@ def run_transcode(stash, args, settings):
 
     rc = -1
     eng = attempts[0][0]
+    used_cq = chosen_cq
     for idx, (engine, gpu_decode) in enumerate(attempts):
         eng = engine
+        # The VMAF-searched cq is calibrated for ONE engine's scale; a fallback to a different engine uses
+        # that engine's own preset cq instead (nvenc -cq and x265/av1 -crf are not the same scale).
+        used_cq = chosen_cq if engine == vmaf_engine else cq
+        is_vmaf = engine == vmaf_engine and vmaf_target is not None
         label = "{}{}".format(engine, " +NVDEC" if gpu_decode else "")
         status_state["label"] = label
         status_state["last"] = 0.0   # let the first block of a new attempt publish immediately
-        log_info("Transcoding scene {} → {} {}p (cq {}, {})".format(scene_id, codec, res_label, cq, label))
+        log_info("Transcoding scene {} → {} {}p (cq {}{}, {})".format(
+            scene_id, codec, res_label, used_cq,
+            " for VMAF {}".format(vmaf_target) if is_vmaf else "", label))
         _write_progress_file(scene_id, {"status": "running", "stage": "starting",
                                         "codec": codec, "resolution": res_label, "engine": label})
         ff = ffmpeg_hw if engine == "hevc_nvenc" else ffmpeg   # NVENC → driver-safe build; SW → main
-        cmd = build_transcode_cmd(src, tmp, codec, target_h, cq, ff, engine, gpu_decode,
+        cmd = build_transcode_cmd(src, tmp, codec, target_h, used_cq, ff, engine, gpu_decode,
                                   av1_preset, cfr_fps, hdr, maxrate)
         log_debug("ffmpeg: " + " ".join(cmd))
         rc, err_tail = _run_ffmpeg(cmd, duration, on_status=_on_status)
@@ -624,6 +973,12 @@ def run_transcode(stash, args, settings):
 
     os.replace(tmp, dst)  # atomic — never serve a half-written file
     size = os.path.getsize(dst)
+
+    # If the encode fell back to an engine other than the one VMAF was searched on, the measured VMAF/target
+    # don't describe the file we actually shipped — don't report them as achieved (the cq scales differ).
+    if eng != vmaf_engine:
+        vmaf_score = None
+        vmaf_target = None
 
     # Probe the ACTUAL output once (not a spam loop) so we report — and hand the app — the real codec /
     # dimensions / bitrate of the file we produced, rather than what was requested. This also makes it
@@ -658,6 +1013,10 @@ def run_transcode(stash, args, settings):
         "width": out_w,
         "height": out_h or height,
         "bitrate": out_bitrate,
+        "engine": eng,                          # encoder that actually produced this file
+        "cq": used_cq,                          # the quality knob actually used (VMAF-chosen or preset)
+        "vmaf": round(vmaf_score, 2) if vmaf_score is not None else None,   # achieved (sampled) VMAF, or null
+        "vmaf_target": vmaf_target,             # the target it aimed for, or null when VMAF wasn't applied
         "source_scene": scene_id,
         "created": int(time.time()),
         "status": "ready",
@@ -772,11 +1131,14 @@ def run_purge(settings):
     for n in os.listdir(CACHE_DIR):
         p = os.path.join(CACHE_DIR, n)
         try:
-            os.remove(p)
+            if os.path.isdir(p):
+                _rmtree(p)   # e.g. an orphaned .vmaf-<scene>-<pid> workdir left by a killed transcode
+            else:
+                os.remove(p)
             removed += 1
         except OSError:
             pass
-    log_info("cache purged ({} files)".format(removed))
+    log_info("cache purged ({} entries)".format(removed))
 
 
 def run_delete(args):
@@ -1022,6 +1384,39 @@ def run_selftest(stash, settings):
                                                 (" *hw", n == _active_tag(True))) if on)
                 installed.append(n + marks)
     log_info("installed builds: {}".format(", ".join(installed) or "(none — using system ffmpeg)"))
+
+    # VMAF perceptual quality targeting — is libvmaf present, and does a real measurement actually run?
+    # (Non-fatal: if it's missing/broken, transcodes just fall back to the preset cq — so it only warns.)
+    vff = _vmaf_ffmpeg(ffmpeg, ffmpeg_hw)
+    if not vff:
+        log_warn("VMAF: no libvmaf filter in either ffmpeg build → VMAF quality targeting will fall back "
+                 "to the preset cq. Install/switch to a build that bundles libvmaf (jellyfin does).")
+    else:
+        model_arg = _vmaf_model_arg(vff)
+        api = "new model= API" if _libvmaf_new_api(vff) else "old phone_model= API"
+        log_info("VMAF: libvmaf present [{}], {} model → {}".format(
+            api, "phone" if VMAF_PHONE_MODEL else "default", model_arg or "(default)"))
+        try:
+            import tempfile
+            tmpd = tempfile.mkdtemp(prefix="vmaf-selftest-", dir=CACHE_DIR)
+            testfile = os.path.join(tmpd, "t.mp4")
+            gen = subprocess.run([vff, "-y", "-hide_banner", "-f", "lavfi",
+                                  "-i", "testsrc2=size=320x240:rate=30", "-t", "1",
+                                  "-c:v", "mpeg4", "-pix_fmt", "yuv420p", testfile],
+                                 capture_output=True, text=True, timeout=60)
+            score = None
+            if gen.returncode == 0 and os.path.isfile(testfile):
+                # Measure the clip against itself — proves the model loads + the filtergraph parses.
+                score = _measure_vmaf(vff, testfile, testfile, 0, 1, 320, 240, "30",
+                                      model_arg, os.path.join(tmpd, "v.json"))
+            _rmtree(tmpd)
+            if score is not None:
+                log_info("  VMAF self-measure OK — identical clip scored {:.1f}".format(score))
+            else:
+                log_warn("  VMAF self-measure FAILED (no score produced) — targeting will fall back to the "
+                         "preset cq. The libvmaf model syntax may not match this build.")
+        except (subprocess.SubprocessError, OSError) as e:
+            log_warn("  VMAF self-measure error: {}".format(e))
 
     try:
         os.makedirs(CACHE_DIR, exist_ok=True)

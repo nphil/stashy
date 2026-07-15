@@ -589,15 +589,20 @@ blocks, both first-class iOS APIs:
   - **★ Encode-quality validation (VMAF / SSIM) — owner-requested 2026-07-11.** "Make sure the encoded
     file makes sense" — don't ship a transcode that's collapsed to mush. Two tiers, because the right tool
     differs by where the encode runs:
-    - **Server (Stash companion plugin) — the primary, do-this-first.** The P40 has the source locally, a
-      GPU, and no thermal/battery limit → this is where full **VMAF** belongs. Two levels: (1) **measure**
-      — after a transcode, run `libvmaf` (encode vs source) and record the score to the served progress/
-      `custom_fields` JSON so the app can show "encoded at VMAF 94" (and optionally auto-reject/re-encode
-      below a floor); (2) **target** — quality-targeted encoding: with x265/SVT-AV1's real CRF control,
-      binary-search CRF to hit a target (e.g. VMAF 93) instead of the current bitrate-fraction presets, so
-      "Balanced/Small" become perceptual targets, not guesses. `libvmaf` is BSD-3 (no GPL); jellyfin-ffmpeg
-      already bundles it, and it has CUDA on the P40. Sampled VMAF (score a few segments) keeps it cheap.
-      Cleanly rides the existing Job→`findJob`→served-file infra.
+    - **Server (Stash companion plugin) — ✅ BUILT 2026-07-14 (plugin v0.2.0, not yet deployed/live-tested).**
+      Both levels done: **(2) target** — VMAF-targeted encoding is now DEFAULT ON. Presets map to a target
+      VMAF (High 97 / Balanced 94 / Small 91, **phone model** — owner's pick, since these play on an iPhone),
+      and the plugin sample-encodes a few short windows + binary-searches the encoder's own quality knob
+      (`-cq` for nvenc, `-crf` for x265/SVT-AV1) for the smallest file that still meets target; the source
+      bitrate cap stays as a ceiling on the final encode. **(1) measure** — the achieved (sampled) VMAF +
+      target are recorded in the result JSON (`vmaf`/`vmaf_target`/`cq`); Swift `TranscodeResult` ignores
+      unknown keys, so the app can surface "encoded at VMAF 94" whenever we add the UI. Robustness: HDR
+      sources skip the search (VMAF's model is SDR-trained); no-libvmaf / any sample failure falls back to
+      the preset cq (a transcode never fails over VMAF); Self-Test probes libvmaf + runs a real measurement.
+      Search stays on whichever engine will do the final encode (keeps the P40 fast-path). CPU `libvmaf` for
+      now (robust, samples are short); `libvmaf_cuda` is a future speed-up. **Still TODO:** app-side UI to
+      show the VMAF badge; an optional auto-reject-below-a-floor; consider `libvmaf_cuda`.
+      `libvmaf` is BSD-3 (no GPL); jellyfin-ffmpeg already bundles it.
     - **On-device — a cheap SANITY GUARD, not full VMAF.** Full VMAF on the phone is a bad fit: it's a
       full-reference metric (needs the source decoded alongside the output) and is often as slow as or
       slower than the encode itself → doubles the work + cooks the battery, defeating the point of local
