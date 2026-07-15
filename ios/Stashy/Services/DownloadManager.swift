@@ -699,6 +699,20 @@ final class DownloadManager {
         item.analyzing = false
         item.vmaf = result.vmaf   // achieved VMAF (phone model) for the Downloads badge; nil if not applied
         appendTranscodeLog(item, "Transcode complete → downloading \(item.codec?.uppercased() ?? "")")
+        // Before → after size + reduction, and the VMAF target/achieved/cq, in the log box.
+        if let orig = scene.files.first?.size, orig > 0, size > 0 {
+            let before = ByteCountFormatter.string(fromByteCount: Int64(orig), countStyle: .file)
+            let after = ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+            let pct = Int((abs(Double(orig) - Double(size)) / Double(orig) * 100).rounded())
+            appendTranscodeLog(item, "Size: \(before) → \(after) (\(pct)% \(size <= Int64(orig) ? "smaller" : "larger"))")
+        }
+        if let v = result.vmaf {
+            var line = "VMAF: "
+            if let t = result.vmaf_target { line += "target \(Int(t.rounded())) → " }
+            line += "achieved \(Int(v.rounded()))"
+            if let c = result.cq { line += " · cq \(c)" }
+            appendTranscodeLog(item, line)
+        }
         item.transcodeStatus = ""
         let transcodedScene = scene.replacingPrimaryFileSpecs(
             container: item.ext, codec: item.codec, width: item.width, height: item.height,
