@@ -628,7 +628,7 @@ def _search_quality_knob(lo, hi, target, tol, score_fn, on_stage=None):
 
 def _vmaf_search(src, engine, gpu_decode, ff_encode, ff_measure, target_h, av1_preset, cfr_fps, hdr,
                  duration, src_w, src_h, target_vmaf, model_arg, workdir, on_stage, on_progress=None,
-                 samples=None):
+                 samples=None, out_curve=None):
     """Binary-search the encoder's quality knob (`-cq`/`-crf`) for the LARGEST value (smallest file) whose
     sample VMAF still meets `target_vmaf`. Returns (chosen_q, measured_vmaf), or None if VMAF couldn't be
     measured at max quality (any sample encode / measurement failure → the caller keeps the preset CQ).
@@ -698,7 +698,12 @@ def _vmaf_search(src, engine, gpu_decode, ff_encode, ff_measure, target_h, av1_p
         cache[q] = m
         return m
 
-    return _search_quality_knob(lo, hi, target_vmaf, VMAF_TOLERANCE, score_at, on_stage)
+    result = _search_quality_knob(lo, hi, target_vmaf, VMAF_TOLERANCE, score_at, on_stage)
+    if out_curve is not None:                    # hand back the measured {cq: vmaf} points (for the CRF map)
+        for q, v in cache.items():
+            if v is not None:
+                out_curve[q] = round(float(v), 2)
+    return result
 
 
 # Map the app's quality preset → a target VMAF, overridable per-preset via plugin settings.
@@ -916,64 +921,73 @@ def run_transcode(stash, args, settings):
     if _truthy(settings.get("vmafTargeting"), True) and not _source_is_hdr(sv) and duration > 0 \
             and src_w > 0 and src_h_probe > 0:
         target = _target_vmaf(settings, str(args.get("quality") or "medium").lower())
-        try:                                     # fewer samples = faster analysis, slightly less representative
-            vmaf_samples = max(1, min(4, int(float(settings.get("vmafSamples") or VMAF_SAMPLES))))
-        except (TypeError, ValueError):
-            vmaf_samples = VMAF_SAMPLES
-        ff_measure = _vmaf_ffmpeg(ffmpeg, ffmpeg_hw)
-        if not ff_measure:
-            log_warn("VMAF targeting is on but no ffmpeg build here has libvmaf — using preset cq {}. "
-                     "Set the software ffmpeg version to 'latest' (BtbN — bundles libvmaf; jellyfin does "
-                     "NOT) and run Install / Switch ffmpeg.".format(cq))
+        cached = _cached_crf(scene_id, target_h, target)
+        if cached is not None:
+            # Precomputed by the scheduled "Compute VMAF Map" task → skip the live analysis entirely.
+            chosen_cq, vmaf_score = cached
+            vmaf_target = target
+            vmaf_engine = primary_engine
+            log_info("VMAF: using precomputed CRF {} (~VMAF {:.1f}, target {}) for scene {} @ {} — "
+                     "skipping live analysis".format(chosen_cq, vmaf_score, target, scene_id, _res_key(target_h)))
         else:
-            ff_encode = ffmpeg_hw if primary_engine == "hevc_nvenc" else ffmpeg
-            model_arg = _vmaf_model_arg(ff_measure)
-            # PID-scoped workdir so concurrent transcodes of the SAME scene never share sample files.
-            work = os.path.join(CACHE_DIR, ".vmaf-{}-{}".format(scene_id, os.getpid()))
-
-            # Live analysis feedback → the served progress file (stage "analyzing" + a 0..1 progress the app
-            # shows as "Analyzing quality — X%"). NOTE: we deliberately DON'T call log_progress here, so the
-            # Stash Job.progress stays 0 during analysis and the app can tell the analyze phase from encoding.
-            vmaf_state = {"note": "", "progress": 0.0}
-
-            def _vmaf_write():
-                _write_progress_file(scene_id, {
-                    "status": "running", "stage": "analyzing", "codec": codec,
-                    "resolution": res_label, "engine": primary_engine,
-                    "note": vmaf_state["note"], "progress": round(vmaf_state["progress"], 4),
-                    "vmaf_target": target})
-
-            def _vmaf_stage(msg):
-                log_info(msg)
-                vmaf_state["note"] = msg
-                _vmaf_write()
-
-            def _vmaf_progress(frac):
-                vmaf_state["progress"] = frac
-                _vmaf_write()
-
-            res = None
-            try:                             # the WHOLE setup is guarded — a workdir/makedirs hiccup must
-                _rmtree(work)                # not fail an otherwise-fine transcode (never fail over VMAF).
-                os.makedirs(work, exist_ok=True)
-                _vmaf_stage("Analyzing quality — targeting VMAF {} ({} model)…".format(
-                    target, "phone" if VMAF_PHONE_MODEL else "default"))
-                res = _vmaf_search(src, primary_engine, attempts[0][1], ff_encode, ff_measure,
-                                   target_h, av1_preset, cfr_fps, hdr, duration,
-                                   src_w, src_h_probe, target, model_arg, work, _vmaf_stage,
-                                   on_progress=_vmaf_progress, samples=vmaf_samples)
-            except Exception as e:
-                log_warn("VMAF search errored ({}) — using preset cq {}".format(e, cq))
-            finally:
-                _rmtree(work)
-            if res:
-                chosen_cq, vmaf_score = res
-                vmaf_target = target
-                vmaf_engine = primary_engine
-                log_info("VMAF targeting: chose cq {} → ~VMAF {:.1f} (target {}) for {}".format(
-                    chosen_cq, vmaf_score, target, primary_engine))
+            try:                                 # fewer samples = faster analysis, slightly less representative
+                vmaf_samples = max(1, min(4, int(float(settings.get("vmafSamples") or VMAF_SAMPLES))))
+            except (TypeError, ValueError):
+                vmaf_samples = VMAF_SAMPLES
+            ff_measure = _vmaf_ffmpeg(ffmpeg, ffmpeg_hw)
+            if not ff_measure:
+                log_warn("VMAF targeting is on but no ffmpeg build here has libvmaf — using preset cq {}. "
+                         "Set the software ffmpeg version to 'latest' (BtbN — bundles libvmaf; jellyfin does "
+                         "NOT) and run Install / Switch ffmpeg.".format(cq))
             else:
-                log_warn("VMAF targeting couldn't measure quality — using preset cq {}.".format(cq))
+                ff_encode = ffmpeg_hw if primary_engine == "hevc_nvenc" else ffmpeg
+                model_arg = _vmaf_model_arg(ff_measure)
+                # PID-scoped workdir so concurrent transcodes of the SAME scene never share sample files.
+                work = os.path.join(CACHE_DIR, ".vmaf-{}-{}".format(scene_id, os.getpid()))
+
+                # Live analysis feedback → the served progress file (stage "analyzing" + a 0..1 progress the
+                # app shows as "Analyzing quality — X%"). NOTE: we deliberately DON'T call log_progress here,
+                # so the Stash Job.progress stays 0 during analysis and the app can tell analyze from encoding.
+                vmaf_state = {"note": "", "progress": 0.0}
+
+                def _vmaf_write():
+                    _write_progress_file(scene_id, {
+                        "status": "running", "stage": "analyzing", "codec": codec,
+                        "resolution": res_label, "engine": primary_engine,
+                        "note": vmaf_state["note"], "progress": round(vmaf_state["progress"], 4),
+                        "vmaf_target": target})
+
+                def _vmaf_stage(msg):
+                    log_info(msg)
+                    vmaf_state["note"] = msg
+                    _vmaf_write()
+
+                def _vmaf_progress(frac):
+                    vmaf_state["progress"] = frac
+                    _vmaf_write()
+
+                res = None
+                try:                             # the WHOLE setup is guarded — a workdir/makedirs hiccup must
+                    _rmtree(work)                # not fail an otherwise-fine transcode (never fail over VMAF).
+                    os.makedirs(work, exist_ok=True)
+                    _vmaf_stage("Analyzing quality — targeting VMAF {} ({} model)…".format(
+                        target, "phone" if VMAF_PHONE_MODEL else "default"))
+                    res = _vmaf_search(src, primary_engine, attempts[0][1], ff_encode, ff_measure,
+                                       target_h, av1_preset, cfr_fps, hdr, duration,
+                                       src_w, src_h_probe, target, model_arg, work, _vmaf_stage,
+                                       on_progress=_vmaf_progress, samples=vmaf_samples)
+                except Exception as e:
+                    log_warn("VMAF search errored ({}) — using preset cq {}".format(e, cq))
+                finally:
+                    _rmtree(work)
+                if res:
+                    chosen_cq, vmaf_score = res
+                    vmaf_target = target
+                    vmaf_engine = primary_engine
+                    log_info("VMAF targeting: chose cq {} → ~VMAF {:.1f} (target {}) for {}".format(
+                        chosen_cq, vmaf_score, target, primary_engine))
+                else:
+                    log_warn("VMAF targeting couldn't measure quality — using preset cq {}.".format(cq))
 
     # Live rich stats (size/ETA/fps/speed) go to a SERVED FILE the app polls over HTTP — NOT to
     # custom_fields — so a running transcode never fires sceneUpdate/Scene.Update hooks (which were
@@ -1764,6 +1778,253 @@ def _report_scene_remove(scene_id):
             _write_playability_raw(data)
 
 
+# ----------------------------------------------------------------------------
+# VMAF CRF map: a scheduled/manual LIBRARY task runs the VMAF search per scene per output
+# resolution and stores just the tiny result (the chosen CRF + the sampled curve) in a served
+# file. Downloads/streams then look up the per-video VMAF-optimal CRF and SKIP the ~30s live
+# analysis — the search's expensive part (sample encodes) is transient; only the CRF number is
+# kept, so the whole library costs kilobytes, not terabytes.
+# ----------------------------------------------------------------------------
+DEFAULT_MAP_RESOLUTIONS = "1080,720"
+
+
+def _res_key(target_h):
+    """Map key for one output resolution = the resolved output height ('720', '1080'), or 'orig' for the
+    source resolution. So a '1080' request on a 720p source and a '720' request key the same (both 720p)."""
+    th = int(target_h or 0)
+    return str(th) if th > 0 else "orig"
+
+
+def _out_height(res_key_req, src_h):
+    """Resolve a requested resolution token ('1080'/'720'/'original') to an even output height for THIS
+    source (downscale only), matching run_transcode. 0 = keep source resolution."""
+    if str(res_key_req).lower() in ("original", "orig", "source", "0"):
+        return 0
+    h = RES_HEIGHTS.get(str(res_key_req), 0)
+    if not h and str(res_key_req).isdigit():
+        h = int(res_key_req)
+    th = min(h, src_h) if (h and src_h > 0) else h
+    return (th - th % 2) if th else 0
+
+
+def _crf_from_curve(curve, target, tol=VMAF_TOLERANCE):
+    """Derive (crf, vmaf) for ANY target VMAF from a stored {cq: vmaf} curve without re-searching: the
+    LARGEST cq whose measured VMAF still meets target-tol (the same rule the live search uses). Returns None
+    when the target isn't covered by the measured points → the caller falls back to a live search (we never
+    extrapolate past what was actually measured)."""
+    pts = []
+    for k, v in (curve or {}).items():
+        try:
+            pts.append((int(k), float(v)))
+        except (TypeError, ValueError):
+            continue
+    if not pts:
+        return None
+    pts.sort()                                    # by cq ascending (VMAF decreases as cq rises)
+    best = None
+    for cq, v in pts:
+        if v >= target - tol:
+            best = (cq, v)
+    return best                                   # None if even the highest-quality measured point misses
+
+
+def _vmaf_map_path():
+    return os.path.join(CACHE_DIR, "vmaf-map.json")
+
+
+@contextlib.contextmanager
+def _vmaf_map_lock():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    lockf = open(_vmaf_map_path() + ".lock", "w")
+    try:
+        if fcntl:
+            try:
+                fcntl.flock(lockf, fcntl.LOCK_EX)
+            except OSError:
+                pass
+        yield
+    finally:
+        try:
+            if fcntl:
+                fcntl.flock(lockf, fcntl.LOCK_UN)
+        finally:
+            lockf.close()
+
+
+def _load_vmaf_map():
+    """The served CRF map as {scene_id: {file, hdr?, res: {reskey: {...}}}}, or {} if none/unreadable."""
+    try:
+        with open(_vmaf_map_path()) as fh:
+            scenes = (json.load(fh) or {}).get("scenes")
+        return scenes if isinstance(scenes, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_vmaf_map_raw(report):
+    blob = {"generated": int(time.time()), "count": len(report), "scenes": report}
+    tmp = _vmaf_map_path() + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(blob, fh)
+    os.replace(tmp, _vmaf_map_path())
+
+
+def _file_fingerprint(scene_file):
+    return "{}|{}".format(scene_file.get("size") or 0, os.path.basename(scene_file.get("path") or ""))
+
+
+def _cached_crf(scene_id, target_h, target):
+    """A precomputed (crf, vmaf) for (scene, output height, target VMAF) from the map, or None. Best-effort:
+    ANY problem returns None so run_transcode simply runs the live search."""
+    try:
+        entry = (_load_vmaf_map().get(str(scene_id)) or {}).get("res", {}).get(_res_key(target_h))
+        if not entry:
+            return None
+        return _crf_from_curve(entry.get("curve") or {}, float(target))
+    except Exception:
+        return None
+
+
+def run_vmaf_map(stash, settings, rebuild=False):
+    """Scheduled/manual LIBRARY task: run the VMAF search per scene per configured output resolution and store
+    the tiny result (chosen CRF + the sampled curve) in the served cache/vmaf-map.json. Downloads then look up
+    the per-video VMAF-optimal CRF and skip the ~30s live analysis. Incremental (skips scenes already mapped
+    for the wanted resolutions + known HDR sources), resumable, and honours an optional per-run time budget so
+    it can chip away on a schedule. Only kilobytes stored — never the transcoded files. Zero scene writes."""
+    ffmpeg = _bin("ffmpeg", settings.get("ffmpegPath"), hw=False)
+    ffmpeg_hw = _bin("ffmpeg", settings.get("ffmpegPath"), hw=True)
+    ffprobe = _bin("ffprobe", settings.get("ffmpegPath"), hw=False)
+    ff_measure = _vmaf_ffmpeg(ffmpeg, ffmpeg_hw)
+    if not ff_measure:
+        log_error("VMAF map: no ffmpeg build here has libvmaf — set the software ffmpeg version to 'latest' "
+                  "(BtbN bundles it; jellyfin does NOT) and run Install / Switch ffmpeg. Aborting.")
+        return
+    model_arg = _vmaf_model_arg(ff_measure)
+    target = _target_vmaf(settings, "balanced")   # map targets the Balanced VMAF; other presets derive from the curve
+    try:
+        samples = max(1, min(4, int(float(settings.get("vmafSamples") or VMAF_SAMPLES))))
+    except (TypeError, ValueError):
+        samples = VMAF_SAMPLES
+    resolutions = [t.strip() for t in str(settings.get("vmafMapResolutions")
+                   or DEFAULT_MAP_RESOLUTIONS).split(",") if t.strip()]
+    try:
+        budget_min = float(settings.get("vmafMapBudgetMin") or 0)
+    except (TypeError, ValueError):
+        budget_min = 0
+    deadline = (time.time() + budget_min * 60) if budget_min > 0 else None
+
+    if encoder_available(ffmpeg_hw, "hevc_nvenc"):
+        engine, gpu_decode, ff_encode = "hevc_nvenc", True, ffmpeg_hw
+    else:
+        engine, gpu_decode, ff_encode = "libx265", False, ffmpeg
+
+    report = {} if rebuild else _load_vmaf_map()
+    work = os.path.join(CACHE_DIR, ".vmafmap-{}".format(os.getpid()))
+    _rmtree(work)
+    os.makedirs(work, exist_ok=True)
+
+    total_count = 0
+    for count, _ in _iter_scenes(stash, page_size=1):
+        total_count = count
+        break
+
+    processed = analyzed = skipped = since_ckpt = 0
+    seen = set()
+    stopped = False
+    try:
+        for count, scenes in _iter_scenes(stash):
+            total_count = count or total_count
+            for scene in scenes:
+                processed += 1
+                if total_count:
+                    log_progress(processed / float(total_count))
+                sid = str(scene["id"])
+                seen.add(sid)
+                files = scene.get("files") or []
+                if not files:
+                    continue
+                sf = files[0]
+                src = sf.get("path")
+                if not src or not os.path.isfile(src):
+                    continue
+                src_h_meta = int(_num(sf.get("height")))
+                fp = _file_fingerprint(sf)
+                e = report.get(sid)
+                if not e or e.get("file") != fp:      # new scene, or the file changed → (re)start its entry
+                    e = {"file": fp, "res": {}}
+                    report[sid] = e
+                if e.get("hdr") and not rebuild:
+                    skipped += 1
+                    continue                          # known HDR/DoVi source — VMAF's SDR model can't judge it
+                wanted = []
+                for tok in resolutions:
+                    k = _res_key(_out_height(tok, src_h_meta))
+                    if k not in wanted:
+                        wanted.append(k)
+                todo = [k for k in wanted if rebuild or k not in e["res"]]
+                if not todo:
+                    skipped += 1
+                    continue
+                if deadline and time.time() > deadline:
+                    stopped = True
+                    break
+                probe = ffprobe_streams(src, ffprobe)
+                if not probe:
+                    continue
+                sv = next((s for s in probe.get("streams", []) if s.get("codec_type") == "video"), {})
+                if _source_is_hdr(sv):
+                    e["hdr"] = True                   # remember so we don't re-probe it every run
+                    continue
+                src_w = int(sv.get("width") or 0)
+                src_h = int(sv.get("height") or src_h_meta or 0)
+                if src_w <= 0 or src_h <= 0:
+                    continue
+                duration = float((probe.get("format") or {}).get("duration") or 0)
+                cfr_fps = _clean_fps(sv)
+                for k in todo:
+                    if deadline and time.time() > deadline:
+                        stopped = True
+                        break
+                    target_h = 0 if k == "orig" else int(k)
+                    curve = {}
+                    try:
+                        res = _vmaf_search(src, engine, gpu_decode, ff_encode, ff_measure, target_h,
+                                           DEFAULT_AV1_PRESET, cfr_fps, None, duration, src_w, src_h,
+                                           target, model_arg, work, lambda m: None, samples=samples,
+                                           out_curve=curve)
+                    except Exception as ex:
+                        log_debug("VMAF map: scene {} @ {} failed: {}".format(sid, k, ex))
+                        res = None
+                    if not res:
+                        continue
+                    crf, vmaf = res
+                    e["res"][k] = {"crf": crf, "vmaf": round(vmaf, 2), "target": target, "engine": engine,
+                                   "curve": {str(q): v for q, v in curve.items()}, "ts": int(time.time())}
+                    analyzed += 1
+                    since_ckpt += 1
+                    log_info("VMAF map: scene {} @ {} → CRF {} (~VMAF {:.1f})".format(sid, k, crf, vmaf))
+                if since_ckpt >= 10:                  # checkpoint so an interrupted long job keeps its progress
+                    since_ckpt = 0
+                    with _vmaf_map_lock():
+                        _write_vmaf_map_raw(report)
+                if stopped:
+                    break
+            if stopped:
+                break
+    finally:
+        _rmtree(work)
+        if not stopped and not rebuild:               # prune scenes deleted from Stash (only on a full pass)
+            for gone in [s for s in report if s not in seen]:
+                del report[gone]
+        with _vmaf_map_lock():
+            _write_vmaf_map_raw(report)
+    log_info("VMAF CRF map ({}) — {} scenes seen, {} (scene,res) analyzed this run, {} already done/skipped{}. "
+             "Served vmaf-map.json ({} scenes mapped). Zero scene writes.".format(
+                 "rebuild" if rebuild else "incremental", processed, analyzed, skipped,
+                 " — hit the time budget; run again to continue" if stopped else "", len(report)))
+    log_progress(1.0)
+
+
 def run_hook(stash, settings, hook_ctx):
     """Dispatch a Stash plugin hook: Scene.Create.Post appends the new scene to the report,
     Scene.Destroy.Post drops it. Opt out via the 'autoReportNewScenes' setting."""
@@ -1861,6 +2122,8 @@ def main():
             run_transcode(stash, args, settings)
         elif mode == "stats":
             run_stats(stash, settings, rebuild=bool(args.get("rebuild")))
+        elif mode == "vmafmap":
+            run_vmaf_map(stash, settings, rebuild=bool(args.get("rebuild")))
         elif mode == "tag":
             # Legacy task id (≤0.1.17 tagged scenes). Now a no-tag alias for the report — it writes the
             # served playability.json and makes zero scene writes, so an old invocation can't storm hooks.

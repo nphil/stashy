@@ -589,6 +589,16 @@ blocks, both first-class iOS APIs:
   - **★ Encode-quality validation (VMAF / SSIM) — owner-requested 2026-07-11.** "Make sure the encoded
     file makes sense" — don't ship a transcode that's collapsed to mush. Two tiers, because the right tool
     differs by where the encode runs:
+    - **VMAF CRF MAP — ✅ BUILT + box-verified 2026-07-15 (plugin v0.3.0).** The insight that unlocks VMAF for
+      streaming/instant-downloads without terabytes: cache the search's *output* (the optimal CRF number +
+      the sampled curve), not the transcoded file — kilobytes for the whole library. New scheduled/manual
+      **Compute VMAF Map** task (mirrors Library Codec Report: incremental skip, resumable, `Scene.Create`-
+      friendly, per-run time budget, served `vmaf-map.json`, zero scene writes). `run_transcode` now looks up
+      the cached CRF (`_cached_crf`) and SKIPS the ~30s live search when present; `_crf_from_curve` derives
+      High/Balanced/Small from the ONE stored curve (verified on the box: 720p search → CRF 35@94, and 36@91 /
+      29@97 derived without re-searching; unmapped res → live-search fallback; run-2 incremental analysed 0).
+      For 1,932 scenes ≈ ~10–15h one-time background P40 grind for one resolution, then incremental. This is
+      the data layer for the live-ABR streaming plan (per-video CRF for every scene, ~zero storage).
     - **Server (Stash companion plugin) — ✅ BUILT 2026-07-14 (plugin v0.2.0, not yet deployed/live-tested).**
       Both levels done: **(2) target** — VMAF-targeted encoding is now DEFAULT ON. Presets map to a target
       VMAF (High 97 / Balanced 94 / Small 91, **phone model** — owner's pick, since these play on an iPhone),

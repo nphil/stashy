@@ -10,7 +10,7 @@ description: >-
   phone model), ffprobe-based codec + HDR stats, and auto-tagging of
   direct-play-ready scenes — capabilities vanilla Stash lacks. Output is served
   back to the app over Stash's own HTTP with real Job progress.
-version: 0.2.3
+version: 0.3.0
 url: https://github.com/nphil/stashy/tree/main/stash-plugin
 exec:
   - python
@@ -57,6 +57,14 @@ settings:
   vmafSamples:
     displayName: VMAF analysis samples (speed)
     description: "How many short windows the VMAF search samples per candidate (1–4, default 3). The windows are measured in parallel, but VMAF is CPU-bound, so FEWER = FASTER analysis at some cost to how representative the score is across a varied scene. Try 2 for quicker downloads, 1 for fastest."
+    type: NUMBER
+  vmafMapResolutions:
+    displayName: VMAF map resolutions
+    description: "Which output resolutions the 'Compute VMAF Map' library task pre-analyses per scene (comma-separated, default '1080,720'). Each is one VMAF search per scene (~15–30s), so more resolutions = proportionally more one-time compute. The tiny result (a CRF number + curve) is cached so downloads at these resolutions skip the live analysis. Use '720' alone for the fastest first pass."
+    type: STRING
+  vmafMapBudgetMin:
+    displayName: VMAF map time budget per run (min)
+    description: "Optional cap (minutes) on how long each 'Compute VMAF Map' run works before stopping — it's resumable, so a nightly scheduled run can chip through the library in chunks. 0 = no limit (run to completion). Useful to keep the GPU free during the day."
     type: NUMBER
   cacheCapGB:
     displayName: Transcode cache cap (GB)
@@ -124,6 +132,15 @@ tasks:
     description: "Re-ffprobe EVERY scene from scratch and rewrite the served playability report — use only if a file changed in place (same scene, new codec) and the incremental report missed it. Still zero scene writes."
     defaultArgs:
       mode: stats
+      rebuild: true
+  - name: Compute VMAF Map
+    description: "Pre-analyse the library so downloads/streams get per-video VMAF-optimal quality WITHOUT the ~30s live analysis each time. Runs the VMAF search per scene for each resolution in the 'VMAF map resolutions' setting and caches just the tiny result (a CRF number + curve) in served vmaf-map.json — kilobytes total, never the video files. INCREMENTAL (skips scenes already mapped + HDR sources) and resumable; set a 'VMAF map time budget' to chip through the library on a schedule. Zero scene writes. First full pass is GPU-heavy (~15s–30s per scene per resolution) — run it overnight."
+    defaultArgs:
+      mode: vmafmap
+  - name: Rebuild VMAF Map (full)
+    description: "Recompute the VMAF CRF map for EVERY scene from scratch (e.g. after changing the target VMAF or replacing files). Same as Compute VMAF Map but ignores the incremental cache. GPU-heavy — run overnight."
+    defaultArgs:
+      mode: vmafmap
       rebuild: true
   - name: Remove Stashy Tags (cleanup)
     description: "One-time cleanup for installs that ran plugin v0.1.16/0.1.17 (which tagged scenes): DELETE the Stashy:* tag definitions. Stash cascade-removes them from every scene with NO per-scene sceneUpdate, so this fires no Scene.Update hooks and queues NO Sync tasks. Your own tags are untouched. (A residual stashy_probe custom field, if present, is left as harmless dead data — clearing it would be a per-scene write = a Sync-task storm.)"

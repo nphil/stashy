@@ -9,6 +9,7 @@ direct-play first, minimal server load, privacy*:
 |---|---|---|
 | **Transcode for iPhone** | Turns one scene into an iPhone-native MP4 — **HEVC via `hevc_nvenc`** (NVIDIA GPU, e.g. Tesla P40), CPU `libx265` fallback, or optional CPU **AV1** (SVT-AV1). Tagged `hvc1` + `+faststart` so AVPlayer direct-plays it. Quality is set by **VMAF perceptual targeting** (below), not a fixed CRF. | Stash's own transcoder is hard-coded to **H.264 / libx264** — no HEVC, no AV1, no per-request quality. |
 | **VMAF quality targeting** | Picks the encoder's CRF/CQ by **binary-searching short samples to hit a target VMAF** (Netflix's perceptual metric), measured with the **phone-viewing model** — the smallest file that still looks good to the eye on a phone. Default on; falls back to a fixed preset if libvmaf is missing. | Stash has no perceptual-quality control at all — quality is whatever the server config's H.264 CRF happens to be. |
+| **VMAF map (library)** | A scheduled task pre-computes each scene's VMAF-optimal CRF (per resolution) once and caches just the **number + curve** (kilobytes, never the video). Downloads then skip the ~30s live analysis and are instant + VMAF-tuned; one search serves High/Balanced/Small via the curve. | — |
 | **Library Codec Report** | ffprobes every scene and records codec / profile / **pixel format** / **HDR transfer** / 10-bit / direct-play into each scene's `custom_fields`, plus an aggregate summary to the job log. | Stash's GraphQL `VideoFile` exposes only codec/res/bitrate — never profile, pix_fmt, or HDR. |
 | **Tag iPhone-Ready Scenes** | Auto-tags `Stashy:Direct-Play`, `Stashy:Needs-Transcode`, `Stashy:HDR`, `Stashy:10-bit`, `Stashy:HEVC`, `Stashy:AV1` so the app and the Stash UI can filter by playability. | — |
 | **Purge Transcode Cache** | Deletes the companion cache, or trims it to a size cap (LRU). | — |
@@ -67,6 +68,9 @@ Settings → Plugins → **Reload Plugins**.
 | Transcode cache cap (GB) | number | `0` | LRU-trim the served cache; 0 = unlimited. |
 | VMAF quality targeting | bool | **on** | Encode to a target VMAF (phone model) instead of a fixed CRF. Off = old preset behaviour. Needs libvmaf; falls back safely if absent. |
 | VMAF target — High / Balanced / Small | number | `97` / `94` / `91` | Per-preset target VMAF (0–100, phone model). Blank = default. |
+| VMAF analysis samples | number | `3` | Windows sampled per candidate (1–4). Fewer = faster analysis, less representative. |
+| VMAF map resolutions | string | `1080,720` | Which output resolutions the **Compute VMAF Map** task pre-analyses per scene. More = more one-time GPU compute. |
+| VMAF map time budget per run (min) | number | `0` | Cap each map run's runtime so a nightly schedule chips through the library; it's resumable. 0 = run to completion. |
 | ffmpeg directory override | string | — | Absolute dir holding an NVENC-enabled ffmpeg/ffprobe. |
 | ffmpeg version | string | pinned tag | Which pinned build to use: a BtbN tag, `latest`, or `system`. |
 | ffmpeg sha256 | string | — | Advanced: verify the download tarball against this hash. |
@@ -126,6 +130,20 @@ Details:
   **Self-Test** to confirm libvmaf is present (it runs a real measurement and prints the score).
 - **HDR** sources skip the search (VMAF's model is SDR-trained) and use the preset.
 - The achieved VMAF, target, and chosen knob are recorded in the result JSON (`vmaf` / `vmaf_target` / `cq`).
+
+### VMAF map — pre-compute the whole library (optional but recommended)
+
+The per-scene VMAF search takes ~15–30s. Run the **Compute VMAF Map** task once (overnight) and the plugin
+stores each scene's optimal CRF — just the *number* plus the sampled curve — in a tiny served
+`cache/vmaf-map.json` (kilobytes for the whole library; **never** the transcoded files). After that:
+
+- **Downloads are instant** — they look up the cached CRF and skip the live analysis, still VMAF-tuned.
+- **One search serves every preset** — High/Balanced/Small are derived from the stored curve, no re-search.
+
+It's **incremental** (skips scenes already mapped + HDR sources, prunes deleted ones) and **resumable** — set
+*VMAF map time budget per run* and schedule it nightly to chip through a big library in chunks. If a scene
+isn't mapped yet (or a target isn't covered by its curve), that download simply falls back to a live search.
+`libvmaf` must be present (the BtbN `latest` software build has it).
 
 ---
 *Part of the [Stashy](https://github.com/nphil/stashy) project. App: `ios/`. This plugin: `stash-plugin/`.*
