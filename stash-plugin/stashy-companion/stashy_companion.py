@@ -471,9 +471,11 @@ def _filter_available(ffmpeg, name):
 
 
 def _vmaf_ffmpeg(ff_sw, ff_hw):
-    """The first ffmpeg binary that has the libvmaf filter (jellyfin + BtbN-gpl both ship it), or None.
-    Measurement is decode-only, so either build works; we just need one with libvmaf compiled in."""
-    for ff in (ff_hw, ff_sw):   # prefer the hw/jellyfin build (bundles libvmaf, CUDA-capable on the P40)
+    """The first ffmpeg binary that has the libvmaf filter, or None. Measurement is CPU decode-only (no
+    NVENC/driver involvement), so build age doesn't matter. VERIFIED on the box 2026-07-14: the BtbN gpl
+    builds (the plugin's default 'latest' software build) ship libvmaf; jellyfin-ffmpeg does NOT (it only
+    has vmafmotion) — so prefer the software build and keep hw only as a just-in-case fallback."""
+    for ff in (ff_sw, ff_hw):
         if ff and _filter_available(ff, "libvmaf"):
             return ff
     return None
@@ -493,11 +495,15 @@ def _libvmaf_new_api(ffmpeg):
 
 
 def _vmaf_model_arg(ffmpeg):
-    """The libvmaf `model` clause selecting the PHONE model, matched to this build's API. New: the model
-    value's inner `:` is escaped `\\:` because `:` separates filter options. Old: the `phone_model=1` flag."""
+    """The libvmaf `model` clause selecting the PHONE model, matched to this build's API. New API: the
+    model value's inner `:` needs DOUBLE escaping (`\\\\:` in the argv string) — the -lavfi graph parser
+    strips one `\\` when extracting the filter's option string, and the option parser needs a remaining
+    `\\:` to keep the `:` inside the model value (a single `\\:` leaks `enable_transform` out as a bogus
+    filter option → "Option not found"; VERIFIED live on the box 2026-07-14, identical clip → 100.0).
+    Old API: the `phone_model=1` flag."""
     new_api = _libvmaf_new_api(ffmpeg)
     if VMAF_PHONE_MODEL:
-        return "model=version=vmaf_v0.6.1\\:enable_transform=true" if new_api else "phone_model=1"
+        return "model=version=vmaf_v0.6.1\\\\:enable_transform=true" if new_api else "phone_model=1"
     return "model=version=vmaf_v0.6.1" if new_api else ""
 
 
@@ -538,10 +544,15 @@ def _vmaf_sample_windows(duration, n, secs):
     return wins
 
 
+_VMAF_LAST_ERR = {"msg": ""}   # last measurement failure detail (stderr tail) — for self-test/log diagnosis
+
+
 def _measure_vmaf(ffmpeg, src, dist, ss, t, src_w, src_h, cfr_fps, model_arg, log_json):
     """Measure mean VMAF of one distorted sample (`dist`, already just the [ss,ss+t] window) vs the matching
     source excerpt. The distorted is upscaled to the SOURCE resolution and BOTH sides are conformed to a
-    common frame grid (fps=`cfr_fps`) so libvmaf pairs frames correctly regardless of source VFR/resolution."""
+    common frame grid (fps=`cfr_fps`) so libvmaf pairs frames correctly regardless of source VFR/resolution.
+    On failure records the real ffmpeg stderr tail in _VMAF_LAST_ERR (a swallowed stderr cost us a debugging
+    round-trip once — the "Option not found" escaping bug was invisible in the job log)."""
     _safe_unlink(log_json)
     n_threads = max(1, (os.cpu_count() or 4))
     fps_pre = "fps={0},".format(cfr_fps) if cfr_fps else ""
@@ -560,11 +571,18 @@ def _measure_vmaf(ffmpeg, src, dist, ss, t, src_w, src_h, cfr_fps, model_arg, lo
            "-lavfi", lavfi, "-f", "null", "-"]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
-    except (subprocess.SubprocessError, OSError):
+    except (subprocess.SubprocessError, OSError) as e:
+        _VMAF_LAST_ERR["msg"] = "launch: {}".format(e)
         return None
     if r.returncode != 0:
+        tail = [ln.strip() for ln in (r.stderr or "").splitlines() if ln.strip()][-3:]
+        _VMAF_LAST_ERR["msg"] = "rc {}: {}".format(r.returncode, " / ".join(tail))
+        log_debug("libvmaf measure failed — " + _VMAF_LAST_ERR["msg"])
         return None
-    return _parse_vmaf_json(log_json)
+    score = _parse_vmaf_json(log_json)
+    if score is None:
+        _VMAF_LAST_ERR["msg"] = "rc 0 but no score in {}".format(os.path.basename(log_json))
+    return score
 
 
 def _search_quality_knob(lo, hi, target, tol, score_fn, on_stage=None):
@@ -883,7 +901,8 @@ def run_transcode(stash, args, settings):
         ff_measure = _vmaf_ffmpeg(ffmpeg, ffmpeg_hw)
         if not ff_measure:
             log_warn("VMAF targeting is on but no ffmpeg build here has libvmaf — using preset cq {}. "
-                     "Install/switch to a build that bundles it (jellyfin does) to enable it.".format(cq))
+                     "Set the software ffmpeg version to 'latest' (BtbN — bundles libvmaf; jellyfin does "
+                     "NOT) and run Install / Switch ffmpeg.".format(cq))
         else:
             ff_encode = ffmpeg_hw if primary_engine == "hevc_nvenc" else ffmpeg
             model_arg = _vmaf_model_arg(ff_measure)
@@ -1425,7 +1444,8 @@ def run_selftest(stash, settings):
     vff = _vmaf_ffmpeg(ffmpeg, ffmpeg_hw)
     if not vff:
         log_warn("VMAF: no libvmaf filter in either ffmpeg build → VMAF quality targeting will fall back "
-                 "to the preset cq. Install/switch to a build that bundles libvmaf (jellyfin does).")
+                 "to the preset cq. Set the software ffmpeg version to 'latest' (BtbN — bundles libvmaf; "
+                 "jellyfin does NOT) and run Install / Switch ffmpeg.")
     else:
         model_arg = _vmaf_model_arg(vff)
         api = "new model= API" if _libvmaf_new_api(vff) else "old phone_model= API"
@@ -1448,8 +1468,8 @@ def run_selftest(stash, settings):
             if score is not None:
                 log_info("  VMAF self-measure OK — identical clip scored {:.1f}".format(score))
             else:
-                log_warn("  VMAF self-measure FAILED (no score produced) — targeting will fall back to the "
-                         "preset cq. The libvmaf model syntax may not match this build.")
+                log_warn("  VMAF self-measure FAILED — targeting will fall back to the preset cq. "
+                         "Detail: {}".format(_VMAF_LAST_ERR["msg"] or "no score produced"))
         except (subprocess.SubprocessError, OSError) as e:
             log_warn("  VMAF self-measure error: {}".format(e))
 

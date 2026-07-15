@@ -119,7 +119,9 @@ quality. Presets map to targets: **High 97 / Balanced 94 / Small 91** (tunable i
 Details:
 - **Default on.** Adds a minute or so of short sample encodes per transcode. Turn off (*VMAF quality
   targeting*) to always use the fixed preset CRF.
-- **Needs libvmaf** in the ffmpeg build (jellyfin-ffmpeg bundles it). If it's missing, or any sample step
+- **Needs libvmaf** in an ffmpeg build — the plugin's default **software build (`latest`, BtbN) bundles it**;
+  jellyfin-ffmpeg does **not** (it's kept only for NVENC). Measurement is CPU-only, so old NVIDIA drivers
+  don't matter here. If libvmaf is missing, or any sample step
   fails, the transcode **safely falls back** to the preset CRF — it never fails because of VMAF. Run
   **Self-Test** to confirm libvmaf is present (it runs a real measurement and prints the score).
 - **HDR** sources skip the search (VMAF's model is SDR-trained) and use the preset.

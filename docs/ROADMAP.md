@@ -605,7 +605,13 @@ blocks, both first-class iOS APIs:
       file (stage `analyzing` + `progress`), and the app shows **"Analyzing quality — X%"** during the search
       and a small **"VMAF 94"** chip in the Downloads specs row (Downloads screen only).
       **Still TODO:** an optional auto-reject-below-a-floor; consider `libvmaf_cuda`; persist the badge across
-      relaunch (currently in-memory like the Transcoded chip). `libvmaf` is BSD-3 (no GPL); jellyfin bundles it.
+      relaunch (currently in-memory like the Transcoded chip). `libvmaf` is BSD-3 (no GPL); the **BtbN gpl
+      builds bundle it, jellyfin-ffmpeg does NOT** (verified on the box 2026-07-14) — measurement is CPU-only
+      so the P40 driver ceiling (580.x, last Pascal branch) is irrelevant; jellyfin stays NVENC-only.
+      **ESCAPING GOTCHA (cost a round-trip):** in `-lavfi` via argv the libvmaf model arg needs DOUBLE
+      escaping — `model=version=vmaf_v0.6.1\\:enable_transform=true` (graph parser strips one `\`, option
+      parser needs the survivor); a single `\:` leaks `enable_transform` as a bogus filter option
+      ("Option not found"). Fixed + verified live in plugin v0.2.2 (identical clip → 100.0).
     - **On-device — a cheap SANITY GUARD, not full VMAF.** Full VMAF on the phone is a bad fit: it's a
       full-reference metric (needs the source decoded alongside the output) and is often as slow as or
       slower than the encode itself → doubles the work + cooks the battery, defeating the point of local
