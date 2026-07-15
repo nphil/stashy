@@ -606,14 +606,32 @@ def _search_quality_knob(lo, hi, target, tol, score_fn, on_stage=None):
 
 
 def _vmaf_search(src, engine, gpu_decode, ff_encode, ff_measure, target_h, av1_preset, cfr_fps, hdr,
-                 duration, src_w, src_h, target_vmaf, model_arg, workdir, on_stage):
+                 duration, src_w, src_h, target_vmaf, model_arg, workdir, on_stage, on_progress=None):
     """Binary-search the encoder's quality knob (`-cq`/`-crf`) for the LARGEST value (smallest file) whose
     sample VMAF still meets `target_vmaf`. Returns (chosen_q, measured_vmaf), or None if VMAF couldn't be
     measured at max quality (any sample encode / measurement failure → the caller keeps the preset CQ).
-    Bounded to a few evaluations; assumes VMAF decreases monotonically as the knob rises."""
+    Bounded to a few evaluations; assumes VMAF decreases monotonically as the knob rises.
+
+    `on_progress(frac)` (optional) is called after each sample step with an estimated 0..1 fraction of the
+    analysis, so the app can show a live "Analyzing quality — X%". The estimate is generous (bounded by the
+    binary-search depth), clamped to 0.99, and monotonic — it may finish below 1.0 if the search converges
+    early; the encode phase then drives its own progress."""
     lo, hi = VMAF_Q_BOUNDS.get(engine, (18, 40))
     windows = _vmaf_sample_windows(duration, VMAF_SAMPLES, VMAF_SAMPLE_SECS)
     cache = {}
+    # Estimated total sample steps = (lo probe + ~log2(range) search evals) × windows. bit_length() avoids
+    # importing math; a generous estimate keeps the reported % monotonic and clamped, never overshooting.
+    est_evals = 1 + max(1, hi - lo).bit_length()
+    total_steps = max(1, est_evals * len(windows))
+    prog = {"done": 0}
+
+    def _tick():
+        prog["done"] += 1
+        if on_progress:
+            try:
+                on_progress(min(0.99, prog["done"] / float(total_steps)))
+            except Exception:
+                pass
 
     def score_at(q):
         if q in cache:
@@ -630,10 +648,12 @@ def _vmaf_search(src, engine, gpu_decode, ff_encode, ff_measure, target_h, av1_p
             if not r or r.returncode != 0 or not os.path.isfile(sample) or os.path.getsize(sample) == 0:
                 _safe_unlink(sample)
                 cache[q] = None
+                _tick()
                 return None
             v = _measure_vmaf(ff_measure, src, sample, ss, t, src_w, src_h, cfr_fps,
                               model_arg, os.path.join(workdir, "vmaf.json"))
             _safe_unlink(sample)
+            _tick()
             if v is None:
                 cache[q] = None
                 return None
@@ -870,12 +890,26 @@ def run_transcode(stash, args, settings):
             # PID-scoped workdir so concurrent transcodes of the SAME scene never share sample files.
             work = os.path.join(CACHE_DIR, ".vmaf-{}-{}".format(scene_id, os.getpid()))
 
-            def _vmaf_stage(msg):
-                log_info(msg)
+            # Live analysis feedback → the served progress file (stage "analyzing" + a 0..1 progress the app
+            # shows as "Analyzing quality — X%"). NOTE: we deliberately DON'T call log_progress here, so the
+            # Stash Job.progress stays 0 during analysis and the app can tell the analyze phase from encoding.
+            vmaf_state = {"note": "", "progress": 0.0}
+
+            def _vmaf_write():
                 _write_progress_file(scene_id, {
                     "status": "running", "stage": "analyzing", "codec": codec,
-                    "resolution": res_label, "engine": primary_engine, "note": msg,
+                    "resolution": res_label, "engine": primary_engine,
+                    "note": vmaf_state["note"], "progress": round(vmaf_state["progress"], 4),
                     "vmaf_target": target})
+
+            def _vmaf_stage(msg):
+                log_info(msg)
+                vmaf_state["note"] = msg
+                _vmaf_write()
+
+            def _vmaf_progress(frac):
+                vmaf_state["progress"] = frac
+                _vmaf_write()
 
             res = None
             try:                             # the WHOLE setup is guarded — a workdir/makedirs hiccup must
@@ -885,7 +919,8 @@ def run_transcode(stash, args, settings):
                     target, "phone" if VMAF_PHONE_MODEL else "default"))
                 res = _vmaf_search(src, primary_engine, attempts[0][1], ff_encode, ff_measure,
                                    target_h, av1_preset, cfr_fps, hdr, duration,
-                                   src_w, src_h_probe, target, model_arg, work, _vmaf_stage)
+                                   src_w, src_h_probe, target, model_arg, work, _vmaf_stage,
+                                   on_progress=_vmaf_progress)
             except Exception as e:
                 log_warn("VMAF search errored ({}) — using preset cq {}".format(e, cq))
             finally:

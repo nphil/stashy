@@ -101,6 +101,13 @@ final class DownloadItem: Identifiable {
     var companionQuality: CompanionQuality = .medium
     /// Live progress (0…1) of the companion server-side transcode while `.serverProcessing`.
     var serverJobProgress: Double = 0
+    /// True while the companion transcode is in its VMAF ANALYSIS phase (choosing the quality knob) — drives
+    /// an "Analyzing quality · X%" status distinct from the encode phase. `serverJobProgress` carries the
+    /// analysis % during this phase, then restarts for the encode.
+    var analyzing = false
+    /// Achieved VMAF (phone model) of a completed server transcode, for the small Downloads badge. In-memory
+    /// like `wasTranscoded` (not persisted to the sidecar), so it shows for the session after a transcode.
+    var vmaf: Double?
     /// Stash Job id of the running companion transcode — persisted so monitoring reconnects after an app
     /// switch / kill / crash, and so a cancel can stop the right job.
     var companionJobID: String?
@@ -616,12 +623,26 @@ final class DownloadManager {
             // hooks. custom_fields only carries the terminal ready/failed (handled below).
             if result?.status != "ready", result?.status != "failed" {
                 if let stats = await fetchCompanionProgress(scene, apiKey: apiKey) {
-                    let line = companionStatusLine(stats)
-                    if !line.isEmpty { item.transcodeStatus = line }
-                    let stage = stats.engine ?? "encoding"
-                    if stage != lastStage { lastStage = stage; appendTranscodeLog(item, "Encoding · \(stage)") }
-                    if (update.job?.progress ?? -1) < 0, let ot = stats.out_time, let d = stats.duration, d > 0 {
-                        item.serverJobProgress = min(1, ot / d)
+                    if stats.stage == "analyzing" {
+                        // VMAF analysis phase: the plugin emits no Job.progress here, so drive the bar +
+                        // status from the served file's own analysis %.
+                        item.analyzing = true
+                        let frac = min(1, max(0, stats.progress ?? 0))
+                        item.serverJobProgress = frac
+                        item.transcodeStatus = "Analyzing quality — \(Int(frac * 100))%"
+                        if lastStage != "analyzing" {
+                            lastStage = "analyzing"; appendTranscodeLog(item, "Analyzing quality (VMAF)")
+                        }
+                    } else {
+                        if item.analyzing { item.transcodeStatus = "" }   // leaving analysis → drop its % line
+                        item.analyzing = false
+                        let line = companionStatusLine(stats)
+                        if !line.isEmpty { item.transcodeStatus = line }
+                        let stage = stats.engine ?? "encoding"
+                        if stage != lastStage { lastStage = stage; appendTranscodeLog(item, "Encoding · \(stage)") }
+                        if (update.job?.progress ?? -1) < 0, let ot = stats.out_time, let d = stats.duration, d > 0 {
+                            item.serverJobProgress = min(1, ot / d)
+                        }
                     }
                 }
             }
@@ -672,6 +693,8 @@ final class DownloadManager {
             item.bitRate = Int(Double(size) * 8 / dur)
         }
         item.wasTranscoded = true
+        item.analyzing = false
+        item.vmaf = result.vmaf   // achieved VMAF (phone model) for the Downloads badge; nil if not applied
         appendTranscodeLog(item, "Transcode complete → downloading \(item.codec?.uppercased() ?? "")")
         item.transcodeStatus = ""
         let transcodedScene = scene.replacingPrimaryFileSpecs(

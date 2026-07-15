@@ -492,6 +492,7 @@ private struct DownloadCard: View {
         if let c = item.codecLabel { out.append(c) }
         if let b = item.bitrateLabel { out.append(b) }
         if let s = item.sizeLabel { out.append(s) }
+        if let v = item.vmaf, v > 0 { out.append("VMAF \(Int(v.rounded()))") }   // e.g. "VMAF 94" (Downloads only)
         return out
     }
 
@@ -547,6 +548,7 @@ private struct DownloadCard: View {
             return item.companionCodec != nil ? "Ready to transcode" : "Ready to download"
         case .serverProcessing:
             let pct = Int(item.serverJobProgress * 100)
+            if item.analyzing { return "Analyzing quality · \(pct)%" }
             if let target = item.transcodeTargetLabel { return "Transcoding → \(target) · \(pct)%" }
             return "Server transcoding · \(pct)%"
         case .queued: return "Queued…"

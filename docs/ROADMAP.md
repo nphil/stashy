@@ -600,9 +600,12 @@ blocks, both first-class iOS APIs:
       sources skip the search (VMAF's model is SDR-trained); no-libvmaf / any sample failure falls back to
       the preset cq (a transcode never fails over VMAF); Self-Test probes libvmaf + runs a real measurement.
       Search stays on whichever engine will do the final encode (keeps the P40 fast-path). CPU `libvmaf` for
-      now (robust, samples are short); `libvmaf_cuda` is a future speed-up. **Still TODO:** app-side UI to
-      show the VMAF badge; an optional auto-reject-below-a-floor; consider `libvmaf_cuda`.
-      `libvmaf` is BSD-3 (no GPL); jellyfin-ffmpeg already bundles it.
+      now (robust, samples are short); `libvmaf_cuda` is a future speed-up.
+      **App UI DONE (plugin v0.2.1):** the analysis phase now streams a live progress fraction to the served
+      file (stage `analyzing` + `progress`), and the app shows **"Analyzing quality — X%"** during the search
+      and a small **"VMAF 94"** chip in the Downloads specs row (Downloads screen only).
+      **Still TODO:** an optional auto-reject-below-a-floor; consider `libvmaf_cuda`; persist the badge across
+      relaunch (currently in-memory like the Transcoded chip). `libvmaf` is BSD-3 (no GPL); jellyfin bundles it.
     - **On-device — a cheap SANITY GUARD, not full VMAF.** Full VMAF on the phone is a bad fit: it's a
       full-reference metric (needs the source decoded alongside the output) and is often as slow as or
       slower than the encode itself → doubles the work + cooks the battery, defeating the point of local

@@ -172,6 +172,13 @@ struct TranscodeResult: Decodable, Sendable {
     let width: Int?
     let height: Int?
     let bitrate: Int?
+    // VMAF perceptual quality targeting (plugin ≥0.2.0): the quality knob used, the achieved (sampled)
+    // VMAF, and the target it aimed for. `vmaf`/`vmaf_target` are null when VMAF wasn't applied (off, no
+    // libvmaf, HDR source, or the encode fell back to a non-searched engine). Server-only fields — older
+    // plugins simply omit them (all Optional).
+    let cq: Int?
+    let vmaf: Double?
+    let vmaf_target: Double?
     // Live fields written ~every 3s while status == "running" (the app's rich-stats side-channel):
     let stage: String?
     let engine: String?
