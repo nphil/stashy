@@ -10,7 +10,7 @@ description: >-
   phone model), ffprobe-based codec + HDR stats, and auto-tagging of
   direct-play-ready scenes — capabilities vanilla Stash lacks. Output is served
   back to the app over Stash's own HTTP with real Job progress.
-version: 0.2.2
+version: 0.2.3
 url: https://github.com/nphil/stashy/tree/main/stash-plugin
 exec:
   - python
@@ -53,6 +53,10 @@ settings:
   vmafSmall:
     displayName: VMAF target — Small
     description: "Target VMAF for 'Small' (phone model, 0–100). Default 91 — smaller files, still good on a phone. Blank = default."
+    type: NUMBER
+  vmafSamples:
+    displayName: VMAF analysis samples (speed)
+    description: "How many short windows the VMAF search samples per candidate (1–4, default 3). The windows are measured in parallel, but VMAF is CPU-bound, so FEWER = FASTER analysis at some cost to how representative the score is across a varied scene. Try 2 for quicker downloads, 1 for fastest."
     type: NUMBER
   cacheCapGB:
     displayName: Transcode cache cap (GB)

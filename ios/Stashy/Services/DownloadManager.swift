@@ -614,8 +614,11 @@ final class DownloadManager {
             networkFails = 0
             let result = update.result
 
-            // Live % comes from the Job (log.progress → Job.progress).
-            if let p = update.job?.progress, p >= 0 {
+            // Live % comes from the Job (log.progress → Job.progress). Skip during the VMAF analysis phase:
+            // the plugin emits no Job.progress then (it reads 0), and clobbering the bar to 0 here — right
+            // before the `await` below — makes it visibly bounce back. The analyzing branch drives the bar
+            // from the served file instead.
+            if !item.analyzing, let p = update.job?.progress, p >= 0 {
                 item.serverJobProgress = min(1, p)
             }
             // Rich live stats (size/ETA/fps/speed) come from the plugin's SERVED progress file — the

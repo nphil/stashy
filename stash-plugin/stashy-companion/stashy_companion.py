@@ -294,9 +294,11 @@ VMAF_Q_BOUNDS = {
     "libx265":    (18, 38),   # x265 -crf
     "libsvtav1":  (24, 50),   # SVT-AV1 -crf (higher scale than HEVC)
 }
-VMAF_SAMPLES = 3          # short windows sampled across the scene (more = more representative, slower)
+VMAF_SAMPLES = 3          # short windows sampled across the scene (more = more representative, slower).
+                          # The windows of one candidate are measured CONCURRENTLY (see _vmaf_search), so on a
+                          # multi-core box the wall-time is bounded by the CPU-bound VMAF work, not 3× a window.
 VMAF_SAMPLE_SECS = 5      # seconds per sample window
-VMAF_SUBSAMPLE = 3        # score every Nth frame (libvmaf n_subsample) — ~3x cheaper, negligible accuracy loss
+VMAF_SUBSAMPLE = 5        # score every Nth frame (libvmaf n_subsample) — cheaper, negligible accuracy loss
 VMAF_TOLERANCE = 0.5      # "meets target" slack, in VMAF points
 
 
@@ -547,14 +549,15 @@ def _vmaf_sample_windows(duration, n, secs):
 _VMAF_LAST_ERR = {"msg": ""}   # last measurement failure detail (stderr tail) — for self-test/log diagnosis
 
 
-def _measure_vmaf(ffmpeg, src, dist, ss, t, src_w, src_h, cfr_fps, model_arg, log_json):
+def _measure_vmaf(ffmpeg, src, dist, ss, t, src_w, src_h, cfr_fps, model_arg, log_json, n_threads=None):
     """Measure mean VMAF of one distorted sample (`dist`, already just the [ss,ss+t] window) vs the matching
     source excerpt. The distorted is upscaled to the SOURCE resolution and BOTH sides are conformed to a
     common frame grid (fps=`cfr_fps`) so libvmaf pairs frames correctly regardless of source VFR/resolution.
     On failure records the real ffmpeg stderr tail in _VMAF_LAST_ERR (a swallowed stderr cost us a debugging
     round-trip once — the "Option not found" escaping bug was invisible in the job log)."""
     _safe_unlink(log_json)
-    n_threads = max(1, (os.cpu_count() or 4))
+    if n_threads is None:
+        n_threads = max(1, (os.cpu_count() or 4))
     fps_pre = "fps={0},".format(cfr_fps) if cfr_fps else ""
     # Force BOTH branches to a single pixel format: VMAF only runs on SDR sources (HDR is skipped upstream)
     # and the distorted output is 8-bit yuv420p, but the source reference may be 4:2:2 / 4:4:4 / 10-bit —
@@ -624,7 +627,8 @@ def _search_quality_knob(lo, hi, target, tol, score_fn, on_stage=None):
 
 
 def _vmaf_search(src, engine, gpu_decode, ff_encode, ff_measure, target_h, av1_preset, cfr_fps, hdr,
-                 duration, src_w, src_h, target_vmaf, model_arg, workdir, on_stage, on_progress=None):
+                 duration, src_w, src_h, target_vmaf, model_arg, workdir, on_stage, on_progress=None,
+                 samples=None):
     """Binary-search the encoder's quality knob (`-cq`/`-crf`) for the LARGEST value (smallest file) whose
     sample VMAF still meets `target_vmaf`. Returns (chosen_q, measured_vmaf), or None if VMAF couldn't be
     measured at max quality (any sample encode / measurement failure → the caller keeps the preset CQ).
@@ -634,49 +638,63 @@ def _vmaf_search(src, engine, gpu_decode, ff_encode, ff_measure, target_h, av1_p
     analysis, so the app can show a live "Analyzing quality — X%". The estimate is generous (bounded by the
     binary-search depth), clamped to 0.99, and monotonic — it may finish below 1.0 if the search converges
     early; the encode phase then drives its own progress."""
+    import concurrent.futures
+    import threading
+
     lo, hi = VMAF_Q_BOUNDS.get(engine, (18, 40))
-    windows = _vmaf_sample_windows(duration, VMAF_SAMPLES, VMAF_SAMPLE_SECS)
+    windows = _vmaf_sample_windows(duration, samples or VMAF_SAMPLES, VMAF_SAMPLE_SECS)
     cache = {}
+    ncpu = os.cpu_count() or 4
+    # The windows of one candidate run CONCURRENTLY, so split the CPU cores across the (possibly) overlapping
+    # libvmaf measures to avoid oversubscription (encode is on the NVENC/GPU side and overlaps for free).
+    meas_threads = max(1, ncpu // max(1, len(windows)))
     # Estimated total sample steps = (lo probe + ~log2(range) search evals) × windows. bit_length() avoids
     # importing math; a generous estimate keeps the reported % monotonic and clamped, never overshooting.
     est_evals = 1 + max(1, hi - lo).bit_length()
     total_steps = max(1, est_evals * len(windows))
     prog = {"done": 0}
+    plock = threading.Lock()
 
     def _tick():
-        prog["done"] += 1
+        with plock:
+            prog["done"] += 1
+            frac = min(0.99, prog["done"] / float(total_steps))
         if on_progress:
             try:
-                on_progress(min(0.99, prog["done"] / float(total_steps)))
+                on_progress(frac)
             except Exception:
                 pass
+
+    def _do_window(q, i, ss, t):
+        """Encode + VMAF-measure ONE window. Returns the score, or None on any failure. Runs on a worker
+        thread; subprocess.run releases the GIL, so the real work (ffmpeg children) genuinely parallelizes."""
+        sample = os.path.join(workdir, "s{0}_{1}.mp4".format(q, i))
+        enc = _sample_encode_cmd(src, sample, engine, q, ff_encode, gpu_decode,
+                                 target_h, av1_preset, cfr_fps, hdr, ss, t)
+        try:
+            r = subprocess.run(enc, capture_output=True, text=True, timeout=1800)
+        except (subprocess.SubprocessError, OSError):
+            r = None
+        v = None
+        if r and r.returncode == 0 and os.path.isfile(sample) and os.path.getsize(sample) > 0:
+            v = _measure_vmaf(ff_measure, src, sample, ss, t, src_w, src_h, cfr_fps, model_arg,
+                              os.path.join(workdir, "vmaf_{0}_{1}.json".format(q, i)), n_threads=meas_threads)
+        _safe_unlink(sample)
+        _tick()
+        return v
 
     def score_at(q):
         if q in cache:
             return cache[q]
-        scores = []
-        for i, (ss, t) in enumerate(windows):
-            sample = os.path.join(workdir, "s{0}_{1}.mp4".format(q, i))
-            enc = _sample_encode_cmd(src, sample, engine, q, ff_encode, gpu_decode,
-                                     target_h, av1_preset, cfr_fps, hdr, ss, t)
-            try:
-                r = subprocess.run(enc, capture_output=True, text=True, timeout=1800)
-            except (subprocess.SubprocessError, OSError):
-                r = None
-            if not r or r.returncode != 0 or not os.path.isfile(sample) or os.path.getsize(sample) == 0:
-                _safe_unlink(sample)
-                cache[q] = None
-                _tick()
-                return None
-            v = _measure_vmaf(ff_measure, src, sample, ss, t, src_w, src_h, cfr_fps,
-                              model_arg, os.path.join(workdir, "vmaf.json"))
-            _safe_unlink(sample)
-            _tick()
-            if v is None:
-                cache[q] = None
-                return None
-            scores.append(v)
-        m = sum(scores) / len(scores)
+        results = [None] * len(windows)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(windows)) as ex:
+            futs = {ex.submit(_do_window, q, i, ss, t): i for i, (ss, t) in enumerate(windows)}
+            for fut in concurrent.futures.as_completed(futs):
+                results[futs[fut]] = fut.result()
+        if any(v is None for v in results):
+            cache[q] = None
+            return None
+        m = sum(results) / len(results)
         cache[q] = m
         return m
 
@@ -898,6 +916,10 @@ def run_transcode(stash, args, settings):
     if _truthy(settings.get("vmafTargeting"), True) and not _source_is_hdr(sv) and duration > 0 \
             and src_w > 0 and src_h_probe > 0:
         target = _target_vmaf(settings, str(args.get("quality") or "medium").lower())
+        try:                                     # fewer samples = faster analysis, slightly less representative
+            vmaf_samples = max(1, min(4, int(float(settings.get("vmafSamples") or VMAF_SAMPLES))))
+        except (TypeError, ValueError):
+            vmaf_samples = VMAF_SAMPLES
         ff_measure = _vmaf_ffmpeg(ffmpeg, ffmpeg_hw)
         if not ff_measure:
             log_warn("VMAF targeting is on but no ffmpeg build here has libvmaf — using preset cq {}. "
@@ -939,7 +961,7 @@ def run_transcode(stash, args, settings):
                 res = _vmaf_search(src, primary_engine, attempts[0][1], ff_encode, ff_measure,
                                    target_h, av1_preset, cfr_fps, hdr, duration,
                                    src_w, src_h_probe, target, model_arg, work, _vmaf_stage,
-                                   on_progress=_vmaf_progress)
+                                   on_progress=_vmaf_progress, samples=vmaf_samples)
             except Exception as e:
                 log_warn("VMAF search errored ({}) — using preset cq {}".format(e, cq))
             finally:

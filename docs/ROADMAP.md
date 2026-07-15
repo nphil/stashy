@@ -604,7 +604,13 @@ blocks, both first-class iOS APIs:
       **App UI DONE (plugin v0.2.1):** the analysis phase now streams a live progress fraction to the served
       file (stage `analyzing` + `progress`), and the app shows **"Analyzing quality — X%"** during the search
       and a small **"VMAF 94"** chip in the Downloads specs row (Downloads screen only).
-      **Still TODO:** an optional auto-reject-below-a-floor; consider `libvmaf_cuda`; persist the badge across
+      **PERF (v0.2.3, measured on the box):** the N sample windows of each candidate now encode+measure
+      CONCURRENTLY (threads; subprocess releases the GIL) and `n_subsample`=5 — worst-case search ~45s→~27s
+      at 3 samples. Profiling showed VMAF is CPU-bound (~1.5s/5s-window, all cores) and the big-file reads are
+      NOT the bottleneck (pre-extracting windows tested *slower*), so parallelism is ~at the CPU floor; further
+      speed is fewer/shorter samples. New `vmafSamples` setting (1–4, default 3): 2→~19s, 1→~13s, ~same result.
+      **Still TODO:** an optional auto-reject-below-a-floor; consider `libvmaf_cuda`; secant/interpolation to
+      cut eval count (biggest remaining lever on worst-case content); persist the badge across
       relaunch (currently in-memory like the Transcoded chip). `libvmaf` is BSD-3 (no GPL); the **BtbN gpl
       builds bundle it, jellyfin-ffmpeg does NOT** (verified on the box 2026-07-14) — measurement is CPU-only
       so the P40 driver ceiling (580.x, last Pascal branch) is irrelevant; jellyfin stays NVENC-only.
