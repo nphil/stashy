@@ -122,8 +122,10 @@ items from this session are listed at the bottom for context.
 - [x] **App-switcher / background privacy blur** — SHIPPED v1.0.246 (`SnapshotPrivacyModifier` in
       `Services/AppLock.swift`): thick-material cover on `scenePhase != .active`, Settings → Privacy
       toggle (default ON), independent of Face ID lock. Deliberately unanimated (snapshotted frame).
-- [ ] **⚠️ REMOVE ALL TELEMETRY before any wider release** — `RemoteLog` → ntfy is off by default but
-      present. Deletion checklist in optimization plan §5. The one intentionally-open tech-debt item.
+- [x] **Telemetry decision RESOLVED — RemoteLog stays** (owner, 2026-07-16). The old "remove all
+      telemetry before wider release" blocker is withdrawn: `RemoteLog` remains an opt-in diagnostics
+      feature (off by default; configurable/self-hostable ntfy server + topic). Optimization-plan §5
+      checklist = reference only.
 
 ## Big deferred ideas (revisit after core is solid)
 - [ ] **XR glasses support** ("phone becomes the remote") — external-display scene + AVPlayer external

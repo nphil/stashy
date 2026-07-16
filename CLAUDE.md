@@ -44,8 +44,10 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
 - GitHub scope = `nphil/stashy` only. No PRs unless asked. Don't `sleep` on CI — poll
   `get_workflow_run` / use scheduled wakeups.
 - **Small single-purpose commits** — the one big multi-feature blob shipped the -3000 regression.
-- **Telemetry (`Services/RemoteLog.swift` → ntfy, off by default) must be removed before any wider
-  release** — checklist in `docs/OPTIMIZATION_PLAN_2026-06-30.md` §5. The one open tech-debt item.
+- **Telemetry (`Services/RemoteLog.swift` → ntfy) is a KEPT feature — do NOT remove** (owner decision
+  2026-07-16, reversing the old remove-before-wider-release rule). It stays opt-in: off by default,
+  server URL + topic configurable/self-hostable in Settings → Diagnostics. The deletion checklist in
+  `docs/OPTIMIZATION_PLAN_2026-06-30.md` §5 is retained as reference only.
 - **The foreground download path and basic playback are load-bearing** — the owner daily-drives this
   app. Don't refactor them casually.
 - The owner is exacting about UI feel: native animation physics/inertia, glass chips that still look
@@ -92,8 +94,8 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   note for what has shipped since).
 - **`docs/DOWNLOADS_PLAN_2026-07-01.md`** — original downloads design (two claims corrected since;
   see its header note).
-- **`docs/OPTIMIZATION_PLAN_2026-06-30.md`** — completed perf pass; §5 = telemetry-removal
-  checklist; plus playback engineering learnings.
+- **`docs/OPTIMIZATION_PLAN_2026-06-30.md`** — completed perf pass; §5 = the (reference-only —
+  RemoteLog is kept) telemetry-removal checklist; plus playback engineering learnings.
 - **`docs/PERF_STABILITY_REVIEW_2026-07-01.md`** — 31 adversarially-verified perf/stability findings
   with per-item status (most shipped; #25 reverted — do not re-apply; a few deferred lows). Check before
   re-analyzing perf or touching the flagged code paths.
@@ -179,7 +181,7 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   excluded from its own shot) → `RemoteLog.uploadImage` PUTs a screenshot as an ntfy attachment; assistant
   fetches the hosted URL (public server only). **ntfy has NO delete API** — "New topic" rotates to a burner
   channel; auto-expiry (public ~12h msgs / ~3h attachments) or short self-hosted retention is the cleanup.
-  Still off by default; still the tech-debt item to remove before wider release.
+  Still off by default; **kept permanently** (owner decision 2026-07-16 — see Standing rules).
 - **M-B shipped**: player gear → custom quality menu forcing Stash HLS at a resolution. The `?resolution=`
   bug is fixed — Stash's HLS URL already carries `resolution=ORIGINAL`, so `serverQualityRoute` now
   *replaces* it (a duplicate param made Stash read the first = ORIGINAL). Enum values LOW/STANDARD/
@@ -237,6 +239,6 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   clobbers the user's volume). Fully-decoupled *normal-speed audio under slow video* stays deferred.
 - Next candidates: **Netflix fullscreen player UI** (next-biggest ★ player item); Blur-Media app-wide /
   WYSIWYG layout editor / mini-player-PiP / AI zoom-follow (all in ROADMAP); **concurrent-queue server
-  transcode** (needs a Stash-scheduling spike first); **remove RemoteLog telemetry** before wider release
-  (the one open tech-debt / release blocker). (Resumable/checkpointed transcode already shipped 2026-07-04
-  as `FFmpegResumableTranscoder` — don't re-plan it.)
+  transcode** (needs a Stash-scheduling spike first). (Resumable/checkpointed transcode already shipped
+  2026-07-04 as `FFmpegResumableTranscoder` — don't re-plan it. RemoteLog telemetry is a kept feature —
+  the old remove-before-release blocker is withdrawn.)

@@ -9,7 +9,8 @@ Items are ordered so the safest, highest-leverage work comes first. Each item no
 **Status (2026-07-01):** ✅ §1 (dead code) · §2.1 (remux pacing) · §2.2 (temp sweep) · §3.1 (slim list
 query + priority performer-image caching) · §3.2 (ImageCache counter) · §4.1–4.4 (correctness) · §6.1
 (split ScenePlayerModel) · LoopbackServer `dataHandler` removed.
-⏸ §2.3 (reinit debounce — deferred, latency tradeoff) · §5 (telemetry removal — kept until wider release).
+⏸ §2.3 (reinit debounce — deferred, latency tradeoff). ✕ §5 (telemetry removal — WITHDRAWN 2026-07-16:
+RemoteLog is a kept feature; checklist retained as reference).
 🔲 Remaining: §3.3 (blur, optional) · §6.2 (RangeReader, optional).
 
 ---
@@ -118,7 +119,7 @@ inefficiency.
 
 ---
 
-## 5. Telemetry removal (planned — currently kept, isolated & toggle-gated)
+## 5. Telemetry removal (SUPERSEDED 2026-07-16 — RemoteLog is a KEPT feature; checklist = reference only)
 Telemetry is **debug-only and OFF by default** (Settings → Diagnostics → "Stream debug logs", and the
 fullscreen Stats "DEBUG LOG" toggle). Transport is **ntfy** — server URL and topic are configurable in
 Settings → Diagnostics (defaults `https://ntfy.sh` / `stashy-dbg-n7x2k9q`; "New topic" rotates to a
@@ -126,9 +127,10 @@ random channel; self-hosted ntfy supported). ntfy was chosen because it was the 
 readable back from the agent sandbox — public MQTT brokers' `wss` ports and `kvdb.io` weren't
 reachable/usable. It's deliberately isolated for a clean delete.
 
-> **REMINDER (per Nitin): remove ALL telemetry before any public/wider release.** Deletion checklist —
-> refreshed 2026-07-16; the surface grew since 2026-07-01. **The final grep is the authority**; the file
-> list below keeps going stale as diagnostics are added:
+> **SUPERSEDED (per Nitin, 2026-07-16): RemoteLog is now a KEPT feature — do NOT remove it.** The
+> deletion checklist below is retained for reference only, in case the decision ever reverses
+> (refreshed 2026-07-16; the surface grew since 2026-07-01). **The final grep is the authority**; the
+> file list below keeps going stale as diagnostics are added:
 > - **FIRST** move the static `RemoteLog.memoryMB()` footprint helper into `ComputeMonitor.swift` (next
 >   to its sibling `appCPUPercent()`) — `ComputeMonitor` (Stats compute meters) calls it and is NOT
 >   telemetry; deleting RemoteLog without this step breaks the build.

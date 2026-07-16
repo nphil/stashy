@@ -330,9 +330,12 @@ There are **two** scrub gestures and they must feel identical:
   `RouteDestination` switch, `.downloads` route). Cross-screen jumps (e.g. tag tap → filtered
   scenes) go through `router`. `fullScreenCover`/`sheet`/push usage is currently a bit ad hoc — the
   owner wants this rationalized (ROADMAP nav-cleanup item); tread carefully here.
-- **Telemetry:** `RemoteLog` → ntfy (`Services/RemoteLog.swift`), OFF by default, isolated as a live
-  debug channel. **Must be deleted before any wider release** — checklist in
-  `docs/OPTIMIZATION_PLAN_2026-06-30.md` §5.
+- **Telemetry:** `RemoteLog` → ntfy (`Services/RemoteLog.swift`), OFF by default; server URL + topic
+  configurable in Settings → Diagnostics (self-hostable). **KEPT feature — owner decision 2026-07-16
+  reversed the old remove-before-wider-release rule**; the §5 checklist in
+  `docs/OPTIMIZATION_PLAN_2026-06-30.md` is reference only. Privacy note: on the default public
+  `ntfy.sh`, anyone with the topic name can read the stream — the topic is a random burner ("New topic"
+  rotates it); point at a self-hosted ntfy for full privacy.
 
 ---
 

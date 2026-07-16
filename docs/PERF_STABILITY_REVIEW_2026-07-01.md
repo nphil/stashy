@@ -152,7 +152,8 @@ nothing: `lastError` never set, spinner spins forever, Stats overlay shows no er
 **Design decisions:** default to a manual retry button, NOT an auto-retry timer (auto-retry against a down
 server/corrupt download is a new landmine); the `didFail` flag needs an explicit unset on retry (mirror the
 `stopped`/`startInProgress` reset) or you only buy one extra attempt. Owner is exacting about UI feel — the
-error card deserves a polish pass. Don't couple new error text to the `RemoteLog` call at :259 (slated for deletion).
+error card deserves a polish pass. Don't couple new error text to the `RemoteLog` call at :259 (RemoteLog
+is now a kept feature — owner decision 2026-07-16 — but keep error text decoupled from logging anyway).
 
 ### 11. [M] Cancelled search task wipes the newer search's results/spinner
 `Features/Library/SearchView.swift:30`

@@ -737,9 +737,10 @@ query slimmed + performer images cached at higher quality (evicted last), ImageC
 `ScenePlayerModel` split out of the view. Remaining items are optional/deferred and not blocking
 features: §3.3 (cheaper 4K blur), §6.2 (shared RangeReader tidy), §2.3 (reinit debounce — deferred, seek
 latency tradeoff).
-- **⚠️ REMOVE ALL TELEMETRY before any wider release.** Debug logging (`RemoteLog` → ntfy) is OFF by
-  default and isolated; deletion checklist is in §5 of the optimization plan. Reminder per Nitin. This is
-  the one tech-debt item still intentionally open (kept as the live debug channel until release).
+- **Telemetry (`RemoteLog` → ntfy): KEPT — owner decision 2026-07-16.** The old "remove all telemetry
+  before any wider release" reminder is withdrawn; RemoteLog stays as an opt-in diagnostics feature
+  (off by default; configurable + self-hostable server/topic in Settings → Diagnostics). The §5
+  deletion checklist in the optimization plan survives as reference only.
 
 ## Privacy & security
 - **★ PRIORITY — "Blur Media": one blur that covers ALL imagery, app-wide (owner-requested 2026-07-03).**
@@ -765,7 +766,8 @@ latency tradeoff).
   (default ON); independent of the Face ID app lock and in-app Privacy Mode.
 - Done: **Face ID is now immediate** — the "Stashy is Locked" splash was replaced with a minimal privacy
   blur so biometrics fire the instant the app becomes active (tap to retry if the prompt is dismissed).
-- Reminder (existing): **remove all telemetry before wider release** (see §5 of the optimization plan).
+- Telemetry: **kept** by owner decision 2026-07-16 (see Tech debt) — the old removal reminder no longer
+  applies.
 
 ## Other
 - Android app — later.
