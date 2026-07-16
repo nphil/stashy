@@ -612,6 +612,24 @@ blocks, both first-class iOS APIs:
       29@97 derived without re-searching; unmapped res → live-search fallback; run-2 incremental analysed 0).
       For 1,932 scenes ≈ ~10–15h one-time background P40 grind for one resolution, then incremental. This is
       the data layer for the live-ABR streaming plan (per-video CRF for every scene, ~zero storage).
+      **⚠ OPEN — CRITICAL NEXT STEP (owner field report 2026-07-16): the map run fails around ~20.7%
+      progress.** Not yet diagnosed. What the source says (verified against `run_vmaf_map` 2026-07-16):
+      per-scene search failures CANNOT kill the run (inner `try` → `log_debug` → continue), so a FAILED
+      job means the process died outside that guard — prime suspects: **OOM** from the v0.2.3 CONCURRENT
+      sample windows on a big 4K scene (check `dmesg` for oom-kill on the box), an ffprobe hang / GraphQL
+      `_iter_scenes` pagination exception, or a Stash restart mid-job. Progress = processed/total in
+      stable iteration order, so a consistent % = a consistent culprit scene (≈ scene N×0.207); the job
+      log names every analyzed scene ("VMAF map: scene id @ res → CRF …") — the culprit sits just after
+      the last logged one. (A time-budget stop is NOT a failure: it logs "hit the time budget; run again
+      to continue" and completes at 100%.) Mitigation tests: `vmafSamples=1` (serializes the heavy
+      encode+measure work), fewer `vmafMapResolutions`, a small `vmafMapBudgetMin`.
+      **Confirmed data-loss bug found while reading the source (fix alongside the diagnosis):** on an
+      exception the `finally` block runs the deleted-scene prune with a partial `seen` set (`stopped` is
+      only set by the budget path) — every previously-mapped scene the run hadn't reached yet is PRUNED
+      from `vmaf-map.json` and the pruned map is persisted. A deterministic mid-run crash therefore caps
+      the map at the crash point forever and re-runs re-analyze the tail. Fix: only prune after a
+      completed full pass (clean-completion flag), and add the last-processed scene id to the failure
+      path so the culprit is named.
     - **Server (Stash companion plugin) — ✅ BUILT 2026-07-14 (v0.2.0); deployed + verified live on the
       box as of v0.2.2/v0.2.3 (2026-07-14); plugin now ships v0.3.0.**
       Both levels done: **(2) target** — VMAF-targeted encoding is now DEFAULT ON. Presets map to a target

@@ -116,7 +116,10 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   Map (full)" tasks pre-compute per-video optimal CRF (+ the measured curve) per resolution into served
   `cache/vmaf-map.json` (kilobytes for the whole library, zero scene writes, incremental + resumable via
   `vmafMapBudgetMin`); `run_transcode` uses the cached CRF and skips the ~30 s live analysis;
-  `_crf_from_curve` derives all three presets from the one stored curve.
+  `_crf_from_curve` derives all three presets from the one stored curve. **⚠ Known issue (owner,
+  2026-07-16): the map run fails around ~20.7% — diagnosing it is the critical next step.** ROADMAP
+  §encode-quality has the leads + a confirmed prune-on-exception data-loss bug in `run_vmaf_map`
+  (a failed run silently prunes every not-yet-reached scene from `vmaf-map.json`).
 - **Scrubbing upgrades shipped this session** (all in `Features/Player/PlayerControlsView.swift` +
   `ZoomablePlayerSurface.swift` + new `Services/ScrubFrameProvider.swift`): (1) **exact-frame preview**
   on downloaded (local) files — `AVAssetImageGenerator` (zero tolerance, `cancelAllCGImageGeneration`
@@ -237,8 +240,10 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   rebuild (seek-reinit / quality / fallback). Persisted **"Mute when slowed"** toggle in the same menu
   (mute vs. pitch-corrected audio below 1×; `slowMute` is a separate output-volume gate so it never
   clobbers the user's volume). Fully-decoupled *normal-speed audio under slow video* stays deferred.
-- Next candidates: **Netflix fullscreen player UI** (next-biggest ★ player item); Blur-Media app-wide /
-  WYSIWYG layout editor / mini-player-PiP / AI zoom-follow (all in ROADMAP); **concurrent-queue server
-  transcode** (needs a Stash-scheduling spike first). (Resumable/checkpointed transcode already shipped
-  2026-07-04 as `FFmpegResumableTranscoder` — don't re-plan it. RemoteLog telemetry is a kept feature —
-  the old remove-before-release blocker is withdrawn.)
+- Next candidates: **① diagnose + fix the VMAF map run failing at ~20.7%** (owner report — the critical
+  next step; leads + a confirmed `run_vmaf_map` prune-on-exception bug in ROADMAP §encode-quality);
+  **Netflix fullscreen player UI** (next-biggest ★ player item); Blur-Media app-wide / WYSIWYG layout
+  editor / mini-player-PiP / AI zoom-follow (all in ROADMAP); **concurrent-queue server transcode**
+  (needs a Stash-scheduling spike first). (Resumable/checkpointed transcode already shipped 2026-07-04
+  as `FFmpegResumableTranscoder` — don't re-plan it. RemoteLog telemetry is a kept feature — the old
+  remove-before-release blocker is withdrawn.)
