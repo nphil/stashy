@@ -300,6 +300,9 @@ VMAF_SAMPLES = 3          # short windows sampled across the scene (more = more 
 VMAF_SAMPLE_SECS = 5      # seconds per sample window
 VMAF_SUBSAMPLE = 5        # score every Nth frame (libvmaf n_subsample) — cheaper, negligible accuracy loss
 VMAF_TOLERANCE = 0.5      # "meets target" slack, in VMAF points
+VMAF_MAP_SEARCH_TIMEOUT = 1800  # hard wall-clock cap (s) on ONE (scene, resolution) map search — one
+                                # pathological/hanging file must not stall the library task; the run logs
+                                # it, moves on, and retries it next run (each ffmpeg child is also capped)
 
 
 def _src_bitrate(sprobe, sv, scene_file):
@@ -628,7 +631,7 @@ def _search_quality_knob(lo, hi, target, tol, score_fn, on_stage=None):
 
 def _vmaf_search(src, engine, gpu_decode, ff_encode, ff_measure, target_h, av1_preset, cfr_fps, hdr,
                  duration, src_w, src_h, target_vmaf, model_arg, workdir, on_stage, on_progress=None,
-                 samples=None, out_curve=None):
+                 samples=None, out_curve=None, deadline=None):
     """Binary-search the encoder's quality knob (`-cq`/`-crf`) for the LARGEST value (smallest file) whose
     sample VMAF still meets `target_vmaf`. Returns (chosen_q, measured_vmaf), or None if VMAF couldn't be
     measured at max quality (any sample encode / measurement failure → the caller keeps the preset CQ).
@@ -637,7 +640,12 @@ def _vmaf_search(src, engine, gpu_decode, ff_encode, ff_measure, target_h, av1_p
     `on_progress(frac)` (optional) is called after each sample step with an estimated 0..1 fraction of the
     analysis, so the app can show a live "Analyzing quality — X%". The estimate is generous (bounded by the
     binary-search depth), clamped to 0.99, and monotonic — it may finish below 1.0 if the search converges
-    early; the encode phase then drives its own progress."""
+    early; the encode phase then drives its own progress.
+
+    `deadline` (optional, epoch seconds) is a hard wall-clock cap: checked before EACH candidate
+    evaluation; past it the search raises TimeoutError (a running evaluation still finishes — each ffmpeg
+    child has its own subprocess timeout — so the true bound is deadline + one evaluation). The VMAF map
+    task uses it so one pathological file can't stall the whole library pass; run_transcode passes None."""
     import concurrent.futures
     import threading
 
@@ -686,6 +694,8 @@ def _vmaf_search(src, engine, gpu_decode, ff_encode, ff_measure, target_h, av1_p
     def score_at(q):
         if q in cache:
             return cache[q]
+        if deadline is not None and time.time() > deadline:
+            raise TimeoutError("VMAF search exceeded its per-file time cap")
         results = [None] * len(windows)
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(windows)) as ex:
             futs = {ex.submit(_do_window, q, i, ss, t): i for i, (ss, t) in enumerate(windows)}
@@ -1885,6 +1895,16 @@ def _cached_crf(scene_id, target_h, target):
         return None
 
 
+def _prune_missing(report, seen):
+    """Drop mapped scenes that no longer exist in Stash. ONLY safe after a complete pass over the library:
+    `seen` must hold EVERY scene id Stash currently has — pruning against a partial `seen` (an exception or
+    a time-budget stop mid-run) would wrongly erase every mapped scene the run never reached."""
+    gone = [s for s in report if s not in seen]
+    for s in gone:
+        del report[s]
+    return gone
+
+
 def run_vmaf_map(stash, settings, rebuild=False):
     """Scheduled/manual LIBRARY task: run the VMAF search per scene per configured output resolution and store
     the tiny result (chosen CRF + the sampled curve) in the served cache/vmaf-map.json. Downloads then look up
@@ -1928,9 +1948,10 @@ def run_vmaf_map(stash, settings, rebuild=False):
         total_count = count
         break
 
-    processed = analyzed = skipped = since_ckpt = 0
+    processed = analyzed = skipped = failed = since_ckpt = 0
     seen = set()
     stopped = False
+    full_pass = False   # True ONLY when the scene loop finished without an exception (see prune below)
     try:
         for count, scenes in _iter_scenes(stash):
             total_count = count or total_count
@@ -1940,69 +1961,79 @@ def run_vmaf_map(stash, settings, rebuild=False):
                     log_progress(processed / float(total_count))
                 sid = str(scene["id"])
                 seen.add(sid)
-                files = scene.get("files") or []
-                if not files:
-                    continue
-                sf = files[0]
-                src = sf.get("path")
-                if not src or not os.path.isfile(src):
-                    continue
-                src_h_meta = int(_num(sf.get("height")))
-                fp = _file_fingerprint(sf)
-                e = report.get(sid)
-                if not e or e.get("file") != fp:      # new scene, or the file changed → (re)start its entry
-                    e = {"file": fp, "res": {}}
-                    report[sid] = e
-                if e.get("hdr") and not rebuild:
-                    skipped += 1
-                    continue                          # known HDR/DoVi source — VMAF's SDR model can't judge it
-                wanted = []
-                for tok in resolutions:
-                    k = _res_key(_out_height(tok, src_h_meta))
-                    if k not in wanted:
-                        wanted.append(k)
-                todo = [k for k in wanted if rebuild or k not in e["res"]]
-                if not todo:
-                    skipped += 1
-                    continue
-                if deadline and time.time() > deadline:
-                    stopped = True
-                    break
-                probe = ffprobe_streams(src, ffprobe)
-                if not probe:
-                    continue
-                sv = next((s for s in probe.get("streams", []) if s.get("codec_type") == "video"), {})
-                if _source_is_hdr(sv):
-                    e["hdr"] = True                   # remember so we don't re-probe it every run
-                    continue
-                src_w = int(sv.get("width") or 0)
-                src_h = int(sv.get("height") or src_h_meta or 0)
-                if src_w <= 0 or src_h <= 0:
-                    continue
-                duration = float((probe.get("format") or {}).get("duration") or 0)
-                cfr_fps = _clean_fps(sv)
-                for k in todo:
+                # ONE bad scene (corrupt file, ffprobe crash, weird metadata, a hung search…) must never
+                # kill the whole library run: log it at INFO with the scene id and move on — it stays
+                # unmapped and is simply retried next run.
+                try:
+                    files = scene.get("files") or []
+                    if not files:
+                        continue
+                    sf = files[0]
+                    src = sf.get("path")
+                    if not src or not os.path.isfile(src):
+                        continue
+                    src_h_meta = int(_num(sf.get("height")))
+                    fp = _file_fingerprint(sf)
+                    e = report.get(sid)
+                    if not e or e.get("file") != fp or not isinstance(e.get("res"), dict):
+                        e = {"file": fp, "res": {}}   # new scene, changed file, or malformed entry → restart
+                        report[sid] = e
+                    if e.get("hdr") and not rebuild:
+                        skipped += 1
+                        continue                      # known HDR/DoVi source — VMAF's SDR model can't judge it
+                    wanted = []
+                    for tok in resolutions:
+                        k = _res_key(_out_height(tok, src_h_meta))
+                        if k not in wanted:
+                            wanted.append(k)
+                    todo = [k for k in wanted if rebuild or k not in e["res"]]
+                    if not todo:
+                        skipped += 1
+                        continue
                     if deadline and time.time() > deadline:
                         stopped = True
                         break
-                    target_h = 0 if k == "orig" else int(k)
-                    curve = {}
-                    try:
-                        res = _vmaf_search(src, engine, gpu_decode, ff_encode, ff_measure, target_h,
-                                           DEFAULT_AV1_PRESET, cfr_fps, None, duration, src_w, src_h,
-                                           target, model_arg, work, lambda m: None, samples=samples,
-                                           out_curve=curve)
-                    except Exception as ex:
-                        log_debug("VMAF map: scene {} @ {} failed: {}".format(sid, k, ex))
-                        res = None
-                    if not res:
+                    probe = ffprobe_streams(src, ffprobe)
+                    if not probe:
                         continue
-                    crf, vmaf = res
-                    e["res"][k] = {"crf": crf, "vmaf": round(vmaf, 2), "target": target, "engine": engine,
-                                   "curve": {str(q): v for q, v in curve.items()}, "ts": int(time.time())}
-                    analyzed += 1
-                    since_ckpt += 1
-                    log_info("VMAF map: scene {} @ {} → CRF {} (~VMAF {:.1f})".format(sid, k, crf, vmaf))
+                    sv = next((s for s in probe.get("streams", []) if s.get("codec_type") == "video"), {})
+                    if _source_is_hdr(sv):
+                        e["hdr"] = True               # remember so we don't re-probe it every run
+                        continue
+                    src_w = int(sv.get("width") or 0)
+                    src_h = int(sv.get("height") or src_h_meta or 0)
+                    if src_w <= 0 or src_h <= 0:
+                        continue
+                    duration = float((probe.get("format") or {}).get("duration") or 0)
+                    cfr_fps = _clean_fps(sv)
+                    for k in todo:
+                        if deadline and time.time() > deadline:
+                            stopped = True
+                            break
+                        target_h = 0 if k == "orig" else int(k)
+                        curve = {}
+                        try:
+                            res = _vmaf_search(src, engine, gpu_decode, ff_encode, ff_measure, target_h,
+                                               DEFAULT_AV1_PRESET, cfr_fps, None, duration, src_w, src_h,
+                                               target, model_arg, work, lambda m: None, samples=samples,
+                                               out_curve=curve,
+                                               deadline=time.time() + VMAF_MAP_SEARCH_TIMEOUT)
+                        except Exception as ex:
+                            failed += 1
+                            log_info("VMAF map: scene {} @ {} failed ({}: {}) — skipped, retried next run"
+                                     .format(sid, k, type(ex).__name__, ex))
+                            res = None
+                        if not res:
+                            continue
+                        crf, vmaf = res
+                        e["res"][k] = {"crf": crf, "vmaf": round(vmaf, 2), "target": target, "engine": engine,
+                                       "curve": {str(q): v for q, v in curve.items()}, "ts": int(time.time())}
+                        analyzed += 1
+                        since_ckpt += 1
+                        log_info("VMAF map: scene {} @ {} → CRF {} (~VMAF {:.1f})".format(sid, k, crf, vmaf))
+                except Exception as ex:
+                    failed += 1
+                    log_info("VMAF map: scene {} skipped after {}: {}".format(sid, type(ex).__name__, ex))
                 if since_ckpt >= 10:                  # checkpoint so an interrupted long job keeps its progress
                     since_ckpt = 0
                     with _vmaf_map_lock():
@@ -2011,16 +2042,19 @@ def run_vmaf_map(stash, settings, rebuild=False):
                     break
             if stopped:
                 break
+        full_pass = not stopped
     finally:
         _rmtree(work)
-        if not stopped and not rebuild:               # prune scenes deleted from Stash (only on a full pass)
-            for gone in [s for s in report if s not in seen]:
-                del report[gone]
+        # Prune deleted scenes ONLY after a clean COMPLETE pass. On an exception (or a time-budget stop)
+        # `seen` is partial, and pruning against it would erase every mapped scene the run never reached —
+        # this exact bug once gutted the persisted map on any mid-run failure.
+        if full_pass and not rebuild:
+            _prune_missing(report, seen)
         with _vmaf_map_lock():
             _write_vmaf_map_raw(report)
-    log_info("VMAF CRF map ({}) — {} scenes seen, {} (scene,res) analyzed this run, {} already done/skipped{}. "
-             "Served vmaf-map.json ({} scenes mapped). Zero scene writes.".format(
-                 "rebuild" if rebuild else "incremental", processed, analyzed, skipped,
+    log_info("VMAF CRF map ({}) — {} scenes seen, {} (scene,res) analyzed this run, {} already done/skipped, "
+             "{} failed{}. Served vmaf-map.json ({} scenes mapped). Zero scene writes.".format(
+                 "rebuild" if rebuild else "incremental", processed, analyzed, skipped, failed,
                  " — hit the time budget; run again to continue" if stopped else "", len(report)))
     log_progress(1.0)
 

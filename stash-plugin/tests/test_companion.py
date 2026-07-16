@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Unit tests for stashy_companion helpers — pure stdlib (unittest), no Stash server, no ffmpeg.
+
+Run from the repo root (or anywhere):  python -m unittest discover stash-plugin/tests -v
+
+Focus: the VMAF-map crash-safety guarantees added in v0.3.1 —
+  * _prune_missing only ever removes scenes absent from `seen`;
+  * a mid-run exception (e.g. a GraphQL error during pagination) must NOT prune the persisted map
+    (the v0.3.0 bug: the finally-block prune ran with a partial `seen` and gutted the map);
+  * a clean full pass still prunes scenes deleted from Stash;
+  * one bad scene is logged + skipped, and the run completes;
+  * _vmaf_search honours its `deadline` cap by raising TimeoutError.
+"""
+import os
+import sys
+import tempfile
+import time
+import unittest
+from unittest import mock
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "stashy-companion"))
+import stashy_companion as sc  # noqa: E402
+
+
+class FakeStash:
+    """Stub for the GraphQL client: serves findScenes pages from a script.
+
+    `pages` is a list where each element is either a list of scene dicts (one full page of the
+    per_page=100 pagination) or an Exception instance to raise when that page is requested.
+    The separate per_page=1 count probe always succeeds.
+    """
+
+    def __init__(self, pages, count=None):
+        self.pages = pages
+        self.count = count if count is not None else sum(
+            len(p) for p in pages if isinstance(p, list))
+
+    def call(self, query, variables=None):
+        f = (variables or {}).get("f", {})
+        if f.get("per_page") == 1:   # the cheap total-count probe
+            return {"findScenes": {"count": self.count, "scenes": [{"id": -1}]}}
+        page = f.get("page", 1)
+        if page > len(self.pages):
+            return {"findScenes": {"count": self.count, "scenes": []}}
+        item = self.pages[page - 1]
+        if isinstance(item, Exception):
+            raise item
+        return {"findScenes": {"count": self.count, "scenes": item}}
+
+
+class VmafMapHarness(unittest.TestCase):
+    """Shared harness: CACHE_DIR → a temp dir; all ffmpeg/ffprobe touchpoints stubbed out."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        patches = [
+            mock.patch.object(sc, "CACHE_DIR", self.tmp.name),
+            mock.patch.object(sc, "_bin", lambda name, override, hw=False: name),
+            mock.patch.object(sc, "_vmaf_ffmpeg", lambda ff, ffhw: "ffmpeg"),
+            mock.patch.object(sc, "_vmaf_model_arg", lambda ff: "model"),
+            mock.patch.object(sc, "encoder_available", lambda ff, enc: False),
+            mock.patch.object(sc, "ffprobe_streams", lambda path, ffprobe: None),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(self.tmp.cleanup)
+
+    def seed_map(self, scene_ids):
+        entry = {"file": "1|x.mp4", "res": {"720": {"crf": 30, "vmaf": 94.0, "curve": {"30": 94.0}}}}
+        sc._write_vmaf_map_raw({sid: dict(entry) for sid in scene_ids})
+
+
+class TestPruneMissing(unittest.TestCase):
+    def test_removes_only_unseen(self):
+        report = {"1": {}, "2": {}, "3": {}}
+        gone = sc._prune_missing(report, seen={"1", "3"})
+        self.assertEqual(gone, ["2"])
+        self.assertEqual(set(report), {"1", "3"})
+
+    def test_full_seen_prunes_nothing(self):
+        report = {"1": {}, "2": {}}
+        self.assertEqual(sc._prune_missing(report, seen={"1", "2", "99"}), [])
+        self.assertEqual(set(report), {"1", "2"})
+
+
+class TestVmafMapCrashSafety(VmafMapHarness):
+    def test_mid_run_exception_does_not_prune_map(self):
+        """Regression for the v0.3.0 data-loss bug: a pagination failure mid-run must leave every
+        previously-mapped scene in the persisted map (the old finally-block prune ran on ANY
+        non-time-budget exit and deleted everything a partial `seen` hadn't reached)."""
+        self.seed_map(["1", "2", "300"])
+        # Page 1 = exactly 100 scenes (so pagination continues), page 2 explodes like a GraphQL blip.
+        page1 = [{"id": i, "files": []} for i in range(1, 101)]
+        stash = FakeStash([page1, RuntimeError("GraphQL errors: connection reset")], count=150)
+        with self.assertRaises(RuntimeError):
+            sc.run_vmaf_map(stash, settings={})
+        kept = sc._load_vmaf_map()
+        self.assertEqual(set(kept), {"1", "2", "300"},
+                         "a mid-run failure must never prune the persisted VMAF map")
+
+    def test_clean_full_pass_prunes_deleted_scenes(self):
+        self.seed_map(["1", "300"])
+        stash = FakeStash([[{"id": 1, "files": []}]])   # scene 300 no longer exists in Stash
+        sc.run_vmaf_map(stash, settings={})
+        self.assertEqual(set(sc._load_vmaf_map()), {"1"})
+
+    def test_bad_scene_is_skipped_and_run_completes(self):
+        """One scene whose per-scene work raises must be logged + skipped; the pass still completes
+        cleanly (so pruning still happens) and the bad scene keeps its existing map entry."""
+        self.seed_map(["300"])
+        bad = os.path.join(self.tmp.name, "bad.mp4")
+        with open(bad, "wb") as fh:
+            fh.write(b"x")
+
+        def boom(path, ffprobe):
+            raise RuntimeError("ffprobe segfault stand-in")
+        p = mock.patch.object(sc, "ffprobe_streams", boom)
+        p.start()
+        self.addCleanup(p.stop)
+        stash = FakeStash([[{"id": 1, "files": [{"path": bad, "height": 720}]},
+                            {"id": 2, "files": []}]])
+        sc.run_vmaf_map(stash, settings={})           # must not raise
+        kept = sc._load_vmaf_map()
+        self.assertIn("1", kept, "the failed scene stays (it still exists in Stash)")
+        self.assertNotIn("300", kept, "the clean pass still prunes genuinely deleted scenes")
+
+    def test_malformed_map_entry_is_restarted_not_fatal(self):
+        """A map entry without a 'res' dict (hand-edited / older format) used to KeyError at
+        `e[\"res\"]`; it must now be reset to a fresh entry instead."""
+        src = os.path.join(self.tmp.name, "v.mp4")
+        with open(src, "wb") as fh:
+            fh.write(b"x")
+        fp = sc._file_fingerprint({"size": 1, "path": src})
+        sc._write_vmaf_map_raw({"1": {"file": fp}})   # matching fingerprint, no "res"
+        stash = FakeStash([[{"id": 1, "files": [{"path": src, "size": 1, "height": 720}]}]])
+        sc.run_vmaf_map(stash, settings={})           # ffprobe stub → None → scene skipped after reset
+        self.assertEqual(sc._load_vmaf_map()["1"], {"file": fp, "res": {}})
+
+
+class TestVmafSearchDeadline(unittest.TestCase):
+    def test_expired_deadline_raises_timeout(self):
+        with tempfile.TemporaryDirectory() as work:
+            with self.assertRaises(TimeoutError):
+                sc._vmaf_search("src.mp4", "libx265", False, "ffmpeg", "ffmpeg", 720,
+                                sc.DEFAULT_AV1_PRESET, "30", None, 60.0, 1280, 720,
+                                94.0, "model", work, lambda m: None,
+                                deadline=time.time() - 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
