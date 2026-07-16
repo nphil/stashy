@@ -6,10 +6,11 @@ playback-debugging session — *before* adding new features.
 Items are ordered so the safest, highest-leverage work comes first. Each item notes **why**, **files**,
 **risk**, and **impact**.
 
-**Status (2026-07-01):** ✅ §1 (dead code) · §2.1 (remux pacing) · §2.2 (temp sweep) · §3.2 (ImageCache
-counter) · §4.1–4.4 (correctness) · §6.1 (split ScenePlayerModel) · LoopbackServer `dataHandler` removed.
+**Status (2026-07-01):** ✅ §1 (dead code) · §2.1 (remux pacing) · §2.2 (temp sweep) · §3.1 (slim list
+query + priority performer-image caching) · §3.2 (ImageCache counter) · §4.1–4.4 (correctness) · §6.1
+(split ScenePlayerModel) · LoopbackServer `dataHandler` removed.
 ⏸ §2.3 (reinit debounce — deferred, latency tradeoff) · §5 (telemetry removal — kept until wider release).
-🔲 Remaining: §3.1 (slim list query — has a UX tradeoff) · §3.3 (blur, optional) · §6.2 (RangeReader, optional).
+🔲 Remaining: §3.3 (blur, optional) · §6.2 (RangeReader, optional).
 
 ---
 
@@ -119,24 +120,41 @@ inefficiency.
 
 ## 5. Telemetry removal (planned — currently kept, isolated & toggle-gated)
 Telemetry is **debug-only and OFF by default** (Settings → Diagnostics → "Stream debug logs", and the
-fullscreen Stats "DEBUG LOG" toggle). Transport is **ntfy.sh** (topic `stashy-dbg-n7x2k9q`) because it
-was the only HTTPS/443 endpoint readable back from the agent sandbox — public MQTT brokers' `wss` ports
-and `kvdb.io` weren't reachable/usable. It's deliberately isolated for a clean delete.
+fullscreen Stats "DEBUG LOG" toggle). Transport is **ntfy** — server URL and topic are configurable in
+Settings → Diagnostics (defaults `https://ntfy.sh` / `stashy-dbg-n7x2k9q`; "New topic" rotates to a
+random channel; self-hosted ntfy supported). ntfy was chosen because it was the only HTTPS/443 endpoint
+readable back from the agent sandbox — public MQTT brokers' `wss` ports and `kvdb.io` weren't
+reachable/usable. It's deliberately isolated for a clean delete.
 
-> **REMINDER (per Nitin): remove ALL telemetry before any public/wider release.** Deletion checklist:
-> - Delete `Services/RemoteLog.swift`.
+> **REMINDER (per Nitin): remove ALL telemetry before any public/wider release.** Deletion checklist —
+> refreshed 2026-07-16; the surface grew since 2026-07-01. **The final grep is the authority**; the file
+> list below keeps going stale as diagnostics are added:
+> - **FIRST** move the static `RemoteLog.memoryMB()` footprint helper into `ComputeMonitor.swift` (next
+>   to its sibling `appCPUPercent()`) — `ComputeMonitor` (Stats compute meters) calls it and is NOT
+>   telemetry; deleting RemoteLog without this step breaks the build.
+> - Delete `Services/RemoteLog.swift` AND `Services/DebugOverlay.swift` (the app-wide floating
+>   screenshot camera button in its own passthrough UIWindow; calls `RemoteLog.uploadImage`).
+> - `StashyApp.swift`: remove the `.debugScreenshotOverlay()` modifier on the root content view.
 > - `OrientationLock.swift` (AppDelegate): remove the `RemoteLog.shared.enable()` launch call.
-> - `ScenePlayerView.swift`: remove `RemoteLog.shared.log(...)` in `start()`, `fallbackToHLS`,
->   `reinitLocal`, `seek`.
+> - `ScenePlayerModel.swift` (split out of `ScenePlayerView.swift` per §6.1): remove
+>   `RemoteLog.shared.log(...)` in `start()`, `fallbackToHLS`, `reinitLocal`, `seek`.
 > - `AVPlaybackEngine.swift`: remove the throttled `av …` telemetry block in the time observer + the
 >   `stallObserver` log.
-> - `SettingsView.swift`: remove the Diagnostics section.
-> - `StatsOverlayView.swift`: remove the DEBUG LOG toggle (and, with §1.4, the demux/loopback
->   self-tests — `FFmpegSource.probeSummary` and `LoopbackProbe` are debug-only too).
-> - Grep `RemoteLog` to confirm zero references remain.
+> - Strip the `RemoteLog` event call sites added since this plan: `FFmpegRemuxer.swift` (remux
+>   diagnostics), `FFmpegResumableTranscoder.swift` (resume-plan), `LoopbackServer.swift`,
+>   `SlowMoInterpolator.swift` + `SlowMoRunner.swift` (slow-mo diagnostics).
+> - `SettingsView.swift`: remove the Diagnostics section (now larger than when this was written —
+>   configurable ntfy server URL + topic fields, "New topic" rotation).
+> - `StatsOverlayView.swift`: remove the DEBUG LOG toggle + the vestigial `probeURL` property (and its
+>   `ScenePlayerView` call-site argument). Delete the now-orphaned `FFmpegSource.probeSummary()` (+ its
+>   private `runProbe`/`runProbeDetached` helpers — `probeVideoInfo` stays, it drives routing) and
+>   `LoopbackProbe` in `LoopbackServer.swift` — the Stats self-tests that used them are already gone.
+> - Grep `RemoteLog` to confirm zero references remain (13 files reference it as of 2026-07-16).
 
-If telemetry is wanted longer-term, swap the one `endpoint` constant in `RemoteLog` (everything else is
-transport-agnostic).
+Update 2026-07-04: the endpoint is no longer a hardcoded constant — it is computed per-use from the two
+UserDefaults-backed settings so a Settings change applies without relaunch. If telemetry is wanted
+longer-term, only the ntfy-specific request shape in `RemoteLog.swift` (POST for batched log lines, PUT
+for screenshot attachments) is transport-specific.
 
 ---
 

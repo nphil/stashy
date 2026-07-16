@@ -209,8 +209,8 @@ only in the uncaught-exception handler.
 >   `image(for:)`/`originalImage(for:)` join an in-flight fetch or start one, body moved to
 >   `fetchDownsampled`/`fetchOriginal`; shared unstructured Task shields against one awaiter's cancellation;
 >   registry cleared on success AND failure (identity-guarded); also kills the #L1 double-count at source.
->   ~~Remaining in cluster: #13 + #12 download-dedup. #18 Tier 2.~~ **DONE (commits `fa87e8b`/`d812c16`/
->   `95ee4fe`):** #13 deleted ScenePreviewGesture's `.task`, poster resolved via nonisolated
+>   ~~Remaining in cluster: #13 + #12 download-dedup. #18 Tier 2.~~ **DONE (commits `e7bd124`/`ea0f737`/
+>   `871c1b7`):** #13 deleted ScenePreviewGesture's `.task`, poster resolved via nonisolated
 >   `ImageCache.cachedImage(for:)`; #12(b) per-content-filename in-flight registry in PreviewCache
 >   (#12(a) loadTask-cancel already shipped); #18 Tier 2 per-key coalescing worker in LibraryEdits
 >   (one write in flight, re-send live value, editSeq removed). #18 T2 touches the daily ratings/favorites
@@ -219,7 +219,7 @@ only in the uncaught-exception handler.
 >   test):** #20 catchable `write(contentsOf:)` + non-optional read + size-verify before success; #21 read
 >   callback retries a transport error (EOF only on a clean empty response) → EIO not fake-EOF; #22
 >   `teardown()` nulls `hostView.player` + removes host/backdrop + `LiveBlurBackdropView.invalidate()`.
->   **#25 REVERTED (commit `a65d932` → revert `0427952`): it regressed HEVC playback** — remux stuck →
+>   **#25 REVERTED (commit `a65d932` → revert `d692de7`): it regressed HEVC playback** — remux stuck →
 >   Stash-transcode fallback. `sendHeaderThenBody`'s non-final header (`isComplete: false`) + nested-
 >   completion send stalled segment delivery to AVPlayer, exactly the truncate/stall the finding warned
 >   about. Left as-is (low value — existing 15s-buffer / 75s-pace bounds already cap the double-buffer

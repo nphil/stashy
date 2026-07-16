@@ -5,7 +5,19 @@
 >    exact design shipped the -3000 (`NSURLErrorCannotCreateFile`) regression (`ef9e591`, reverted
 >    `22f6740`). The shipped design is a dual-engine handoff: foreground 8-way parallel ⇄ background
 >    single-connection.
-> 2. M3 shipped using **AVAssetReader/AVAssetWriter (VideoToolbox), not FFmpeg** (v1.0.105–106).
+> 2. M3 first shipped using **AVAssetReader/AVAssetWriter (VideoToolbox), not FFmpeg** (v1.0.105–106) —
+>    but the downloads transcode has since become **FFmpeg-first** (`151e707`, `f421ecd`/`d3c0108`,
+>    `960ac90`): `FFmpegTranscoder` handles lossless stream copy + short non-native/non-H.264 clips,
+>    the checkpointed `FFmpegResumableTranscoder` handles all long re-encodes (survives
+>    background/kill), and the AVFoundation `VideoTranscoder` remains only for short (<90 s)
+>    native-container H.264 sources. See ENGINEERING_NOTES §4.
+> 3. A THIRD download source shipped since: **Companion server-side transcode** (`stash-plugin/` — GPU
+>    HEVC via hevc_nvenc, CPU AV1 via SVT-AV1, VMAF quality targeting, surfaced in Downloads across
+>    v1.0.250–252) — a `.serverProcessing` DownloadState drives a determinate bar off live
+>    `Job.progress`, then hands the finished file to the normal byte-download engine
+>    (`Services/StashCompanion.swift`). The "AV1 encode is NOT available / deferred" constraint below
+>    remains true only for ON-DEVICE encode — AV1-encoded downloads ARE available via the server path.
+>    See CLAUDE.md (Companion sections) + `stash-plugin/README.md`.
 > M1 and M3 have shipped; M2 shipped as the single-connection handoff (Live Activity still open).
 
 Goal: download Stash videos to the device (fast, resilient, resumable), manage them on a clean

@@ -6,6 +6,15 @@
 > `docs/ENGINEERING_NOTES.md` §3); network-loss recovery ("Waiting for network…" + bounded
 > auto-retry). Still open from those areas: Live Activity / Dynamic Island, AV1 encode, download
 > source choice, re-download at different quality.
+>
+> **Re-audited 2026-07-14 (v1.0.249) and 2026-07-16:** body checkboxes are current through 2026-07-16.
+> [Of the note above's "still open" list, **download source choice** has since shipped (Original /
+> server-transcode Companion staging on the Downloads screen); Live Activity / Dynamic Island,
+> **on-device** AV1 encode, and re-download-at-different-quality remain open.] Shipped since the first
+> re-audit: the **VMAF arc** (v1.0.250–252 + Companion v0.2.2/v0.3.0) — perceptual-quality (VMAF)
+> targeting for Companion transcodes with a live "Analyzing quality — %" status, a VMAF badge and
+> before→after size/reduction in Downloads, and a library-wide VMAF CRF-map plugin task. See CLAUDE.md
+> Current state.
 
 A consolidated punch list pulled from the session history, cross-referenced against `ROADMAP.md` and
 `DOWNLOADS_PLAN_2026-07-01.md`. Grouped by area; each item is **not yet done** unless marked. Shipped
@@ -15,17 +24,22 @@ items from this session are listed at the bottom for context.
 - [x] **Downloaded-only filter + offline sprites** — verified on device (owner daily-drives it).
 - [x] **Filter-popover flicker/crash** — verified gone on device (stable-anchor `FilterPopoverAnchor`).
 - [x] **Settings popup clipping** — verified resolved after the popover rework.
-- [x] **M-A on-device streaming transcode (video + audio)** — verified on device.
+- [x] **M-A on-device streaming transcode (video + audio)** — verified on device… then **REMOVED**
+      (`c088325`, 2026-07-05: flaky + glitchy scrubbing; exotic codecs now go to server HLS).
 - [x] **Seek-by-reinit + loading-donut tuning** (warm per-seek estimate + file-weight-scaled) — verified.
-- [ ] **Downloaded thumbnails in the scene grid** — a downloaded scene currently shows the same remote
-      thumbnail. Consider a small "downloaded" badge on grid cells so offline availability is visible in
-      the normal (non-filtered) scenes grid too.
+- [x] **Downloaded badge on grid cells** — SHIPPED 2026-07-03 (`4f55d0a`): green `arrow.down.circle.fill`
+      (+ `wand.and.stars` if transcoded) under the duration capsule in `ScenesView`. Remaining sliver (if
+      still wanted): the grid card still loads the *remote* thumbnail URL — have `SceneCard` prefer the
+      local sidecar thumbnail DownloadManager already saves (`<sceneID>-thumb.jpg`).
 
 ## Downloads (M2 / M3 — SHIPPED)
 - [x] **M2 — background continuation.** Downloads run under a background `URLSession` and survive
       suspension/exit (dual-engine handoff: foreground 8-way ⇄ background single-connection — see
       ENGINEERING_NOTES §3).
-- [x] **M2 — Live Activity / Dynamic Island for downloads.** Aggregate %/speed/ETA.
+- [ ] **M2 — Live Activity / Dynamic Island for downloads.** Aggregate %/speed/ETA. **NOT built** (the
+      [x] here was an error) — needs a Widget Extension target in `ios/project.yml` (ActivityKit +
+      `NSSupportsLiveActivities`); riskiest remaining downloads item for a sideloaded IPA (see
+      ENGINEERING_NOTES §3 Follow-ups). Background continuation itself shipped (v1.0.107, above).
 - [x] **M3 — on-device transcode.** FFmpeg → `h264/hevc_videotoolbox` (+aac), encoding card, resolution +
       bitrate-capped quality presets, HEVC default.
 - [x] **Server-side HEVC/AV1 transcode-for-download** — the Stashy Companion plugin (GPU HEVC on the EOL
@@ -36,13 +50,20 @@ items from this session are listed at the bottom for context.
       build ships VideoToolbox H.264/HEVC + AAC only; AV1 *decode* only). Note: server-side AV1 via the
       companion plugin already covers this need; on-device AV1 encode remains deferred.
 - [ ] **Re-download at different quality** from the management screen.
-- [ ] **Resumable/checkpointed on-device transcode** (fragmented-MP4 append — owner-requested; see ROADMAP).
+- [x] **Resumable/checkpointed on-device transcode** — SHIPPED 2026-07-04 (`f421ecd`/`d3c0108`/`960ac90`):
+      `FFmpegResumableTranscoder`, keyframe-aligned chunk engine (ROADMAP Approach B — chosen over
+      fragmented-MP4 append), persistent work dir (`plan.json` + `chunk_NNNN.mp4` + `settings.json`) so
+      even a cold relaunch resumes; used for long re-encodes only (stream-copy and <90 s files take the
+      fast paths).
 
 ## FFmpeg iOS XCFrameworks (separate build project — enables M3/AV1/broader transcode)
-- [ ] Stand up the dedicated `ffmpeg-ios` repo + `macos-15` GitHub Actions build producing the 6
-      XCFrameworks (avformat/avcodec/avutil/avfilter/swscale/swresample), arm64 device + sim, module
-      maps, published as checksummed Release assets. (Full brief exists as a standalone plan.) The app's
-      on-device transcode/remux features ride on these.
+- [x] **DONE** (pre-dates this snapshot's re-audit) — shipped as the SPM package
+      **`nphil/stashy-videoengine`** (LGPL-minimal build: VideoToolbox H.264/HEVC + native `aac` encoders
+      only; AV1 decode but **no AV1 encode**). The app's on-device transcode/remux features
+      (FFmpegRemuxer/Transcoder/ResumableTranscoder/Probe) ride on it; capability changes = rebuild +
+      republish that package and bump the pin in `ios/project.yml`, not this repo (ENGINEERING_NOTES §5).
+      The remaining open slice — rebuilding with SVT-AV1/libaom for on-device AV1 encode — is tracked in
+      the Downloads section above.
 
 ## Playback & scrubbing
 - [x] **Seekable remux (seek-by-reinit)** — SHIPPED. `ScenePlayerModel.seek(to:)` reinits the local remux/
@@ -62,8 +83,12 @@ items from this session are listed at the bottom for context.
       100-bin watched-seconds curve, host-scoped, drawn above the ScrubBar while scrubbing; Settings →
       Player toggle + Clear.
 - [ ] **Revive segmented HLS** only if driven by one continuous muxer (per-segment muxing was choppy).
-- [ ] **Quality / gear selector** — Auto / Direct / On-device / Server transcode + resolution picker.
-- [ ] **Server-side transcode controls** — quality/resolution for the HLS path.
+- [x] **Quality / gear selector** — mostly shipped as M-B (gear menu, Auto + server-resolution rungs;
+      routing is otherwise automatic via `playbackRoute`). Only an explicit Direct / On-device method
+      forcing remains unbuilt.
+- [x] **Server-side transcode controls** — SHIPPED as M-B: player gear → `ServerQuality` menu forcing
+      Stash HLS at a chosen resolution (duplicate `?resolution=` param bug fixed; exact-position resume
+      on switch). `PlayerControlsView` + `Scene.serverQualityRoute`.
 
 ## Stash feature parity
 - [ ] **O-counter** — increment/track per scene.
@@ -77,7 +102,9 @@ items from this session are listed at the bottom for context.
       (`PerformerFilterType.country`).
 - [ ] **Rework the filter/sort chips UI** — cleaner interaction model (ongoing; popover stability was one
       slice of this).
-- [ ] **Pull-down search** integrated into the library (scroll-to-reveal) instead of a separate tab.
+- [x] **Pull-down search** — SHIPPED 2026-07-08 (`db1263a`): native `.searchable` drawer on the Scenes
+      and Performers lists (collapsed until pull-down or the magnifier button, 350 ms debounce);
+      `SearchView.swift` deleted, Search tab replaced by a Downloads tab.
 - [ ] **Universal search** across content types; **tab show/hide/reorder**.
 - [ ] **Filter scenes by favorites/rating** (downloaded-only just added; extend the "Show" row).
 
@@ -102,8 +129,13 @@ items from this session are listed at the bottom for context.
 - [ ] **XR glasses support** ("phone becomes the remote") — external-display scene + AVPlayer external
       playback; big-screen UI on glasses, phone becomes a gesture trackpad; Live Activity/Dynamic Island
       remote. Needs real hardware. *(User explicitly asked; confirmed feasible on iPhone 15+.)*
-- [ ] **AI upscaling** — MetalFX spatial (Phase A) → per-video overfitted Core ML SR model via Stash
-      plugin (Phase B). For low-bandwidth/remote viewing.
+- [ ] **AI upscaling** — **ATTEMPTED & REVERTED**: the live-upscaling path shipped v1.0.239–244 (VT
+      zoom-crop, then MetalFX 2×/4× + neural pause-stills) and was removed 2026-07-10
+      (`Services/UpscaleRunner.swift` deleted) — owner called it buggy and not worth it on 720p sources.
+      **Do NOT retry cold — read ROADMAP §AI upscaling postmortem first.** Current revival plan:
+      Real-ESRGAN Core ML paused-frame enhance (A19 Pro), iOS 27 VT capability-query APIs for a live
+      re-attempt, server-side SR as max-quality offline. The Phase B idea (per-video overfitted SR model
+      via Stash plugin) remains untried.
 - [ ] **Instant-start preview preloader** — Stash plugin pre-generates ~3s opening clips; app plays the
       preview instantly then hands off to the real stream.
 - [ ] **Performer social feed** (X/Twitter) in the socials card — API-constrained, best-effort.
