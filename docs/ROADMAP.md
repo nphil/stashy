@@ -646,8 +646,16 @@ blocks, both first-class iOS APIs:
       successful settings READ (a transient read failure must not trigger it). Backup lives in cache/ —
       never in the shipped zip. Owner re-enters settings once after installing v0.3.2; every later task
       run keeps the backup fresh.
+      **✅ LIVE-VERIFIED 2026-07-16:** job 56 ("Compute VMAF Map") started ~02:25 under v0.3.1 and was
+      checked again at 05:56 — still RUNNING, 41.1% progress, clean `VMAF map: scene …` lines through
+      scene 1461 with **zero `GraphQL HTTP 401`** in the docker log — over an hour past the previous
+      ~2h40m death point. Fix confirmed working under real multi-hour load, not just root-caused.
+      v0.3.2 deployed to the box the same session (direct file copy, box now shows `version: 0.3.2` +
+      `_sync_settings`/`settings-backup.json` present in the live plugin file); live settings map on the
+      box is currently full (not wiped), so the backup will self-seed on the next Companion task run —
+      no manual re-entry needed unless a future package-manager update wipes it before then.
     - **Server (Stash companion plugin) — ✅ BUILT 2026-07-14 (v0.2.0); deployed + verified live on the
-      box as of v0.2.2/v0.2.3 (2026-07-14); plugin now ships v0.3.1.**
+      box as of v0.2.2/v0.2.3 (2026-07-14); plugin now ships v0.3.2.**
       Both levels done: **(2) target** — VMAF-targeted encoding is now DEFAULT ON. Presets map to a target
       VMAF (High 97 / Balanced 94 / Small 91, **phone model** — owner's pick, since these play on an iPhone),
       and the plugin sample-encodes a few short windows + binary-searches the encoder's own quality knob

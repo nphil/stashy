@@ -117,7 +117,9 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   `cache/vmaf-map.json` (kilobytes for the whole library, zero scene writes, incremental + resumable via
   `vmafMapBudgetMin`); `run_transcode` uses the cached CRF and skips the ~30 s live analysis;
   `_crf_from_curve` derives all three presets from the one stored curve.
-- **Companion v0.3.1 — the mid-run map FAILURE (~20.7%, GraphQL 401) is FIXED**, both the cause and the
+- **Companion v0.3.1 — the mid-run map FAILURE (~20.7%, GraphQL 401) is FIXED and LIVE-VERIFIED**
+  (2026-07-16): job 56 ("Compute VMAF Map") ran clean from ~02:25 to past 05:56 (41.1% progress, scene
+  1461, zero 401s in the docker log) — over an hour past the previous ~2h40m death point. Both the cause and the
   damage: (1) **auth** — Stash's session cookie expires during multi-hour jobs, so `main()` now swaps to
   the server's API key at task start (`Stash.adopt_api_key`, fetched while the cookie still works; Cookie
   header dropped; one retry on 401); (2) **data loss** — the finally-block deleted-scene prune ran on ANY
@@ -252,10 +254,10 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   rebuild (seek-reinit / quality / fallback). Persisted **"Mute when slowed"** toggle in the same menu
   (mute vs. pitch-corrected audio below 1×; `slowMute` is a separate output-volume gate so it never
   clobbers the user's volume). Fully-decoupled *normal-speed audio under slow video* stays deferred.
-- Next candidates: **① ship + verify the VMAF map fix (plugin v0.3.1)** — root cause confirmed
-  2026-07-16 (session-cookie expiry → GraphQL 401 on long runs) + the prune data-loss bug; a fix
-  session is in flight (ROADMAP §encode-quality has the full evidence);
-  **Netflix fullscreen player UI** (next-biggest ★ player item); Blur-Media app-wide / WYSIWYG layout
+- Next candidates: **the VMAF map fix (plugin v0.3.1) is DONE — shipped, deployed, and live-verified**
+  2026-07-16 (job 56 ran clean past the previous ~2h40m/20.7% death point, zero 401s; v0.3.2 settings-
+  persistence also deployed to the box; ROADMAP §encode-quality has the full evidence — no further
+  action needed here). **Netflix fullscreen player UI** (next-biggest ★ player item); Blur-Media app-wide / WYSIWYG layout
   editor / mini-player-PiP / AI zoom-follow (all in ROADMAP); **concurrent-queue server transcode**
   (needs a Stash-scheduling spike first). (Resumable/checkpointed transcode already shipped 2026-07-04
   as `FFmpegResumableTranscoder` — don't re-plan it. RemoteLog telemetry is a kept feature — the old
