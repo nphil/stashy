@@ -94,10 +94,27 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   see its header note).
 - **`docs/OPTIMIZATION_PLAN_2026-06-30.md`** — completed perf pass; §5 = telemetry-removal
   checklist; plus playback engineering learnings.
+- **`docs/PERF_STABILITY_REVIEW_2026-07-01.md`** — 31 adversarially-verified perf/stability findings
+  with per-item status (most shipped; #25 reverted — do not re-apply; a few deferred lows). Check before
+  re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.249** (scrub speed-gear label + variable-speed on the video hold-scrub, commit
-  `1069758`, ~8.60 MB — built green). Verify the newest release/IPA size each push.
+- Latest release: **v1.0.252** (Downloads before→after size + VMAF line on transcode finish, commit
+  `f1b008a`, ~8.60 MB — built green). `a8e3242` (Companion v0.3.0) is newer on main but plugin+docs-only
+  (no app build). Verify the newest release/IPA size each push.
+- **VMAF quality-targeted transcodes shipped** (Companion v0.2.0→v0.3.0 + app v1.0.250–252): the plugin
+  binary-searches the encoder quality knob on short sample windows to hit a target VMAF (phone model;
+  presets are now perceptual targets High 97 / Balanced 94 / Small 91; default ON; needs libvmaf — in the
+  BtbN software ffmpeg build, NOT jellyfin-ffmpeg; HDR/DoVi or any measure failure falls back safely to
+  the preset CRF). v0.2.2 fixed the `-lavfi` double-escaped-colon bug that silently broke EVERY
+  measurement; v0.2.3 parallelized sample windows (~45s→~27s) + `vmafSamples` setting. Result JSON carries
+  `cq/vmaf/vmaf_target` → Downloads shows a live **"Analyzing quality — %"** phase (served-file progress;
+  the Job.progress clobber is skipped while analyzing or the bar bounces), a **"VMAF NN" chip**, and
+  **before→after size + reduction** on finish. **v0.3.0 VMAF CRF map**: "Compute VMAF Map" / "Rebuild VMAF
+  Map (full)" tasks pre-compute per-video optimal CRF (+ the measured curve) per resolution into served
+  `cache/vmaf-map.json` (kilobytes for the whole library, zero scene writes, incremental + resumable via
+  `vmafMapBudgetMin`); `run_transcode` uses the cached CRF and skips the ~30 s live analysis;
+  `_crf_from_curve` derives all three presets from the one stored curve.
 - **Scrubbing upgrades shipped this session** (all in `Features/Player/PlayerControlsView.swift` +
   `ZoomablePlayerSurface.swift` + new `Services/ScrubFrameProvider.swift`): (1) **exact-frame preview**
   on downloaded (local) files — `AVAssetImageGenerator` (zero tolerance, `cancelAllCGImageGeneration`
@@ -141,8 +158,8 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   synthesised frames on-device. Deferred: adaptive frame count per rate; the standalone 0.25×-won't-play bug.
 - **Stashy Companion plugin shipped** (`stash-plugin/` — its OWN top-level folder, sibling to `ios/`):
   a stashapp/stash plugin (`interface: raw`, zero-dep Python) that adds what vanilla Stash can't — **GPU
-  HEVC (hevc_nvenc, Tesla P40) / CPU AV1 (SVT-AV1) transcode**, ffprobe codec+HDR stats, direct-play
-  auto-tagging. Delivery mechanism (researched from real Stash source): plugin writes the iPhone-native
+  HEVC (hevc_nvenc, Tesla P40) / CPU AV1 (SVT-AV1) transcode**, ffprobe codec+HDR stats, and a served
+  playability report (no scene writes). Delivery mechanism (researched from real Stash source): plugin writes the iPhone-native
   MP4 into its served `cache/` dir (`/plugin/stashy-companion/assets/…`, Range-capable) and records the
   download path on the SOURCE scene's `custom_fields.stashy_transcode`; the app polls `findJob` for real
   `Job.progress`. Encoder ladder: NVDEC+NVENC → CPU-decode+NVENC → libx265. Install = add
@@ -168,14 +185,15 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   *replaces* it (a duplicate param made Stash read the first = ORIGINAL). Enum values LOW/STANDARD/
   STANDARD_HD/FULL_HD/ORIGINAL verified against stashapp/stash source. Quality switch resumes at the exact
   position (client-side seek; `start=` doesn't work on the HLS manifest).
-- **M-A shipped (video path; awaiting device verification)**: on-device *streaming* transcode tier.
-  `FFmpegStreamTranscoder` (Services/) = read-ahead range-request AVIO + pacing + seek-by-reinit (from
-  `FFmpegRemuxer`) + HW decode→libswscale→`h264_videotoolbox`→**fragmented MP4** (global-header init seg);
-  `LocalTranscodeStream` wraps it over the loopback like `LocalRemuxStream`. Routing (`Scene.playbackRoute`)
-  sends the "Apple can't decode at all" bucket (VP9/software-AV1/exotic) ≤1080p to it with the Stash HLS as
-  `fallbackURL` (`armWatchdog` auto-recovers); heavier 4K → server. Audio: **copy** when MP4-muxable, else
-  **AAC re-encode** (Stage 1b shipped — `FFmpegAudioReencoder`: decode → libswresample → AVAudioFifo →
-  native `aac` encoder, global-header init seg, sample-counter PTS). **M-A is complete (video + audio).**
+- **M-A (on-device *streaming* transcode playback tier) shipped then was REMOVED** (`c088325`,
+  2026-07-05): flaky, seek-by-reinit made scrubbing glitchy, and it pulled the whole original over the
+  network to re-encode locally. `FFmpegStreamTranscoder`/`LocalTranscodeStream`/`FFmpegAudioReencoder` are
+  **deleted** — don't go looking for them (git history only). The "Apple can't decode at all" bucket
+  (VP9/software-AV1/exotic) now routes straight to Stash **server** HLS at any resolution. On-device FFmpeg
+  transcode survives in the **Downloads** flow only: `FFmpegTranscoder` (universal single-pass + lossless
+  stream-copy fast path) and `FFmpegResumableTranscoder` (checkpointed keyframe-aligned chunks, shipped
+  2026-07-04 — deliberately chosen over fragmented-MP4 append; used for long re-encodes) beside the
+  AVFoundation `VideoTranscoder` (short native H.264 only). See ENGINEERING_NOTES §4.
 - **Player UX this session** (all shipped): intelligent loading donut (per-mode `LoadEstimator` rolling
   average + saturating curve, % inside ring); inline expanding **volume slider** 0–100 (starts muted);
   quality+method **status badges** on one control row; gear moved right; resume-from-position on return
@@ -205,8 +223,10 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   use served files, like the transcode-progress file). App: `PlayabilityStore` fetches+caches it →
   (1) **smarter routing** (`playbackRoute(pluginNeedsTranscode:)` skips a doomed remux on Apple-undecodable
   4:2:2/4:4:4 HEVC), (2) **playability filter** (`SceneFilterPanel` Any/Direct-play/Needs-transcode, pages
-  via `findScenesByIDs`). No scene-card badges (owner). Plugin writes nothing to scenes; **Remove Stashy
-  Library Data** task cleans up tags/fields from ≤0.1.17.
+  via `findScenesByIDs`). No scene-card badges (owner). Plugin writes nothing to scenes; the **Remove Stashy
+  Tags (cleanup)** task deletes the `Stashy:*` tag definitions left by ≤0.1.17 (tag-definitions only —
+  the residual `stashy_probe` custom field is deliberately left as dead data; clearing it would be a
+  per-scene write = Sync storm).
 - **Playback speed shipped**: Podcasts-style speed pill on the player control row (left of the gear) →
   0.25×–2× menu, **pitch-corrected** audio (`AVPlayerItem.audioTimePitchAlgorithm = .timeDomain`). Rate is
   published via `AVPlayer.defaultRate` + a re-invoked `play()` (applies live, keeps
@@ -215,8 +235,8 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   rebuild (seek-reinit / quality / fallback). Persisted **"Mute when slowed"** toggle in the same menu
   (mute vs. pitch-corrected audio below 1×; `slowMute` is a separate output-volume gate so it never
   clobbers the user's volume). Fully-decoupled *normal-speed audio under slow video* stays deferred.
-- Next candidates: **Netflix fullscreen player UI** (next-biggest ★ player item); **resumable/checkpointed
-  transcode** (fragmented-MP4 append — owner wants it, see ROADMAP Downloads); Blur-Media app-wide /
+- Next candidates: **Netflix fullscreen player UI** (next-biggest ★ player item); Blur-Media app-wide /
   WYSIWYG layout editor / mini-player-PiP / AI zoom-follow (all in ROADMAP); **concurrent-queue server
   transcode** (needs a Stash-scheduling spike first); **remove RemoteLog telemetry** before wider release
-  (the one open tech-debt / release blocker).
+  (the one open tech-debt / release blocker). (Resumable/checkpointed transcode already shipped 2026-07-04
+  as `FFmpegResumableTranscoder` — don't re-plan it.)

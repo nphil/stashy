@@ -2,28 +2,31 @@
 
 Companion to the root `CLAUDE.md` (the lean entry point). This file holds the hard-won detail:
 **read the relevant section before touching that subsystem**, and update it as you learn. Everything
-here was verified against the repo on 2026-07-01.
+here was verified against the repo on 2026-07-01; full re-audit against code + git history 2026-07-16.
 
 ---
 
 ## 1. Build / CI detail
 
 Workflow: `.github/workflows/ios-build.yml`, runs on `macos-15`, triggered on every push to `main`.
-`paths-ignore` skips `**/*.md` and `android/**` — doc-only commits do **not** trigger a build.
+`paths-ignore` skips `**/*.md`, `android/**`, `stash-plugin/**`, and `.github/workflows/android.yml` —
+doc-only AND plugin-only commits do **not** trigger an app build.
 
-### The swallowed exit code
-The "Build (unsigned)" step pipes xcodebuild through `| xcpretty || true`, which **swallows the exit
-code** — a compile or link error still shows ✅ green. The failure is only caught by the later
-**"Package into IPA"** step, which checks the `.app` contains a non-empty executable (exits 1 with
-`"App executable '<name>' missing/empty — the build failed"`) and enforces a ~1 MB minimum IPA size.
+### Fail-fast compile errors (since `f243d30`, 2026-07-08)
+The "Build (unsigned)" step tees raw xcodebuild output to `xcodebuild.log` (xcpretty is cosmetic only)
+and deliberately tolerates the pipeline's exit code (a framework-validation false-positive). It then
+greps the log for the precise `<path>:<line>:<col>: error:` diagnostic pattern — on any hit it prints
+the deduped errors up front, emits GitHub `::error file=…,line=…,col=…` inline annotations for `.swift`
+diagnostics, and exits 1 **at the Build step**. A red Build step with annotations = compile failure,
+already surfaced — no log digging. (The old `| xcpretty || true` swallowed-exit-code trap, where a
+compile error showed green until the Package step, is gone.)
 
-Consequences:
-- "Build step green" ≠ "it compiled." Only the Package step passing / a published release proves it.
-- On a compile failure **no release is published**, so the previously-installed IPA keeps working — a
-  broken push is low-blast-radius.
-- To read a real compile error: `get_job_logs` (GitHub MCP) with `return_content:true`,
-  `tail_lines: ~230`. Swift `error:` lines appear just before the Package-step echo. Look for
-  `❌ .../File.swift:LINE:COL: <message>` and `** BUILD FAILED **`.
+Still true:
+- On a failed run **no release is published**, so the previously-installed IPA keeps working — a broken
+  push is low-blast-radius; only a published release fully proves a push out.
+- A pure **linker** error (no `line:col` diagnostic — rare) still passes the grep; it's caught by the
+  Package step's executable-present check + ~1 MB IPA-size floor. For those, read logs the old way:
+  `get_job_logs` (`return_content:true`, `tail_lines: ~230`), look for `** BUILD FAILED **`.
 
 ### Verify Apple API signatures BEFORE you push (CI is the only compiler)
 Every unverified API guess is a ~6–8 min round trip. Before using an unfamiliar Apple symbol, fetch its
@@ -158,6 +161,28 @@ predates this discovery and asserts the opposite — this file is the correction
 - Accessors the rest of the app relies on: `localFile(sceneID:)`, `localSprite(sceneID:)`,
   `localVTT(sceneID:)`, `hasDownload(sceneID:)`.
 
+### Companion (server-side) transcode source + VMAF
+- `Services/StashCompanion.swift` is the one typed app↔plugin gateway (`runPluginTask` / `findJob` /
+  `custom_fields` / `TranscodeResult`). Downloads staging has a third source **Companion** (server GPU
+  HEVC / CPU AV1 + resolution + quality): a **`.serverProcessing`** DownloadState drives a *determinate*
+  bar from polled `Job.progress`, then hands the finished served file to the normal (Range-capable,
+  8-way) byte engine — the load-bearing transfer path is untouched. One combined poll reads `findJob` +
+  the scene's `custom_fields.stashy_transcode`, so completion survives an app kill or Stash GC'ing the Job.
+- **VMAF quality targeting (plugin v0.2.x, 2026-07-14):** the plugin binary-searches the encoder quality
+  knob on short sample windows to hit a phone-model VMAF target (High 97 / Balanced 94 / Small 91).
+  During the search it writes a progress fraction to its served progress file (stage `analyzing`) — the
+  app shows **"Analyzing quality — X%"** via `item.analyzing` and **skips the Job.progress clobber while
+  analyzing** (Job.progress reads 0 during analysis; writing it made the bar visibly bounce — `ba7c65a`).
+- Result fields `cq`/`vmaf`/`vmaf_target` come back in `custom_fields` (`TranscodeResult`); `item.vmaf`
+  renders a "VMAF NN" chip in `DownloadsView`, and the finish log appends before→after size + % reduction
+  and `VMAF: target → achieved · cq` (`f1b008a`, v1.0.252). Achieved sits at/just above target by
+  CRF-step granularity — expected, not a mismatch.
+- **v0.3.0 VMAF CRF map:** "Compute VMAF Map" / "Rebuild VMAF Map (full)" plugin tasks pre-compute
+  per-scene optimal CRF (+ the sampled curve) per resolution into served `cache/vmaf-map.json` —
+  incremental, resumable (per-run `vmafMapBudgetMin` time budget), zero scene writes. `run_transcode`
+  looks up the cached CRF and skips the ~30 s live analysis; `_crf_from_curve` derives all presets from
+  the one stored curve. Full detail: `stash-plugin/README.md` + ROADMAP §encode-quality.
+
 ### Follow-ups
 - **Encryption (roadmap, not built):** opt-in "encrypt downloads" — Data Protection `.complete`, or
   app-level AES-GCM (CryptoKit + Keychain) decrypted via `AVAssetResourceLoaderDelegate`. See ROADMAP.
@@ -167,20 +192,27 @@ predates this discovery and asserts the opposite — this file is the correction
 
 ---
 
-## 4. On-device transcode (`Services/VideoTranscoder.swift`)
+## 4. On-device download transcode — three engines, FFmpeg-first
 
-- **`AVAssetReader` → `AVAssetWriter`** (hardware VideoToolbox), **NOT FFmpeg** — chosen for
-  robustness (handles audio re-encode, no untestable C interop, can't crash the app).
-  (`DOWNLOADS_PLAN` M3 said "reuse the FFmpeg engine" — this is what actually shipped.) Presets:
-  resolution (Original/2160/1080/720/480) × quality (Low/Med/High bitrate ladder) × codec (HEVC
-  default / H.264). Produces a faststart MP4, **replaces the offline file in place**, updates the
+`DownloadManager.transcode()` (~line 987–1029) routes each job across three engines (all conform to
+`OnDeviceTranscoder`, declared in `VideoTranscoder.swift`):
+
+- **Lossless stream copy** — same codec + same-or-smaller target size → `FFmpegTranscoder` remux-only
+  fast path (incl. hev1→hvc1 retag). Near-instant.
+- **Short clips (< 90 s)** — `VideoTranscoder` (`AVAssetReader` → `AVAssetWriter`, hardware
+  VideoToolbox) when the container is AV-native AND the codec is H.264; otherwise `FFmpegTranscoder`
+  (universal FFmpeg decode → VideoToolbox encode, commit `151e707`). **MKV/WebM/VP9/AV1 no longer throw
+  `.unreadable`** — the old AVFoundation-only limitation is gone.
+- **Long re-encodes (everything else)** → `FFmpegResumableTranscoder(workDir:)`
+  (`f421ecd`/`d3c0108`/`960ac90`, 2026-07-04): checkpointed keyframe-aligned standalone chunk MP4s
+  (`chunk_NNNN.mp4`, atomic-rename commit, `plan.json` + `settings.json` so even a cold relaunch
+  resumes from the last committed chunk), finalized by a stream-copy concat remux with single-pass
+  audio. **Deliberately chosen over single-file fragmented-MP4 append** (see the file header).
+- Presets: resolution (Original/2160/1080/720/480) × quality (Low/Med/High bitrate ladder) × codec
+  (HEVC default / H.264). Produces a faststart MP4, **replaces the offline file in place**, updates the
   item's spec chips.
-- **Limitation:** only inputs AVFoundation can decode (H.264/HEVC in mp4/mov). **MKV/WebM/VP9/AV1
-  throw `.unreadable`.** FFmpeg-based transcode for exotic containers is a documented follow-up (the
-  FFmpeg remux path already exists for playback — §5).
-- **AV1 encode is impossible with the current FFmpeg build** (LGPL-minimal: videotoolbox H.264/HEVC +
-  AAC only). Would need rebuilding the FFmpeg XCFrameworks with libaom/SVT-AV1 — a separate project
-  (build brief lives with the owner; see §5 on `stashy-videoengine`).
+- **AV1 encode is impossible on-device** (LGPL-minimal FFmpeg: videotoolbox H.264/HEVC + AAC encoders
+  only — §5). AV1-encoded *downloads* DO exist via the server path: the Companion plugin's SVT-AV1 (§3).
 - UI: `wand.and.stars` button on a completed download card → `TranscodePresetSheet` →
   `downloads.transcode`. Progress on the card (accent bar + "Transcoding… NN%") with cancel.
   Progress deliberately rides on `item.transcoding`/`transcodeProgress` bools instead of a new
@@ -310,6 +342,10 @@ There are **two** scrub gestures and they must feel identical:
 - v1.0.101: Downloads M1 (8-connection engine + screen), downloaded-only filter, offline sprites.
 - v1.0.105–106: on-device transcode (AVFoundation, presets, card UI).
 - v1.0.107: single-connection background continuation with foreground handoff (`b8ea21d`).
+- 2026-07-03/04: downloads transcode goes FFmpeg-first (`151e707` universal engine;
+  `f421ecd`/`d3c0108`/`960ac90` checkpointed resumable engine — §4).
+- 2026-07-04/05: M-A on-device *streaming* transcode playback tier shipped… then **removed** in
+  `c088325` (flaky + glitchy scrubbing; exotic codecs → server HLS). M-B (server-quality menu) stays.
 - Also shipped in the big handoff session: scene ratings + performer/tag favorites (`LibraryEdits`),
   Apple-Photos-style image viewer, portrait-fullscreen tab-bar fix, popover stable-anchor fix,
   private Application Support storage migration, network-loss recovery ("Waiting for network…" +
