@@ -11,11 +11,14 @@ Focus: the VMAF-map crash-safety guarantees added in v0.3.1 —
   * one bad scene is logged + skipped, and the run completes;
   * _vmaf_search honours its `deadline` cap by raising TimeoutError.
 """
+import io
+import json
 import os
 import sys
 import tempfile
 import time
 import unittest
+import urllib.error
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "stashy-companion"))
@@ -136,6 +139,70 @@ class TestVmafMapCrashSafety(VmafMapHarness):
         stash = FakeStash([[{"id": 1, "files": [{"path": src, "size": 1, "height": 720}]}]])
         sc.run_vmaf_map(stash, settings={})           # ffprobe stub → None → scene skipped after reset
         self.assertEqual(sc._load_vmaf_map()["1"], {"file": fp, "res": {}})
+
+
+class FakeResponse:
+    """Context-manager stand-in for urllib.request.urlopen's return value."""
+
+    def __init__(self, body):
+        self._body = json.dumps(body).encode("utf-8")
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class TestStashAuth(unittest.TestCase):
+    """The v0.3.1 fix for the CONFIRMED root cause of the mid-run VMAF-map deaths: Stash's session
+    cookie expires during multi-hour jobs (GraphQL 401 after ~2h40m on the box), so the client must
+    adopt the never-expiring API key at task start."""
+
+    def _stash(self):
+        return sc.Stash({"Scheme": "http", "Host": "localhost", "Port": 9999,
+                         "SessionCookie": {"Name": "session", "Value": "abc"}})
+
+    def test_adopt_api_key_swaps_cookie_for_key(self):
+        st = self._stash()
+        self.assertIn("Cookie", st.headers)
+        resp = FakeResponse({"data": {"configuration": {"general": {"apiKey": "K123"}}}})
+        with mock.patch.object(sc.urllib.request, "urlopen", return_value=resp):
+            st.adopt_api_key()
+        self.assertEqual(st.headers.get("ApiKey"), "K123")
+        self.assertNotIn("Cookie", st.headers, "the expiring cookie must be dropped once the key is adopted")
+
+    def test_adopt_api_key_noop_on_open_instance(self):
+        st = self._stash()
+        resp = FakeResponse({"data": {"configuration": {"general": {"apiKey": ""}}}})
+        with mock.patch.object(sc.urllib.request, "urlopen", return_value=resp):
+            st.adopt_api_key()
+        self.assertNotIn("ApiKey", st.headers)
+        self.assertIn("Cookie", st.headers)
+
+    def test_adopt_api_key_survives_fetch_error(self):
+        st = self._stash()
+        with mock.patch.object(sc.urllib.request, "urlopen",
+                               side_effect=OSError("connection refused")):
+            st.adopt_api_key()   # must not raise
+        self.assertNotIn("ApiKey", st.headers)
+
+    def test_call_retries_once_on_401(self):
+        st = self._stash()
+        calls = []
+
+        def fake_urlopen(req, timeout=None):
+            calls.append(req)
+            raise urllib.error.HTTPError("http://x/graphql", 401, "Unauthorized",
+                                         None, io.BytesIO(b"unauthorized"))
+        with mock.patch.object(sc.urllib.request, "urlopen", side_effect=fake_urlopen), \
+             mock.patch.object(sc.time, "sleep", lambda s: None):
+            with self.assertRaises(RuntimeError):
+                st.call("query { version { version } }")
+        self.assertEqual(len(calls), 2, "a 401 gets exactly one retry")
 
 
 class TestVmafSearchDeadline(unittest.TestCase):

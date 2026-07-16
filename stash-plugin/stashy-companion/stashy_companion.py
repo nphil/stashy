@@ -164,17 +164,39 @@ class Stash:
         if isinstance(cookie, dict) and cookie.get("Value"):
             self.headers["Cookie"] = "{}={}".format(cookie.get("Name", "session"), cookie["Value"])
 
-    def call(self, query, variables=None):
+    def call(self, query, variables=None, _retry=True):
         payload = json.dumps({"query": query, "variables": variables or {}}).encode("utf-8")
         req = urllib.request.Request(self.url, data=payload, headers=self.headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
+            if e.code == 401 and _retry:
+                time.sleep(2)   # transient session rotation — one retry (an adopted ApiKey never 401s)
+                return self.call(query, variables, _retry=False)
             raise RuntimeError("GraphQL HTTP {}: {}".format(e.code, e.read().decode("utf-8", "replace")))
         if body.get("errors"):
             raise RuntimeError("GraphQL errors: {}".format(json.dumps(body["errors"])))
         return body.get("data") or {}
+
+    def adopt_api_key(self):
+        """Swap session-cookie auth for the server's API key. Stash hands plugin jobs a SessionCookie that
+        EXPIRES mid-run on multi-hour tasks (confirmed on the box: the VMAF map task died with GraphQL 401
+        after ~2h40m) — so at task start, while the cookie still authenticates, fetch the configured API
+        key and use its header (never expires) for every later call. No-op when the connection already
+        carries an ApiKey, or when the instance has none configured (open instance — auth doesn't matter
+        then), or on any fetch error (we just stay on the cookie)."""
+        if self.headers.get("ApiKey"):
+            return
+        try:
+            data = self.call("query { configuration { general { apiKey } } }")
+            key = ((data.get("configuration") or {}).get("general") or {}).get("apiKey") or ""
+        except Exception as e:
+            log_debug("could not fetch API key (staying on session cookie): {}".format(e))
+            return
+        if key:
+            self.headers["ApiKey"] = key
+            self.headers.pop("Cookie", None)
 
 
 # ----------------------------------------------------------------------------
@@ -2133,6 +2155,9 @@ def main():
     conn = payload.get("server_connection") or {}
     args = payload.get("args") or {}
     stash = Stash(conn)
+    # Long tasks (VMAF map, a first full codec report, big AV1 transcodes) outlive Stash's session
+    # cookie — switch to the API key NOW, while the cookie still works (fixes mid-run GraphQL-401 deaths).
+    stash.adopt_api_key()
 
     # Pull saved plugin settings (typed config the user set in the Stash UI).
     settings = {}
