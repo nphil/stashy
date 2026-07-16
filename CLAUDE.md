@@ -102,9 +102,9 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
 
 ## Current state (update as you go; keep this section short)
 - Latest release: **v1.0.252** (Downloads before→after size + VMAF line on transcode finish, commit
-  `f1b008a`, ~8.60 MB — built green). `a8e3242` (Companion v0.3.0) is newer on main but plugin+docs-only
+  `f1b008a`, ~8.60 MB — built green). Companion commits are newer on main but plugin+docs-only
   (no app build). Verify the newest release/IPA size each push.
-- **VMAF quality-targeted transcodes shipped** (Companion v0.2.0→v0.3.0 + app v1.0.250–252): the plugin
+- **VMAF quality-targeted transcodes shipped** (Companion v0.2.0→v0.3.1 + app v1.0.250–252): the plugin
   binary-searches the encoder quality knob on short sample windows to hit a target VMAF (phone model;
   presets are now perceptual targets High 97 / Balanced 94 / Small 91; default ON; needs libvmaf — in the
   BtbN software ffmpeg build, NOT jellyfin-ffmpeg; HDR/DoVi or any measure failure falls back safely to
@@ -116,12 +116,16 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   Map (full)" tasks pre-compute per-video optimal CRF (+ the measured curve) per resolution into served
   `cache/vmaf-map.json` (kilobytes for the whole library, zero scene writes, incremental + resumable via
   `vmafMapBudgetMin`); `run_transcode` uses the cached CRF and skips the ~30 s live analysis;
-  `_crf_from_curve` derives all three presets from the one stored curve. **⚠ Known issue — ROOT-CAUSED
-  2026-07-16, fix in flight (v0.3.1):** long map runs die mid-run with **GraphQL 401** — Stash's session
-  cookie expires during multi-hour jobs; the plugin must fetch the API key at task start
-  (`configuration { general { apiKey } }`) and use the ApiKey header thereafter. The failure also
-  triggers a prune-on-exception bug that deletes every not-yet-reached scene from `vmaf-map.json`.
-  Details in ROADMAP §encode-quality.
+  `_crf_from_curve` derives all three presets from the one stored curve.
+- **Companion v0.3.1 — the mid-run map FAILURE (~20.7%, GraphQL 401) is FIXED**, both the cause and the
+  damage: (1) **auth** — Stash's session cookie expires during multi-hour jobs, so `main()` now swaps to
+  the server's API key at task start (`Stash.adopt_api_key`, fetched while the cookie still works; Cookie
+  header dropped; one retry on 401); (2) **data loss** — the finally-block deleted-scene prune ran on ANY
+  exception with a partial `seen`, erasing every mapped scene the run hadn't reached and persisting the
+  gutted map — now prunes only after a clean full pass (`_prune_missing`); (3) hardening — whole per-scene
+  body try-wrapped (INFO log + `failed` count, run continues), malformed entries reset, 30-min per-
+  (scene,res) `deadline` in `_vmaf_search` (map task only). Unit tests: `stash-plugin/tests/` (stdlib-only;
+  the prune regression test fails on v0.3.0). Full story in ROADMAP §encode-quality.
 - **Scrubbing upgrades shipped this session** (all in `Features/Player/PlayerControlsView.swift` +
   `ZoomablePlayerSurface.swift` + new `Services/ScrubFrameProvider.swift`): (1) **exact-frame preview**
   on downloaded (local) files — `AVAssetImageGenerator` (zero tolerance, `cancelAllCGImageGeneration`

@@ -612,25 +612,32 @@ blocks, both first-class iOS APIs:
       29@97 derived without re-searching; unmapped res → live-search fallback; run-2 incremental analysed 0).
       For 1,932 scenes ≈ ~10–15h one-time background P40 grind for one resolution, then incremental. This is
       the data layer for the live-ABR streaming plan (per-video CRF for every scene, ~zero storage).
-      **⚠ OPEN — the map run FAILS mid-run (~20.7% observed). ROOT CAUSE CONFIRMED on the box
-      (2026-07-16, Stash docker log):** `GraphQL HTTP 401:` → `Plugin returned error: exit status 1`
-      after ~2h40m of clean analysis (scenes 460→895, 08:16→10:57 on 07-15) — **no OOM** (dmesg clean),
+      **✅ FIXED in v0.3.1 (2026-07-16) — the map run used to FAIL mid-run (~20.7% observed). ROOT CAUSE
+      CONFIRMED on the box (Stash docker log):** `GraphQL HTTP 401:` → `Plugin returned error: exit status
+      1` after ~2h40m of clean analysis (scenes 460→895, 08:16→10:57 on 07-15) — **no OOM** (dmesg clean),
       no bad scene. The plugin's GraphQL client authenticates with the **SessionCookie** Stash hands it
       at job start (`class Stash` sets an ApiKey header only when `server_connection` carries one — it
       doesn't here), and Stash's session cookie **expires/rotates during multi-hour runs** — the next
       `_iter_scenes` page fetch raises out of `Stash.call` and kills the task. Any sufficiently long run
       dies this way; short tasks (transcode, codec report) never hit it. (A time-budget stop is NOT this
-      failure: it logs "hit the time budget; run again to continue" and completes at 100%.) **Fix (v0.3.1,
-      in flight):** at task start — while the cookie still works — fetch the API key via
-      `configuration { general { apiKey } }` and use the `ApiKey` header for all subsequent calls
-      (immune to cookie expiry, zero user config); retry once on a 401; plus the prune guard below.
-      **Confirmed data-loss bug (fix alongside):** on an exception the `finally` block runs the
+      failure: it logs "hit the time budget; run again to continue" and completes at 100%.) **Auth fix:**
+      `main()` now calls `Stash.adopt_api_key()` for every mode — at task start, while the cookie still
+      works, it fetches `configuration { general { apiKey } }`, switches to the `ApiKey` header (immune to
+      cookie expiry, zero user config) and drops the Cookie header; `Stash.call` also retries once on a
+      401. No API key configured (open instance) → silent no-op.
+      **Confirmed data-loss bug (fixed alongside):** on an exception the `finally` block ran the
       deleted-scene prune with a partial `seen` set (`stopped` is only set by the budget path) — every
-      previously-mapped scene the run hadn't reached yet is PRUNED from `vmaf-map.json` and the pruned
-      map is persisted. Every 401 death therefore also threw away the unreached tail of the map. Fix:
-      only prune after a completed full pass (clean-completion flag) + per-scene exception hardening.
+      previously-mapped scene the run hadn't reached yet was PRUNED from `vmaf-map.json` and the pruned
+      map persisted, so every 401 death also threw away the unreached tail of the map. Now: prune ONLY
+      after a clean complete pass (`full_pass` flag + `_prune_missing` helper); the WHOLE per-scene body
+      is try-wrapped (one bad scene → INFO log with the scene id + `failed` count in the summary, run
+      continues); malformed map entries (no `res` dict) reset instead of KeyError; `_vmaf_search` gained
+      an optional `deadline` (the map task caps each (scene,res) search at 30 min → TimeoutError → skip +
+      retry next run; run_transcode passes None, unaffected). Unit tests added
+      (`stash-plugin/tests/test_companion.py`, stdlib-only, incl. a prune regression test proven to FAIL
+      on v0.3.0).
     - **Server (Stash companion plugin) — ✅ BUILT 2026-07-14 (v0.2.0); deployed + verified live on the
-      box as of v0.2.2/v0.2.3 (2026-07-14); plugin now ships v0.3.0.**
+      box as of v0.2.2/v0.2.3 (2026-07-14); plugin now ships v0.3.1.**
       Both levels done: **(2) target** — VMAF-targeted encoding is now DEFAULT ON. Presets map to a target
       VMAF (High 97 / Balanced 94 / Small 91, **phone model** — owner's pick, since these play on an iPhone),
       and the plugin sample-encodes a few short windows + binary-searches the encoder's own quality knob
