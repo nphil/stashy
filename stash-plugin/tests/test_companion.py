@@ -205,6 +205,76 @@ class TestStashAuth(unittest.TestCase):
         self.assertEqual(len(calls), 2, "a 401 gets exactly one retry")
 
 
+class RecordingStash:
+    """Records every GraphQL call; returns {}."""
+
+    def __init__(self):
+        self.calls = []
+
+    def call(self, query, variables=None):
+        self.calls.append((query, variables))
+        return {}
+
+
+class TestSettingsBackupRestore(unittest.TestCase):
+    """Stash wipes plugins.settings.<id> on every package update; the plugin self-heals from a backup
+    in cache/ (which updates preserve)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        p = mock.patch.object(sc, "CACHE_DIR", self.tmp.name)
+        p.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_non_empty_settings_refresh_the_backup(self):
+        stash = RecordingStash()
+        out = sc._sync_settings(stash, {"encoder": "hevc_nvenc", "vmafSamples": 2})
+        self.assertEqual(out, {"encoder": "hevc_nvenc", "vmafSamples": 2})
+        with open(sc._settings_backup_path()) as fh:
+            self.assertEqual(json.load(fh), {"encoder": "hevc_nvenc", "vmafSamples": 2})
+        self.assertEqual(stash.calls, [], "backing up must not touch GraphQL")
+
+    def test_empty_settings_restore_from_backup(self):
+        with open(sc._settings_backup_path(), "w") as fh:
+            json.dump({"preserveHDR": True, "vmafMapBudgetMin": 90}, fh)
+        stash = RecordingStash()
+        out = sc._sync_settings(stash, {})
+        self.assertEqual(out, {"preserveHDR": True, "vmafMapBudgetMin": 90},
+                         "the run must use the restored values")
+        self.assertEqual(len(stash.calls), 1)
+        query, variables = stash.calls[0]
+        self.assertIn("configurePlugin", query)
+        self.assertEqual(variables, {"id": sc.PLUGIN_ID,
+                                     "input": {"preserveHDR": True, "vmafMapBudgetMin": 90}})
+
+    def test_empty_settings_without_backup_stay_empty(self):
+        stash = RecordingStash()
+        self.assertEqual(sc._sync_settings(stash, {}), {})
+        self.assertEqual(stash.calls, [])
+
+    def test_partial_settings_never_trigger_restore(self):
+        """A partial map is user intent — it must be backed up, not merged over."""
+        with open(sc._settings_backup_path(), "w") as fh:
+            json.dump({"a": 1, "b": 2, "c": 3}, fh)
+        stash = RecordingStash()
+        out = sc._sync_settings(stash, {"a": 9})
+        self.assertEqual(out, {"a": 9})
+        self.assertEqual(stash.calls, [], "no configurePlugin on a partial map")
+        with open(sc._settings_backup_path()) as fh:
+            self.assertEqual(json.load(fh), {"a": 9}, "backup refreshed to the live map")
+
+    def test_restore_survives_configure_plugin_failure(self):
+        with open(sc._settings_backup_path(), "w") as fh:
+            json.dump({"x": 1}, fh)
+
+        class FailingStash:
+            def call(self, query, variables=None):
+                raise RuntimeError("configurePlugin unsupported")
+        out = sc._sync_settings(FailingStash(), {})
+        self.assertEqual(out, {"x": 1}, "the backup is still used for this run")
+
+
 class TestVmafSearchDeadline(unittest.TestCase):
     def test_expired_deadline_raises_timeout(self):
         with tempfile.TemporaryDirectory() as work:

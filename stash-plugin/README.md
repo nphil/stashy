@@ -86,6 +86,12 @@ Settings → Plugins → **Reload Plugins**.
 | ffmpeg sha256 | string | — | Advanced: verify the download tarball against this hash. |
 | ffmpeg download URL | string | — | Advanced: override the exact tarball URL. |
 
+**Settings survive plugin updates** (v0.3.2+): Stash wipes a plugin's saved settings from its
+`config.yml` on every package update, so the plugin keeps a backup in its own `cache/` dir (which
+updates preserve) — refreshed on every run, and automatically written back via `configurePlugin`
+whenever the live settings map turns up completely empty. A *partial* map is treated as user intent
+and never overwritten. You'll re-enter settings once after installing v0.3.2; after that they stick.
+
 ### Managing ffmpeg (dual build: software + NVENC)
 
 NVENC's required driver API and the software encoders' speed pull in opposite directions on older GPUs,

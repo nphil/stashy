@@ -1917,6 +1917,53 @@ def _cached_crf(scene_id, target_h, target):
         return None
 
 
+def _settings_backup_path():
+    return os.path.join(CACHE_DIR, "settings-backup.json")
+
+
+def _sync_settings(stash, settings):
+    """Self-heal the plugin settings across plugin updates. Stash WIPES plugins.settings.<id> from its
+    config.yml on EVERY package update (verified on the box), but the update replaces only the
+    zip-shipped files — extra dirs (cache/, bin/) survive — so cache/ is a durable home for a backup:
+
+      * live map NON-EMPTY → refresh the backup (atomic, pid-suffixed tmp so concurrent hook processes
+        can't interleave; last writer wins with identical content).
+      * live map completely EMPTY + backup exists → write it back via configurePlugin (which REPLACES
+        the whole map — exactly right here) and use the restored values for this run.
+      * a PARTIAL map is user intent — never merged over, only backed up.
+
+    Best-effort: any error returns `settings` unchanged. Returns the settings the run should use."""
+    try:
+        if settings:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            tmp = "{}.tmp{}".format(_settings_backup_path(), os.getpid())
+            with open(tmp, "w") as fh:
+                json.dump(settings, fh)
+            os.replace(tmp, _settings_backup_path())
+            return settings
+        try:
+            with open(_settings_backup_path()) as fh:
+                saved = json.load(fh)
+        except (OSError, ValueError):
+            return settings
+        if not (isinstance(saved, dict) and saved):
+            return settings
+        try:
+            stash.call(
+                "mutation($id: ID!, $input: Map!) { configurePlugin(plugin_id: $id, input: $input) }",
+                {"id": PLUGIN_ID, "input": saved},
+            )
+            log_info("Restored {} saved settings from backup (Stash dropped them on plugin update)."
+                     .format(len(saved)))
+        except Exception as e:
+            log_warn("Settings backup found but could not be written back to Stash ({}) — using it for "
+                     "this run only.".format(e))
+        return saved
+    except Exception as e:
+        log_debug("settings backup/restore skipped: {}".format(e))
+        return settings
+
+
 def _prune_missing(report, seen):
     """Drop mapped scenes that no longer exist in Stash. ONLY safe after a complete pass over the library:
     `seen` must hold EVERY scene id Stash currently has — pruning against a partial `seen` (an exception or
@@ -2161,11 +2208,17 @@ def main():
 
     # Pull saved plugin settings (typed config the user set in the Stash UI).
     settings = {}
+    settings_read_ok = False
     try:
         data = stash.call("query { configuration { plugins } }")
         settings = ((data.get("configuration") or {}).get("plugins") or {}).get(PLUGIN_ID) or {}
+        settings_read_ok = True
     except Exception as e:
         log_debug("could not read plugin settings: {}".format(e))
+    if settings_read_ok:
+        # Stash wipes plugin settings on every package update — back them up / restore from cache/
+        # (which updates preserve). Only acts on a GENUINE read: a failed read must not trigger a restore.
+        settings = _sync_settings(stash, settings)
 
     mode = (args.get("mode") or "transcode").lower()
     log_debug("mode={} args={}".format(mode, {k: v for k, v in args.items() if k != "mode"}))
