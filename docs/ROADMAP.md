@@ -636,6 +636,16 @@ blocks, both first-class iOS APIs:
       retry next run; run_transcode passes None, unaffected). Unit tests added
       (`stash-plugin/tests/test_companion.py`, stdlib-only, incl. a prune regression test proven to FAIL
       on v0.3.0).
+      **v0.3.2 (2026-07-16) — settings survive plugin updates:** Stash wipes `plugins.settings.<id>` from
+      config.yml on EVERY package update (box-verified: only preserveHDR+vmafMapBudgetMin — re-set by hand —
+      survived the 07-15 20:06 update; cache/ + bin/ keep pre-update timestamps, so cache/ is durable).
+      `_sync_settings` in `main()`: non-empty live map → atomic backup to `cache/settings-backup.json`
+      (pid-suffixed tmp, safe vs concurrent hook processes); completely EMPTY map + backup → restore via
+      `configurePlugin` (REPLACES the whole map — the right semantics) + INFO log, and the run uses the
+      restored values; partial map = user intent → backup-only, never merged over; restore gated on a
+      successful settings READ (a transient read failure must not trigger it). Backup lives in cache/ —
+      never in the shipped zip. Owner re-enters settings once after installing v0.3.2; every later task
+      run keeps the backup fresh.
     - **Server (Stash companion plugin) — ✅ BUILT 2026-07-14 (v0.2.0); deployed + verified live on the
       box as of v0.2.2/v0.2.3 (2026-07-14); plugin now ships v0.3.1.**
       Both levels done: **(2) target** — VMAF-targeted encoding is now DEFAULT ON. Presets map to a target

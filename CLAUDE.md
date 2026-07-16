@@ -126,6 +126,12 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   body try-wrapped (INFO log + `failed` count, run continues), malformed entries reset, 30-min per-
   (scene,res) `deadline` in `_vmaf_search` (map task only). Unit tests: `stash-plugin/tests/` (stdlib-only;
   the prune regression test fails on v0.3.0). Full story in ROADMAP §encode-quality.
+- **Companion v0.3.2 — settings survive plugin updates**: Stash wipes `plugins.settings.stashy-companion`
+  from config.yml on EVERY package update (box-verified; cache/ + bin/ survive), so `_sync_settings` in
+  `main()` backs the live map up to `cache/settings-backup.json` every run and auto-restores it via
+  `configurePlugin` (whole-map replace) when the map turns up completely empty; a PARTIAL map = user
+  intent, never overwritten; restore only fires on a successful settings read. Owner re-enters settings
+  once on v0.3.2, then they stick.
 - **Scrubbing upgrades shipped this session** (all in `Features/Player/PlayerControlsView.swift` +
   `ZoomablePlayerSurface.swift` + new `Services/ScrubFrameProvider.swift`): (1) **exact-frame preview**
   on downloaded (local) files — `AVAssetImageGenerator` (zero tolerance, `cancelAllCGImageGeneration`
