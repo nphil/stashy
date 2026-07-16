@@ -9,7 +9,7 @@ scrubbing**, **direct-play first**, on-device FFmpeg as the fallback, minimal se
 foreign-container H.264 → **on-device linear remux over loopback HLS** (smooth playback, confirmed
 on-device); everything Apple can't decode → Stash HLS.
 
-### What works now ✅ (linear-remux baseline — still current as of v1.0.184; seek-by-reinit + on-device transcode now layered on top)
+### What works now ✅ (linear-remux baseline — still current as of v1.0.184; seek-by-reinit now layered on top)
 - **Linear continuous remux → byte-range HLS over loopback** plays HEVC (incl. hev1→hvc1) smoothly
   on-device. Fast start (~2s), flat memory, no crashes. This is the default for the remux class.
 - **4 MB read-ahead** on the source AVIO (one HTTP request per slab, not per 64 KB) — essential; without
@@ -35,15 +35,18 @@ donut was tuned to match (warm per-seek estimate + snappy curve, and a file-weig
 see LoadEstimator). **Do not disturb the seek-hold logic.** (Reinit debounce still deferred — seek fires
 only on drag release, so mid-drag thrash isn't a concern.)
 
-### ✅ SHIPPED (2026-07-04/05): on-device transcode playback tier (M-A) + manual server-quality menu (M-B)
-Both pieces shipped and on device. M-A = the on-device streaming transcode tier (`FFmpegStreamTranscoder`
-+ `LocalTranscodeStream`, HW decode → `h264_videotoolbox` → fragmented MP4, audio copy-or-AAC-reencode,
-seek-by-reinit, `armWatchdog` auto-fallback to Stash HLS). M-B = the player gear → force Stash HLS at a
-chosen resolution (the `?resolution=` duplicate-param bug fixed; resumes at the exact position). Original
-design below, kept as the record. They build on the **file** transcoder shipped in
-v1.0.12x (`FFmpegTranscoder`: libavformat demux → FFmpeg decode → libswscale NV12 → VideoToolbox
-`h264/hevc_videotoolbox` encode → MP4; audio copy for AAC/AC3/EAC3/MP3/ALAC). That class is the encode
-core both items reuse.
+### ✅ SHIPPED (2026-07-04/05) then ❌ M-A REMOVED (`c088325`, 2026-07-05): on-device transcode playback tier (M-A) + manual server-quality menu (M-B)
+**Only M-B still ships.** M-A — the on-device streaming transcode tier (`FFmpegStreamTranscoder` +
+`LocalTranscodeStream` + `FFmpegAudioReencoder`, HW decode → `h264_videotoolbox` → fragmented MP4, audio
+copy-or-AAC-reencode, seek-by-reinit, `armWatchdog` auto-fallback) — was **deleted the day after it
+shipped** (`c088325`): flaky, its seek-by-reinit made scrubbing glitchy, and it pulled the whole original
+over the network to re-encode locally. The "Apple can't decode at all" bucket now routes straight to
+Stash **server** HLS at any resolution (see the routing comment in `Scene.swift`); the deleted code is
+git-history-only. M-B = the player gear → force Stash HLS at a chosen resolution (the `?resolution=`
+duplicate-param bug fixed; resumes at the exact position) — alive and well. Original design below, kept
+as the record. Both built on the **file** transcoder shipped in v1.0.12x (`FFmpegTranscoder`: libavformat
+demux → FFmpeg decode → libswscale NV12 → VideoToolbox `h264/hevc_videotoolbox` encode → MP4; audio copy
+for AAC/AC3/EAC3/MP3/ALAC). That class survives as the Downloads-flow encode core.
 
 - **M-A — Streaming on-device transcode tier.** Insert **between remux and the Stash server fallback**:
   `direct-play → remux → on-device streaming transcode → Stash server (final fallback)`. Needs a
@@ -69,8 +72,8 @@ core both items reuse.
 so it never stalls on a bad connection and uses full quality on a good one, with **zero manual fiddling**.
 This is the automatic sibling of M-B (which is a *manual* server-quality override).
 
-**The gap today.** Every current path is single-rendition: direct-play (no adaptation), remux, on-device
-transcode (fixed target), or M-B's manual Stash HLS at one chosen resolution. None adapts mid-stream — a
+**The gap today.** Every current path is single-rendition: direct-play (no adaptation), remux, or M-B's
+manual Stash HLS at one chosen resolution. None adapts mid-stream — a
 flaky link means either a stall (rung too high) or a manual downshift. AVPlayer does ABR *natively and
 well*, but **only when handed a multi-variant HLS master playlist** (`#EXT-X-STREAM-INF` variants with
 `BANDWIDTH`/`RESOLUTION`/`CODECS`). Stash serves only per-resolution single streams, so AVPlayer has
@@ -162,7 +165,11 @@ nothing to switch between.
   deferred:** option (b) *normal-(1×)-speed audio under slow video* — that needs a decoupled audio
   timeline (`AVSampleBufferAudioRenderer` / a separate normal-rate pass); the shipped toggle covers
   mute-vs-pitch-corrected, not the fully-decoupled case.
-- **★ AI / motion-interpolated slow-mo (on-device) — researched 2026-07-05, Phase 1 in progress.** Plain
+- **★ AI / motion-interpolated slow-mo (on-device) — researched 2026-07-05, ✅ SHIPPED & working
+  (Phases 1a/1b/2, v1.0.192–207; adaptive per-rate interpolation factor added `9344e8c` 2026-07-06;
+  still opt-in beta via `aiSlowMoEnabled`). Remaining: the standalone 0.25×-won't-play bug, a dedicated
+  video output for inline (blur-active) playback, optional Phase 2b (Frame Rate Conversion) / Phase 3
+  (export).** Plain
   slow playback (setting `AVPlayer` rate < 1) doesn't create frames — it just holds each real frame on
   screen longer, so a 30fps file at 0.25× shows ~7.5 distinct fps = judder. Fix = **synthesise the
   in-between frames** so slowed footage looks like true high-fps slow motion.
@@ -240,9 +247,9 @@ nothing to switch between.
     black flash). Chose the Metal path over `AVSampleBufferDisplayLayer`/`CMTimebase` (lower blind-API risk,
     proven code). **v1 caveats / next tuning:** shares the blur's `AVPlayerItemVideoOutput` so *inline* (blur
     active) may drop frames while *fullscreen* (blur paused) is clean → give slow-mo its **own** video output;
-    zoom during slow-mo not mirrored on the overlay. **Deferred tuning:** adaptive interpolation count per
-    playback rate (fixed 4× today — recreating the session on rate change would let 0.25× go 8×); the
-    standalone "0.25× won't play at all" bug. **Phase 2b (optional)** — swap the low-latency effect for Frame
+    zoom during slow-mo not mirrored on the overlay. ✅ Adaptive interpolation count per playback rate shipped
+    (`9344e8c`, 2026-07-06 — `SlowMoRunner.desiredMids(forRate:)` scales mids 0.5×→3, 0.25×→7). **Still open:**
+    the standalone "0.25× won't play at all" bug. **Phase 2b (optional)** — swap the low-latency effect for Frame
     Rate Conversion (quality path) with a per-rate `interpolationPhase` for arbitrary-factor smoothness.
     **Phase 3 (optional)** — an "export smooth slow-mo clip" action (on-device or P40 plugin) for a max-quality
     result.
@@ -266,7 +273,7 @@ nothing to switch between.
     `ZoomablePlayerSurface` pan+scale so the subject stays centred. Free-form shape → use its bounding box
     (optionally its centroid) for the tracker.
   - **Sync:** tracking must run against the *displayed* frames (works for every playback mode — direct,
-    remux, on-device transcode, server HLS) via the player's `AVPlayerItemVideoOutput` pixel buffers
+    remux, server HLS) via the player's `AVPlayerItemVideoOutput` pixel buffers
     (already tapped for the live blur), so it's engine-agnostic.
   - **Constraints:** on-device only, gated on device capability, and — per the hard rule — it must **never
     delay/stutter playback**: run tracking off the render path (sampled, with prediction between samples),
@@ -294,13 +301,16 @@ nothing to switch between.
      range request per 64 KB read (which made a 4K file produce only ~400 KB before the player gave up).
    - ✅ **Seekable now** (seek-by-reinit shipped — see above): a far/backward seek restarts the mux input-
      seeked near the target keyframe instead of waiting.
-   - ✅ **On-device transcode shipped** (M-A): MPEG4-ASP/VC1/VP9, software-AV1, exotic ≤1080p ride the same
-     HLS delivery, decoding via FFmpeg → `h264_videotoolbox`; heavy 4K → server.
+   - ❌ **On-device transcode tier (M-A) shipped then REMOVED** (2026-07-04 → `c088325`, 2026-07-05):
+     MPEG4-ASP/VC1/VP9, software-AV1, exotic now go to the Stash **server** HLS transcode at any
+     resolution — the on-device tier was flaky, made scrubbing glitchy, and pulled the whole original
+     over the network to re-encode. On-device REMUX and the Downloads-flow transcode are unaffected.
 
 3. **Quality / gear selector** — Auto / Direct / On-device / Server transcode + resolution; also the
-   manual escape hatch.
+   manual escape hatch. *(Mostly shipped as M-B: gear menu with Auto + server-resolution rungs; an
+   explicit Direct / On-device method forcing is the only part still open.)*
 
-4. **Server-side transcoding controls** — quality/resolution options for the HLS path.
+4. **Server-side transcoding controls** — quality/resolution options for the HLS path. ✅ Shipped as M-B.
 
 ### Notes / facts established
 - Apple's HEVC decoder (Safari + iOS, same stack) only handles 4:2:0 (Main/Main 10); **4:2:2 / 4:4:4
@@ -314,12 +324,18 @@ nothing to switch between.
 - ✅ **Seekable remux — SHIPPED** (seek-by-reinit). A seek before the stream start / past the produced
   point re-inits FFmpeg input-seeked (`av_seek_frame`) near the target keyframe and rebuilds the loopback
   from there, instead of waiting; the donut's expected time is warm-per-seek + file-weight-scaled. Works
-  across both remux and on-device transcode. (Reinit debounce still deferred.)
-- **Hybrid scrub preview** — show the (instant) Stash sprite tile while dragging, then refine with an
-  on-device decoded frame at the exact position when the user pauses on it. Sprites are coarse on long
-  videos (fixed tile count ÷ duration); on-device extraction is exact but has decode latency, so layer
-  it as a refinement, not a replacement.
-- **Watch-heat overlay on the scrubber ("most replayed").** A YouTube-style heat curve/histogram drawn
+  on the remux path (the on-device transcode playback tier was removed — `c088325`). (Reinit debounce
+  still deferred.)
+- **Hybrid scrub preview** — ✅ SHIPPED for downloaded/local files 2026-07-14 (`8a091ac`;
+  `Services/ScrubFrameProvider.swift` — sprite tile as the instant placeholder, refined by an exact
+  `AVAssetImageGenerator` frame, gated to `file://` URLs). Remaining gap: exact-frame refinement for
+  *streaming* sources (arbitrary-frame decode needs the network per frame). Original idea: show the
+  (instant) Stash sprite tile while dragging, then refine with an on-device decoded frame at the exact
+  position when the user pauses on it.
+- **Watch-heat overlay on the scrubber ("most replayed").** ✅ SHIPPED 2026-07-11 (`633e9b8`,
+  `Services/WatchHeat.swift`) — smoothed/normalised curve above the ScrubBar track, drawn only while
+  scrubbing; Settings → Player toggle (default ON; off also stops tracking) + Clear data. Original
+  design (matches what shipped): a YouTube-style heat curve/histogram drawn
   *on top of* the progress bar showing where the user has spent the most time actually watching this
   video. Stash doesn't provide this, so it's **built locally on-device**:
   - **Data model:** bucket each video's timeline into N bins (e.g. ~200 bins, or ~1–2s each, capped).
@@ -500,26 +516,21 @@ blocks, both first-class iOS APIs:
 
 ## Downloads & offline
 
-- **★ Resumable (checkpointed) on-device transcode — owner-requested 2026-07-04.** Today a transcode is a
-  single-pass whole-file encode whose MP4 index (`moov`) is only written by `av_write_trailer` at the very
-  end, so an interruption leaves an unusable partial and the restart re-runs from 0%. (VideoToolbox is also
-  foreground-only, so backgrounding must stop it regardless — but the *restart-from-0* is the real pain.)
-  Make it resume from where it stopped:
-  - **Approach A (preferred) — fragmented-MP4 output + append.** Write the transcode as a *fragmented* MP4
-    (`frag_keyframe+empty_moov+default_base_moof`, exactly like `FFmpegStreamTranscoder`), so the partial
-    file is valid up to the last complete fragment. Persist a checkpoint = last-muxed media timestamp. On
-    resume, reopen/append, `av_seek_frame` the input to that keyframe, re-init decoder+encoder, and keep
-    muxing fragments with continuous timestamps. Reuses the M-A fragmented-mux code; the final file is a
-    fragmented MP4 (AVPlayer plays it fine). Caveat: encoder settings must be identical across sessions,
-    and appending via libavformat needs care (likely concatenate fragment byte-ranges rather than
-    re-running `write_header`).
-  - **Approach B — segment & concat.** Encode fixed media chunks (e.g. 15–30s) as complete standalone
-    MP4s into a temp dir; persist which segments are done; resume from the next; concat all via the
-    `concat` demuxer / stream-copy remux at the end. Each segment is GOP-aligned (independent encode), so
-    stitching is clean; minor AAC-priming gaps at joins are acceptable for a download.
-  - Either way: persist the checkpoint + settings across launches (so an accidental app-kill resumes too),
-    show a "Resume" affordance, and keep it off the main thread. Pairs with the transcode auto-resume that
-    already re-kicks on foreground — that hook would resume from the checkpoint instead of 0%.
+- **★ Resumable (checkpointed) on-device transcode — owner-requested 2026-07-04. ✅ SHIPPED the same day**
+  (`f421ecd`/`d3c0108`/`960ac90`: `Services/FFmpegResumableTranscoder.swift`, wired into `DownloadManager`
+  and used only for **long re-encodes** — stream-copy cases and files <90 s take the fast single-pass
+  paths). **Approach B won**, deliberately chosen over fragmented-MP4 append (see the file header), and
+  improves on the write-up below: chunks are video-only and audio is copied in ONE pass at finalize, so
+  the "AAC-priming gaps at joins" caveat doesn't apply. Checkpoint state (`plan.json` + `chunk_NNNN.mp4`
+  atomic-rename commits + `settings.json`) persists across launches, so even a cold relaunch resumes from
+  the last committed chunk. Historical design record:
+  - **Approach A — fragmented-MP4 output + append** (NOT chosen). Write the transcode as a *fragmented*
+    MP4 (`frag_keyframe+empty_moov+default_base_moof`, as the since-deleted `FFmpegStreamTranscoder` did —
+    removed in `c088325`; git history only), so the partial file is valid up to the last complete
+    fragment. Caveat that killed it: encoder settings must be identical across sessions, and appending
+    via libavformat needs fragile byte-range surgery rather than re-running `write_header`.
+  - **Approach B — segment & concat** (CHOSEN). Encode keyframe-aligned standalone chunk MP4s; persist
+    which are done; resume from the first missing; finalize via a stream-copy concat remux.
 - **Download videos for offline viewing**, with a choice of source:
   - **Original file** (as-is from Stash). ✅
   - **Stash-transcoded version** (ask the server for a smaller/compatible encode). Shipping now as an
@@ -566,8 +577,10 @@ blocks, both first-class iOS APIs:
          Needs-transcode), shown only when the store is loaded; it pages the grid over that bucket's scene
          IDs (`SceneQuery.playability` → `PlayabilityStore.ids` → `findScenesByIDs`), no tags involved.
       Plugin (v0.1.18) writes NOTHING to scenes anymore — the tagging task was removed; a one-time **Remove
-      Stashy Library Data** cleanup strips tags/custom_fields left by ≤0.1.17. Nice-to-have: an "On-device
-      only" filter bucket (direct + remux).
+      Stashy Tags (cleanup)** task (renamed in v0.1.19) deletes the `Stashy:*` tag definitions left by
+      ≤0.1.17 — Stash cascade-removes them from scenes with zero per-scene writes; the residual
+      `stashy_probe` custom field is deliberately left in place (clearing it would itself be a per-scene
+      `sceneUpdate` storm). Nice-to-have: an "On-device only" filter bucket (direct + remux).
     - **Concurrent-queue server transcoding (P40 throughput) — owner-requested 2026-07-05.** When multiple
       downloads are queued with the Companion transcode source, run **2–3 transcode Jobs at once** instead of
       strictly one at a time, to use the P40's spare encoder capacity. This is the *right* parallelism lever
@@ -599,7 +612,8 @@ blocks, both first-class iOS APIs:
       29@97 derived without re-searching; unmapped res → live-search fallback; run-2 incremental analysed 0).
       For 1,932 scenes ≈ ~10–15h one-time background P40 grind for one resolution, then incremental. This is
       the data layer for the live-ABR streaming plan (per-video CRF for every scene, ~zero storage).
-    - **Server (Stash companion plugin) — ✅ BUILT 2026-07-14 (plugin v0.2.0, not yet deployed/live-tested).**
+    - **Server (Stash companion plugin) — ✅ BUILT 2026-07-14 (v0.2.0); deployed + verified live on the
+      box as of v0.2.2/v0.2.3 (2026-07-14); plugin now ships v0.3.0.**
       Both levels done: **(2) target** — VMAF-targeted encoding is now DEFAULT ON. Presets map to a target
       VMAF (High 97 / Balanced 94 / Small 91, **phone model** — owner's pick, since these play on an iPhone),
       and the plugin sample-encodes a few short windows + binary-searches the encoder's own quality knob
@@ -613,7 +627,10 @@ blocks, both first-class iOS APIs:
       now (robust, samples are short); `libvmaf_cuda` is a future speed-up.
       **App UI DONE (plugin v0.2.1):** the analysis phase now streams a live progress fraction to the served
       file (stage `analyzing` + `progress`), and the app shows **"Analyzing quality — X%"** during the search
-      and a small **"VMAF 94"** chip in the Downloads specs row (Downloads screen only).
+      and a small **"VMAF 94"** chip in the Downloads specs row (Downloads screen only). v1.0.252 (`f1b008a`):
+      on transcode finish the Downloads log box also shows before→after size + % reduction ("Size: 5.24 GB →
+      2.67 GB (49% smaller)") and "VMAF: target 94 → achieved 95 · cq 33" (achieved sits at/just above target
+      by CRF-step granularity — expected, not a mismatch). In `DownloadManager.swift`.
       **PERF (v0.2.3, measured on the box):** the N sample windows of each candidate now encode+measure
       CONCURRENTLY (threads; subprocess releases the GIL) and `n_subsample`=5 — worst-case search ~45s→~27s
       at 3 samples. Profiling showed VMAF is CPU-bound (~1.5s/5s-window, all cores) and the big-file reads are
@@ -644,8 +661,11 @@ blocks, both first-class iOS APIs:
     locally). ✅ H.264/HEVC (VideoToolbox) with resolution + quality presets.
 - **Downloaded Videos management screen** — list/manage offline videos (size, source, delete, play
   offline, re-download at different quality). ✅ (Downloader screen)
-- **Background continuation + Live Activity / Dynamic Island** — ✅ downloads run under a background
-  `URLSession` and survive suspension; a Live Activity shows aggregate progress.
+- **Background continuation** — ✅ downloads run under a background `URLSession` and survive suspension
+  (dual-engine handoff: foreground 8-way ⇄ background single-connection). **Live Activity / Dynamic
+  Island** — ⏳ NOT built: needs a Widget Extension target in `ios/project.yml` (ActivityKit +
+  `NSSupportsLiveActivities`) — riskiest remaining downloads item since it changes the IPA structure for
+  a sideloaded app (see ENGINEERING_NOTES §3 Follow-ups).
 - **Private storage** — ✅ downloaded media + sidecars live in a Stashy-scoped Application Support folder
   (never surfaced in the Files app or to other apps), excluded from iCloud/iTunes backup, migrated from
   the old Documents location.
@@ -666,12 +686,12 @@ blocks, both first-class iOS APIs:
 
 - **★ PRIORITY — Replace the bottom-nav Search tab with a Downloads tab + universal search.** Two linked
   changes to the tab bar (owner-requested 2026-07-03):
-  1. **Remove the Search icon** from the bottom navigation. Fold its function into a **universal search**
-     that spans **both performers and scenes** (one query → results across content types), surfaced from
-     within the library rather than as its own tab (pairs with the pull-down search-field idea below).
-  2. **Put a Downloads icon where Search was**, opening the Downloads/Transcodes screen directly (today
-     it's only reachable from a scene's ••• menu and Settings — see Downloads section). This makes the
-     daily-driven downloads/transcode flow a first-class destination.
+  1. **Remove the Search icon** from the bottom navigation — ✅ SHIPPED 2026-07-08 (`db1263a`; tab bar is
+     now Scenes / Performers / Downloads / Settings, with native pull-down search per tab). **Still open:**
+     the truly-*universal* search — one query spanning **both performers and scenes** (current pull-down
+     search is per-tab).
+  2. **Put a Downloads icon where Search was** — ✅ SHIPPED 2026-07-08 (`db1263a`): Downloads is a
+     first-class tab opening the Downloads/Transcodes screen directly.
 - **Navigation / "back" model cleanup.** Going back and moving between screens doesn't make sense once
   you're deep inside menus — the back affordance and inter-screen navigation need a coherent model.
   Audit every push/cover/sheet path (scenes ⇄ performers ⇄ tags ⇄ studios, the player, downloads reached
@@ -682,7 +702,8 @@ blocks, both first-class iOS APIs:
   per-tab `NavigationStack` paths) rather than ad-hoc `fullScreenCover`/`sheet` stacks.
 - **Rework the filter/sort chips UI** (the current chip row needs a cleaner interaction model).
 - **Integrate search into the main library UI** via a **pull-down** (scroll-to-reveal search field)
-  instead of a separate Search tab/menu.
+  instead of a separate Search tab/menu. ✅ Done 2026-07-08 (`db1263a` — native `.searchable` drawer on
+  the Scenes and Performers lists; the Search tab was removed in the same commit).
 - **Filter by favorites.** (Performers done — favorites-only toggle.)
 - **Filter performers by country** — a country picker in the performer filter panel (Stash
   `PerformerFilterType.country` is a `StringCriterionInput`), mirroring the existing ethnicity filter.
@@ -691,8 +712,11 @@ blocks, both first-class iOS APIs:
 
 ## Stash feature parity
 
-- **Favorites** — add/remove **performers, tags, and scenes** to favorites (and surface/filter by them).
-- **Rate scenes** (star rating).
+- **Favorites** — ✅ shipped for **performers and tags** (add/remove via the `LibraryEdits` optimistic
+  store; surfaced/filterable — performer favorites-only toggle + tag favorites). Still open: scene-level
+  favorites — Stash has no native scene `favorite` boolean, so it would need a convention (tag/rating).
+- **Rate scenes** (star rating) — ✅ shipped via `LibraryEdits`/`RatingControls` (`rating100` 0–100 ↔
+  5 stars; performer ratings too).
 - **O-counter** ("ejaculation counter") support — increment/track per scene, like Stash.
 - **Stash markers** support — view/seek to (and ideally create) scene markers.
 - **Metadata search / auto-fill** — integrate Stash's scene & performer scraping/identify so missing
@@ -734,14 +758,11 @@ latency tradeoff).
     temporary **long-press-to-peek** reveal or keep it fully locked; whether to fold the separate **Blur
     Titles** toggle into this or keep it independent; and whether this replaces/relates to the
     app-switcher blur below.
-- **App-switcher / background privacy blur.** Blur (or cover) the app's content the moment it resigns
-  active — going to the App Switcher, Control Center, a call, etc. — so the multitasking snapshot iOS
-  captures never shows video/thumbnails. Implement by adding a heavy blur overlay on
-  `scenePhase != .active` (or a `UIWindow`-level cover on `willResignActive`/`didBecomeActive`),
-  **independent of the Face ID app lock**. *Note:* today the only blur-on-return is the app-lock cover,
-  which is why it looks irregular — it appears only when app lock is enabled and only on return, not in
-  the switcher snapshot. This feature makes it consistent and lock-independent. A settings toggle to
-  enable/disable it.
+- **App-switcher / background privacy blur.** ✅ SHIPPED 2026-07-11 (`e6bf2d0`):
+  `SnapshotPrivacyModifier` in `Services/AppLock.swift`, applied outermost via `.snapshotPrivacy()` in
+  `StashyApp.swift` — an unanimated thick-material cover whenever `scenePhase != .active`, so the
+  multitasking snapshot iOS captures never shows video/thumbnails. Settings → Privacy toggle
+  (default ON); independent of the Face ID app lock and in-app Privacy Mode.
 - Done: **Face ID is now immediate** — the "Stashy is Locked" splash was replaced with a minimal privacy
   blur so biometrics fire the instant the app becomes active (tap to retry if the prompt is dismissed).
 - Reminder (existing): **remove all telemetry before wider release** (see §5 of the optimization plan).
