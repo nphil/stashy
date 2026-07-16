@@ -116,10 +116,12 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   Map (full)" tasks pre-compute per-video optimal CRF (+ the measured curve) per resolution into served
   `cache/vmaf-map.json` (kilobytes for the whole library, zero scene writes, incremental + resumable via
   `vmafMapBudgetMin`); `run_transcode` uses the cached CRF and skips the ~30 s live analysis;
-  `_crf_from_curve` derives all three presets from the one stored curve. **⚠ Known issue (owner,
-  2026-07-16): the map run fails around ~20.7% — diagnosing it is the critical next step.** ROADMAP
-  §encode-quality has the leads + a confirmed prune-on-exception data-loss bug in `run_vmaf_map`
-  (a failed run silently prunes every not-yet-reached scene from `vmaf-map.json`).
+  `_crf_from_curve` derives all three presets from the one stored curve. **⚠ Known issue — ROOT-CAUSED
+  2026-07-16, fix in flight (v0.3.1):** long map runs die mid-run with **GraphQL 401** — Stash's session
+  cookie expires during multi-hour jobs; the plugin must fetch the API key at task start
+  (`configuration { general { apiKey } }`) and use the ApiKey header thereafter. The failure also
+  triggers a prune-on-exception bug that deletes every not-yet-reached scene from `vmaf-map.json`.
+  Details in ROADMAP §encode-quality.
 - **Scrubbing upgrades shipped this session** (all in `Features/Player/PlayerControlsView.swift` +
   `ZoomablePlayerSurface.swift` + new `Services/ScrubFrameProvider.swift`): (1) **exact-frame preview**
   on downloaded (local) files — `AVAssetImageGenerator` (zero tolerance, `cancelAllCGImageGeneration`
@@ -240,8 +242,9 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   rebuild (seek-reinit / quality / fallback). Persisted **"Mute when slowed"** toggle in the same menu
   (mute vs. pitch-corrected audio below 1×; `slowMute` is a separate output-volume gate so it never
   clobbers the user's volume). Fully-decoupled *normal-speed audio under slow video* stays deferred.
-- Next candidates: **① diagnose + fix the VMAF map run failing at ~20.7%** (owner report — the critical
-  next step; leads + a confirmed `run_vmaf_map` prune-on-exception bug in ROADMAP §encode-quality);
+- Next candidates: **① ship + verify the VMAF map fix (plugin v0.3.1)** — root cause confirmed
+  2026-07-16 (session-cookie expiry → GraphQL 401 on long runs) + the prune data-loss bug; a fix
+  session is in flight (ROADMAP §encode-quality has the full evidence);
   **Netflix fullscreen player UI** (next-biggest ★ player item); Blur-Media app-wide / WYSIWYG layout
   editor / mini-player-PiP / AI zoom-follow (all in ROADMAP); **concurrent-queue server transcode**
   (needs a Stash-scheduling spike first). (Resumable/checkpointed transcode already shipped 2026-07-04
