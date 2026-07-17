@@ -35,6 +35,13 @@ android {
         versionName = flutter.versionName
 
         resConfigs("en")
+
+        ndk {
+            // Ship arm64 only (the target tablet's ABI). Keeps the APK ~40MB
+            // instead of a ~115MB universal build carrying every ABI's native
+            // libs (media_kit/libmpv bundles a large .so per ABI).
+            abiFilters.add("arm64-v8a")
+        }
     }
 
     signingConfigs {
