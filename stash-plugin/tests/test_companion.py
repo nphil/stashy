@@ -297,6 +297,28 @@ class TestOriginalMapLookup(unittest.TestCase):
                 self.assertEqual(sc._cached_crf("42", sc._map_lookup_height(0, 1080), 94.0), (40, 97.2))
 
 
+class TestBitrateMap(unittest.TestCase):
+    """v0.3.4: per-preset target bitrates resolved from the measured VMAF + bitrate curves, for
+    VMAF-calibrated on-device transcodes."""
+
+    def test_bitrates_from_curves_picks_per_preset(self):
+        vmaf = {"30": 99.0, "38": 95.0, "42": 92.0}      # stored curves use str CQ keys
+        bps = {30: 8_000_000, 38: 4_000_000, 42: 2_000_000}
+        out = sc._bitrates_from_curves(vmaf, bps, {"high": 97, "balanced": 94, "small": 91})
+        self.assertEqual(out, {"high": 8_000_000, "balanced": 4_000_000, "small": 2_000_000})
+
+    def test_bitrates_tolerate_str_bitrate_keys_and_omit_uncovered(self):
+        vmaf = {"30": 96.0, "40": 93.0}
+        bps = {"30": 6_000_000, "40": 3_000_000}         # str keys too
+        out = sc._bitrates_from_curves(vmaf, bps, {"high": 99, "balanced": 94, "small": 91})
+        self.assertNotIn("high", out)                    # target 99 not covered by any measured point → omitted
+        self.assertEqual(out["balanced"], 6_000_000)     # largest CQ with VMAF≥93.5 is 30
+        self.assertEqual(out["small"], 3_000_000)        # largest CQ with VMAF≥90.5 is 40
+
+    def test_empty_when_no_curve(self):
+        self.assertEqual(sc._bitrates_from_curves({}, {}, {"balanced": 94}), {})
+
+
 class TestVmafSearchDeadline(unittest.TestCase):
     def test_expired_deadline_raises_timeout(self):
         with tempfile.TemporaryDirectory() as work:

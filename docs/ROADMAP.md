@@ -621,6 +621,17 @@ blocks, both first-class iOS APIs:
       `_cached_crf("2752",1080,94)` hit while the live run keyed `"orig"`). Covers ≤1080 sources whose height
       the map computed; a 4K source downloaded at Original still misses unless `2160`/`original` is added to
       `vmafMapResolutions` (the map didn't measure native 4K).
+      **✅ v0.3.4 (2026-07-17) — the map now also stores per-preset target BITRATES** (`res[k].bitrates =
+      {high,balanced,small}`, bits/sec) so **on-device** transcodes can be VMAF-calibrated too: the phone
+      feeds the mapped bitrate into VideoToolbox's native average-bitrate control (it has no CRF knob),
+      reusing the P40's perceptual analysis with zero on-device VMAF/thermals. Bitrate is a free byproduct of
+      the search's sample encodes for new entries; existing entries backfill cheaply (`_backfill_bitrates` —
+      encode-only at the preset-derived CQs, NO VMAF measure; box-verified: scenes 3/4/28/29… filled). Caveat
+      (feed-forward): VideoToolbox at bitrate X ≠ x265/NVENC at X, so it's a calibrated *starting point* — an
+      on-device **SSIM guard** (needs a `stashy-videoengine` rebuild with `--enable-filter=ssim`, or a Metal
+      PSNR/SSIM from decoded frames) is the planned feedback loop to catch when the HW encoder underperforms.
+      **App side (`VmafMapStore`) — TODO:** fetch the served map, resolve (sceneID, source/target height,
+      quality) → bitrate, pass it as the local encoder's bitrate override (else keep the current preset ladder).
       **✅ FIXED in v0.3.1 (2026-07-16) — the map run used to FAIL mid-run (~20.7% observed). ROOT CAUSE
       CONFIRMED on the box (Stash docker log):** `GraphQL HTTP 401:` → `Plugin returned error: exit status
       1` after ~2h40m of clean analysis (scenes 460→895, 08:16→10:57 on 07-15) — **no OOM** (dmesg clean),

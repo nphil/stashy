@@ -653,7 +653,7 @@ def _search_quality_knob(lo, hi, target, tol, score_fn, on_stage=None):
 
 def _vmaf_search(src, engine, gpu_decode, ff_encode, ff_measure, target_h, av1_preset, cfr_fps, hdr,
                  duration, src_w, src_h, target_vmaf, model_arg, workdir, on_stage, on_progress=None,
-                 samples=None, out_curve=None, deadline=None):
+                 samples=None, out_curve=None, out_bitrate_curve=None, deadline=None):
     """Binary-search the encoder's quality knob (`-cq`/`-crf`) for the LARGEST value (smallest file) whose
     sample VMAF still meets `target_vmaf`. Returns (chosen_q, measured_vmaf), or None if VMAF couldn't be
     measured at max quality (any sample encode / measurement failure → the caller keeps the preset CQ).
@@ -674,6 +674,7 @@ def _vmaf_search(src, engine, gpu_decode, ff_encode, ff_measure, target_h, av1_p
     lo, hi = VMAF_Q_BOUNDS.get(engine, (18, 40))
     windows = _vmaf_sample_windows(duration, samples or VMAF_SAMPLES, VMAF_SAMPLE_SECS)
     cache = {}
+    bcache = {}                                  # {q: mean sample bits/sec} — the bitrate at each measured knob
     ncpu = os.cpu_count() or 4
     # The windows of one candidate run CONCURRENTLY, so split the CPU cores across the (possibly) overlapping
     # libvmaf measures to avoid oversubscription (encode is on the NVENC/GPU side and overlaps for free).
@@ -705,13 +706,15 @@ def _vmaf_search(src, engine, gpu_decode, ff_encode, ff_measure, target_h, av1_p
             r = subprocess.run(enc, capture_output=True, text=True, timeout=1800)
         except (subprocess.SubprocessError, OSError):
             r = None
-        v = None
+        v = bps = None
         if r and r.returncode == 0 and os.path.isfile(sample) and os.path.getsize(sample) > 0:
+            if t > 0:
+                bps = os.path.getsize(sample) * 8.0 / t   # this sample's bitrate at knob q (byproduct → bitrate map)
             v = _measure_vmaf(ff_measure, src, sample, ss, t, src_w, src_h, cfr_fps, model_arg,
                               os.path.join(workdir, "vmaf_{0}_{1}.json".format(q, i)), n_threads=meas_threads)
         _safe_unlink(sample)
         _tick()
-        return v
+        return (v, bps)
 
     def score_at(q):
         if q in cache:
@@ -723,18 +726,23 @@ def _vmaf_search(src, engine, gpu_decode, ff_encode, ff_measure, target_h, av1_p
             futs = {ex.submit(_do_window, q, i, ss, t): i for i, (ss, t) in enumerate(windows)}
             for fut in concurrent.futures.as_completed(futs):
                 results[futs[fut]] = fut.result()
-        if any(v is None for v in results):
+        if any(r is None or r[0] is None for r in results):
             cache[q] = None
             return None
-        m = sum(results) / len(results)
-        cache[q] = m
-        return m
+        cache[q] = sum(r[0] for r in results) / len(results)
+        bps = [r[1] for r in results if r[1] is not None]
+        if bps:
+            bcache[q] = sum(bps) / len(bps)      # mean sample bitrate at this knob
+        return cache[q]
 
     result = _search_quality_knob(lo, hi, target_vmaf, VMAF_TOLERANCE, score_at, on_stage)
     if out_curve is not None:                    # hand back the measured {cq: vmaf} points (for the CRF map)
         for q, v in cache.items():
             if v is not None:
                 out_curve[q] = round(float(v), 2)
+    if out_bitrate_curve is not None:            # measured {cq: bits/sec} at the same points (for the bitrate map)
+        for q, b in bcache.items():
+            out_bitrate_curve[q] = int(b)
     return result
 
 
@@ -1861,6 +1869,58 @@ def _crf_from_curve(curve, target, tol=VMAF_TOLERANCE):
     return best                                   # None if even the highest-quality measured point misses
 
 
+def _bitrates_from_curves(vmaf_curve, bitrate_curve, targets):
+    """Resolve {preset: bits/sec} from a measured VMAF curve + bitrate curve. For each preset's target
+    VMAF, pick the CQ the live search would (largest CQ still meeting target, via _crf_from_curve) and read
+    that CQ's measured bitrate. Presets whose CQ has no measured bitrate are omitted (the app then falls back
+    to its own preset ladder for that one). Keys tolerate int or str CQ (stored curves use str)."""
+    out = {}
+    for name, tv in (targets or {}).items():
+        pick = _crf_from_curve(vmaf_curve, float(tv))
+        if not pick:
+            continue
+        cq = pick[0]
+        bps = bitrate_curve.get(cq)
+        if bps is None:
+            bps = bitrate_curve.get(str(cq))
+        if bps:
+            out[name] = int(bps)
+    return out
+
+
+def _backfill_bitrates(src, engine, gpu_decode, ff_encode, target_h, cfr_fps, duration, entry_res,
+                       targets, workdir):
+    """Cheap bitrate fill for a res entry mapped BEFORE bitrate capture (has a VMAF curve, no bitrates):
+    encode ONE short sample at each distinct preset-derived CQ — NO VMAF measurement (the expensive part is
+    skipped) — and read its bitrate. Returns {preset: bps}, or {} on any failure (best-effort; on failure the
+    caller leaves the entry unchanged and simply retries next run)."""
+    vmaf_curve = entry_res.get("curve") or {}
+    cqs = set()
+    for tv in (targets or {}).values():
+        pick = _crf_from_curve(vmaf_curve, float(tv))
+        if pick:
+            cqs.add(pick[0])
+    if not cqs:
+        return {}
+    windows = _vmaf_sample_windows(duration, 1, VMAF_SAMPLE_SECS)   # one window is plenty to estimate bitrate
+    if not windows:
+        return {}
+    ss, t = windows[0]
+    bitrate_curve = {}
+    for cq in cqs:
+        sample = os.path.join(workdir, "bf_{}.mp4".format(cq))
+        enc = _sample_encode_cmd(src, sample, engine, cq, ff_encode, gpu_decode, target_h,
+                                 DEFAULT_AV1_PRESET, cfr_fps, None, ss, t)
+        try:
+            r = subprocess.run(enc, capture_output=True, text=True, timeout=1800)
+            if r.returncode == 0 and os.path.isfile(sample) and os.path.getsize(sample) > 0 and t > 0:
+                bitrate_curve[cq] = int(os.path.getsize(sample) * 8 / t)
+        except (subprocess.SubprocessError, OSError):
+            pass
+        _safe_unlink(sample)
+    return _bitrates_from_curves(vmaf_curve, bitrate_curve, targets)
+
+
 def _vmaf_map_path():
     return os.path.join(CACHE_DIR, "vmaf-map.json")
 
@@ -2004,6 +2064,8 @@ def run_vmaf_map(stash, settings, rebuild=False):
         return
     model_arg = _vmaf_model_arg(ff_measure)
     target = _target_vmaf(settings, "balanced")   # map targets the Balanced VMAF; other presets derive from the curve
+    targets = {"high": _target_vmaf(settings, "high"), "balanced": target,
+               "small": _target_vmaf(settings, "small")}   # per-preset target VMAF → per-preset bitrate
     try:
         samples = max(1, min(4, int(float(settings.get("vmafSamples") or VMAF_SAMPLES))))
     except (TypeError, ValueError):
@@ -2070,7 +2132,11 @@ def run_vmaf_map(stash, settings, rebuild=False):
                         if k not in wanted:
                             wanted.append(k)
                     todo = [k for k in wanted if rebuild or k not in e["res"]]
-                    if not todo:
+                    # Cheap backfill: entries mapped before bitrate capture (have a curve but no bitrates) get
+                    # their bitrates filled by encode-only samples — no re-run of the expensive VMAF search.
+                    backfill = [] if rebuild else [k for k in wanted if k in e["res"]
+                                and e["res"][k].get("curve") and "bitrates" not in e["res"][k]]
+                    if not todo and not backfill:
                         skipped += 1
                         continue
                     if deadline and time.time() > deadline:
@@ -2094,12 +2160,12 @@ def run_vmaf_map(stash, settings, rebuild=False):
                             stopped = True
                             break
                         target_h = 0 if k == "orig" else int(k)
-                        curve = {}
+                        curve, bcurve = {}, {}
                         try:
                             res = _vmaf_search(src, engine, gpu_decode, ff_encode, ff_measure, target_h,
                                                DEFAULT_AV1_PRESET, cfr_fps, None, duration, src_w, src_h,
                                                target, model_arg, work, lambda m: None, samples=samples,
-                                               out_curve=curve,
+                                               out_curve=curve, out_bitrate_curve=bcurve,
                                                deadline=time.time() + VMAF_MAP_SEARCH_TIMEOUT)
                         except Exception as ex:
                             failed += 1
@@ -2109,11 +2175,32 @@ def run_vmaf_map(stash, settings, rebuild=False):
                         if not res:
                             continue
                         crf, vmaf = res
-                        e["res"][k] = {"crf": crf, "vmaf": round(vmaf, 2), "target": target, "engine": engine,
-                                       "curve": {str(q): v for q, v in curve.items()}, "ts": int(time.time())}
+                        entry = {"crf": crf, "vmaf": round(vmaf, 2), "target": target, "engine": engine,
+                                 "curve": {str(q): v for q, v in curve.items()}, "ts": int(time.time())}
+                        bitrates = _bitrates_from_curves(curve, bcurve, targets)
+                        if bitrates:
+                            entry["bitrates"] = bitrates   # {preset: bps} for VMAF-calibrated on-device encodes
+                        e["res"][k] = entry
                         analyzed += 1
                         since_ckpt += 1
-                        log_info("VMAF map: scene {} @ {} → CRF {} (~VMAF {:.1f})".format(sid, k, crf, vmaf))
+                        log_info("VMAF map: scene {} @ {} → CRF {} (~VMAF {:.1f}){}".format(
+                            sid, k, crf, vmaf, " · bitrates=" + str(bitrates) if bitrates else ""))
+                    for k in backfill:
+                        if deadline and time.time() > deadline:
+                            stopped = True
+                            break
+                        target_h = 0 if k == "orig" else int(k)
+                        try:
+                            bitrates = _backfill_bitrates(src, engine, gpu_decode, ff_encode, target_h,
+                                                          cfr_fps, duration, e["res"][k], targets, work)
+                        except Exception as ex:
+                            log_info("VMAF map: scene {} @ {} bitrate-backfill error ({}: {})"
+                                     .format(sid, k, type(ex).__name__, ex))
+                            bitrates = None
+                        if bitrates:
+                            e["res"][k]["bitrates"] = bitrates
+                            since_ckpt += 1
+                            log_info("VMAF map: scene {} @ {} bitrates backfilled {}".format(sid, k, bitrates))
                 except Exception as ex:
                     failed += 1
                     log_info("VMAF map: scene {} skipped after {}: {}".format(sid, type(ex).__name__, ex))
