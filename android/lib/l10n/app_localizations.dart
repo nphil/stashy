@@ -117,7 +117,7 @@ abstract class AppLocalizations {
   /// The name of the application
   ///
   /// In en, this message translates to:
-  /// **'StashFlow'**
+  /// **'Stashy'**
   String get appTitle;
 
   /// No description provided for @common_token.
@@ -2183,6 +2183,48 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Scale typography and spacing proportionally'**
   String get settings_appearance_font_size_subtitle;
+
+  /// No description provided for @settings_appearance_color_theme.
+  ///
+  /// In en, this message translates to:
+  /// **'Color Theme'**
+  String get settings_appearance_color_theme;
+
+  /// No description provided for @settings_appearance_color_theme_subtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Choose a curated palette, match your wallpaper, or set a custom color'**
+  String get settings_appearance_color_theme_subtitle;
+
+  /// No description provided for @settings_appearance_material_you.
+  ///
+  /// In en, this message translates to:
+  /// **'Material You'**
+  String get settings_appearance_material_you;
+
+  /// No description provided for @settings_appearance_theme_custom.
+  ///
+  /// In en, this message translates to:
+  /// **'Custom'**
+  String get settings_appearance_theme_custom;
+
+  /// No description provided for @settings_appearance_background_gradient.
+  ///
+  /// In en, this message translates to:
+  /// **'Background Gradient'**
+  String get settings_appearance_background_gradient;
+
+  /// No description provided for @settings_appearance_background_gradient_subtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Paint a subtle gradient from your theme colors behind every screen'**
+  String get settings_appearance_background_gradient_subtitle;
+
+  /// No description provided for @settings_appearance_custom_color_hint.
+  ///
+  /// In en, this message translates to:
+  /// **'The seed color applies to the Custom theme. Pick a swatch to switch to it.'**
+  String get settings_appearance_custom_color_hint;
 
   /// No description provided for @settings_interface_title.
   ///

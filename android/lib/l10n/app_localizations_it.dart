@@ -1134,6 +1134,30 @@ class AppLocalizationsIt extends AppLocalizations {
       'Ridimensiona la tipografia e la spaziatura proporzionalmente';
 
   @override
+  String get settings_appearance_color_theme => 'Color Theme';
+
+  @override
+  String get settings_appearance_color_theme_subtitle =>
+      'Choose a curated palette, match your wallpaper, or set a custom color';
+
+  @override
+  String get settings_appearance_material_you => 'Material You';
+
+  @override
+  String get settings_appearance_theme_custom => 'Custom';
+
+  @override
+  String get settings_appearance_background_gradient => 'Background Gradient';
+
+  @override
+  String get settings_appearance_background_gradient_subtitle =>
+      'Paint a subtle gradient from your theme colors behind every screen';
+
+  @override
+  String get settings_appearance_custom_color_hint =>
+      'The seed color applies to the Custom theme. Pick a swatch to switch to it.';
+
+  @override
   String get settings_interface_title => 'Impostazioni Interfaccia';
 
   @override

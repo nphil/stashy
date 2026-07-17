@@ -21,12 +21,17 @@ import 'package:graphql_flutter/graphql_flutter.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:screen_retriever/screen_retriever.dart';
 
+import 'package:dynamic_color/dynamic_color.dart';
 import 'core/presentation/theme/app_theme.dart';
 import 'core/presentation/theme/theme_mode_provider.dart';
 import 'core/presentation/theme/theme_color_provider.dart';
+import 'core/presentation/theme/theme_preset_provider.dart';
+import 'core/presentation/theme/theme_catalog.dart';
 import 'core/presentation/theme/true_black_provider.dart';
+import 'core/presentation/theme/background_gradient_provider.dart';
 import 'core/presentation/providers/layout_settings_provider.dart';
 import 'core/presentation/widgets/app_lock_gate.dart';
+import 'core/presentation/widgets/app_background.dart';
 
 import 'core/utils/environment.dart' as env;
 
@@ -255,40 +260,94 @@ class MyApp extends ConsumerWidget {
     final themeMode = ref.watch(appThemeModeProvider);
     final seedColor = ref.watch(appThemeColorProvider);
     final useTrueBlack = ref.watch(trueBlackEnabledProvider);
+    final useBackgroundGradient = ref.watch(backgroundGradientEnabledProvider);
     final appLocale = ref.watch(appLanguageProvider);
+    final presetId = ref.watch(appThemePresetProvider);
 
     final cardTitleFontSize = ref.watch(cardTitleFontSizeProvider);
     final performerAvatarSize = ref.watch(performerAvatarSizeProvider);
     final fontSizeFactor = ref.watch(appGlobalScaleProvider);
 
-    return MaterialApp.router(
-      routerConfig: router,
-      builder: (context, child) {
-        if (child == null) {
-          return const SizedBox.shrink();
+    return DynamicColorBuilder(
+      builder: (ColorScheme? lightDynamic, ColorScheme? darkDynamic) {
+        final preset = ThemeCatalog.byId(presetId);
+        final useDynamic =
+            presetId == ThemeCatalog.dynamicPresetId &&
+            lightDynamic != null &&
+            darkDynamic != null;
+
+        final ThemeData lightTheme;
+        final ThemeData darkTheme;
+
+        if (useDynamic) {
+          lightTheme = AppTheme.buildThemeFromColorScheme(
+            lightDynamic,
+            cardTitleFontSize: cardTitleFontSize,
+            performerAvatarSize: performerAvatarSize,
+            fontSizeFactor: fontSizeFactor,
+          );
+          darkTheme = AppTheme.buildThemeFromColorScheme(
+            darkDynamic,
+            useTrueBlack: useTrueBlack,
+            cardTitleFontSize: cardTitleFontSize,
+            performerAvatarSize: performerAvatarSize,
+            fontSizeFactor: fontSizeFactor,
+          );
+        } else if (preset != null) {
+          lightTheme = AppTheme.buildThemeFromColorScheme(
+            preset.light,
+            ratingColor: preset.lightRating,
+            cardTitleFontSize: cardTitleFontSize,
+            performerAvatarSize: performerAvatarSize,
+            fontSizeFactor: fontSizeFactor,
+          );
+          darkTheme = AppTheme.buildThemeFromColorScheme(
+            preset.dark,
+            ratingColor: preset.darkRating,
+            useTrueBlack: useTrueBlack,
+            cardTitleFontSize: cardTitleFontSize,
+            performerAvatarSize: performerAvatarSize,
+            fontSizeFactor: fontSizeFactor,
+          );
+        } else {
+          // 'custom' (default) or an unknown id → the free-form seed color path.
+          lightTheme = AppTheme.buildTheme(
+            Brightness.light,
+            seedColor,
+            cardTitleFontSize: cardTitleFontSize,
+            performerAvatarSize: performerAvatarSize,
+            fontSizeFactor: fontSizeFactor,
+          );
+          darkTheme = AppTheme.buildTheme(
+            Brightness.dark,
+            seedColor,
+            useTrueBlack: useTrueBlack,
+            cardTitleFontSize: cardTitleFontSize,
+            performerAvatarSize: performerAvatarSize,
+            fontSizeFactor: fontSizeFactor,
+          );
         }
-        return AppLockGate(child: child);
+
+        return MaterialApp.router(
+          routerConfig: router,
+          builder: (context, child) {
+            if (child == null) {
+              return const SizedBox.shrink();
+            }
+            return AppBackground(
+              enabled: useBackgroundGradient,
+              child: AppLockGate(child: child),
+            );
+          },
+          onGenerateTitle: (context) => context.l10n.appTitle,
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: supportedAppLocales,
+          locale: appLocale,
+          themeMode: themeMode,
+          theme: lightTheme,
+          darkTheme: darkTheme,
+        );
       },
-      onGenerateTitle: (context) => context.l10n.appTitle,
-      localizationsDelegates: AppLocalizations.localizationsDelegates,
-      supportedLocales: supportedAppLocales,
-      locale: appLocale,
-      themeMode: themeMode,
-      theme: AppTheme.buildTheme(
-        Brightness.light,
-        seedColor,
-        cardTitleFontSize: cardTitleFontSize,
-        performerAvatarSize: performerAvatarSize,
-        fontSizeFactor: fontSizeFactor,
-      ),
-      darkTheme: AppTheme.buildTheme(
-        Brightness.dark,
-        seedColor,
-        useTrueBlack: useTrueBlack,
-        cardTitleFontSize: cardTitleFontSize,
-        performerAvatarSize: performerAvatarSize,
-        fontSizeFactor: fontSizeFactor,
-      ),
     );
   }
 }

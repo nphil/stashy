@@ -8,7 +8,7 @@
                      android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.WRITE_SETTINGS" tools:ignore="ProtectedPermissions"/>
     <application
-        android:label="StashFlow"
+        android:label="Stashy"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true"

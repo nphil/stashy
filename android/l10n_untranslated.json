@@ -1,1 +1,101 @@
-{}
+{
+  "de": [
+    "settings_appearance_color_theme",
+    "settings_appearance_color_theme_subtitle",
+    "settings_appearance_material_you",
+    "settings_appearance_theme_custom",
+    "settings_appearance_background_gradient",
+    "settings_appearance_background_gradient_subtitle",
+    "settings_appearance_custom_color_hint"
+  ],
+
+  "es": [
+    "settings_appearance_color_theme",
+    "settings_appearance_color_theme_subtitle",
+    "settings_appearance_material_you",
+    "settings_appearance_theme_custom",
+    "settings_appearance_background_gradient",
+    "settings_appearance_background_gradient_subtitle",
+    "settings_appearance_custom_color_hint"
+  ],
+
+  "fr": [
+    "settings_appearance_color_theme",
+    "settings_appearance_color_theme_subtitle",
+    "settings_appearance_material_you",
+    "settings_appearance_theme_custom",
+    "settings_appearance_background_gradient",
+    "settings_appearance_background_gradient_subtitle",
+    "settings_appearance_custom_color_hint"
+  ],
+
+  "it": [
+    "settings_appearance_color_theme",
+    "settings_appearance_color_theme_subtitle",
+    "settings_appearance_material_you",
+    "settings_appearance_theme_custom",
+    "settings_appearance_background_gradient",
+    "settings_appearance_background_gradient_subtitle",
+    "settings_appearance_custom_color_hint"
+  ],
+
+  "ja": [
+    "settings_appearance_color_theme",
+    "settings_appearance_color_theme_subtitle",
+    "settings_appearance_material_you",
+    "settings_appearance_theme_custom",
+    "settings_appearance_background_gradient",
+    "settings_appearance_background_gradient_subtitle",
+    "settings_appearance_custom_color_hint"
+  ],
+
+  "ko": [
+    "settings_appearance_color_theme",
+    "settings_appearance_color_theme_subtitle",
+    "settings_appearance_material_you",
+    "settings_appearance_theme_custom",
+    "settings_appearance_background_gradient",
+    "settings_appearance_background_gradient_subtitle",
+    "settings_appearance_custom_color_hint"
+  ],
+
+  "ru": [
+    "settings_appearance_color_theme",
+    "settings_appearance_color_theme_subtitle",
+    "settings_appearance_material_you",
+    "settings_appearance_theme_custom",
+    "settings_appearance_background_gradient",
+    "settings_appearance_background_gradient_subtitle",
+    "settings_appearance_custom_color_hint"
+  ],
+
+  "zh": [
+    "settings_appearance_color_theme",
+    "settings_appearance_color_theme_subtitle",
+    "settings_appearance_material_you",
+    "settings_appearance_theme_custom",
+    "settings_appearance_background_gradient",
+    "settings_appearance_background_gradient_subtitle",
+    "settings_appearance_custom_color_hint"
+  ],
+
+  "zh_Hans": [
+    "settings_appearance_color_theme",
+    "settings_appearance_color_theme_subtitle",
+    "settings_appearance_material_you",
+    "settings_appearance_theme_custom",
+    "settings_appearance_background_gradient",
+    "settings_appearance_background_gradient_subtitle",
+    "settings_appearance_custom_color_hint"
+  ],
+
+  "zh_Hant": [
+    "settings_appearance_color_theme",
+    "settings_appearance_color_theme_subtitle",
+    "settings_appearance_material_you",
+    "settings_appearance_theme_custom",
+    "settings_appearance_background_gradient",
+    "settings_appearance_background_gradient_subtitle",
+    "settings_appearance_custom_color_hint"
+  ]
+}

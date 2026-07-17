@@ -4,10 +4,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:stash_app_flutter/core/presentation/theme/app_theme.dart';
 import 'package:stash_app_flutter/l10n/app_localizations.dart';
 import 'package:stash_app_flutter/core/presentation/theme/theme_mode_provider.dart';
+import 'package:stash_app_flutter/core/presentation/theme/theme_catalog.dart';
 import 'package:stash_app_flutter/core/presentation/theme/theme_color_provider.dart';
+import 'package:stash_app_flutter/core/presentation/theme/theme_preset_provider.dart';
 import 'package:stash_app_flutter/core/presentation/theme/true_black_provider.dart';
+import 'package:stash_app_flutter/core/presentation/theme/background_gradient_provider.dart';
 import 'package:stash_app_flutter/core/presentation/providers/layout_settings_provider.dart';
 import '../../widgets/settings_page_shell.dart';
+import '../../widgets/theme_catalog_picker.dart';
 
 class AppearanceSettingsPage extends ConsumerStatefulWidget {
   const AppearanceSettingsPage({super.key});
@@ -71,6 +75,10 @@ class _AppearanceSettingsPageState
       _forceShowCustom = false;
     });
     await ref.read(appThemeColorProvider.notifier).setThemeColor(color);
+    // Choosing a seed color activates the free-form "Custom" theme so it applies.
+    await ref
+        .read(appThemePresetProvider.notifier)
+        .setPreset(ThemeCatalog.customPresetId);
   }
 
   @override
@@ -83,6 +91,8 @@ class _AppearanceSettingsPageState
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
+    final isCustomTheme =
+        ref.watch(appThemePresetProvider) == ThemeCatalog.customPresetId;
 
     return SettingsPageShell(
       title: l10n.settings_appearance_title,
@@ -162,13 +172,33 @@ class _AppearanceSettingsPageState
                                 .set(value);
                           },
                         ),
+                        SwitchListTile.adaptive(
+                          contentPadding: EdgeInsets.zero,
+                          title: Text(
+                            l10n.settings_appearance_background_gradient,
+                          ),
+                          subtitle: Text(
+                            l10n.settings_appearance_background_gradient_subtitle,
+                          ),
+                          value: ref.watch(backgroundGradientEnabledProvider),
+                          onChanged: (value) {
+                            ref
+                                .read(backgroundGradientEnabledProvider.notifier)
+                                .set(value);
+                          },
+                        ),
                       ],
                     ),
                   ),
                   SettingsSectionCard(
+                    title: l10n.settings_appearance_color_theme,
+                    subtitle: l10n.settings_appearance_color_theme_subtitle,
+                    child: const ThemeCatalogPicker(),
+                  ),
+                  SettingsSectionCard(
                     title: l10n.settings_appearance_primary_color,
                     subtitle: l10n.settings_appearance_primary_color_subtitle,
-                    child: _buildColorSelector(),
+                    child: _buildColorSelector(isCustomTheme),
                   ),
                   SettingsSectionCard(
                     title: l10n.settings_appearance_font_size,
@@ -226,19 +256,30 @@ class _AppearanceSettingsPageState
     );
   }
 
-  Widget _buildColorSelector() {
+  Widget _buildColorSelector(bool isCustomTheme) {
     final isCustom = _forceShowCustom || !_presetColors.contains(_seedColor);
     final l10n = AppLocalizations.of(context)!;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        if (!isCustomTheme) ...[
+          Text(
+            l10n.settings_appearance_custom_color_hint,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+          SizedBox(height: context.dimensions.spacingSmall),
+        ],
         Wrap(
           spacing: context.dimensions.spacingSmall,
           runSpacing: context.dimensions.spacingSmall,
           children: [
-            ..._presetColors.map((color) => _buildColorSwatch(color)),
-            _buildColorSwatch(null),
+            ..._presetColors.map(
+              (color) => _buildColorSwatch(color, isCustomTheme),
+            ),
+            _buildColorSwatch(null, isCustomTheme),
           ],
         ),
         if (isCustom) ...[
@@ -262,6 +303,9 @@ class _AppearanceSettingsPageState
                   ref
                       .read(appThemeColorProvider.notifier)
                       .setThemeColor(_seedColor);
+                  ref
+                      .read(appThemePresetProvider.notifier)
+                      .setPreset(ThemeCatalog.customPresetId);
                 }
               }
             },
@@ -271,10 +315,12 @@ class _AppearanceSettingsPageState
     );
   }
 
-  Widget _buildColorSwatch(Color? color) {
-    final isSelected = color == null
-        ? (_forceShowCustom || !_presetColors.contains(_seedColor))
-        : (_seedColor == color && !_forceShowCustom);
+  Widget _buildColorSwatch(Color? color, bool isCustomTheme) {
+    final isSelected =
+        isCustomTheme &&
+        (color == null
+            ? (_forceShowCustom || !_presetColors.contains(_seedColor))
+            : (_seedColor == color && !_forceShowCustom));
     final displayColor = color ?? _seedColor;
 
     return Padding(

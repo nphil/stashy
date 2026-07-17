@@ -232,6 +232,34 @@ class AppTheme {
     double? performerAvatarSize,
     double fontSizeFactor = 1.0,
   }) {
+    final colorScheme = ColorScheme.fromSeed(
+      seedColor: seedColor,
+      brightness: brightness,
+    );
+    return buildThemeFromColorScheme(
+      colorScheme,
+      useTrueBlack: useTrueBlack,
+      cardTitleFontSize: cardTitleFontSize,
+      performerAvatarSize: performerAvatarSize,
+      fontSizeFactor: fontSizeFactor,
+    );
+  }
+
+  /// Builds a [ThemeData] from a fully-specified [ColorScheme] — a named catalog
+  /// theme or a Material You dynamic scheme — applying the same component themes,
+  /// true-black overlay, font scaling, and [ThemeExtension]s as the seed path.
+  ///
+  /// [ratingColor] overrides the semantic rating accent; when null it falls back
+  /// to the brightness-keyed amber used by the seed themes. The [baseScheme]'s
+  /// own [ColorScheme.brightness] drives light/dark behavior.
+  static ThemeData buildThemeFromColorScheme(
+    ColorScheme baseScheme, {
+    bool useTrueBlack = false,
+    double? cardTitleFontSize,
+    double? performerAvatarSize,
+    double fontSizeFactor = 1.0,
+    Color? ratingColor,
+  }) {
     final dims = AppDimensions(
       performerAvatarSize: (performerAvatarSize ?? 16.0) * fontSizeFactor,
       cardTitleFontSize: (cardTitleFontSize ?? 12.0) * fontSizeFactor,
@@ -242,11 +270,9 @@ class AppTheme {
       buttonHeight: 48.0 * fontSizeFactor,
     );
 
+    final brightness = baseScheme.brightness;
     final isDark = brightness == Brightness.dark;
-    var colorScheme = ColorScheme.fromSeed(
-      seedColor: seedColor,
-      brightness: brightness,
-    );
+    var colorScheme = baseScheme;
 
     if (isDark && useTrueBlack) {
       colorScheme = colorScheme.copyWith(
@@ -425,7 +451,9 @@ class AppTheme {
           onSurfaceVariant: colorScheme.onSurfaceVariant,
           outline: colorScheme.outline,
           cardBackground: colorScheme.surfaceContainerHighest,
-          ratingColor: isDark ? Colors.amber.shade300 : Colors.amber.shade700,
+          ratingColor:
+              ratingColor ??
+              (isDark ? Colors.amber.shade300 : Colors.amber.shade700),
         ),
         dims,
       ],

@@ -26,7 +26,7 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "io.github.alchemistaloha.stashflow"
+        applicationId = "com.nphil.stashy"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
@@ -44,6 +44,15 @@ android {
                 storePassword = keystoreProperties["storePassword"] as String
                 keyAlias = keystoreProperties["keyAlias"] as String
                 keyPassword = keystoreProperties["keyPassword"] as String
+            } else {
+                // Fallback: a committed, stable key so every CI-built APK shares one
+                // signature — required for in-place updates via Obtainium (Android
+                // rejects an update signed with a different key). No CI secrets needed.
+                // This key is public: fine for personal sideloading, not the Play Store.
+                storeFile = rootProject.file("app/stashy.keystore")
+                storePassword = "stashyapp"
+                keyAlias = "stashy"
+                keyPassword = "stashyapp"
             }
         }
     }

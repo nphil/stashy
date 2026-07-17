@@ -12,3 +12,7 @@ GeneratedPluginRegistrant.java
 key.properties
 **/*.keystore
 **/*.jks
+# Committed on purpose: a stable signing key so every CI-built APK shares one
+# signature, enabling in-place Obtainium/Android updates without CI secrets.
+# Public key — fine for personal sideloading, never for the Play Store.
+!app/stashy.keystore
