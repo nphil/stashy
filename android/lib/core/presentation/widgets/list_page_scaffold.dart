@@ -599,7 +599,11 @@ class _ListPageScaffoldState<T> extends ConsumerState<ListPageScaffold<T>> {
                                         physics:
                                             const AlwaysScrollableScrollPhysics(),
                                         padding: widget.padding,
-                                        cacheExtent: viewportCacheExtent,
+                                        // Two screens of lookahead so thumbnails
+                                        // are decoded before they scroll in during
+                                        // fast 120Hz flings (matches the non-masonry
+                                        // grid/list paths).
+                                        cacheExtent: viewportCacheExtent * 2,
                                         gridDelegate:
                                             SliverSimpleGridDelegateWithFixedCrossAxisCount(
                                               crossAxisCount:

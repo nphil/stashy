@@ -97,10 +97,17 @@ class _MarkerImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final dpr = MediaQuery.devicePixelRatioOf(context);
     return AspectRatio(
       aspectRatio: 16 / 9,
       child: imageUrl?.isNotEmpty == true
-          ? StashImage(imageUrl: imageUrl, fit: BoxFit.cover)
+          ? LayoutBuilder(
+              builder: (context, constraints) => StashImage(
+                imageUrl: imageUrl,
+                fit: BoxFit.cover,
+                memCacheWidth: (constraints.maxWidth * dpr).round(),
+              ),
+            )
           : ColoredBox(
               color: Theme.of(context).colorScheme.surfaceContainerHighest,
               child: Icon(

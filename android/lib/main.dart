@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_displaymode/flutter_displaymode.dart';
 import 'package:stash_app_flutter/l10n/app_localizations.dart';
 import 'package:stash_app_flutter/core/utils/l10n_extensions.dart';
 import 'package:stash_app_flutter/core/presentation/providers/app_language_provider.dart';
@@ -44,6 +45,17 @@ StashMediaHandler _buildMediaHandler() => StashMediaHandler();
 Future<void> main() async {
   final startupStopwatch = Stopwatch()..start();
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Opt into the display's highest refresh rate (e.g. 120Hz). Android leaves an
+  // app at 60Hz by default on most high-refresh panels unless it asks — this is
+  // what makes scrolling and transitions feel native-smooth.
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+    try {
+      await FlutterDisplayMode.setHighRefreshRate();
+    } catch (_) {
+      // Device doesn't support runtime mode switching; ignore.
+    }
+  }
 
   try {
     if (!kIsWeb &&

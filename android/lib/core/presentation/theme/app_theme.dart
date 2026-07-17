@@ -298,6 +298,13 @@ class AppTheme {
 
     return ThemeData(
       useMaterial3: true,
+      // Native Android predictive-back (finger-following peek) + iOS swipe-back.
+      // Falls back to the standard zoom animation when the gesture isn't active.
+      pageTransitionsTheme: const PageTransitionsTheme(
+        builders: {
+          TargetPlatform.android: PredictiveBackPageTransitionsBuilder(),
+        },
+      ),
       brightness: brightness,
       colorScheme: colorScheme,
       scaffoldBackgroundColor: colorScheme.surface,

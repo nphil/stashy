@@ -1,4 +1,3 @@
-import 'package:flutter/material.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/data/graphql/graphql_client.dart';
@@ -86,17 +85,11 @@ GoRouter router(Ref ref) {
                   ),
                   GoRoute(
                     path: 'scene/:id',
-                    pageBuilder: (context, state) => CustomTransitionPage(
-                      key: state.pageKey,
-                      child: SceneDetailsPage(
-                        sceneId: state.pathParameters['id']!,
-                        autoPlayOnMount: state.extra is bool
-                            ? state.extra as bool
-                            : false,
-                      ),
-                      transitionsBuilder:
-                          (context, animation, secondaryAnimation, child) =>
-                              FadeTransition(opacity: animation, child: child),
+                    builder: (context, state) => SceneDetailsPage(
+                      sceneId: state.pathParameters['id']!,
+                      autoPlayOnMount: state.extra is bool
+                          ? state.extra as bool
+                          : false,
                     ),
                     routes: [
                       GoRoute(

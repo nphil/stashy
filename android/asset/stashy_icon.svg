@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="108" height="108">
+  <!-- Stashy app icon source. Foreground/monochrome path is shared with the
+       Android vector drawables in android/app/src/main/res/drawable/. -->
+  <rect width="108" height="108" fill="#E85D4A"/>
+  <path d="M49.92,37.27 Q42,33 42,42 L42,66 Q42,75 49.92,70.73 L73.08,58.27 Q81,54 73.08,49.73 Z" fill="#ffffff" fill-opacity="0.17" transform="translate(-7,-3)"/>
+  <path d="M49.92,37.27 Q42,33 42,42 L42,66 Q42,75 49.92,70.73 L73.08,58.27 Q81,54 73.08,49.73 Z" fill="#ffffff"/>
+</svg>
