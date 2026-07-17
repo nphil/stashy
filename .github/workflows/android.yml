@@ -1,0 +1,110 @@
+name: Build APK
+
+# Builds the Flutter Android app and publishes a signed universal APK to a
+# GitHub Release you can install/update from Obtainium. Runs on every push to
+# main that touches android/, and auto-bumps the version each time.
+#
+# Isolation from iOS: ios-build.yml has `paths-ignore: android/**` and this one
+# scopes to `paths: android/**`, so neither fires on the other's changes. iOS
+# tags stay `v*`; Android tags are `android-v*` (disjoint globs).
+#
+# Signing: uses the committed stable keystore (android/android/app/stashy.keystore)
+# via the fallback in app/build.gradle.kts — no CI secrets, and the signature
+# stays constant so Obtainium can update in place. To switch to a private secret
+# keystore later, write android/android/key.properties from secrets before the
+# build step; build.gradle prefers it when present.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'android/**'
+      - '.github/workflows/android.yml'
+    paths-ignore:
+      - '**/*.md'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    working-directory: android
+
+jobs:
+  release:
+    name: Build and release APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: ver
+        run: |
+          CURRENT=$(grep -E '^version:' pubspec.yaml | sed -E 's/version:[[:space:]]*//')
+          VER="${CURRENT%%+*}"
+          BUILD="${CURRENT##*+}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VER"
+          NEW_VER="$MAJOR.$MINOR.$((PATCH + 1))"
+          NEW_BUILD="$((BUILD + 1))"
+          echo "version=$NEW_VER"        >> "$GITHUB_OUTPUT"
+          echo "full=$NEW_VER+$NEW_BUILD" >> "$GITHUB_OUTPUT"
+          echo "tag=android-v$NEW_VER"   >> "$GITHUB_OUTPUT"
+
+      - name: Bump pubspec version
+        run: sed -i -E "s/^version:.*/version: ${{ steps.ver.outputs.full }}/" pubspec.yaml
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Generate code (freezed / riverpod / graphql)
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      - name: Build universal APK (release)
+        run: flutter build apk --release
+
+      - name: Stage APK
+        run: |
+          mkdir -p out
+          cp build/app/outputs/flutter-apk/app-release.apk \
+             "out/Stashy-${{ steps.ver.outputs.version }}.apk"
+          ls -la out
+
+      - name: Commit bump, tag, and publish release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          NOTES="Stashy for Android ${{ steps.ver.outputs.version }}. Install or auto-update via Obtainium (point it at this repo), or download the APK directly. Built from \`$SHORT_SHA\` on $(date -u +'%Y-%m-%d %H:%M UTC')."
+
+          cd "$GITHUB_WORKSPACE"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add android/pubspec.yaml
+          git commit -m "chore(android): bump to ${{ steps.ver.outputs.version }} [skip ci]"
+          git fetch origin main
+          git rebase origin/main
+          git push origin main
+          git tag "$TAG"
+          git push origin "$TAG"
+
+          gh release create "$TAG" \
+            "android/out/Stashy-${{ steps.ver.outputs.version }}.apk" \
+            --title "Stashy Android ${{ steps.ver.outputs.version }}" \
+            --notes "$NOTES"
