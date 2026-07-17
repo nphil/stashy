@@ -1,0 +1,521 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import 'package:url_launcher/url_launcher.dart';
+import '../../../core/presentation/theme/app_theme.dart';
+import '../../../core/utils/responsive.dart';
+import '../../../core/utils/l10n_extensions.dart';
+import '../../../core/utils/environment.dart' as env;
+import 'package:flutter/gestures.dart';
+import '../../../core/presentation/providers/desktop_capabilities_provider.dart';
+import '../../../core/presentation/providers/keybinds_provider.dart';
+import '../../../core/presentation/providers/list_scroll_controller_provider.dart';
+import '../../../core/data/graphql/graphql_client.dart';
+import '../../scenes/presentation/providers/video_player_provider.dart';
+import '../../scenes/presentation/providers/scene_list_provider.dart';
+import '../../scenes/presentation/widgets/tiktok_scenes_view.dart';
+import '../../setup/presentation/providers/navigation_tabs_provider.dart';
+import '../../setup/presentation/providers/main_page_orientation_provider.dart';
+import '../../setup/presentation/providers/update_provider.dart';
+import '../../setup/domain/entities/update_info.dart';
+import 'widgets/mini_player.dart';
+import '../../scenes/presentation/widgets/global_fullscreen_overlay.dart';
+
+class ShellPage extends ConsumerStatefulWidget {
+  final StatefulNavigationShell navigationShell;
+  const ShellPage({required this.navigationShell, super.key});
+
+  @override
+  ConsumerState<ShellPage> createState() => _ShellPageState();
+}
+
+class _ShellPageState extends ConsumerState<ShellPage> {
+  bool _dialogShown = false;
+  DateTime? _lastHorizontalSwipeTime;
+  static const _horizontalSwipeThreshold = Duration(milliseconds: 500);
+  bool? _lastAppliedMainPageGravityOrientation;
+  bool _wasVideoFullscreen = false;
+  bool _enableDeferredStartupChecks = false;
+  Timer? _deferredStartupTimer;
+
+  bool get _isDesktopPlatform =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.windows ||
+          defaultTargetPlatform == TargetPlatform.linux ||
+          defaultTargetPlatform == TargetPlatform.macOS);
+
+  List<DeviceOrientation> _mainPageOrientations(bool allowGravity) {
+    if (allowGravity) {
+      return [
+        DeviceOrientation.portraitUp,
+        DeviceOrientation.portraitDown,
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ];
+    }
+    return [DeviceOrientation.portraitUp];
+  }
+
+  void _syncMainPageOrientations({
+    required bool allowGravity,
+    required bool isVideoFullScreen,
+  }) {
+    if (_isDesktopPlatform || kIsWeb) return;
+
+    if (isVideoFullScreen) {
+      _wasVideoFullscreen = true;
+      return;
+    }
+
+    final shouldApply =
+        _wasVideoFullscreen ||
+        _lastAppliedMainPageGravityOrientation != allowGravity;
+    if (!shouldApply) return;
+
+    _wasVideoFullscreen = false;
+    _lastAppliedMainPageGravityOrientation = allowGravity;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(
+        SystemChrome.setPreferredOrientations(
+          _mainPageOrientations(allowGravity),
+        ),
+      );
+    });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _checkServerConfiguration();
+      // Defer non-critical startup checks off the first frame.
+      _deferredStartupTimer = Timer(const Duration(milliseconds: 1200), () {
+        if (!mounted) return;
+        setState(() {
+          _enableDeferredStartupChecks = true;
+        });
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _deferredStartupTimer?.cancel();
+    super.dispose();
+  }
+
+  void _showUpdateDialog(UpdateInfo updateInfo) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: Text(context.l10n.common_update_available),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(context.l10n.update_available(updateInfo.latestVersion)),
+            const SizedBox(height: 12),
+            Text(
+              context
+                  .l10n
+                  .would_you_like_to_visit_the_release_page_to_download_it,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              ref.read(startupUpdateCheckProvider.notifier).markChecked();
+              Navigator.pop(context);
+            },
+            child: Text(context.l10n.common_later),
+          ),
+          if (!kIsWeb &&
+              Platform.isAndroid &&
+              updateInfo.androidApkUrl != null &&
+              updateInfo.androidApkUrl!.isNotEmpty)
+            TextButton(
+              onPressed: () async {
+                final url = Uri.parse(updateInfo.androidApkUrl!);
+                try {
+                  if (await canLaunchUrl(url)) {
+                    await launchUrl(url, mode: LaunchMode.externalApplication);
+                  }
+                } catch (_) {}
+              },
+              child: Text(context.l10n.common_download),
+            ),
+          FilledButton(
+            onPressed: () async {
+              final url = Uri.parse(updateInfo.releaseUrl);
+              try {
+                if (await canLaunchUrl(url)) {
+                  await launchUrl(url, mode: LaunchMode.externalApplication);
+                }
+              } catch (_) {}
+              if (context.mounted) {
+                ref.read(startupUpdateCheckProvider.notifier).markChecked();
+                Navigator.pop(context);
+              }
+            },
+            child: Text(context.l10n.common_update_now),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _checkServerConfiguration() {
+    if (env.isTestMode) return;
+    final serverUrl = ref.read(serverUrlProvider);
+    if (serverUrl.isEmpty && !_dialogShown && mounted) {
+      _dialogShown = true;
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => AlertDialog(
+          title: Text(context.l10n.common_setup_required),
+          content: Text(context.l10n.to_get_started_configure_stash_server),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+                context.push('/settings/server');
+              },
+              child: Text(context.l10n.common_configure_now),
+            ),
+          ],
+        ),
+      );
+    }
+  }
+
+  String? _extractSceneIdFromPath(String path) {
+    if (path.startsWith('/scenes/scene/')) {
+      final segments = Uri.parse(path).pathSegments;
+      return segments.length >= 3 ? segments[2] : null;
+    }
+    if (path.startsWith('/scene/')) {
+      final segments = Uri.parse(path).pathSegments;
+      return segments.length >= 2 ? segments[1] : null;
+    }
+    return null;
+  }
+
+  String _getTabLabel(NavigationTabType type) {
+    switch (type) {
+      case NavigationTabType.scenes:
+        return context.l10n.nav_scenes;
+      case NavigationTabType.performers:
+        return context.l10n.nav_performers;
+      case NavigationTabType.studios:
+        return context.l10n.nav_studios;
+      case NavigationTabType.tags:
+        return context.l10n.nav_tags;
+      case NavigationTabType.galleries:
+        return context.l10n.nav_galleries;
+      case NavigationTabType.groups:
+        return context.l10n.groups_title;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_enableDeferredStartupChecks) {
+      ref.listen(startupUpdateCheckProvider, (previous, next) {
+        next.whenData((updateInfo) {
+          if (updateInfo != null && updateInfo.isUpdateAvailable && mounted) {
+            _showUpdateDialog(updateInfo);
+          }
+        });
+      });
+    }
+
+    ref.listen(playerStateProvider.select((s) => s.navigationIntent), (
+      prev,
+      next,
+    ) {
+      if (next != null && mounted) {
+        for (final action in next.actions) {
+          if (action.isReplacement) {
+            context.pushReplacement(action.path);
+          } else {
+            context.push(action.path);
+          }
+        }
+      }
+    });
+
+    final navigationShell = widget.navigationShell;
+    final currentPath = GoRouterState.of(context).uri.path;
+    final playerState = ref.watch(playerStateProvider);
+    final activeSceneId = playerState.activeScene?.id;
+    final pathSceneId = _extractSceneIdFromPath(currentPath);
+    final isTiktokFullScreen = ref.watch(fullScreenModeProvider);
+    final allowMainPageGravityOrientation = ref.watch(
+      mainPageGravityOrientationProvider,
+    );
+
+    final isVideoFullScreen = playerState.isFullScreen || isTiktokFullScreen;
+    _syncMainPageOrientations(
+      allowGravity: allowMainPageGravityOrientation,
+      isVideoFullScreen: isVideoFullScreen,
+    );
+
+    // Consider we are in fullscreen if the provider says so, OR if we are on a known fullscreen path.
+    // This provides a more immediate UI response during route transitions.
+    final isFullscreenPath =
+        currentPath.contains('/image/') ||
+        currentPath.contains('/images/') ||
+        currentPath.startsWith('/image/') ||
+        currentPath.startsWith('/images/');
+
+    final isFullScreen =
+        playerState.isFullScreen || isTiktokFullScreen || isFullscreenPath;
+    final isTiktokLayout = ref.watch(sceneTiktokLayoutProvider);
+    final isMobile = Responsive.isMobile(context);
+
+    final allTabs = ref.watch(navigationTabsProvider);
+    final visibleTabs = allTabs.where((t) => t.visible).toList();
+
+    // Map branch index to UI index for the NavigationBar/Rail
+    final branchToUiMap = <int, int>{};
+    for (var i = 0; i < visibleTabs.length; i++) {
+      final branchIndex = visibleTabs[i].type.index;
+      branchToUiMap[branchIndex] = i;
+    }
+
+    final currentUiIndex = branchToUiMap[navigationShell.currentIndex] ?? 0;
+
+    final onScenesPage = currentPath == '/scenes';
+
+    final hideMiniPlayer =
+        (activeSceneId != null &&
+            pathSceneId != null &&
+            activeSceneId == pathSceneId) ||
+        isFullScreen ||
+        (isTiktokLayout && onScenesPage);
+
+    void onDestinationSelected(int uiIndex) {
+      final tab = visibleTabs[uiIndex];
+      final branchIndex = tab.type.index;
+
+      if (branchIndex == navigationShell.currentIndex) {
+        switch (tab.type) {
+          case NavigationTabType.scenes:
+            final isTiktokLayout = ref.read(sceneTiktokLayoutProvider);
+            if (!isTiktokLayout) {
+              ref
+                  .read(
+                    listScrollControllerProvider(
+                      ListScrollTarget.scene,
+                    ).notifier,
+                  )
+                  .scrollToTop();
+            }
+            break;
+          case NavigationTabType.performers:
+            ref
+                .read(
+                  listScrollControllerProvider(
+                    ListScrollTarget.performer,
+                  ).notifier,
+                )
+                .scrollToTop();
+            break;
+          case NavigationTabType.studios:
+            ref
+                .read(
+                  listScrollControllerProvider(
+                    ListScrollTarget.studio,
+                  ).notifier,
+                )
+                .scrollToTop();
+            break;
+          case NavigationTabType.tags:
+            ref
+                .read(
+                  listScrollControllerProvider(ListScrollTarget.tag).notifier,
+                )
+                .scrollToTop();
+            break;
+          case NavigationTabType.galleries:
+            ref
+                .read(
+                  listScrollControllerProvider(
+                    ListScrollTarget.gallery,
+                  ).notifier,
+                )
+                .scrollToTop();
+            break;
+          case NavigationTabType.groups:
+            break;
+        }
+      }
+      navigationShell.goBranch(
+        branchIndex,
+        initialLocation: branchIndex == navigationShell.currentIndex,
+      );
+    }
+
+    final navigationDestinations = visibleTabs
+        .map(
+          (t) => NavigationDestination(
+            icon: Icon(t.type.icon),
+            label: _getTabLabel(t.type),
+          ),
+        )
+        .toList();
+
+    final navigationRailDestinations = visibleTabs
+        .map(
+          (t) => NavigationRailDestination(
+            icon: Icon(t.type.icon),
+            label: Text(_getTabLabel(t.type)),
+          ),
+        )
+        .toList();
+
+    Widget bodyContent = Stack(
+      children: [
+        Positioned.fill(
+          bottom: (!hideMiniPlayer && activeSceneId != null) ? 66.0 : 0.0,
+          child: RepaintBoundary(child: navigationShell),
+        ),
+        if (!hideMiniPlayer && activeSceneId != null)
+          const Positioned(left: 0, right: 0, bottom: 0, child: MiniPlayer()),
+        const Positioned.fill(child: GlobalFullscreenOverlay()),
+      ],
+    );
+
+    if (!isMobile && !isFullScreen) {
+      bodyContent = Row(
+        children: [
+          NavigationRail(
+            selectedIndex: currentUiIndex,
+            onDestinationSelected: onDestinationSelected,
+            labelType: NavigationRailLabelType.selected,
+            useIndicator: true,
+            indicatorColor: Theme.of(context).colorScheme.secondaryContainer,
+            indicatorShape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(AppTheme.radiusMedium),
+            ),
+            destinations: navigationRailDestinations,
+          ),
+          const VerticalDivider(thickness: 1, width: 1),
+          Expanded(child: bodyContent),
+        ],
+      );
+    }
+
+    if (ref.watch(desktopCapabilitiesProvider)) {
+      final Map<ShortcutActivator, VoidCallback> bindings = {};
+      final keybinds = ref.watch(keybindsProvider);
+
+      final digitKeys = [
+        LogicalKeyboardKey.digit1,
+        LogicalKeyboardKey.digit2,
+        LogicalKeyboardKey.digit3,
+        LogicalKeyboardKey.digit4,
+        LogicalKeyboardKey.digit5,
+        LogicalKeyboardKey.digit6,
+        LogicalKeyboardKey.digit7,
+        LogicalKeyboardKey.digit8,
+        LogicalKeyboardKey.digit9,
+      ];
+      for (int i = 0; i < visibleTabs.length && i < digitKeys.length; i++) {
+        final index = i;
+        bindings[SingleActivator(digitKeys[i], control: true)] = () =>
+            onDestinationSelected(index);
+      }
+
+      // Add back bind
+      final backBind = keybinds.binds[KeybindAction.back];
+      if (backBind != null) {
+        bindings[backBind.toActivator()] = () {
+          if (context.canPop()) {
+            context.pop();
+          }
+        };
+      }
+
+      bodyContent = CallbackShortcuts(
+        bindings: bindings,
+        child: Focus(autofocus: true, child: bodyContent),
+      );
+    }
+
+    final isDesktop = ref.watch(desktopCapabilitiesProvider);
+
+    return PopScope(
+      canPop: !isFullScreen,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && isFullScreen) {
+          // Back gesture was blocked because canPop=false in fullscreen mode.
+          // Exit fullscreen instead of navigating back.
+          if (playerState.isFullScreen) {
+            final notifier = ref.read(playerStateProvider.notifier);
+            notifier.syncBackgroundToActiveScene(context);
+            notifier.requestExitFullscreen();
+          } else if (isTiktokFullScreen) {
+            ref.read(fullScreenModeProvider.notifier).set(false);
+          }
+        }
+      },
+      child: Scaffold(
+        body: Listener(
+          onPointerSignal: (pointerSignal) {
+            if (isDesktop && pointerSignal is PointerScrollEvent) {
+              if (pointerSignal.scrollDelta.dx.abs() > 30) {
+                final now = DateTime.now();
+                if (_lastHorizontalSwipeTime == null ||
+                    now.difference(_lastHorizontalSwipeTime!) >
+                        _horizontalSwipeThreshold) {
+                  if (pointerSignal.scrollDelta.dx < -30) {
+                    // Swipe Right (negative dx) -> Go Back
+                    if (context.canPop()) {
+                      _lastHorizontalSwipeTime = now;
+                      context.pop();
+                    }
+                  } else if (pointerSignal.scrollDelta.dx > 30) {
+                    // Swipe Left (positive dx) -> Go Forward (if possible)
+                    // GoRouter doesn't have a simple goForward,
+                    // but we can at least support Back for now as it's most expected.
+                  }
+                }
+              }
+            }
+          },
+          child: bodyContent,
+        ),
+        bottomNavigationBar: (isFullScreen || !isMobile)
+            ? null
+            : SafeArea(
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: NavigationBar(
+                        selectedIndex: currentUiIndex,
+                        destinations: navigationDestinations,
+                        onDestinationSelected: onDestinationSelected,
+                        labelBehavior:
+                            NavigationDestinationLabelBehavior.alwaysShow,
+                        height: 72,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+      ),
+    );
+  }
+}

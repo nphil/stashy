@@ -1,0 +1,36 @@
+targets:
+  $default:
+    builders:
+      mockito:mockBuilder:
+        enabled: true
+        generate_for:
+          - test/**
+      riverpod_generator:
+        enabled: true
+      freezed:
+        enabled: true
+      json_serializable:
+        enabled: true
+        options:
+          explicit_to_json: true
+      graphql_codegen:
+        options:
+          clients:
+            - graphql
+          schema_mapping:
+            - schema: graphql/schema.graphql
+              queries_glob: lib/features/**/*.graphql
+              output_directory: lib/core/data/graphql/__generated__
+          scalars:
+            Any:
+              type: Object
+            Map:
+              type: Map<String, dynamic>
+            Timestamp:
+              type: DateTime
+            Upload:
+              type: String
+            Time:
+              type: String
+            Int64:
+              type: int

@@ -1,0 +1,48 @@
+fragment GalleryData on Gallery {
+  id
+  title
+  date
+  rating100
+  image_count
+  details
+  files {
+    path
+  }
+  paths {
+    cover
+  }
+  cover {
+    visual_files {
+      ... on ImageFile {
+        width
+        height
+      }
+      ... on VideoFile {
+        width
+        height
+      }
+    }
+  }
+}
+
+query FindGalleries($filter: FindFilterType, $gallery_filter: GalleryFilterType) {
+  findGalleries(filter: $filter, gallery_filter: $gallery_filter) {
+    count
+    galleries {
+      ...GalleryData
+    }
+  }
+}
+
+query FindGallery($id: ID!) {
+  findGallery(id: $id) {
+    ...GalleryData
+  }
+}
+
+mutation UpdateGalleryRating($id: ID!, $rating: Int!) {
+  galleryUpdate(input: { id: $id, rating100: $rating }) {
+    id
+    rating100
+  }
+}
