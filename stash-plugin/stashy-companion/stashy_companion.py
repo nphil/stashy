@@ -953,14 +953,15 @@ def run_transcode(stash, args, settings):
     if _truthy(settings.get("vmafTargeting"), True) and not _source_is_hdr(sv) and duration > 0 \
             and src_w > 0 and src_h_probe > 0:
         target = _target_vmaf(settings, str(args.get("quality") or "medium").lower())
-        cached = _cached_crf(scene_id, target_h, target)
+        map_h = _map_lookup_height(target_h, src_h or src_h_probe)
+        cached = _cached_crf(scene_id, map_h, target)
         if cached is not None:
             # Precomputed by the scheduled "Compute VMAF Map" task → skip the live analysis entirely.
             chosen_cq, vmaf_score = cached
             vmaf_target = target
             vmaf_engine = primary_engine
             log_info("VMAF: using precomputed CRF {} (~VMAF {:.1f}, target {}) for scene {} @ {} — "
-                     "skipping live analysis".format(chosen_cq, vmaf_score, target, scene_id, _res_key(target_h)))
+                     "skipping live analysis".format(chosen_cq, vmaf_score, target, scene_id, _res_key(map_h)))
         else:
             try:                                 # fewer samples = faster analysis, slightly less representative
                 vmaf_samples = max(1, min(4, int(float(settings.get("vmafSamples") or VMAF_SAMPLES))))
@@ -1903,6 +1904,19 @@ def _write_vmaf_map_raw(report):
 
 def _file_fingerprint(scene_file):
     return "{}|{}".format(scene_file.get("size") or 0, os.path.basename(scene_file.get("path") or ""))
+
+
+def _map_lookup_height(target_h, src_h):
+    """The output height to look up in the VMAF map for a transcode request. For a downscale
+    (target_h > 0) that's the target height itself. For an **Original** download (target_h == 0 → keep the
+    source resolution — the app's default) the map has no 'orig' key: it keys every entry by a NUMERIC
+    output height, and the identical source-resolution encode is stored under the source-height key. So
+    resolve Original to the (even) source height — matching how run_vmaf_map keyed it from file metadata —
+    instead of missing 'orig' and re-running the ~30s live search on data the map already holds."""
+    if int(target_h or 0) > 0:
+        return int(target_h)
+    sh = int(src_h or 0)
+    return sh - (sh % 2)
 
 
 def _cached_crf(scene_id, target_h, target):

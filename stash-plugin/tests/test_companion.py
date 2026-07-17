@@ -275,6 +275,28 @@ class TestSettingsBackupRestore(unittest.TestCase):
         self.assertEqual(out, {"x": 1}, "the backup is still used for this run")
 
 
+class TestOriginalMapLookup(unittest.TestCase):
+    """Regression for v0.3.3: an Original download (target_h == 0) must reuse the numeric source-height
+    map entry instead of missing the nonexistent 'orig' key and re-running the live analysis."""
+
+    def test_map_lookup_height_resolves_original_to_source(self):
+        self.assertEqual(sc._map_lookup_height(720, 1080), 720)        # downscale → target height
+        self.assertEqual(sc._map_lookup_height(0, 1080), 1080)         # Original → source height
+        self.assertEqual(sc._map_lookup_height(0, 1079), 1078)         # kept even
+        self.assertEqual(sc._map_lookup_height(0, 0), 0)               # unknown source → 0 (still misses, safely)
+
+    def test_cached_crf_hits_via_source_height_for_original(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(sc, "CACHE_DIR", tmp):
+                sc._write_vmaf_map_raw({"42": {"file": "1|x.mp4",
+                    "res": {"1080": {"crf": 40, "vmaf": 97.2, "curve": {"38": 98.7, "40": 97.2}}}}})
+                # The old behaviour: looking up target_h=0 keys 'orig', which the map never stores → miss.
+                self.assertEqual(sc._res_key(0), "orig")
+                self.assertIsNone(sc._cached_crf("42", 0, 94.0))
+                # The fix: Original resolves to the source height (1080) and hits the stored entry.
+                self.assertEqual(sc._cached_crf("42", sc._map_lookup_height(0, 1080), 94.0), (40, 97.2))
+
+
 class TestVmafSearchDeadline(unittest.TestCase):
     def test_expired_deadline_raises_timeout(self):
         with tempfile.TemporaryDirectory() as work:

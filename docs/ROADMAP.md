@@ -612,6 +612,15 @@ blocks, both first-class iOS APIs:
       29@97 derived without re-searching; unmapped res → live-search fallback; run-2 incremental analysed 0).
       For 1,932 scenes ≈ ~10–15h one-time background P40 grind for one resolution, then incremental. This is
       the data layer for the live-ABR streaming plan (per-video CRF for every scene, ~zero storage).
+      **✅ FIXED in v0.3.3 (2026-07-17) — Original downloads now hit the map.** The app defaults
+      server-transcode downloads to **Original** resolution → `run_transcode` set `target_h=0` → the cache
+      lookup keyed `"orig"`, which the map NEVER stores (it keys numeric output heights), so every default
+      download re-ran the ~30s live analysis even though the identical source-resolution encode was already
+      mapped under the numeric source-height key. Fix: `_map_lookup_height()` resolves Original → the (even)
+      source height for the lookup, reusing the existing map with **no recompute** (box-diagnosed:
+      `_cached_crf("2752",1080,94)` hit while the live run keyed `"orig"`). Covers ≤1080 sources whose height
+      the map computed; a 4K source downloaded at Original still misses unless `2160`/`original` is added to
+      `vmafMapResolutions` (the map didn't measure native 4K).
       **✅ FIXED in v0.3.1 (2026-07-16) — the map run used to FAIL mid-run (~20.7% observed). ROOT CAUSE
       CONFIRMED on the box (Stash docker log):** `GraphQL HTTP 401:` → `Plugin returned error: exit status
       1` after ~2h40m of clean analysis (scenes 460→895, 08:16→10:57 on 07-15) — **no OOM** (dmesg clean),
