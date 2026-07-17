@@ -19,8 +19,6 @@ on:
     paths:
       - 'android/**'
       - '.github/workflows/android.yml'
-    paths-ignore:
-      - '**/*.md'
   workflow_dispatch:
 
 permissions:
