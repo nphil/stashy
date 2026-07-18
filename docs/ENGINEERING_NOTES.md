@@ -347,6 +347,29 @@ that is **not biased toward black**; **fluid scrolling above all**.
   `GeometryReader` to a single `onGeometryChange(for: CGRect...)` — no per-cell `frame(in:.global)` writes on
   the hot path. The long-press "fake hero" preview still works.
 
+### Minimized search (v1.0.268) — no scroll-top drawer, tap-to-expand button
+Owner ask: search must NOT appear when the list scrolls to the top; it should pop up only when the
+magnifier is tapped. Applied to Scenes & Performers.
+- **Why the old setup revealed it:** `.searchable(..., placement: .navigationBarDrawer(displayMode:))`
+  puts search in the nav-bar drawer, shown at the top and hidden on scroll-down — BOTH displayMode cases
+  (`.automatic`, `.always`) show it at scroll-top. The `isPresented:` binding governs only the
+  ACTIVE/focused state, NOT whether the collapsed drawer chrome renders. No drawer mode hides it at top.
+- **Fix (iOS 26):** `.searchToolbarBehavior(.minimize)` (spelling is `.minimize`, NOT `.minimized`)
+  renders the searchable as a **button** that expands into the field on tap — nothing at scroll-top. Drop
+  the `.navigationBarDrawer` placement (default `.automatic`). Pin the button top-left with
+  `DefaultToolbarItem(kind: .search, placement: .topBarLeading)` inside `.toolbar { }` (it's
+  `ToolbarContent`, iOS 26.0+); without it the button lands in the iOS 26 default (bottom) slot. Remove the
+  custom magnifier `Button` — the system provides one. Keep `isPresented: $searchPresented` (optional; the
+  system drives it) + the debounced `.task(id: searchText)` → `query.search`.
+- **Toolbar landmine respected:** the search `DefaultToolbarItem` is UNCONDITIONAL (always present) and the
+  top-leading `ToolbarItem` keeps stable identity with only its CONTENT conditional (`if selectionMode {
+  Cancel }`). Do NOT gate the whole search item behind `if !selectionMode` — a conditional whole toolbar
+  item risks the "vanishing button" drop bug. Accepted consequence: the magnifier shows during Scenes
+  multi-select next to Cancel.
+- **All iOS 26.0+** (`searchToolbarBehavior`, `SearchToolbarBehavior.minimize`, `DefaultToolbarItem`,
+  `ToolbarDefaultItemKind.search`); deploy target is 26.0 so no `#available` gate. Signatures were
+  doc-JSON verified before push.
+
 ---
 
 ## 7. Smaller facts that will still trip you up
@@ -401,3 +424,7 @@ that is **not biased toward black**; **fluid scrolling above all**.
   background-depth sliders), hero **zoom** grid→detail transitions, tab-bar minimize-on-scroll,
   `numericText` selection count, Liquid-Glass filter panel with **accent-fill active chips**, no-scrollbars
   enforcement, and the `ScenePreview` `onGeometryChange` scroll-perf fix. Full detail in §6.
+- **v1.0.266–268 — Phase-4 consolidation + minimized search**: DesignSystem primitives
+  `LabeledSegment`/`overlayBadge`/`capsuleField` + `SceneFilterBar` → `filterPill`; and search reworked to
+  an iOS 26 minimized toolbar button (no scroll-top drawer — `.searchToolbarBehavior(.minimize)` +
+  `DefaultToolbarItem(kind: .search)`, §6).

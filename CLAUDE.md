@@ -109,8 +109,8 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.265** (active filter chips fill with an accent pill, commit `3556301`,
-  ~8.64 MB — built green). Verify the newest release/IPA size each push.
+- Latest release: **v1.0.268** (search = minimized toolbar button, no scroll-top drawer, commit
+  `0cd7f99`, ~8.64 MB — built green). Verify the newest release/IPA size each push.
 - **UI/UX overhaul shipped (v1.0.253–265)** — full reference in ENGINEERING_NOTES §6 "UI/UX overhaul".
   In brief: new **`DesignSystem/`** folder — `ThemedBackground` (per-theme **static** `MeshGradient`
   behind all browse screens via `.themedBackground()`, blends toward foreground/primary/accent **never
@@ -123,6 +123,15 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   **Filter panel** is Liquid Glass with solid (never-glass) chips; **active chips fill accent** (pink for
   Favorites). Scroll-perf: `ScenePreview` per-cell `GeometryReader` → one `onGeometryChange`.
   **No scrollbars anywhere** (Standing rules).
+- **Phase-4 consolidation + minimized search shipped (v1.0.266–268)**: (1) DesignSystem now owns the
+  repeated styling — `LabeledSegment` (Downloads caption-over-segment helper, was copy-pasted in two
+  files), `overlayBadge()` (the translucent media badge ×3), `capsuleField()` (the filter text-field
+  capsule), and `SceneFilterBar` chips migrated to the shared `filterPill`. (2) **Search reworked** on
+  Scenes & Performers — dropped `.navigationBarDrawer` (it shows the bar at scroll-top; `isPresented`
+  only controls focus, never the collapsed chrome) → iOS 26 **`.searchToolbarBehavior(.minimize)`**
+  renders search as a tap-to-expand magnifier BUTTON (nothing at scroll-top), pinned top-left via
+  **`DefaultToolbarItem(kind: .search, placement: .topBarLeading)`**; custom magnifier removed (system
+  provides one). All iOS 26.0+ (deploy target 26.0, no gating). Full detail in ENGINEERING_NOTES §6.
 - **VMAF quality-targeted transcodes shipped** (Companion v0.2.0→v0.3.1 + app v1.0.250–252): the plugin
   binary-searches the encoder quality knob on short sample windows to hit a target VMAF (phone model;
   presets are now perceptual targets High 97 / Balanced 94 / Small 91; default ON; needs libvmaf — in the
