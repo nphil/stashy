@@ -304,6 +304,49 @@ There are **two** scrub gestures and they must feel identical:
 - **Pitfall that cost a build:** adding `speedTier`/`exactFrame` to `ScrubBar` — a SwiftUI `View`'s
   synthesized init requires call-site args in **declaration order** (Swift won't reorder labelled args).
 
+### UI/UX overhaul (v1.0.253–265) — design system, mesh background, motion, glass discipline
+A cohesive iOS-26 pass over the **browse** surfaces (the fullscreen player rework is deferred). **Read this
+before touching theme, backgrounds, chips, or grid→detail transitions.** Owner asks (all shipped): lean on
+Liquid Glass where functional; Apple-Music/Photos-grade motion; a themed background gradient with depth
+that is **not biased toward black**; **fluid scrolling above all**.
+
+- **`DesignSystem/` folder** (XcodeGen globs `Stashy/` → just add files, never touch a `.pbxproj`):
+  - `ThemedBackground.swift` — a per-theme **static** `MeshGradient` (3×3 regular-grid `points`,
+    `.perceptual` colour space) exposed as `.themedBackground()`. Wired behind every browse screen
+    (Login, Scenes, Performers, Downloads ×2, Scene/Performer detail, Settings) replacing the old flat
+    `backgroundColor.ignoresSafeArea()`. **One static layer, never per-cell** — recomputed only on theme /
+    slider change, so it is free while scrolling (the scroll-perf rule).
+  - `CardStyle.swift` — `CornerRadius` (card 12 / small 10 / large 18) + `cardElevation(isDark:)` (a small,
+    cheap shadow so a card floats over the mesh; apply **after** the card's `clipShape`).
+  - `FilterPill.swift` — `filterPill(active:tint:foreground:)`, the one filter-chip style. Active = solid
+    `tint` fill + white label; inactive = `foreground.opacity(0.12)` capsule. **Solid, never glass** (see
+    glass discipline). Every chip in `ImmersiveFilter.swift`'s panels uses it.
+- **Theme.swift** — 14 distinct palettes (dark: nocturne/aurora/synthwave/ember/verdant/ruby/slate/mocha;
+  light: daybreak/blossom/meadow/citrus/periwinkle/seabreeze — synthwave & mocha kept by owner request).
+  `meshColors(vibrancy:lift:)` builds the 9 mesh colours from the palette tokens, blending toward
+  `foreground`/`primary`/`accent` — **never toward black** ("don't bias the gradient toward dark").
+  **`MeshTuning`** = slider ranges + defaults (vibrancy 0.50, lift 0.32). `ThemeManager` persists **four**
+  values — vibrancy & lift, **separately for light & dark** (`stashy.mesh.{vib,lift}.{dark,light}`);
+  `currentMeshVibrancy/currentMeshLift` select by `current.variant`. Settings → "Background depth" hosts the
+  4 sliders (`meshSliderRow`).
+- **Motion** (system springs → reduce-motion-safe): hero **zoom** grid→detail —
+  `.matchedTransitionSource(id:in:)` on the grid cell + `.navigationTransition(.zoom(sourceID:in:))` on the
+  destination, one `@Namespace` per grid (Scenes + Performers). Coexists with the long-press preview and the
+  player's `.id(route.url)` rebuild — verified no double-hero. `.tabBarMinimizeBehavior(.onScrollDown)` on the
+  `TabView` (iOS 26, iPhone). `.contentTransition(.numericText())` + `.animation(.snappy, value:)` on the
+  selection-count button (rolling digits).
+- **Glass discipline (cost a CI cycle):** Liquid Glass only shows character over **vibrant/varied content**
+  (the mesh, media) — NOT over flat `Material` or over another glass surface. So the floating filter **panel**
+  (`FilterPopoverAnchor`) is `.glassEffect(.regular)` because it sits over the mesh/grid, but the **chips
+  inside it are solid `filterPill`s**. History: v1.0.262 glassed the chips over the then-material panel →
+  invisible; v1.0.264 flipped it (glass panel, solid chips); v1.0.265 made active chips fill accent.
+- **No scrollbars anywhere** (owner standing pref): `UIScrollView.appearance()` indicator flags off in
+  `StashyApp.init()` + `.scrollIndicators(.hidden)` in `ContentView` (propagates via environment). Reinforce
+  on any new scroll view; never reintroduce an indicator (incl. `UIScrollView`-backed views).
+- **Scroll-perf fix:** `ScenePreview`'s per-cell global-frame tracking moved from a background
+  `GeometryReader` to a single `onGeometryChange(for: CGRect...)` — no per-cell `frame(in:.global)` writes on
+  the hot path. The long-press "fake hero" preview still works.
+
 ---
 
 ## 7. Smaller facts that will still trip you up
@@ -353,3 +396,8 @@ There are **two** scrub gestures and they must feel identical:
   Apple-Photos-style image viewer, portrait-fullscreen tab-bar fix, popover stable-anchor fix,
   private Application Support storage migration, network-loss recovery ("Waiting for network…" +
   bounded auto-retry), replay-after-end + time-over-duration fixes.
+- **v1.0.253–265 — UI/UX overhaul** (browse surfaces; player deferred): new `DesignSystem/` (mesh
+  `ThemedBackground`, `CardStyle`, `FilterPill`), Theme.swift rewrite (14 palettes + `meshColors` + 4
+  background-depth sliders), hero **zoom** grid→detail transitions, tab-bar minimize-on-scroll,
+  `numericText` selection count, Liquid-Glass filter panel with **accent-fill active chips**, no-scrollbars
+  enforcement, and the `ScenePreview` `onGeometryChange` scroll-perf fix. Full detail in §6.

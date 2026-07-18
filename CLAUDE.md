@@ -52,6 +52,10 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   app. Don't refactor them casually.
 - The owner is exacting about UI feel: native animation physics/inertia, glass chips that still look
   native, Apple-Photos gesture parity, precise sizing. Ship polished, expect iteration.
+- **No scrollbars anywhere** (owner standing preference): indicators are globally off
+  (`UIScrollView.appearance()...showsVertical/HorizontalScrollIndicator = false` in `StashyApp.init()`
+  + `.scrollIndicators(.hidden)` in `ContentView`, which propagates via environment). Never reintroduce
+  a visible indicator; add `.scrollIndicators(.hidden)` as reinforcement on any new `ScrollView`/`List`.
 
 ## Landmines (one-liners — full stories in ENGINEERING_NOTES)
 - **-3000:** a background `URLSession` cannot run 8 parallel range tasks (shipped regression,
@@ -78,6 +82,10 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
 - **SwiftUI View arg order:** adding a property (esp. a `@Binding`) to a `View` struct means the call
   site's labelled args must be in the **same order as declaration** — Swift won't reorder them, and the
   error is cryptic. Cost a CI cycle this session (`ScrubBar.speedTier`). Match them. (§6)
+- **Glass reads flat over flat `Material` or over another glass surface** — Liquid Glass only shows
+  character over vibrant/varied content (the mesh, media). So the floating **filter panel** is glass but
+  its **chips are solid `filterPill`s**, not glass (v1.0.262 glassed chips over a material panel →
+  invisible; v1.0.264 flipped it: glass panel + solid chips; v1.0.265 active chips fill accent). (§6)
 - **`VTFrameProcessor` (AI slow-mo):** `-19730 "Processor is not initialized"` is a **misleading** error —
   it means the input is unsupported, NOT that startSession failed. Two real causes, both bit us: (1) feed
   buffers in the config's own `sourcePixelBufferAttributes` format (**420v biplanar YUV**, NOT BGRA —
@@ -101,9 +109,20 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.252** (Downloads before→after size + VMAF line on transcode finish, commit
-  `f1b008a`, ~8.60 MB — built green). Companion commits are newer on main but plugin+docs-only
-  (no app build). Verify the newest release/IPA size each push.
+- Latest release: **v1.0.265** (active filter chips fill with an accent pill, commit `3556301`,
+  ~8.64 MB — built green). Verify the newest release/IPA size each push.
+- **UI/UX overhaul shipped (v1.0.253–265)** — full reference in ENGINEERING_NOTES §6 "UI/UX overhaul".
+  In brief: new **`DesignSystem/`** folder — `ThemedBackground` (per-theme **static** `MeshGradient`
+  behind all browse screens via `.themedBackground()`, blends toward foreground/primary/accent **never
+  black**), `CardStyle` (`CornerRadius` + `cardElevation`), `FilterPill`
+  (`filterPill(active:tint:foreground:)`). **Theme.swift rewritten**: 14 distinct palettes (8 dark +
+  6 light; synthwave & mocha kept), `meshColors(vibrancy:lift:)`, `MeshTuning` ranges, and **4 Settings
+  sliders** (vibrancy + lift, separately for light & dark; defaults 0.50/0.32). **Motion:** hero **zoom**
+  grid→detail (`matchedTransitionSource` + `.navigationTransition(.zoom)`) on Scenes & Performers;
+  `.tabBarMinimizeBehavior(.onScrollDown)`; `.contentTransition(.numericText())` on the selection count.
+  **Filter panel** is Liquid Glass with solid (never-glass) chips; **active chips fill accent** (pink for
+  Favorites). Scroll-perf: `ScenePreview` per-cell `GeometryReader` → one `onGeometryChange`.
+  **No scrollbars anywhere** (Standing rules).
 - **VMAF quality-targeted transcodes shipped** (Companion v0.2.0→v0.3.1 + app v1.0.250–252): the plugin
   binary-searches the encoder quality knob on short sample windows to hit a target VMAF (phone model;
   presets are now perceptual targets High 97 / Balanced 94 / Small 91; default ON; needs libvmaf — in the
