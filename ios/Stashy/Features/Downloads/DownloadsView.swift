@@ -367,19 +367,19 @@ private struct DownloadCard: View {
                 }
                 .pickerStyle(.segmented)
             case .serverTranscode:
-                labeledSegment("Codec") {
+                LabeledSegment("Codec") {
                     Picker("Codec", selection: companionCodecBinding) {
                         ForEach(StashCompanion.Codec.allCases) { Text($0.label).tag($0) }
                     }
                     .pickerStyle(.segmented)
                 }
-                labeledSegment("Resolution") {
+                LabeledSegment("Resolution") {
                     Picker("Resolution", selection: $item.serverResolution) {
                         ForEach([ServerQuality.original, .p1080, .p720, .p480]) { Text($0.label).tag($0) }
                     }
                     .pickerStyle(.segmented)
                 }
-                labeledSegment("Quality") {
+                LabeledSegment("Quality") {
                     Picker("Quality", selection: $item.companionQuality) {
                         ForEach(CompanionQuality.allCases) { Text($0.label).tag($0) }
                     }
@@ -390,15 +390,6 @@ private struct DownloadCard: View {
                     .font(.caption2).foregroundStyle(.tertiary)
                     .lineLimit(1)
             }
-        }
-    }
-
-    /// A small caption above a full-width control, so segmented pickers stay self-explanatory without a
-    /// side label squeezing them (which caused the menu wrapping/truncation).
-    private func labeledSegment<Content: View>(_ label: String, @ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label).font(.caption2.weight(.medium)).foregroundStyle(.secondary)
-            content()
         }
     }
 

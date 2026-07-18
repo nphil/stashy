@@ -14,4 +14,10 @@ extension View {
     func cardElevation(isDark: Bool) -> some View {
         shadow(color: .black.opacity(isDark ? 0.28 : 0.12), radius: 4, y: 2)
     }
+
+    /// Translucent-dark capsule behind a small badge floated over media (scene duration, rating, "+N"
+    /// performers). One definition keeps the media-overlay badges visually identical.
+    func overlayBadge() -> some View {
+        background(.black.opacity(0.55), in: Capsule())
+    }
 }

@@ -563,7 +563,7 @@ struct SceneCard: View {
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 3)
-                                .background(.black.opacity(0.55), in: Capsule())
+                                .overlayBadge()
                         }
                         // Offline status, tucked under the duration: green = downloaded, accent = transcoded.
                         if isDownloaded {
@@ -586,7 +586,7 @@ struct SceneCard: View {
                         .foregroundStyle(.yellow)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
-                        .background(.black.opacity(0.55), in: Capsule())
+                        .overlayBadge()
                         .padding(6)
                     }
                 }

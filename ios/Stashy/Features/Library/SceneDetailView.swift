@@ -297,7 +297,7 @@ struct ScenePerformerCard: View {
                             .foregroundStyle(.white)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 3)
-                            .background(.black.opacity(0.55), in: Capsule())
+                            .overlayBadge()
                             .padding(8)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                     }

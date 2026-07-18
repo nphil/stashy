@@ -68,17 +68,17 @@ struct BulkDownloadSheet: View {
                         .pickerStyle(.segmented)
 
                         if transcode {
-                            labeledSegment("Codec") {
+                            LabeledSegment("Codec") {
                                 Picker("Codec", selection: $codec) {
                                     ForEach(StashCompanion.Codec.allCases) { Text($0.label).tag($0) }
                                 }.pickerStyle(.segmented)
                             }
-                            labeledSegment("Resolution") {
+                            LabeledSegment("Resolution") {
                                 Picker("Resolution", selection: $resolution) {
                                     ForEach([ServerQuality.original, .p1080, .p720, .p480]) { Text($0.label).tag($0) }
                                 }.pickerStyle(.segmented)
                             }
-                            labeledSegment("Quality") {
+                            LabeledSegment("Quality") {
                                 Picker("Quality", selection: $quality) {
                                     ForEach(CompanionQuality.allCases) { Text($0.label).tag($0) }
                                 }.pickerStyle(.segmented)
@@ -126,13 +126,5 @@ struct BulkDownloadSheet: View {
         savedCodec = codec.rawValue
         savedResolution = resolution.rawValue
         savedQuality = quality.rawValue
-    }
-
-    /// A small caption above a full-width segmented control (matches the per-scene card's pattern).
-    private func labeledSegment<Content: View>(_ label: String, @ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label).font(.caption2.weight(.medium)).foregroundStyle(.secondary)
-            content()
-        }
     }
 }
