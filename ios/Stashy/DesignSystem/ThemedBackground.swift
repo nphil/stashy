@@ -21,11 +21,13 @@ struct ThemedBackground: View {
     var body: some View {
         let theme = themeManager.current
         // Every parameter passed explicitly — MeshGradient's initializer exposes no reliable defaults.
+        // Vibrancy/lift come from the active palette's variant, tunable in Settings → Background depth.
         MeshGradient(
             width: 3,
             height: 3,
             points: Self.points,
-            colors: theme.meshColors,
+            colors: theme.meshColors(vibrancy: themeManager.currentMeshVibrancy,
+                                     lift: themeManager.currentMeshLift),
             background: theme.backgroundColor,
             smoothsColors: true,
             colorSpace: .perceptual

@@ -46,6 +46,25 @@ struct SettingsView: View {
         .padding(.vertical, 4)
     }
 
+    /// A labelled slider row for a mesh-tuning value (a 0…1 blend fraction), shown as a percentage. Reads
+    /// live from `get` so the drag tracks the ThemeManager (the background updates underneath, in place).
+    @ViewBuilder
+    private func meshSliderRow(_ title: String, get: @escaping () -> Double,
+                               range: ClosedRange<Double>, set: @escaping (Double) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title).font(.subheadline)
+                Spacer()
+                Text("\(Int((get() * 100).rounded()))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            Slider(value: Binding(get: get, set: set), in: range)
+                .tint(themeManager.current.accentColor)
+        }
+        .padding(.vertical, 2)
+    }
+
     /// True once the user taps **Edit** on a saved connection. A saved server is otherwise shown as
     /// read-only (greyed) rows so it can't be changed by accident. A not-yet-connected server is always
     /// editable (first-time setup).
@@ -204,6 +223,22 @@ struct SettingsView: View {
                     Text(themeManager.systemMode
                          ? "Stashy follows your device's Light/Dark setting, using the palette you pick for each."
                          : "Pick any of \(AppTheme.allCases.count) palettes, or turn on “Match system appearance” to switch automatically.")
+                }
+
+                // Background depth (mesh tuning) — tune the gradient per light/dark, live.
+                Section {
+                    meshSliderRow("Dark · vibrancy", get: { themeManager.meshVibrancyDark },
+                                  range: MeshTuning.vibrancyRange) { themeManager.setMeshVibrancy($0, dark: true) }
+                    meshSliderRow("Dark · lift", get: { themeManager.meshLiftDark },
+                                  range: MeshTuning.liftRange) { themeManager.setMeshLift($0, dark: true) }
+                    meshSliderRow("Light · vibrancy", get: { themeManager.meshVibrancyLight },
+                                  range: MeshTuning.vibrancyRange) { themeManager.setMeshVibrancy($0, dark: false) }
+                    meshSliderRow("Light · lift", get: { themeManager.meshLiftLight },
+                                  range: MeshTuning.liftRange) { themeManager.setMeshLift($0, dark: false) }
+                } header: {
+                    Text("Background depth")
+                } footer: {
+                    Text("Tune the themed background gradient. Vibrancy is how strongly the accent colours glow in the corners; Lift is how light the base becomes. Set separately for dark and light palettes.")
                 }
 
                 // Scenes section
