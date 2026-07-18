@@ -89,6 +89,11 @@ struct ContentView: View {
                 LoginView()
             }
         }
+        // Owner preference: NO scroll indicators anywhere. The global UIScrollView.appearance() proxy in
+        // init() doesn't reliably stick — SwiftUI's ScrollView overrides it with its own default — so hide
+        // them the SwiftUI-native way here. This propagates through the environment to every descendant
+        // scroll view (grids, lists, and presented sheets/covers) app-wide.
+        .scrollIndicators(.hidden)
         .debugScreenshotOverlay()
         .onChange(of: colorScheme, initial: true) { _, scheme in
             themeManager.systemIsDark = (scheme == .dark)
