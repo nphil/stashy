@@ -22,6 +22,9 @@ struct LibraryView: View {
             }
         }
         .tint(themeManager.current.accentColor)
+        // Apple-Music-style: the glass tab bar minimizes on downward scroll, freeing the screen for
+        // content and reading as a floating pill. iPhone-only per the API (this app is iPhone-only).
+        .tabBarMinimizeBehavior(.onScrollDown)
         // NO forced toolbarBackground on the tab bar: pinning it opaque killed the native scroll-under
         // glass ("immersive") look on Scenes/Performers. The palette still reads through the accent tint
         // and the themed page background beneath the translucent bar.
