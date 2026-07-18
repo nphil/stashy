@@ -76,7 +76,10 @@ struct SceneFilterBar: View {
         .foregroundStyle(active ? Color.white : themeManager.current.foregroundColor)
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .background(active ? themeManager.current.accentColor : themeManager.current.surfaceColor, in: Capsule())
+        // Glass filter chip: accent-tinted when active, regular glass otherwise. Chrome, not a scrolled cell.
+        .glassEffect(active ? .regular.tint(themeManager.current.accentColor).interactive()
+                            : .regular.interactive(),
+                     in: Capsule())
     }
 }
 

@@ -176,7 +176,7 @@ struct SceneFilterPanel: View {
             .font(.subheadline.weight(.medium))
             .foregroundStyle(active ? themeManager.current.accentColor : themeManager.current.foregroundColor)
             .padding(.horizontal, 12).padding(.vertical, 7)
-            .background(themeManager.current.backgroundColor.opacity(0.6), in: Capsule())
+            .glassEffect(.regular.interactive(), in: Capsule())
         }
     }
 
@@ -196,7 +196,7 @@ struct SceneFilterPanel: View {
             .font(.subheadline.weight(.medium))
             .foregroundStyle(query.playability != .any ? themeManager.current.accentColor : themeManager.current.foregroundColor)
             .padding(.horizontal, 12).padding(.vertical, 7)
-            .background(themeManager.current.backgroundColor.opacity(0.6), in: Capsule())
+            .glassEffect(.regular.interactive(), in: Capsule())
         }
     }
 
@@ -220,7 +220,7 @@ struct SceneFilterPanel: View {
             .font(.subheadline.weight(.medium))
             .foregroundStyle(query.downloadedOnly ? themeManager.current.accentColor : themeManager.current.foregroundColor)
             .padding(.horizontal, 12).padding(.vertical, 7)
-            .background(themeManager.current.backgroundColor.opacity(0.6), in: Capsule())
+            .glassEffect(.regular.interactive(), in: Capsule())
         }
         .buttonStyle(.plain)
     }
@@ -246,7 +246,7 @@ struct SceneFilterPanel: View {
             .foregroundStyle(themeManager.current.foregroundColor)
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
-            .background(themeManager.current.backgroundColor.opacity(0.6), in: Capsule())
+            .glassEffect(.regular.interactive(), in: Capsule())
         }
     }
 }
@@ -267,7 +267,7 @@ struct PerformerFilterPanel: View {
                 .autocorrectionDisabled()
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(themeManager.current.backgroundColor.opacity(0.6), in: Capsule())
+                .glassEffect(.regular.interactive(), in: Capsule())
 
             HStack {
                 Text("Sort").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
@@ -321,7 +321,7 @@ struct PerformerFilterPanel: View {
             .foregroundStyle(themeManager.current.foregroundColor)
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
-            .background(themeManager.current.backgroundColor.opacity(0.6), in: Capsule())
+            .glassEffect(.regular.interactive(), in: Capsule())
         }
     }
 
@@ -337,7 +337,7 @@ struct PerformerFilterPanel: View {
             .foregroundStyle(query.favoritesOnly ? .pink : themeManager.current.foregroundColor)
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
-            .background(themeManager.current.backgroundColor.opacity(0.6), in: Capsule())
+            .glassEffect(.regular.interactive(), in: Capsule())
         }
         .buttonStyle(.plain)
     }
@@ -360,7 +360,7 @@ struct PerformerFilterPanel: View {
             .foregroundStyle(themeManager.current.foregroundColor)
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
-            .background(themeManager.current.backgroundColor.opacity(0.6), in: Capsule())
+            .glassEffect(.regular.interactive(), in: Capsule())
         }
     }
 }
@@ -402,7 +402,7 @@ struct InlineTagEditor: View {
                 .textInputAutocapitalization(.never)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(themeManager.current.backgroundColor.opacity(0.6), in: Capsule())
+                .glassEffect(.regular.interactive(), in: Capsule())
 
             // Suggestions with favourited tags floated to the front. Each chip has a heart (toggles the
             // tag's favorite) and a tap area (adds it to the filter) — adjacent buttons, not nested.
