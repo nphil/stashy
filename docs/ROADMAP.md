@@ -630,8 +630,12 @@ blocks, both first-class iOS APIs:
       (feed-forward): VideoToolbox at bitrate X ≠ x265/NVENC at X, so it's a calibrated *starting point* — an
       on-device **SSIM guard** (needs a `stashy-videoengine` rebuild with `--enable-filter=ssim`, or a Metal
       PSNR/SSIM from decoded frames) is the planned feedback loop to catch when the HW encoder underperforms.
-      **App side (`VmafMapStore`) — TODO:** fetch the served map, resolve (sceneID, source/target height,
-      quality) → bitrate, pass it as the local encoder's bitrate override (else keep the current preset ladder).
+      **✅ App side shipped (`VmafMapStore`):** fetches the served map (refreshed alongside `PlayabilityStore`
+      in `ScenesView`), resolves (sceneID, output height, quality) → bitrate, and `DownloadManager.transcode`
+      sets it as `VideoTranscoder.Settings.bitrateOverride` for **HEVC** on-device encodes (all three engines
+      honour it — `VideoTranscoder`/`FFmpegTranscoder`/`FFmpegResumableTranscoder`); any miss ⇒ the existing
+      preset ladder. Original resolves to the source height (matching the v0.3.3 map fix). SSIM feedback guard
+      still the next enhancement.
       **✅ FIXED in v0.3.1 (2026-07-16) — the map run used to FAIL mid-run (~20.7% observed). ROOT CAUSE
       CONFIRMED on the box (Stash docker log):** `GraphQL HTTP 401:` → `Plugin returned error: exit status
       1` after ~2h40m of clean analysis (scenes 460→895, 08:16→10:57 on 07-15) — **no OOM** (dmesg clean),

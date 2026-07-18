@@ -163,10 +163,11 @@ final class FFmpegTranscoder: OnDeviceTranscoder, @unchecked Sendable {
         // Cap the preset at a fraction of the source bitrate (High ≤ source) so a re-encode never
         // inflates bitrate — across codecs too (H.264 → HEVC), not just same-codec.
         let srcBitrate = vCodecpar.pointee.bit_rate
-        var bitrate = VideoTranscoder.videoBitrate(width: outSize.width, height: outSize.height,
-                                                   fps: fps > 0 ? fps : 30,
-                                                   quality: settings.quality, codec: settings.codec,
-                                                   sourceBitrate: srcBitrate > 100_000 ? Int(srcBitrate) : 0)
+        var bitrate = settings.bitrateOverride.flatMap { $0 > 0 ? $0 : nil }
+            ?? VideoTranscoder.videoBitrate(width: outSize.width, height: outSize.height,
+                                            fps: fps > 0 ? fps : 30,
+                                            quality: settings.quality, codec: settings.codec,
+                                            sourceBitrate: srcBitrate > 100_000 ? Int(srcBitrate) : 0)
         if vCodecpar.pointee.codec_id == targetCodecId, srcBitrate > 100_000 {
             bitrate = min(bitrate, Int(srcBitrate))   // same-codec: also never exceed exact source
         }

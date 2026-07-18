@@ -324,9 +324,10 @@ final class FFmpegResumableTranscoder: OnDeviceTranscoder, @unchecked Sendable {
         // Pass the source bitrate so the quality preset is capped at a fraction of it (High ≤ source),
         // even across codecs (H.264 → HEVC), so a re-encode never inflates bitrate.
         let srcBitrate = vCodecpar.pointee.bit_rate
-        let bitrate = VideoTranscoder.videoBitrate(width: outSize.width, height: outSize.height,
-                                                   fps: fps, quality: settings.quality, codec: settings.codec,
-                                                   sourceBitrate: srcBitrate > 100_000 ? Int(srcBitrate) : 0)
+        let bitrate = settings.bitrateOverride.flatMap { $0 > 0 ? $0 : nil }
+            ?? VideoTranscoder.videoBitrate(width: outSize.width, height: outSize.height,
+                                            fps: fps, quality: settings.quality, codec: settings.codec,
+                                            sourceBitrate: srcBitrate > 100_000 ? Int(srcBitrate) : 0)
 
         // Output MP4 (video only) via avio to the temp path.
         var outFmtOpt: UnsafeMutablePointer<AVFormatContext>?

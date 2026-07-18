@@ -23,6 +23,17 @@ enum TranscodeResolution: String, CaseIterable, Identifiable, Codable {
         case .sd480: return 854
         }
     }
+    /// Nominal output HEIGHT for this rung (nil = keep source), used to key the VMAF bitrate map — which is
+    /// keyed by output height. Exact for 16:9 landscape; other aspects just miss the map and fall back.
+    var nominalHeight: Int? {
+        switch self {
+        case .original: return nil
+        case .uhd2160: return 2160
+        case .fhd1080: return 1080
+        case .hd720: return 720
+        case .sd480: return 480
+        }
+    }
 }
 
 enum TranscodeQuality: String, CaseIterable, Identifiable, Codable {
@@ -95,6 +106,9 @@ final class VideoTranscoder: OnDeviceTranscoder, @unchecked Sendable {
         var resolution: TranscodeResolution
         var quality: TranscodeQuality
         var codec: TranscodeCodec
+        /// Absolute target video bitrate (bits/sec) from the server's VMAF map, overriding the preset
+        /// bitrate ladder. Optional (nil ⇒ use the ladder). HEVC-calibrated — only set for HEVC encodes.
+        var bitrateOverride: Int? = nil
     }
 
     private let lock = NSLock()
@@ -125,9 +139,10 @@ final class VideoTranscoder: OnDeviceTranscoder, @unchecked Sendable {
 
         let size = Self.outputSize(naturalSize: naturalSize, maxDimension: settings.resolution.maxDimension)
         let sourceBitrate = Int((try? await videoTrack.load(.estimatedDataRate)) ?? 0)
-        let bitrate = Self.videoBitrate(width: size.width, height: size.height, fps: fps,
-                                        quality: settings.quality, codec: settings.codec,
-                                        sourceBitrate: sourceBitrate)
+        let bitrate = settings.bitrateOverride.flatMap { $0 > 0 ? $0 : nil }
+            ?? Self.videoBitrate(width: size.width, height: size.height, fps: fps,
+                                 quality: settings.quality, codec: settings.codec,
+                                 sourceBitrate: sourceBitrate)
         onLog("Input: \(Int(abs(naturalSize.width)))×\(Int(abs(naturalSize.height))) @ \(Int(fps.rounded())) fps")
         onLog("Encoder: \(settings.codec.label) → \(size.width)×\(size.height) @ ~\(bitrate / 1000) kbps")
         onLog(String(format: "Duration: %.0fs", max(duration.seconds, 0)))

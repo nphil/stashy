@@ -975,10 +975,20 @@ final class DownloadManager {
     /// VideoToolbox), replacing the offline file with the smaller/normalised copy on success.
     func transcode(_ item: DownloadItem, settings: VideoTranscoder.Settings) {
         guard item.state == .completed, let src = item.localURL, !item.transcoding else { return }
+        var settings = settings
+        // VMAF-calibrated bitrate for on-device HEVC encodes: reuse the server's per-scene target bitrate
+        // from the VMAF map (VideoToolbox has no CRF knob, so drive its average-bitrate control with the
+        // mapped number). HEVC only — the map's bitrates are HEVC; any miss ⇒ nil ⇒ the preset ladder.
+        if settings.codec == .hevc, settings.bitrateOverride == nil, let sceneID = item.scene?.id {
+            let sourceHeight = item.height ?? 0
+            let outputHeight = settings.resolution.nominalHeight.map { min($0, sourceHeight) } ?? sourceHeight
+            settings.bitrateOverride = VmafMapStore.shared.targetBitrate(
+                sceneID: sceneID, outputHeight: outputHeight, quality: settings.quality)
+        }
         item.transcoding = true
         item.transcodeProgress = 0
         item.transcodeTargetLabel = "\(settings.codec.label) \(settings.resolution.label)"
-        item.transcodeLog = ""
+        item.transcodeLog = settings.bitrateOverride.map { "VMAF-calibrated bitrate ~\($0 / 1000) kbps (server map)\n" } ?? ""
         item.transcodeStatus = ""
         item.error = nil
         let id = item.id
