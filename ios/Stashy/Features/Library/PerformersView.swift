@@ -139,6 +139,9 @@ struct PerformersView: View {
                         }
                         // Source for the zoom into the performer detail (Apple-Photos style).
                         .matchedTransitionSource(id: performer.id, in: zoomNS)
+                        // Isolate the cell's geometry so the zoom SOURCE card doesn't lag its neighbours when
+                        // you scroll immediately after returning from the .zoom transition.
+                        .geometryGroup()
                     }
                 }
                 .padding(12)

@@ -451,6 +451,9 @@ struct ScenesView: View {
                         // Source for the Apple-Photos-style zoom into the scene detail (paired with the
                         // .navigationTransition(.zoom) on the .scene destination below).
                         .matchedTransitionSource(id: scene.id, in: zoomNS)
+                        // Isolate the cell's geometry so the zoom SOURCE card doesn't lag its neighbours when
+                        // you scroll immediately after returning from the .zoom transition.
+                        .geometryGroup()
                     }
                 }
                 .padding(12)
@@ -484,6 +487,9 @@ struct ScenesView: View {
                             onOpen: { path.append(.scene($0)) }
                         ) {}
                         .matchedTransitionSource(id: scene.id, in: zoomNS)
+                        // Isolate the cell's geometry so the zoom SOURCE card doesn't lag its neighbours when
+                        // you scroll immediately after returning from the .zoom transition.
+                        .geometryGroup()
                     }
                 }
                 .padding(12)
