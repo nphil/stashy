@@ -308,9 +308,13 @@ struct ScenesView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     if selectionMode {
-                        Button("Download (\(selectedIDs.count))") { startSelectionDownload() }
-                            .fontWeight(.semibold)
-                            .disabled(selectedIDs.isEmpty)
+                        Button { startSelectionDownload() } label: {
+                            Text("Download (\(selectedIDs.count))")
+                                .fontWeight(.semibold)
+                                .contentTransition(.numericText())   // count rolls as scenes are selected
+                        }
+                        .disabled(selectedIDs.isEmpty)
+                        .animation(.snappy, value: selectedIDs.count)
                     } else if !query.downloadedOnly {
                         Button {
                             actionsExpanded.toggle()
