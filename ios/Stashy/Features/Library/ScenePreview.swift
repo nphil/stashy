@@ -86,13 +86,11 @@ struct ScenePreviewGesture: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .background(
-                GeometryReader { geo in
-                    Color.clear
-                        .onAppear { frame = geo.frame(in: .global) }
-                        .onChange(of: geo.frame(in: .global)) { _, new in frame = new }
-                }
-            )
+            // Track the cell's global frame for the long-press "hero" origin WITHOUT a per-cell background
+            // GeometryReader (an extra view node that also re-ran on every scroll frame). onGeometryChange is
+            // the efficient, Apple-recommended path and reports the identical .global frame, so the preview's
+            // start rect — and thus the animation — is unchanged.
+            .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }, action: { frame = $0 })
             .contentShape(Rectangle())
             // Don't navigate if a long-press already opened the preview (avoids tap+preview both firing).
             .onTapGesture { if presenter?.active == nil { onOpen(scene) } }
