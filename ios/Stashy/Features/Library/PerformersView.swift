@@ -12,6 +12,8 @@ struct PerformersView: View {
     @State private var filterExpanded = false
     @State private var path: [Route] = []
     @State private var reloadDebounce: Task<Void, Never>?
+    // Shared namespace for the zoom transition from a performer cell into the performer detail.
+    @Namespace private var zoomNS
 
     private let columns = [GridItem(.adaptive(minimum: 110), spacing: 12)]
 
@@ -80,7 +82,14 @@ struct PerformersView: View {
                 query.search = searchText
             }
             .navigationDestination(for: Route.self) { route in
-                RouteDestination(route: route, path: $path)
+                // Pair the zoom with the grid cell's matchedTransitionSource for performer detail; a scene
+                // opened from within a performer page uses the default push.
+                if case .performer(let performer) = route {
+                    RouteDestination(route: route, path: $path)
+                        .navigationTransition(.zoom(sourceID: performer.id, in: zoomNS))
+                } else {
+                    RouteDestination(route: route, path: $path)
+                }
             }
         }
         // Debounced: rapid filter changes (e.g. tapping the favorites toggle repeatedly) coalesce into
@@ -136,6 +145,8 @@ struct PerformersView: View {
                         .onAppear {
                             Task { await loader.loadNextIfNeeded(triggerID: performer.id) }
                         }
+                        // Source for the zoom into the performer detail (Apple-Photos style).
+                        .matchedTransitionSource(id: performer.id, in: zoomNS)
                     }
                 }
                 .padding(12)
