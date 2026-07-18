@@ -2,7 +2,6 @@ import SwiftUI
 
 struct PerformersView: View {
     @Environment(AppState.self) private var appState
-    @Environment(ThemeManager.self) private var themeManager
     @Environment(LibraryEdits.self) private var edits
     @Environment(\.imageCache) private var imageCache
     @State private var loader = PaginatedLoader<Performer>(pageSize: 30)
@@ -59,22 +58,15 @@ struct PerformersView: View {
             .navigationTitle("Performers")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    // Top-left search entry — same field the pull-down drawer reveals.
-                    Button { searchPresented = true } label: {
-                        Image(systemName: "magnifyingglass")
-                            .font(.body.weight(.semibold))
-                            .foregroundStyle(themeManager.current.foregroundColor)
-                    }
-                }
+                // Minimized search button (no scroll-top drawer), pinned top-left; expands into the field on tap.
+                DefaultToolbarItem(kind: .search, placement: .topBarLeading)
                 ToolbarItem(placement: .topBarTrailing) {
                     FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
                 }
             }
-            // Native search — see ScenesView note (collapsed = free; debounced = no input lag).
-            .searchable(text: $searchText, isPresented: $searchPresented,
-                        placement: .navigationBarDrawer(displayMode: .automatic),
-                        prompt: "Search performers")
+            // Search is a minimized toolbar button (no scroll-top drawer) — see ScenesView note. Debounced below.
+            .searchable(text: $searchText, isPresented: $searchPresented, prompt: "Search performers")
+            .searchToolbarBehavior(.minimize)
             .task(id: searchText) {
                 guard searchText != query.search else { return }
                 try? await Task.sleep(for: .milliseconds(350))

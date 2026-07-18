@@ -13,8 +13,8 @@ struct ScenesView: View {
     @State private var path: [Route] = []
     @State private var previewPresenter = ScenePreviewPresenter()
     @State private var filterExpanded = false
-    // Native list search (replaces the Search tab): hidden until revealed by a pull-down from the top
-    // (system drawer behaviour) or the top-left magnifier. Debounced into query.search.
+    // Native list search (replaces the Search tab): a minimized toolbar magnifier that expands into the
+    // field on tap — nothing shows at scroll-top. Debounced into query.search.
     @State private var searchText = ""
     @State private var searchPresented = false
     @State private var reloadDebounce: Task<Void, Never>?
@@ -279,12 +279,12 @@ struct ScenesView: View {
             .themedBackground()
             .navigationTitle("Scenes")
             .navigationBarTitleDisplayMode(.inline)
-            // Native search: collapsed until a pull-down from the top of the list (system drawer) or the
-            // magnifier button. Costs nothing while collapsed — it's the UIKit search controller, no
-            // per-frame work — and typing is debounced below so it never lags input or spams the server.
-            .searchable(text: $searchText, isPresented: $searchPresented,
-                        placement: .navigationBarDrawer(displayMode: .automatic),
-                        prompt: "Search scenes")
+            // Search is a MINIMIZED toolbar button (no drawer): nothing shows at scroll-top; the magnifier
+            // expands into the search field only when tapped. `.searchToolbarBehavior(.minimize)` renders it
+            // as a button and `DefaultToolbarItem(kind: .search, …)` (in the toolbar) pins it top-left. Typing
+            // is debounced below so it never lags input or spams the server.
+            .searchable(text: $searchText, isPresented: $searchPresented, prompt: "Search scenes")
+            .searchToolbarBehavior(.minimize)
             .task(id: searchText) {
                 guard searchText != query.search else { return }
                 try? await Task.sleep(for: .milliseconds(350))   // debounce; cancelled by the next keystroke
@@ -294,16 +294,11 @@ struct ScenesView: View {
             // Stable ToolbarItem identities with conditional CONTENT — swapping whole ToolbarItems behind an
             // if/else makes SwiftUI's toolbar builder drop them (the "⋯ button vanished" bug).
             .toolbar {
+                // Minimized search button (no scroll-top drawer), pinned top-left; expands into the field on tap.
+                DefaultToolbarItem(kind: .search, placement: .topBarLeading)
                 ToolbarItem(placement: .topBarLeading) {
                     if selectionMode {
                         Button("Cancel") { exitSelection() }
-                    } else {
-                        // Top-left search entry — same field the pull-down drawer reveals.
-                        Button { searchPresented = true } label: {
-                            Image(systemName: "magnifyingglass")
-                                .font(.body.weight(.semibold))
-                                .foregroundStyle(themeManager.current.foregroundColor)
-                        }
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
