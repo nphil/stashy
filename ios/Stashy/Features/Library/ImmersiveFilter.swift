@@ -51,20 +51,13 @@ struct FilterPopoverAnchor<Panel: View>: View {
                     .environment(themeManager)
                     .environment(appState)
                     .environment(edits)
-                    // Container chrome: a frosted backdrop with the blur toned down (~30%) by a light theme
-                    // tint over the material, which also keeps the list from showing through during a reload.
-                    .background {
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .fill(.ultraThinMaterial)
-                            .overlay(themeManager.current.backgroundColor.opacity(0.30))
-                            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                            // Shadow on the background SHAPE, not the composed panel: shadowing the whole
-                            // panel (material + rows + text) forces an offscreen render of the entire
-                            // composite every frame while the material re-samples the scrolling list
-                            // beneath — a measurable 120Hz killer. The shape's silhouette is identical, so
-                            // the shadow looks the same at a fraction of the cost.
-                            .shadow(color: .black.opacity(0.28), radius: 18, y: 10)
-                    }
+                    // Container chrome: a floating Liquid Glass sheet. Glass shows its character HERE because
+                    // it sits over the vibrant grid/mesh (unlike the chips, which sat over this flat panel).
+                    // Shadowing the glass composite is acceptable: the panel only shows while the list is
+                    // STATIC (any scroll dismisses it via dismissesPopover), so there's no per-frame
+                    // re-sample — the old 120Hz concern only applied to shadowing over a scrolling list.
+                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .shadow(color: .black.opacity(0.28), radius: 18, y: 10)
                     .overlay(
                         RoundedRectangle(cornerRadius: 20, style: .continuous)
                             .stroke(.white.opacity(0.12), lineWidth: 1)
@@ -176,7 +169,7 @@ struct SceneFilterPanel: View {
             .font(.subheadline.weight(.medium))
             .foregroundStyle(active ? themeManager.current.accentColor : themeManager.current.foregroundColor)
             .padding(.horizontal, 12).padding(.vertical, 7)
-            .glassEffect(.regular.interactive(), in: Capsule())
+            .background(themeManager.current.foregroundColor.opacity(0.12), in: Capsule())
         }
     }
 
@@ -196,7 +189,7 @@ struct SceneFilterPanel: View {
             .font(.subheadline.weight(.medium))
             .foregroundStyle(query.playability != .any ? themeManager.current.accentColor : themeManager.current.foregroundColor)
             .padding(.horizontal, 12).padding(.vertical, 7)
-            .glassEffect(.regular.interactive(), in: Capsule())
+            .background(themeManager.current.foregroundColor.opacity(0.12), in: Capsule())
         }
     }
 
@@ -220,7 +213,7 @@ struct SceneFilterPanel: View {
             .font(.subheadline.weight(.medium))
             .foregroundStyle(query.downloadedOnly ? themeManager.current.accentColor : themeManager.current.foregroundColor)
             .padding(.horizontal, 12).padding(.vertical, 7)
-            .glassEffect(.regular.interactive(), in: Capsule())
+            .background(themeManager.current.foregroundColor.opacity(0.12), in: Capsule())
         }
         .buttonStyle(.plain)
     }
@@ -246,7 +239,7 @@ struct SceneFilterPanel: View {
             .foregroundStyle(themeManager.current.foregroundColor)
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
-            .glassEffect(.regular.interactive(), in: Capsule())
+            .background(themeManager.current.foregroundColor.opacity(0.12), in: Capsule())
         }
     }
 }
@@ -267,7 +260,7 @@ struct PerformerFilterPanel: View {
                 .autocorrectionDisabled()
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .glassEffect(.regular.interactive(), in: Capsule())
+                .background(themeManager.current.foregroundColor.opacity(0.12), in: Capsule())
 
             HStack {
                 Text("Sort").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
@@ -321,7 +314,7 @@ struct PerformerFilterPanel: View {
             .foregroundStyle(themeManager.current.foregroundColor)
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
-            .glassEffect(.regular.interactive(), in: Capsule())
+            .background(themeManager.current.foregroundColor.opacity(0.12), in: Capsule())
         }
     }
 
@@ -337,7 +330,7 @@ struct PerformerFilterPanel: View {
             .foregroundStyle(query.favoritesOnly ? .pink : themeManager.current.foregroundColor)
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
-            .glassEffect(.regular.interactive(), in: Capsule())
+            .background(themeManager.current.foregroundColor.opacity(0.12), in: Capsule())
         }
         .buttonStyle(.plain)
     }
@@ -360,7 +353,7 @@ struct PerformerFilterPanel: View {
             .foregroundStyle(themeManager.current.foregroundColor)
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
-            .glassEffect(.regular.interactive(), in: Capsule())
+            .background(themeManager.current.foregroundColor.opacity(0.12), in: Capsule())
         }
     }
 }
@@ -402,7 +395,7 @@ struct InlineTagEditor: View {
                 .textInputAutocapitalization(.never)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .glassEffect(.regular.interactive(), in: Capsule())
+                .background(themeManager.current.foregroundColor.opacity(0.12), in: Capsule())
 
             // Suggestions with favourited tags floated to the front. Each chip has a heart (toggles the
             // tag's favorite) and a tap area (adds it to the filter) — adjacent buttons, not nested.
