@@ -166,10 +166,9 @@ struct SceneFilterPanel: View {
                 Text(label(selection.wrappedValue))
                 Image(systemName: "chevron.down").font(.caption2)
             }
-            .font(.subheadline.weight(.medium))
-            .foregroundStyle(active ? themeManager.current.accentColor : themeManager.current.foregroundColor)
-            .padding(.horizontal, 12).padding(.vertical, 7)
-            .background(themeManager.current.foregroundColor.opacity(0.12), in: Capsule())
+            .filterPill(active: active,
+                        tint: themeManager.current.accentColor,
+                        foreground: themeManager.current.foregroundColor)
         }
     }
 
@@ -186,10 +185,9 @@ struct SceneFilterPanel: View {
                 Text(query.playability.label)
                 Image(systemName: "chevron.down").font(.caption2)
             }
-            .font(.subheadline.weight(.medium))
-            .foregroundStyle(query.playability != .any ? themeManager.current.accentColor : themeManager.current.foregroundColor)
-            .padding(.horizontal, 12).padding(.vertical, 7)
-            .background(themeManager.current.foregroundColor.opacity(0.12), in: Capsule())
+            .filterPill(active: query.playability != .any,
+                        tint: themeManager.current.accentColor,
+                        foreground: themeManager.current.foregroundColor)
         }
     }
 
@@ -210,10 +208,9 @@ struct SceneFilterPanel: View {
                 Image(systemName: query.downloadedOnly ? "arrow.down.circle.fill" : "square.grid.2x2").font(.caption)
                 Text(query.downloadedOnly ? "Downloaded" : "All videos")
             }
-            .font(.subheadline.weight(.medium))
-            .foregroundStyle(query.downloadedOnly ? themeManager.current.accentColor : themeManager.current.foregroundColor)
-            .padding(.horizontal, 12).padding(.vertical, 7)
-            .background(themeManager.current.foregroundColor.opacity(0.12), in: Capsule())
+            .filterPill(active: query.downloadedOnly,
+                        tint: themeManager.current.accentColor,
+                        foreground: themeManager.current.foregroundColor)
         }
         .buttonStyle(.plain)
     }
@@ -235,11 +232,9 @@ struct SceneFilterPanel: View {
                 Text(query.sort.label)
                 Image(systemName: query.direction == .asc ? "arrow.up" : "arrow.down").font(.caption2)
             }
-            .font(.subheadline.weight(.medium))
-            .foregroundStyle(themeManager.current.foregroundColor)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background(themeManager.current.foregroundColor.opacity(0.12), in: Capsule())
+            .filterPill(active: false,
+                        tint: themeManager.current.accentColor,
+                        foreground: themeManager.current.foregroundColor)
         }
     }
 }
@@ -310,11 +305,9 @@ struct PerformerFilterPanel: View {
                 Text(query.sort.label)
                 Image(systemName: query.direction == .asc ? "arrow.up" : "arrow.down").font(.caption2)
             }
-            .font(.subheadline.weight(.medium))
-            .foregroundStyle(themeManager.current.foregroundColor)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background(themeManager.current.foregroundColor.opacity(0.12), in: Capsule())
+            .filterPill(active: false,
+                        tint: themeManager.current.accentColor,
+                        foreground: themeManager.current.foregroundColor)
         }
     }
 
@@ -326,11 +319,9 @@ struct PerformerFilterPanel: View {
                 Image(systemName: query.favoritesOnly ? "heart.fill" : "heart").font(.caption)
                 Text(query.favoritesOnly ? "Favorites only" : "All")
             }
-            .font(.subheadline.weight(.medium))
-            .foregroundStyle(query.favoritesOnly ? .pink : themeManager.current.foregroundColor)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background(themeManager.current.foregroundColor.opacity(0.12), in: Capsule())
+            .filterPill(active: query.favoritesOnly,
+                        tint: .pink,
+                        foreground: themeManager.current.foregroundColor)
         }
         .buttonStyle(.plain)
     }
@@ -349,11 +340,9 @@ struct PerformerFilterPanel: View {
                 Image(systemName: "globe").font(.caption)
                 Text(query.ethnicity ?? "Any")
             }
-            .font(.subheadline.weight(.medium))
-            .foregroundStyle(themeManager.current.foregroundColor)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background(themeManager.current.foregroundColor.opacity(0.12), in: Capsule())
+            .filterPill(active: query.ethnicity != nil,
+                        tint: themeManager.current.accentColor,
+                        foreground: themeManager.current.foregroundColor)
         }
     }
 }
