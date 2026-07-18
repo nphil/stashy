@@ -79,16 +79,22 @@ actor ImageCache {
     private func fetchDownsampled(url: URL, key: String, maxPixel: CGFloat, priority: Bool) async throws -> UIImage {
         let nsKey = key as NSString
         let file = directory.appendingPathComponent(key + ".jpg")
-        if let data = try? Data(contentsOf: file), let image = UIImage(data: data) {
+        if let data = try? Data(contentsOf: file), let raw = UIImage(data: data) {
+            // Decode to a display-ready bitmap OFF the main thread (we're in the actor) so the image never
+            // decodes on the render thread as its cell scrolls into view — that decode-on-arrival was a
+            // mid-scroll hitch. `UIImage(data:)` is otherwise lazily decoded at first draw.
+            let image = await raw.byPreparingForDisplay() ?? raw
             memoryCache.setObject(image, forKey: nsKey, cost: Self.memoryCost(image, fallback: data.count))
             touch(file)
             return image
         }
 
         let (data, _) = try await session.data(from: url)
-        guard let image = Self.downsample(data: data, maxPixel: maxPixel) else {
+        guard let downsized = Self.downsample(data: data, maxPixel: maxPixel) else {
             throw ImageCacheError.invalidData
         }
+        // Force the full decode off-main (in the actor) so nothing decodes on the render thread mid-scroll.
+        let image = await downsized.byPreparingForDisplay() ?? downsized
         // Higher quality for priority (performer) images so they stay crisp on the cards; the ordinary
         // 0.7 keeps grid thumbnails small.
         if let jpeg = image.jpegData(compressionQuality: priority ? 0.85 : 0.7) {

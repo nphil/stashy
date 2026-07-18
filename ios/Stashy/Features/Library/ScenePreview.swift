@@ -71,6 +71,14 @@ struct LongPressTrigger: UIGestureRecognizerRepresentable {
 
 // MARK: - Reusable preview gesture
 
+/// Holds the cell's latest global frame WITHOUT triggering SwiftUI invalidation. `onGeometryChange`
+/// tracking `.frame(in: .global)` fires on EVERY scroll frame; writing that into `@State` re-evaluated
+/// every visible cell's body at up to 120 Hz (the browse-scroll judder). A reference box is invisible to
+/// SwiftUI's dependency tracking, so mutating it is free — we only read it when a long-press begins.
+private final class FrameBox {
+    var rect: CGRect = .zero
+}
+
 /// Adds tap-to-open + press-hold-to-preview to any scene view (card, row, …) so the preview works
 /// everywhere a scene appears. Requires a `scenePreviewPresenter` in the environment and a host
 /// `ScenePreviewOverlay`.
@@ -82,15 +90,16 @@ struct ScenePreviewGesture: ViewModifier {
     @Environment(\.scenePreviewPresenter) private var presenter
     @Environment(\.imageCache) private var imageCache
     @AppStorage("animatedPreviews") private var animatedPreviews = true
-    @State private var frame: CGRect = .zero
+    // Reference box, NOT @State: the .global frame changes every scroll frame, so writing it to @State
+    // re-rendered every visible cell at 120 Hz. We only need its CURRENT value at long-press time. See FrameBox.
+    @State private var frameBox = FrameBox()
 
     func body(content: Content) -> some View {
         content
-            // Track the cell's global frame for the long-press "hero" origin WITHOUT a per-cell background
-            // GeometryReader (an extra view node that also re-ran on every scroll frame). onGeometryChange is
-            // the efficient, Apple-recommended path and reports the identical .global frame, so the preview's
-            // start rect — and thus the animation — is unchanged.
-            .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }, action: { frame = $0 })
+            // Track the cell's global frame for the long-press "hero" origin into the FrameBox — no @State
+            // write, so no per-frame body invalidation. Reports the identical .global frame the old path did,
+            // so the preview's start rect and animation are unchanged.
+            .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }, action: { frameBox.rect = $0 })
             .contentShape(Rectangle())
             // Don't navigate if a long-press already opened the preview (avoids tap+preview both firing).
             .onTapGesture { if presenter?.active == nil { onOpen(scene) } }
@@ -101,7 +110,7 @@ struct ScenePreviewGesture: ViewModifier {
                     // loaded it) instead of a second `.task`-driven fetch/decode of the same URL per cell.
                     // A miss just shows black until the clip's first frame — the popup already handles that.
                     let poster = scene.thumbnailURL(apiKey: apiKey).flatMap { imageCache.cachedImage(for: $0) }
-                    presenter?.begin(scene: scene, apiKey: apiKey, sourceRect: frame, thumbnail: poster)
+                    presenter?.begin(scene: scene, apiKey: apiKey, sourceRect: frameBox.rect, thumbnail: poster)
                 }
             )
     }
