@@ -72,14 +72,11 @@ struct SceneFilterBar: View {
                 Image(systemName: trailing).font(.caption2)
             }
         }
-        .font(.subheadline.weight(.medium))
-        .foregroundStyle(active ? Color.white : themeManager.current.foregroundColor)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        // Glass filter chip: accent-tinted when active, regular glass otherwise. Chrome, not a scrolled cell.
-        .glassEffect(active ? .regular.tint(themeManager.current.accentColor).interactive()
-                            : .regular.interactive(),
-                     in: Capsule())
+        // Solid filter pill (accent-filled when active) — shared with the immersive filter panel so every
+        // filter chip in the app reads the same.
+        .filterPill(active: active,
+                    tint: themeManager.current.accentColor,
+                    foreground: themeManager.current.foregroundColor)
     }
 }
 

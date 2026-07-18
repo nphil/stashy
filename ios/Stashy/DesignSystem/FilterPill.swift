@@ -15,4 +15,13 @@ extension View {
             .padding(.vertical, 7)
             .background(active ? tint : foreground.opacity(0.12), in: Capsule())
     }
+
+    /// The neutral translucent capsule behind an inline text field in a filter panel — the same fill as an
+    /// inactive `filterPill`, factored out so the panel's search / name fields share one definition.
+    func capsuleField(foreground: Color) -> some View {
+        self
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(foreground.opacity(0.12), in: Capsule())
+    }
 }

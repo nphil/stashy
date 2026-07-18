@@ -253,9 +253,7 @@ struct PerformerFilterPanel: View {
         VStack(alignment: .leading, spacing: 12) {
             TextField("Performer name…", text: $name)
                 .autocorrectionDisabled()
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(themeManager.current.foregroundColor.opacity(0.12), in: Capsule())
+                .capsuleField(foreground: themeManager.current.foregroundColor)
 
             HStack {
                 Text("Sort").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
@@ -382,9 +380,7 @@ struct InlineTagEditor: View {
             TextField("Search tags…", text: $search)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(themeManager.current.foregroundColor.opacity(0.12), in: Capsule())
+                .capsuleField(foreground: themeManager.current.foregroundColor)
 
             // Suggestions with favourited tags floated to the front. Each chip has a heart (toggles the
             // tag's favorite) and a tap area (adds it to the filter) — adjacent buttons, not nested.
