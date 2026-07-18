@@ -93,7 +93,7 @@ struct SceneDetailView: View {
             // working — the box glides while the scroll internals commit instantly.
             .animation(.easeInOut(duration: 0.3), value: isFullscreen)
         }
-        .background(themeManager.current.backgroundColor.ignoresSafeArea())
+        .themedBackground()
         .toolbar(.hidden, for: .navigationBar)
         // Hide the tab bar for the whole scene screen, not just in fullscreen. Toggling tab-bar
         // visibility *in place* is unreliable: SwiftUI only re-applies it on a navigation push/pop or an

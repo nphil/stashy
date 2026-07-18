@@ -70,7 +70,7 @@ struct PerformerDetailView: View {
             }
             .padding(.vertical, 12)
         }
-        .background(themeManager.current.backgroundColor.ignoresSafeArea())
+        .themedBackground()
         .environment(\.scenePreviewPresenter, previewPresenter)
         .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: { path.openScene($0) }) }
         .navigationTitle(performer.name)

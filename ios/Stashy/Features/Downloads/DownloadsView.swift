@@ -27,7 +27,7 @@ struct DownloadsView: View {
                 }
             }
         }
-        .background(themeManager.current.backgroundColor.ignoresSafeArea())
+        .themedBackground()
         .navigationTitle("Downloads")
         .navigationBarTitleDisplayMode(.inline)
         // No top-left back button (owner preference); the edge-swipe (kept alive by EnableSwipeBack) goes back.
@@ -64,7 +64,7 @@ private struct DownloadPlayerCover: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            themeManager.current.backgroundColor.ignoresSafeArea()
+            ThemedBackground().ignoresSafeArea()
                 .navigationDestination(for: Route.self) { RouteDestination(route: $0, path: $path) }
         }
         .onChange(of: path) { _, newPath in

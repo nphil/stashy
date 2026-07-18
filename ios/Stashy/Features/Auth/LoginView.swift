@@ -10,7 +10,7 @@ struct LoginView: View {
 
     var body: some View {
         ZStack {
-            themeManager.current.backgroundColor
+            ThemedBackground()
                 .ignoresSafeArea()
 
             ScrollView {

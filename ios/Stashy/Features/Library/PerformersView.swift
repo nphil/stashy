@@ -53,7 +53,7 @@ struct PerformersView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(themeManager.current.backgroundColor.ignoresSafeArea())
+            .themedBackground()
             .navigationTitle("Performers")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

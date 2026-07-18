@@ -64,6 +64,22 @@ struct ThemeColors {
     var surface: Color { background.blended(with: foreground, fraction: 0.07) }
     /// A more elevated surface for stacked/secondary content.
     var elevatedSurface: Color { background.blended(with: foreground, fraction: 0.13) }
+
+    /// 3×3 mesh-gradient colours (row-major) for the themed background depth. Corners lift toward the
+    /// elevated surface (which blends toward the light `foreground`, so dark palettes read *lighter* than
+    /// base — depth, never toward black); a faint accent glow sits top-right, a faint secondary glow
+    /// bottom-left. The centre stays on the base colour so content contrast is preserved.
+    var meshColors: [Color] {
+        let lift = elevatedSurface
+        let mid = surface
+        let accentGlow = background.blended(with: primary, fraction: 0.12)
+        let secondaryGlow = background.blended(with: accent, fraction: 0.10)
+        return [
+            lift, mid, accentGlow,
+            mid, background, mid,
+            secondaryGlow, mid, lift,
+        ]
+    }
 }
 
 // MARK: - App themes
@@ -131,6 +147,7 @@ enum AppTheme: String, CaseIterable, Identifiable, Hashable {
     var secondaryColor: Color { colors.accent }
     var surfaceColor: Color { colors.surface }
     var elevatedSurfaceColor: Color { colors.elevatedSurface }
+    var meshColors: [Color] { colors.meshColors }
     var preferredColorScheme: ColorScheme { colors.preferredColorScheme }
 }
 

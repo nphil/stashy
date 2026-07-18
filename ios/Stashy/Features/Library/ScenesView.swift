@@ -274,7 +274,7 @@ struct ScenesView: View {
             .onChange(of: filterExpanded) { _, open in if open { actionsExpanded = false } }
             .onChange(of: actionsExpanded) { _, open in if open { filterExpanded = false } }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(themeManager.current.backgroundColor.ignoresSafeArea())
+            .themedBackground()
             .navigationTitle("Scenes")
             .navigationBarTitleDisplayMode(.inline)
             // Native search: collapsed until a pull-down from the top of the list (system drawer) or the
