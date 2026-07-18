@@ -277,6 +277,8 @@ struct ScenesView: View {
             .onChange(of: actionsExpanded) { _, open in if open { filterExpanded = false } }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .themedBackground()
+            // Briefly lock scrolling right after a zoom-back so the iOS 26 source-card freeze is never seen.
+            .zoomReturnScrollGate(depth: path.count)
             .navigationTitle("Scenes")
             .navigationBarTitleDisplayMode(.inline)
             // Search is a MINIMIZED toolbar button (no drawer): nothing shows at scroll-top; the magnifier
@@ -451,9 +453,6 @@ struct ScenesView: View {
                         // Source for the Apple-Photos-style zoom into the scene detail (paired with the
                         // .navigationTransition(.zoom) on the .scene destination below).
                         .matchedTransitionSource(id: scene.id, in: zoomNS)
-                        // Isolate the cell's geometry so the zoom SOURCE card doesn't lag its neighbours when
-                        // you scroll immediately after returning from the .zoom transition.
-                        .geometryGroup()
                     }
                 }
                 .padding(12)
@@ -487,9 +486,6 @@ struct ScenesView: View {
                             onOpen: { path.append(.scene($0)) }
                         ) {}
                         .matchedTransitionSource(id: scene.id, in: zoomNS)
-                        // Isolate the cell's geometry so the zoom SOURCE card doesn't lag its neighbours when
-                        // you scroll immediately after returning from the .zoom transition.
-                        .geometryGroup()
                     }
                 }
                 .padding(12)

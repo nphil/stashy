@@ -55,6 +55,8 @@ struct PerformersView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .themedBackground()
+            // Briefly lock scrolling right after a zoom-back so the iOS 26 source-card freeze is never seen.
+            .zoomReturnScrollGate(depth: path.count)
             .navigationTitle("Performers")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -139,9 +141,6 @@ struct PerformersView: View {
                         }
                         // Source for the zoom into the performer detail (Apple-Photos style).
                         .matchedTransitionSource(id: performer.id, in: zoomNS)
-                        // Isolate the cell's geometry so the zoom SOURCE card doesn't lag its neighbours when
-                        // you scroll immediately after returning from the .zoom transition.
-                        .geometryGroup()
                     }
                 }
                 .padding(12)
