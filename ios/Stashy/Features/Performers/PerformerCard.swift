@@ -25,7 +25,8 @@ struct PerformerCard: View {
                         PerformerPlaceholder()
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.card, style: .continuous))
+                .cardElevation(isDark: themeManager.current.preferredColorScheme == .dark)
 
             Text(performer.name)
                 .font(.subheadline.weight(.semibold))

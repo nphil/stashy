@@ -596,8 +596,9 @@ struct SceneCard: View {
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.card, style: .continuous))
+        .cardElevation(isDark: themeManager.current.preferredColorScheme == .dark)
+        .contentShape(RoundedRectangle(cornerRadius: CornerRadius.card, style: .continuous))
         .task(id: scene.id) {
             guard let url = scene.thumbnailURL(apiKey: apiKey) else { return }
             thumbnail = try? await imageCache.image(for: url)
