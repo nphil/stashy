@@ -91,6 +91,17 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   buffers in the config's own `sourcePixelBufferAttributes` format (**420v biplanar YUV**, NOT BGRA —
   convert via CoreImage); (2) the model has a **device-specific max dimension (~720p)** that iOS 26 can't
   query (OS 27 only) — so **cap interpolation at 1280×720**, never scale up. `SlowMoInterpolator`.
+- **iOS 26 zoom-transition source-card freeze (Apple bug FB21961572; fine on iOS 18):** scrolling right
+  after a `.navigationTransition(.zoom)` zoom-back freezes the SOURCE grid card ~1s (the transition holds
+  it out of the scroll layout during its settle). `geometryGroup()` and the
+  `matchedTransitionSource(configuration:)` variant do NOT fix it (both verified). Workaround =
+  `DesignSystem/ZoomReturnScrollGate.swift` (`.zoomReturnScrollGate(depth:)` = 600 ms `scrollDisabled`
+  after a pop). **Remove once iOS 27 / a 26.x point release fixes it** (ROADMAP Tech debt); don't
+  re-attempt a geometry/config fix. (§6)
+- **`onGeometryChange` on a per-frame value is a scroll-perf TRAP:** tracking `.frame(in: .global)` (which
+  changes every scroll frame) and writing it to `@State` re-renders EVERY visible cell at 120 Hz — a
+  self-inflicted browse-grid judder we shipped then fixed. If you only need the value later (e.g. a
+  long-press source rect), store it in a reference box, NOT `@State` (`ScenePreview.FrameBox`). (§6)
 
 ## Docs map — what to read when
 - **`docs/ENGINEERING_NOTES.md`** — deep reference: CI detail, Swift 6 concurrency patterns,
@@ -109,8 +120,16 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.268** (search = minimized toolbar button, no scroll-top drawer, commit
-  `0cd7f99`, ~8.64 MB — built green). Verify the newest release/IPA size each push.
+- Latest release: **v1.0.271** (iOS 26 zoom-freeze scroll-gate workaround, commit `359470d`). Verify the
+  newest release/IPA size each push.
+- **120 Hz scroll-perf pass shipped (v1.0.269)** — browse-grid flick judder fixed: (1) `ScenePreview` was
+  writing each cell's `.frame(in:.global)` to `@State` via `onGeometryChange` on EVERY scroll frame,
+  re-rendering every visible cell at 120 Hz → now a reference box (`FrameBox`, no invalidation) — the
+  dominant cause; (2) `cardElevation` casts its shadow from an opaque backing `RoundedRectangle`, not the
+  clipped cell (kills the per-cell offscreen pass); (3) `ImageCache` decodes grid thumbs off-main
+  (`byPreparingForDisplay`) before caching. The post-zoom **source-card freeze** is a separate Apple bug
+  (FB21961572, see Landmines) masked by `ZoomReturnScrollGate` (600 ms `scrollDisabled` after a pop,
+  v1.0.271); `geometryGroup` was tried + reverted. Remove the gate once iOS 27 fixes it (ROADMAP Tech debt).
 - **UI/UX overhaul shipped (v1.0.253–265)** — full reference in ENGINEERING_NOTES §6 "UI/UX overhaul".
   In brief: new **`DesignSystem/`** folder — `ThemedBackground` (per-theme **static** `MeshGradient`
   behind all browse screens via `.themedBackground()`, blends toward foreground/primary/accent **never
@@ -121,8 +140,9 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   grid→detail (`matchedTransitionSource` + `.navigationTransition(.zoom)`) on Scenes & Performers;
   `.tabBarMinimizeBehavior(.onScrollDown)`; `.contentTransition(.numericText())` on the selection count.
   **Filter panel** is Liquid Glass with solid (never-glass) chips; **active chips fill accent** (pink for
-  Favorites). Scroll-perf: `ScenePreview` per-cell `GeometryReader` → one `onGeometryChange`.
-  **No scrollbars anywhere** (Standing rules).
+  Favorites). **No scrollbars anywhere** (Standing rules). (The `ScenePreview` `GeometryReader` →
+  `onGeometryChange` change from this pass later proved to be the 120 Hz judder cause — see the scroll-perf
+  bullet above.)
 - **Phase-4 consolidation + minimized search shipped (v1.0.266–268)**: (1) DesignSystem now owns the
   repeated styling — `LabeledSegment` (Downloads caption-over-segment helper, was copy-pasted in two
   files), `overlayBadge()` (the translucent media badge ×3), `capsuleField()` (the filter text-field

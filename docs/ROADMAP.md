@@ -807,6 +807,18 @@ latency tradeoff).
   before any wider release" reminder is withdrawn; RemoteLog stays as an opt-in diagnostics feature
   (off by default; configurable + self-hostable server/topic in Settings → Diagnostics). The §5
   deletion checklist in the optimization plan survives as reference only.
+- **★ REMOVE ONCE iOS 27 SHIPS — the zoom-transition scroll-gate workaround (added v1.0.271, 2026-07-18).**
+  iOS 26 has a confirmed SwiftUI regression (Apple **FB21961572**; works fine on iOS 18): after a
+  `.navigationTransition(.zoom)` pops, the `matchedTransitionSource` grid card is held out of the scroll
+  layout through the transition's settle, so scrolling *immediately* after a zoom-back **freezes that one
+  card for ~1 s** (worse with richer cells). Nothing makes the transition release the card sooner —
+  `.geometryGroup()` and the `matchedTransitionSource(id:in:configuration:)` variant were both verified
+  NOT to fix it. Owner chose to keep the hero zoom, so the shipped workaround is
+  **`DesignSystem/ZoomReturnScrollGate.swift`**: `.zoomReturnScrollGate(depth: path.count)` on the Scenes &
+  Performers `NavigationStack` root briefly (`600 ms`) disables scrolling after a pop so the freeze window
+  is never entered. **Once iOS 27 (or a 26.x point release) fixes FB21961572: verify on device, then delete
+  `ZoomReturnScrollGate.swift` + both `.zoomReturnScrollGate` call sites — the zoom then works cleanly with
+  no gate.** Do NOT re-attempt a geometry/`configuration:` fix (ruled out).
 
 ## Privacy & security
 - **★ PRIORITY — "Blur Media": one blur that covers ALL imagery, app-wide (owner-requested 2026-07-03).**
