@@ -29,10 +29,8 @@ import 'core/presentation/theme/theme_color_provider.dart';
 import 'core/presentation/theme/theme_preset_provider.dart';
 import 'core/presentation/theme/theme_catalog.dart';
 import 'core/presentation/theme/true_black_provider.dart';
-import 'core/presentation/theme/background_gradient_provider.dart';
 import 'core/presentation/providers/layout_settings_provider.dart';
 import 'core/presentation/widgets/app_lock_gate.dart';
-import 'core/presentation/widgets/app_background.dart';
 
 import 'core/utils/environment.dart' as env;
 
@@ -272,7 +270,6 @@ class MyApp extends ConsumerWidget {
     final themeMode = ref.watch(appThemeModeProvider);
     final seedColor = ref.watch(appThemeColorProvider);
     final useTrueBlack = ref.watch(trueBlackEnabledProvider);
-    final useBackgroundGradient = ref.watch(backgroundGradientEnabledProvider);
     final appLocale = ref.watch(appLanguageProvider);
     final presetId = ref.watch(appThemePresetProvider);
 
@@ -346,10 +343,7 @@ class MyApp extends ConsumerWidget {
             if (child == null) {
               return const SizedBox.shrink();
             }
-            return AppBackground(
-              enabled: useBackgroundGradient,
-              child: AppLockGate(child: child),
-            );
+            return AppLockGate(child: child);
           },
           onGenerateTitle: (context) => context.l10n.appTitle,
           localizationsDelegates: AppLocalizations.localizationsDelegates,

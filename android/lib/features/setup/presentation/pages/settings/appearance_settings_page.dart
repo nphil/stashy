@@ -8,7 +8,6 @@ import 'package:stash_app_flutter/core/presentation/theme/theme_catalog.dart';
 import 'package:stash_app_flutter/core/presentation/theme/theme_color_provider.dart';
 import 'package:stash_app_flutter/core/presentation/theme/theme_preset_provider.dart';
 import 'package:stash_app_flutter/core/presentation/theme/true_black_provider.dart';
-import 'package:stash_app_flutter/core/presentation/theme/background_gradient_provider.dart';
 import 'package:stash_app_flutter/core/presentation/providers/layout_settings_provider.dart';
 import '../../widgets/settings_page_shell.dart';
 import '../../widgets/theme_catalog_picker.dart';
@@ -169,21 +168,6 @@ class _AppearanceSettingsPageState
                           onChanged: (value) {
                             ref
                                 .read(trueBlackEnabledProvider.notifier)
-                                .set(value);
-                          },
-                        ),
-                        SwitchListTile.adaptive(
-                          contentPadding: EdgeInsets.zero,
-                          title: Text(
-                            l10n.settings_appearance_background_gradient,
-                          ),
-                          subtitle: Text(
-                            l10n.settings_appearance_background_gradient_subtitle,
-                          ),
-                          value: ref.watch(backgroundGradientEnabledProvider),
-                          onChanged: (value) {
-                            ref
-                                .read(backgroundGradientEnabledProvider.notifier)
                                 .set(value);
                           },
                         ),
