@@ -27,6 +27,8 @@ struct ScenesView: View {
     @State private var selectedIDs: Set<String> = []
     // The ⋯ actions menu, shown as the SAME custom popover as the filter (not a system Menu).
     @State private var actionsExpanded = false
+    // Shared namespace for the Apple-Photos-style zoom transition from a grid cell into the scene detail.
+    @Namespace private var zoomNS
 
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
@@ -345,7 +347,14 @@ struct ScenesView: View {
             // (OLED-black), not just the content area.
             .toolbar(previewPresenter.active != nil ? .hidden : .automatic, for: .tabBar)
             .navigationDestination(for: Route.self) { route in
-                RouteDestination(route: route, path: $path)
+                // Pair the zoom with the grid cell's matchedTransitionSource for scene detail; other
+                // routes (performer/downloads) use the default push.
+                if case .scene(let scene) = route {
+                    RouteDestination(route: route, path: $path)
+                        .navigationTransition(.zoom(sourceID: scene.id, in: zoomNS))
+                } else {
+                    RouteDestination(route: route, path: $path)
+                }
             }
         }
         .environment(\.scenePreviewPresenter, previewPresenter)
@@ -440,6 +449,9 @@ struct ScenesView: View {
                                     .padding(6)
                             }
                         }
+                        // Source for the Apple-Photos-style zoom into the scene detail (paired with the
+                        // .navigationTransition(.zoom) on the .scene destination below).
+                        .matchedTransitionSource(id: scene.id, in: zoomNS)
                     }
                 }
                 .padding(12)
@@ -472,6 +484,7 @@ struct ScenesView: View {
                             apiKey: appState.client?.apiKey ?? "",
                             onOpen: { path.append(.scene($0)) }
                         ) {}
+                        .matchedTransitionSource(id: scene.id, in: zoomNS)
                     }
                 }
                 .padding(12)
