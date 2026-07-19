@@ -120,26 +120,29 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.282** (jobs-panel custom glass top bar on Scenes & Performers, commit `7277505`,
-  IPA 8,755,790 B). Verify the newest release/IPA size each push.
-- **Jobs panel + custom glass top bar shipped (v1.0.280–282)** — Scenes & Performers dropped the system nav
-  bar (title + `.searchable` + `.toolbar`) for a **custom Liquid-Glass top-bar overlay** (owner wanted a true
-  glass *morph*, not the funnel scale/fade). New `DesignSystem/GlassMorphDropdown` = a glass button that melts
-  into a glass panel via one `GlassEffectContainer` + shared `glassEffectID`, with a dim tap-catching backdrop
-  AND a per-panel hit-catcher `.background(Color…opacity(0.0001).onTapGesture{})` so taps in the gaps between
-  chips are absorbed (fixes the old filter tap-through-to-scene-cards bug). Top-left = a title button
-  (“Scenes”/“Performers” + chevron) morphs into `Features/Library/JobsPanel` (live Stash job title + a
-  progress bar bound to Stash’s 0…1 `progress`, idle line, “+N queued”); Scenes shows Scan Library / Compute
-  VMAF / ThumbHash / Loudness buttons, Performers is status-only. `Services/JobMonitor` (@MainActor
-  @Observable singleton) polls `jobQueue` **only while a panel is open** (start on JobsPanel `.onAppear`, stop
-  on `.onDisappear`) — nothing polls in the background. `StashClient.jobQueue()`/`metadataScan()` +
-  `JobInfo` back it; `StashCompanion.Task` gained the three map tasks. Top-right = the funnel morphs into the
-  filter panel; search is now `DesignSystem/LibrarySearchField` (glass magnifier ⇄ field, replacing
-  `.searchable`). The old ⋯ menu is gone — its Download-all / Select fold into `SceneFilterPanel`
-  (`onDownloadAll`/`onSelect`/`bulkLoading`). Nav bar hidden via `.toolbar(.hidden, for: .navigationBar)` on
-  the root only (pushed detail keeps its back button); grid inset below the bar via a top `safeAreaInset`.
-  `FilterPopoverAnchor`/`FilterFunnelButton`/`dismissesPopover` deleted (replaced). Owner will iterate on
-  positioning/sizing on-device. **NEXT (owner-queued URGENT): fix AI slow-mo quality degradation** (ROADMAP).
+- Latest release: **v1.0.283** (jobs panel v2 — system nav bar restored + native dropdowns + job cancel,
+  commit `8472e4d`, IPA 8,760,456 B). Verify the newest release/IPA size each push.
+- **Jobs panel shipped (v1.0.280–283)** — Scenes & Performers have a **jobs status dropdown** off the title,
+  plus job-queue actions. **The v1.0.282 custom-glass-overlay approach was REVERTED at v1.0.283** after owner
+  on-device testing: a custom glass top bar floating over the scrolling grid re-sampled the moving content
+  per-frame → **scroll judder** (the CLAUDE.md glass-over-scrolling-list landmine), the full-screen sibling
+  ZStacks **missed taps** (leaked to scene cards), it **hid the system nav bar** (lost native collapse), and
+  the `glassEffectID` morph "just popped". `GlassMorphDropdown` + `LibrarySearchField` were **deleted**.
+  **The shipped design (v2):** keep the **SYSTEM nav bar** — inline title, `.searchable(.minimize)` magnifier
+  pinned top-right, funnel + selection actions as toolbar items — so scroll stays buttery (no custom glass over
+  the grid), taps are reliable, and the bar collapses natively. The **title is a nav-bar Button** (“Scenes”/
+  “Performers” + chevron) toggling the jobs dropdown. Both panels are `DesignSystem/LibraryDropdownPanel`
+  (stable ZStack siblings of `content`, exist **only while open** so glass never samples the scroll; anchor
+  `.topLeading` jobs / `.topTrailing` filter; open with the system `.snappy` spring +
+  `.transition(.scale(anchor:))`; **hit-catcher** `.background(Color…0.0001…onTapGesture{})` behind the
+  controls kills the tag-tap-through). `dismissesPopover` (restored) closes a panel AND scrolls in one swipe —
+  no modal backdrop, no pause. `Features/Library/JobsPanel` shows the live Stash job (title + bar bound to
+  `progress`, idle line, “+N queued”) with a **stop.circle.fill cancel button** → `JobMonitor.cancelRunningJob`
+  → `StashClient.stopJob(job_id:)`; Scenes shows Scan Library / Compute VMAF·ThumbHash·Loudness, Performers is
+  status-only. `JobMonitor` (@MainActor @Observable) polls `jobQueue` **only while a panel is open**. The old ⋯
+  menu folded into `SceneFilterPanel` (`onDownloadAll`/`onSelect`/`bulkLoading`). Lesson: **custom glass must
+  never float over a scrolling list** — the system nav bar composites its glass efficiently; custom glass does
+  not. **NEXT (owner-queued URGENT): fix AI slow-mo quality degradation** (ROADMAP).
 - **ThumbHash blur placeholders shipped (v1.0.272–274 + Companion v0.3.5–0.3.6)** — a card now shows an instant
   tiny blur *before* its real thumbnail loads, so a fast flick never flashes blank cards. Three sources,
   merged (on-device hashes always win): (1) **on-device** — `Services/ThumbHash.swift` (verbatim MIT port
