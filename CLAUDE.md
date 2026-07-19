@@ -120,8 +120,25 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.271** (iOS 26 zoom-freeze scroll-gate workaround, commit `359470d`). Verify the
-  newest release/IPA size each push.
+- Latest release: **v1.0.274** (app fetches the plugin's served ThumbHash map, commit `89993d0`,
+  IPA 8,694,565 B). Verify the newest release/IPA size each push.
+- **ThumbHash blur placeholders shipped (v1.0.272–274 + Companion v0.3.5)** — a card now shows an instant
+  tiny blur *before* its real thumbnail loads, so a fast flick never flashes blank cards. Three sources,
+  merged (on-device hashes always win): (1) **on-device** — `Services/ThumbHash.swift` (verbatim MIT port
+  of evanw/thumbhash; keep its non-idiomatic `while` loops — they dodge Swift's slow type-checker) +
+  `Services/ThumbHashStore.swift` (`@MainActor`, **NOT** `@Observable` — cards read `placeholder(for:)`
+  imperatively so a hash arriving mid-scroll never invalidates cells; persisted base64 JSON in App Support),
+  computed as each thumb loads via `ingest`, keyed by scene id and `"perf-"+id`; (2) **bulk pre-cache** —
+  `Services/ThumbnailPrefetcher.swift` (Settings → “Cache All Thumbnails”, sequential = gentle server load,
+  cancellable/resumable) walks the whole library to disk-cache thumbs AND build the hash map (ImageCache
+  disk cap bumped 200→800 MB so a full pre-cache isn't evicted); (3) **server map** — the Companion plugin’s
+  **Compute ThumbHash Map** task writes `cache/thumbhashes.json` (zero scene writes, incremental/resumable,
+  budget-capped, prune-only-on-clean-pass), which `ThumbHashStore.refresh(serverURL:apiKey:)` fetches +
+  merges (wired in `ScenesView.task` beside Playability/VMAF refresh; mirrors `PlayabilityStore.refresh`).
+  The plugin encoder is a pure-stdlib port of `ThumbHash.swift` using `floor(x+0.5)` — **NOT** Python’s
+  banker's `round()` — so its bytes decode in-app; covers decoded via one ffmpeg PPM pass. Scene-only
+  (performers get on-device hashes only); no auto-hash-on-scan hook (re-run the task, or on-device covers it).
+  **Owner step: deploy Companion v0.3.5 + run Compute ThumbHash Map once.**
 - **120 Hz scroll-perf pass shipped (v1.0.269)** — browse-grid flick judder fixed: (1) `ScenePreview` was
   writing each cell's `.frame(in:.global)` to `@State` via `onGeometryChange` on EVERY scroll frame,
   re-rendering every visible cell at 120 Hz → now a reference box (`FrameBox`, no invalidation) — the
