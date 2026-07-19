@@ -161,10 +161,8 @@ struct TagPickerSheet: View {
                     .font(.caption2)
                     .opacity(isSelected ? 1 : 0.55)
             }
-            .font(.subheadline.weight(.medium))
-            .foregroundStyle(isSelected ? Color.white : themeManager.current.foregroundColor)
-            .padding(.horizontal, 12).padding(.vertical, 7)
-            .background(isSelected ? themeManager.current.accentColor : themeManager.current.surfaceColor, in: Capsule())
+            .filterPill(active: isSelected, tint: themeManager.current.accentColor,
+                        foreground: themeManager.current.foregroundColor)
         }
         .buttonStyle(.plain)
     }
