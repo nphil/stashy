@@ -345,7 +345,39 @@ struct StashClient: Sendable {
         }
         return ids
     }
+
+    // MARK: - Job queue / library scan
+
+    /// The whole Stash job queue (running + queued). Used by the jobs panel — only called while it's open.
+    func jobQueue() async throws -> [JobInfo] {
+        struct Response: Decodable, Sendable { let jobQueue: [JobInfo] }
+        let resp: Response = try await query(
+            "query JobQueue { jobQueue { id status description subTasks progress } }")
+        return resp.jobQueue
+    }
+
+    /// Kick Stash's native library scan with server defaults (all configured paths). Returns the Job id.
+    @discardableResult
+    func metadataScan() async throws -> String {
+        struct Response: Decodable, Sendable { let metadataScan: String }
+        let gql = "mutation MetadataScan($input: ScanMetadataInput!) { metadataScan(input: $input) }"
+        let resp: Response = try await query(gql, variables: ScanMetadataVariables(input: ScanMetadataInput()))
+        return resp.metadataScan
+    }
 }
+
+/// One entry in Stash's job queue. `progress` is 0…1 (nil = indeterminate); `status` is one of
+/// READY / RUNNING / STOPPING / FINISHED / CANCELLED / FAILED.
+struct JobInfo: Decodable, Sendable, Identifiable, Equatable {
+    let id: String
+    let status: String
+    let description: String
+    let subTasks: [String]?
+    let progress: Double?
+}
+
+private struct ScanMetadataInput: Encodable, Sendable {}   // empty = scan all library paths, server defaults
+private struct ScanMetadataVariables: Encodable, Sendable { let input: ScanMetadataInput }
 
 // MARK: - Scene query model
 

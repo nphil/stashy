@@ -29,6 +29,10 @@ struct StashCompanion: Sendable {
         case tag         = "Tag iPhone-Ready Scenes"
         case purge       = "Purge Transcode Cache"
         case deleteCache = "Delete Cache File"
+        // Library map-compute tasks (owner-triggerable from the jobs panel; also runnable from Stash's UI).
+        case vmafMap      = "Compute VMAF Map"
+        case thumbhashMap = "Compute ThumbHash Map"
+        case loudnessMap  = "Compute Loudness Map"
     }
 
     /// Output codecs the plugin can produce. HEVC = GPU (hevc_nvenc) — the default; AV1 = CPU (SVT-AV1),
