@@ -77,6 +77,23 @@ actor ImageCache {
         return try await task.value
     }
 
+    /// Load a LOCAL thumbnail file (a completed download's saved cover) — downsampled + decoded OFF the main
+    /// thread (we're in the actor) and memoized in the same in-memory cache. `DownloadCard` used to load these
+    /// with `UIImage(contentsOfFile:)` on the main actor, which defers its bitmap decode to first render — so
+    /// the decode landed on the render thread as the card scrolled into view (the Downloads-tab hitch). This
+    /// gives the local path the exact off-main treatment that keeps the grid smooth. Keyed by path+size; no
+    /// disk copy (the file already IS the local store). Returns nil on any failure so the caller can fall back
+    /// to the remote URL.
+    func localImage(at fileURL: URL, maxPixel: CGFloat = 600) async -> UIImage? {
+        let key = "local-\(Int(maxPixel))-\(fileURL.path)" as NSString
+        if let hit = memoryCache.object(forKey: key) { return hit }
+        guard let data = try? Data(contentsOf: fileURL),
+              let downsized = Self.downsample(data: data, maxPixel: maxPixel) else { return nil }
+        let image = await downsized.byPreparingForDisplay() ?? downsized
+        memoryCache.setObject(image, forKey: key, cost: Self.memoryCost(image, fallback: data.count))
+        return image
+    }
+
     /// The disk-then-network body of `image(for:)`, run inside the coalesced Task so joiners share it.
     private func fetchDownsampled(url: URL, key: String, maxPixel: CGFloat, priority: Bool) async throws -> UIImage {
         let nsKey = key as NSString

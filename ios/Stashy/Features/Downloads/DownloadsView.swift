@@ -473,7 +473,10 @@ private struct DownloadCard: View {
     private var thumbKey: String { item.localThumb?.path ?? item.thumbnailURL?.absoluteString ?? item.id }
 
     private func loadThumb() async {
-        if let local = item.localThumb, let img = UIImage(contentsOfFile: local.path) { thumb = img; return }
+        // Local file (a completed download) goes through ImageCache too, so it's downsampled + decoded OFF the
+        // main thread and memoized — NOT loaded with `UIImage(contentsOfFile:)` on the main actor, whose
+        // deferred decode hit the render thread as the card scrolled in (the Downloads-tab hitch).
+        if let local = item.localThumb, let img = await imageCache.localImage(at: local) { thumb = img; return }
         if let url = item.thumbnailURL { thumb = try? await imageCache.image(for: url) }
     }
 
