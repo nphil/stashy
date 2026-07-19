@@ -4,14 +4,7 @@ import SwiftUI
 /// UI rules: fixed one-screen layouts, evenly-spaced rounded cards, tag chips that deep-link into a
 /// filtered Scenes list, and social links truncated by priority to fit their card.
 
-private let detailCardCorner: CGFloat = 16
-
 extension View {
-    /// Standard rounded surface used by every detail card.
-    func detailCardBackground(_ color: Color) -> some View {
-        background(color, in: RoundedRectangle(cornerRadius: detailCardCorner, style: .continuous))
-    }
-
     /// Immersive scroll: fade a vertical `ScrollView`'s top/bottom edges so content dissolves into the card
     /// instead of hard-cutting — but only where there's actually off-screen content. At the very top there's
     /// no top fade; it ramps in as you scroll away, and the bottom fade disappears once you reach the end.

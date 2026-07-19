@@ -162,8 +162,8 @@ struct PerformerDetailView: View {
                         }
                     }
                     .frame(width: portraitWidth, height: portraitHeight)
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.detail, style: .continuous))
+                    .contentShape(RoundedRectangle(cornerRadius: CornerRadius.detail, style: .continuous))
                 }
                 .buttonStyle(.plain)
 

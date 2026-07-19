@@ -302,8 +302,8 @@ struct ScenePerformerCard: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.detail, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: CornerRadius.detail, style: .continuous))
                 .overlay(alignment: .topLeading) {
                     FavoriteHeart(isFavorite: edits.isFavorite(performer), size: 16) { newValue in
                         edits.setPerformerFavorite(newValue, id: performer.id, client: appState.client)
@@ -320,7 +320,7 @@ struct ScenePerformerCard: View {
                 }
         } else {
             PerformerPlaceholder()
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.detail, style: .continuous))
         }
     }
 }

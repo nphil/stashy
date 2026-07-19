@@ -146,7 +146,7 @@ private struct DownloadCard: View {
         }
         .padding(12)
         .detailCardBackground(themeManager.current.surfaceColor)
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.white.opacity(0.06)))
+        .overlay(RoundedRectangle(cornerRadius: CornerRadius.detail, style: .continuous).strokeBorder(.white.opacity(0.06)))
         .task(id: thumbKey) { await loadThumb() }
         .task(id: item.performerImageURL) {
             if let url = item.performerImageURL { performer = try? await imageCache.image(for: url, priority: true) }

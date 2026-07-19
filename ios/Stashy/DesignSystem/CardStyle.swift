@@ -4,6 +4,7 @@ import SwiftUI
 enum CornerRadius {
     static let card: CGFloat = 12
     static let small: CGFloat = 10
+    static let detail: CGFloat = 16   // the larger radius used by the scene/performer detail cards
     static let large: CGFloat = 18
 }
 
@@ -27,5 +28,11 @@ extension View {
     /// performers). One definition keeps the media-overlay badges visually identical.
     func overlayBadge() -> some View {
         background(.black.opacity(0.55), in: Capsule())
+    }
+
+    /// Standard rounded surface for the scene/performer detail cards (and the Downloads card) — a filled
+    /// `color` rounded at the shared detail radius. Keeps every detail card's surface identical.
+    func detailCardBackground(_ color: Color) -> some View {
+        background(color, in: RoundedRectangle(cornerRadius: CornerRadius.detail, style: .continuous))
     }
 }
