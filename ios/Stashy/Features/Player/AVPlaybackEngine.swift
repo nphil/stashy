@@ -57,7 +57,8 @@ final class AVPlaybackEngine: PlaybackEngine {
     var renderView: UIView? { hostView }
     var liveBlurView: UIView? { blurBackdrop }
 
-    init(url: URL) {
+    init(url: URL, normalizationGain: Float = 1) {
+        self.normalizationGain = normalizationGain
         // The playback category is set once at launch (AppDelegate); just claim the session so sound
         // plays through the ringer switch. Activating an already-active session is a cheap no-op, so a
         // reinit creating a new engine no longer re-configures the whole category each time.
@@ -226,6 +227,9 @@ final class AVPlaybackEngine: PlaybackEngine {
     // `volume`, so toggling one never clobbers the other; `applyOutputVolume()` combines them.
     private var storedVolume: Float = 0
     private var slowMuted = false
+    /// Per-scene loudness-normalization gain (0…1, attenuation-only) folded into the output volume so it
+    /// composes with the user's slider instead of clobbering it. 1 = no normalization (no served data).
+    private let normalizationGain: Float
 
     var volume: Float {
         get { storedVolume }
@@ -237,7 +241,7 @@ final class AVPlaybackEngine: PlaybackEngine {
         set { slowMuted = newValue; applyOutputVolume() }
     }
 
-    private func applyOutputVolume() { player.volume = slowMuted ? 0 : storedVolume }
+    private func applyOutputVolume() { player.volume = slowMuted ? 0 : storedVolume * normalizationGain }
 
     /// The live decoded-frame output (shared with the blur) for the slow-mo frame interpolator.
     var frameOutput: AVPlayerItemVideoOutput? { videoOutput }

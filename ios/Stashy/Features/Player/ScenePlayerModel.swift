@@ -329,7 +329,10 @@ final class ScenePlayerModel {
 
     /// Build an AVPlayer engine for `url` and wire its callbacks into this facade.
     private func makeEngine(url: URL) -> PlaybackEngine {
-        let engine: PlaybackEngine = AVPlaybackEngine(url: url)
+        // Loudness normalization (attenuation-only): pull loud scenes down toward a reference so volume is
+        // consistent scene-to-scene. Gain is 1 (no-op) when the served loudness map has no entry for this id.
+        let normalizationGain = sceneID.map { LoudnessStore.shared.gain(for: $0) } ?? 1
+        let engine: PlaybackEngine = AVPlaybackEngine(url: url, normalizationGain: normalizationGain)
         // Every engine (the initial one and any seek-reinit / quality / fallback swap) inherits the
         // current volume — which starts at 0, so playback always begins silent until the user raises it.
         engine.volume = Float(volume)

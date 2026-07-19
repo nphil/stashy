@@ -390,6 +390,8 @@ struct ScenesView: View {
             Task { await VmafMapStore.shared.refresh(serverURL: client.serverURL, apiKey: client.apiKey) }
             // And the served ThumbHash map — instant blur placeholders for scenes never opened on this device.
             Task { await ThumbHashStore.shared.refresh(serverURL: client.serverURL, apiKey: client.apiKey) }
+            // And the served loudness map — per-scene gain for consistent volume across scenes.
+            Task { await LoudnessStore.shared.refresh(serverURL: client.serverURL, apiKey: client.apiKey) }
             guard loader.items.isEmpty else { return }
             await reload()
         }
