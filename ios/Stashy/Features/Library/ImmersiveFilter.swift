@@ -1,98 +1,19 @@
 import SwiftUI
 
-/// Funnel toggle button for the nav bar. It only flips `expanded` — the popover is presented from a
-/// stable anchor in the list content (see `filterPopover`), NOT from this toolbar item: a popover hosted
-/// on a toolbar item is torn down and re-presented whenever the toolbar rebuilds (which happens on every
-/// query change, since `isActive` changes), which caused the pop-down/pop-up flicker and instability.
-struct FilterFunnelButton: View {
-    @Binding var expanded: Bool
-    var isActive: Bool
-    @Environment(ThemeManager.self) private var themeManager
-
-    var body: some View {
-        Button {
-            expanded.toggle()
-        } label: {
-            Image(systemName: "line.3.horizontal.decrease")
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(isActive ? themeManager.current.accentColor : themeManager.current.foregroundColor)
-                .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
-                .frame(width: 34, height: 34)
-        }
-    }
-}
-
-/// The filter panel presented as a **custom dropdown** just under the nav bar's funnel button — NOT a
-/// system `.popover`. Two reasons the popover was replaced:
-///  1. `.presentationCompactAdaptation(.popover)` always draws a speech-bubble arrow, and anchored near
-///     the top-right corner that arrow overlapped/clipped the funnel button.
-///  2. A popover attached to the old 1×1 anchor routinely missed presentation on the first toggle — the
-///     "have to press the filter button twice" bug.
-/// This dropdown is driven purely by the `isPresented` Bool (opens first-tap, every time), pins itself
-/// top-trailing below the bar with no arrow, and dismisses on tap-outside. It's placed as a stable
-/// top-trailing sibling of the list content in the `ZStack`, so it still survives `content`'s branch
-/// flips during reloads (the reason the anchor never lived on the churning toolbar item).
-struct FilterPopoverAnchor<Panel: View>: View {
-    @Binding var isPresented: Bool
-    @ViewBuilder var panel: () -> Panel
-    @Environment(ThemeManager.self) private var themeManager
-    @Environment(AppState.self) private var appState
-    @Environment(LibraryEdits.self) private var edits
-
-    var body: some View {
-        ZStack(alignment: .topTrailing) {
-            if isPresented {
-                // No blocking catcher over the list: dismissal is driven by the list itself (see
-                // `dismissesPopover`), so a swipe both SCROLLS the list and closes the panel in one motion.
-                // Only the panel's own area is interactive here; the rest of the screen falls through to the
-                // list behind it.
-                panel()
-                    // Re-inject the observables the panel/tag editor rely on (harmless if already inherited).
-                    .environment(themeManager)
-                    .environment(appState)
-                    .environment(edits)
-                    // Container chrome: a floating Liquid Glass sheet. Glass shows its character HERE because
-                    // it sits over the vibrant grid/mesh (unlike the chips, which sat over this flat panel).
-                    // Shadowing the glass composite is acceptable: the panel only shows while the list is
-                    // STATIC (any scroll dismisses it via dismissesPopover), so there's no per-frame
-                    // re-sample — the old 120Hz concern only applied to shadowing over a scrolling list.
-                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                    .shadow(color: .black.opacity(0.28), radius: 18, y: 10)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .stroke(.white.opacity(0.12), lineWidth: 1)
-                    )
-                    .padding(.trailing, 10)
-                    .padding(.top, 6)
-                    // Emerge from the funnel (top-trailing) with the system's own spring, so it matches
-                    // native menu/popover physics without any custom graphics.
-                    .transition(.scale(scale: 0.9, anchor: .topTrailing).combined(with: .opacity))
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-        .animation(.snappy(duration: 0.28, extraBounce: 0.03), value: isPresented)
-    }
-}
-
-extension View {
-    /// Dismiss an open filter/sort popover when the user scrolls OR taps the list behind it. Applied to the
-    /// list content so a swipe both scrolls the list AND closes the panel in one gesture (there's no blocking
-    /// catcher over the list anymore). No-ops while the popover is closed. Works for scenes + performers.
-    func dismissesPopover(_ isPresented: Binding<Bool>) -> some View {
-        self
-            .onScrollPhaseChange { _, phase in
-                if phase != .idle, isPresented.wrappedValue { isPresented.wrappedValue = false }
-            }
-            .simultaneousGesture(TapGesture().onEnded {
-                if isPresented.wrappedValue { isPresented.wrappedValue = false }
-            })
-    }
-}
+// NOTE: `FilterFunnelButton`, `FilterPopoverAnchor`, and the `dismissesPopover` View extension used to live
+// here — the nav-bar funnel toggle + the custom filter dropdown + its scroll/tap-to-dismiss helper. They were
+// replaced by `DesignSystem/GlassMorphDropdown` (Liquid-Glass morph + a tap-catching backdrop) when Scenes &
+// Performers moved to the custom glass top bar, and are gone. Git history has them if ever needed.
 
 /// Sort + inline tag filter panel. Themed, semi-transparent; floats over the list so the content
 /// scrolls behind it. Editing updates the bound query in real time.
 struct SceneFilterPanel: View {
     @Binding var query: SceneQuery
+    // Folded-in ⋯ actions (Scenes only; Performers passes none). Rendered as buttons at the bottom of the
+    // panel so the old ellipsis menu could be removed from the toolbar.
+    var onDownloadAll: (() -> Void)? = nil
+    var onSelect: (() -> Void)? = nil
+    var bulkLoading = false
     @Environment(ThemeManager.self) private var themeManager
     @Environment(AppState.self) private var appState
 
@@ -139,6 +60,18 @@ struct SceneFilterPanel: View {
             }
             Divider().opacity(0.25)
             InlineTagEditor(selected: $query.tags)
+
+            // Folded-in actions (the old ⋯ menu). Solid rows — never glass over the glass panel.
+            if onDownloadAll != nil || onSelect != nil {
+                Divider().opacity(0.25)
+                if let onDownloadAll {
+                    actionRow("Download all in filter", icon: "arrow.down.circle", loading: bulkLoading, action: onDownloadAll)
+                        .disabled(bulkLoading)
+                }
+                if let onSelect {
+                    actionRow("Select…", icon: "checkmark.circle", action: onSelect)
+                }
+            }
         }
         .padding(16)
         .frame(width: 330)
@@ -147,6 +80,28 @@ struct SceneFilterPanel: View {
                 await PlayabilityStore.shared.refresh(serverURL: client.serverURL, apiKey: client.apiKey)
             }
         }
+    }
+
+    private func actionRow(_ title: String, icon: String, loading: Bool = false,
+                           action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 9) {
+                Group {
+                    if loading { ProgressView().controlSize(.small) }
+                    else { Image(systemName: icon) }
+                }
+                .frame(width: 20)
+                Text(title)
+                Spacer(minLength: 0)
+            }
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(themeManager.current.foregroundColor)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(themeManager.current.foregroundColor.opacity(0.10),
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 
     /// A themed capsule menu for a report-backed filter enum (resolution / fps / quality). Mirrors the

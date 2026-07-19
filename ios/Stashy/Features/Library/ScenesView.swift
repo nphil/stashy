@@ -13,10 +13,10 @@ struct ScenesView: View {
     @State private var path: [Route] = []
     @State private var previewPresenter = ScenePreviewPresenter()
     @State private var filterExpanded = false
-    // Native list search (replaces the Search tab): a minimized toolbar magnifier that expands into the
-    // field on tap — nothing shows at scroll-top. Debounced into query.search.
+    // Custom top-bar search (nav bar is hidden): a glass magnifier that expands into a field. Debounced
+    // into query.search. `searchExpanded` drives the magnifier ⇄ field morph in `LibrarySearchField`.
     @State private var searchText = ""
-    @State private var searchPresented = false
+    @State private var searchExpanded = false
     @State private var reloadDebounce: Task<Void, Never>?
     // Bulk download (additive): fetch the whole filtered set, then pick one quality for all.
     @State private var bulkSheet = false
@@ -25,8 +25,8 @@ struct ScenesView: View {
     // Multi-select download (additive; off by default → zero cost during normal browsing).
     @State private var selectionMode = false
     @State private var selectedIDs: Set<String> = []
-    // The ⋯ actions menu, shown as the SAME custom popover as the filter (not a system Menu).
-    @State private var actionsExpanded = false
+    // The jobs status dropdown (title button, top-leading). Mutually exclusive with the filter dropdown.
+    @State private var jobsExpanded = false
     // Shared namespace for the Apple-Photos-style zoom transition from a grid cell into the scene detail.
     @Namespace private var zoomNS
 
@@ -221,121 +221,121 @@ struct ScenesView: View {
         }
     }
 
-    /// The ⋯ actions popover content (Download all / Select), styled to sit in the shared popover chrome.
-    private var actionsPanel: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Button {
-                actionsExpanded = false
-                startBulkDownload()
-            } label: {
-                Label("Download all in filter", systemImage: "arrow.down.circle")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .padding(.vertical, 9).padding(.horizontal, 6)
-            }
-            .disabled(bulkLoading)
-            Button {
-                actionsExpanded = false
-                selectionMode = true
-            } label: {
-                Label("Select…", systemImage: "checkmark.circle")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .padding(.vertical, 9).padding(.horizontal, 6)
+    // MARK: - Custom glass top bar (replaces the nav bar)
+
+    /// The whole top-bar overlay: in selection mode a Cancel/Download bar; otherwise the jobs dropdown
+    /// (top-left, morphs its title button into the jobs panel), the filter dropdown (top-right, morphs the
+    /// funnel into the filter panel), and the search magnifier/field. Each dropdown/field is a full-screen
+    /// sibling that positions itself; the grid content is inset below the bar via a `safeAreaInset`.
+    @ViewBuilder
+    private var topChrome: some View {
+        if selectionMode {
+            selectionBar
+        } else {
+            ZStack(alignment: .top) {
+                // Hidden while searching so the expanded field spans the bar without overlapping them.
+                if !searchExpanded {
+                    GlassMorphDropdown(expanded: $jobsExpanded, anchor: .topLeading) {
+                        morphTitleButton
+                    } panel: {
+                        JobsPanel(showActions: !query.downloadedOnly)
+                    }
+                    GlassMorphDropdown(expanded: $filterExpanded, anchor: .topTrailing) {
+                        funnelLabel
+                    } panel: {
+                        sceneFilterPanel
+                    }
+                }
+                LibrarySearchField(text: $searchText, expanded: $searchExpanded, prompt: "Search scenes")
             }
         }
-        .font(.subheadline.weight(.medium))
+    }
+
+    /// The filter panel with the old ⋯ actions (Download all / Select) folded in. Explicitly-typed optionals
+    /// avoid a ternary-with-closure inference pitfall; the actions are suppressed in downloaded-only (nothing
+    /// to bulk-download when everything shown is already local — matches the old ⋯-hidden behaviour).
+    private var sceneFilterPanel: some View {
+        let onDownloadAll: (() -> Void)? = query.downloadedOnly ? nil
+            : { filterExpanded = false; startBulkDownload() }
+        let onSelect: (() -> Void)? = query.downloadedOnly ? nil
+            : { filterExpanded = false; selectionMode = true }
+        return SceneFilterPanel(query: $query, onDownloadAll: onDownloadAll, onSelect: onSelect,
+                                bulkLoading: bulkLoading)
+    }
+
+    /// The glass title button (top-left) that morphs into the jobs panel. Just the label — `GlassMorphDropdown`
+    /// wraps it in the button + glass capsule.
+    private var morphTitleButton: some View {
+        HStack(spacing: 6) {
+            Text("Scenes").font(.title3.weight(.semibold))
+            Image(systemName: "chevron.down").font(.caption.weight(.bold))
+        }
         .foregroundStyle(themeManager.current.foregroundColor)
-        .buttonStyle(.plain)
-        .padding(8)
-        .frame(width: 240)
+        .padding(.horizontal, 16)
+        .frame(height: 38)
+    }
+
+    /// The filter-funnel label (top-right), tinted when a filter is active.
+    private var funnelLabel: some View {
+        Image(systemName: "line.3.horizontal.decrease")
+            .font(.title3.weight(.semibold))
+            .foregroundStyle(filterActive ? themeManager.current.accentColor : themeManager.current.foregroundColor)
+            .frame(width: 34, height: 34)
+    }
+
+    /// The multi-select action bar shown in place of the top chrome while selecting.
+    private var selectionBar: some View {
+        HStack(spacing: 12) {
+            Button("Cancel") { exitSelection() }
+            Spacer(minLength: 8)
+            Button { startSelectionDownload() } label: {
+                Text("Download (\(selectedIDs.count))")
+                    .fontWeight(.semibold)
+                    .contentTransition(.numericText())   // count rolls as scenes are selected
+            }
+            .disabled(selectedIDs.isEmpty)
+            .animation(.snappy, value: selectedIDs.count)
+        }
+        .font(.body)
+        .foregroundStyle(themeManager.current.foregroundColor)
+        .padding(.horizontal, 16)
+        .frame(height: 40)
+        .glassEffect(.regular, in: Capsule())
+        .padding(.top, 6)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     var body: some View {
         NavigationStack(path: $path) {
-            ZStack(alignment: .topTrailing) {
+            ZStack(alignment: .top) {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .dismissesPopover($filterExpanded)   // swipe/tap the list closes the panel AND scrolls
-                    .dismissesPopover($actionsExpanded)
-                // The filter dropdown is hosted from a *stable sibling* of `content`, never as an overlay on
-                // it. `content` flips its `@ViewBuilder` branch (grid ⇄ full-screen spinner ⇄ empty state)
-                // every time a reload clears `items`; a panel attached to that churning subtree is torn
-                // down and re-presented on each branch flip — exactly the "tap a tag → window closes and
-                // reopens" bug. As a peer in the ZStack the anchor keeps its identity regardless of which
-                // branch `content` renders, so the dropdown stays put across reloads.
-                FilterPopoverAnchor(isPresented: $filterExpanded) {
-                    SceneFilterPanel(query: $query)
-                }
-                // The ⋯ actions menu — same custom popover chrome/animation as the filter.
-                FilterPopoverAnchor(isPresented: $actionsExpanded) {
-                    actionsPanel
-                }
+                    // Reserve space so the grid starts below the floating glass bar (the bar is an overlay,
+                    // not a nav bar, so it wouldn't otherwise push content down).
+                    .safeAreaInset(edge: .top) { Color.clear.frame(height: 50) }
+                // Custom glass top bar (jobs dropdown / search / filter), a stable ZStack sibling of the
+                // churning `content` — it survives `content`'s branch flips during reloads, the reason the
+                // old filter anchor never lived on the reloading subtree. The dropdowns' own dim backdrop now
+                // catches taps (fixing the old tap-through-to-scene-cards bug), so no `dismissesPopover`.
+                topChrome
             }
-            // Only one popover open at a time.
-            .onChange(of: filterExpanded) { _, open in if open { actionsExpanded = false } }
-            .onChange(of: actionsExpanded) { _, open in if open { filterExpanded = false } }
+            // Only one dropdown / the search field open at a time.
+            .onChange(of: filterExpanded) { _, open in if open { jobsExpanded = false } }
+            .onChange(of: jobsExpanded) { _, open in if open { filterExpanded = false } }
+            .onChange(of: searchExpanded) { _, open in if open { jobsExpanded = false; filterExpanded = false } }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .themedBackground()
             // Briefly lock scrolling right after a zoom-back so the iOS 26 source-card freeze is never seen.
             .zoomReturnScrollGate(depth: path.count)
-            .navigationTitle("Scenes")
-            .navigationBarTitleDisplayMode(.inline)
-            // Search is a MINIMIZED toolbar button (no drawer): nothing shows at scroll-top; the magnifier
-            // expands into the search field only when tapped. `.searchToolbarBehavior(.minimize)` renders it
-            // as a button and `DefaultToolbarItem(kind: .search, …)` (in the toolbar) pins it top-left. Typing
-            // is debounced below so it never lags input or spams the server.
-            .searchable(text: $searchText, isPresented: $searchPresented, prompt: "Search scenes")
-            .searchToolbarBehavior(.minimize)
+            // The nav bar is replaced by the custom glass top bar; hide it (only on this root — pushed
+            // destinations keep their own nav bar + back button).
+            .toolbar(.hidden, for: .navigationBar)
             .task(id: searchText) {
                 guard searchText != query.search else { return }
                 try? await Task.sleep(for: .milliseconds(350))   // debounce; cancelled by the next keystroke
                 guard !Task.isCancelled else { return }
                 query.search = searchText                        // triggers the existing query reload
-            }
-            // Stable ToolbarItem identities with conditional CONTENT — swapping whole ToolbarItems behind an
-            // if/else makes SwiftUI's toolbar builder drop them (the "⋯ button vanished" bug).
-            .toolbar {
-                // Minimized search button (no scroll-top drawer), pinned top-left; expands into the field on tap.
-                DefaultToolbarItem(kind: .search, placement: .topBarLeading)
-                ToolbarItem(placement: .topBarLeading) {
-                    if selectionMode {
-                        Button("Cancel") { exitSelection() }
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    if selectionMode {
-                        Button { startSelectionDownload() } label: {
-                            Text("Download (\(selectedIDs.count))")
-                                .fontWeight(.semibold)
-                                .contentTransition(.numericText())   // count rolls as scenes are selected
-                        }
-                        .disabled(selectedIDs.isEmpty)
-                        .animation(.snappy, value: selectedIDs.count)
-                    } else if !query.downloadedOnly {
-                        Button {
-                            actionsExpanded.toggle()
-                        } label: {
-                            Group {
-                                if bulkLoading { ProgressView() }
-                                else { Image(systemName: "ellipsis") }
-                            }
-                            .font(.title3.weight(.semibold))
-                            .foregroundStyle(actionsExpanded ? themeManager.current.accentColor : themeManager.current.foregroundColor)
-                            .frame(width: 34, height: 34)
-                        }
-                    }
-                }
-                // A fixed spacer splits the ⋯ and funnel into SEPARATE glass pills, so pressing one only
-                // lights that button (not the whole grouped pill).
-                if !selectionMode && !query.downloadedOnly {
-                    ToolbarSpacer(.fixed, placement: .topBarTrailing)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    if !selectionMode {
-                        FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
-                    }
-                }
             }
             .sheet(isPresented: $bulkSheet) {
                 BulkDownloadSheet(sceneCount: bulkScenes.count) { opts in

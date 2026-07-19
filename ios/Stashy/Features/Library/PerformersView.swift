@@ -3,12 +3,16 @@ import SwiftUI
 struct PerformersView: View {
     @Environment(AppState.self) private var appState
     @Environment(LibraryEdits.self) private var edits
+    @Environment(ThemeManager.self) private var themeManager
     @Environment(\.imageCache) private var imageCache
     @State private var loader = PaginatedLoader<Performer>(pageSize: 30)
     @State private var query = PerformerQuery()
+    // Custom top-bar search (nav bar hidden) — glass magnifier that expands into a field. Debounced below.
     @State private var searchText = ""
-    @State private var searchPresented = false
+    @State private var searchExpanded = false
     @State private var filterExpanded = false
+    // The jobs status dropdown (title button, top-leading). Mutually exclusive with the filter dropdown.
+    @State private var jobsExpanded = false
     @State private var path: [Route] = []
     @State private var reloadDebounce: Task<Void, Never>?
     // Shared namespace for the zoom transition from a performer cell into the performer detail.
@@ -43,32 +47,25 @@ struct PerformersView: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            ZStack(alignment: .topTrailing) {
+            ZStack(alignment: .top) {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .dismissesPopover($filterExpanded)   // swipe/tap the list closes the panel AND scrolls
-                // Filter dropdown hosted from a stable sibling of `content` (not an overlay on it) so it
-                // survives `content`'s branch flips during reloads — see the detailed note in ScenesView.
-                FilterPopoverAnchor(isPresented: $filterExpanded) {
-                    PerformerFilterPanel(query: $query)
-                }
+                    // Reserve space so the grid starts below the floating glass bar.
+                    .safeAreaInset(edge: .top) { Color.clear.frame(height: 50) }
+                // Custom glass top bar (jobs dropdown / search / filter) — a stable ZStack sibling of the
+                // churning `content`; the dropdowns' own dim backdrop catches taps (no `dismissesPopover`).
+                topChrome
             }
+            // Only one dropdown / the search field open at a time.
+            .onChange(of: filterExpanded) { _, open in if open { jobsExpanded = false } }
+            .onChange(of: jobsExpanded) { _, open in if open { filterExpanded = false } }
+            .onChange(of: searchExpanded) { _, open in if open { jobsExpanded = false; filterExpanded = false } }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .themedBackground()
             // Briefly lock scrolling right after a zoom-back so the iOS 26 source-card freeze is never seen.
             .zoomReturnScrollGate(depth: path.count)
-            .navigationTitle("Performers")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                // Minimized search button (no scroll-top drawer), pinned top-left; expands into the field on tap.
-                DefaultToolbarItem(kind: .search, placement: .topBarLeading)
-                ToolbarItem(placement: .topBarTrailing) {
-                    FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
-                }
-            }
-            // Search is a minimized toolbar button (no scroll-top drawer) — see ScenesView note. Debounced below.
-            .searchable(text: $searchText, isPresented: $searchPresented, prompt: "Search performers")
-            .searchToolbarBehavior(.minimize)
+            // The nav bar is replaced by the custom glass top bar; hide it (pushed detail keeps its own).
+            .toolbar(.hidden, for: .navigationBar)
             .task(id: searchText) {
                 guard searchText != query.search else { return }
                 try? await Task.sleep(for: .milliseconds(350))
@@ -104,6 +101,48 @@ struct PerformersView: View {
         }
         .onDisappear { reloadDebounce?.cancel() }
         .libraryEditErrorToast(edits)
+    }
+
+    // MARK: - Custom glass top bar (replaces the nav bar)
+
+    /// Jobs dropdown (top-left, status only — no action buttons on Performers), search, and the filter
+    /// dropdown (top-right). Same custom overlay as Scenes; see the note there.
+    @ViewBuilder
+    private var topChrome: some View {
+        ZStack(alignment: .top) {
+            if !searchExpanded {
+                GlassMorphDropdown(expanded: $jobsExpanded, anchor: .topLeading) {
+                    morphTitleButton
+                } panel: {
+                    JobsPanel(showActions: false)
+                }
+                GlassMorphDropdown(expanded: $filterExpanded, anchor: .topTrailing) {
+                    funnelLabel
+                } panel: {
+                    PerformerFilterPanel(query: $query)
+                }
+            }
+            LibrarySearchField(text: $searchText, expanded: $searchExpanded, prompt: "Search performers")
+        }
+    }
+
+    /// The glass title button (top-left) that morphs into the jobs panel.
+    private var morphTitleButton: some View {
+        HStack(spacing: 6) {
+            Text("Performers").font(.title3.weight(.semibold))
+            Image(systemName: "chevron.down").font(.caption.weight(.bold))
+        }
+        .foregroundStyle(themeManager.current.foregroundColor)
+        .padding(.horizontal, 16)
+        .frame(height: 38)
+    }
+
+    /// The filter-funnel label (top-right), tinted when a filter is active.
+    private var funnelLabel: some View {
+        Image(systemName: "line.3.horizontal.decrease")
+            .font(.title3.weight(.semibold))
+            .foregroundStyle(filterActive ? themeManager.current.accentColor : themeManager.current.foregroundColor)
+            .frame(width: 34, height: 34)
     }
 
     @ViewBuilder

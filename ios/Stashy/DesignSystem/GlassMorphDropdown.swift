@@ -37,6 +37,15 @@ struct GlassMorphDropdown<ButtonLabel: View, Panel: View>: View {
             GlassEffectContainer(spacing: nil) {
                 if expanded {
                     panel()
+                        // Invisible hit-catcher filling the panel's own frame, BEHIND its controls: taps in
+                        // the gaps between chips/rows are absorbed here instead of falling through to the
+                        // backdrop (which would dismiss) or — the old bug — to a scene card behind the panel.
+                        // Controls sit in front of this background, so their taps still reach them.
+                        .background(
+                            Color.black.opacity(0.0001)
+                                .contentShape(Rectangle())
+                                .onTapGesture { }
+                        )
                         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
                         .glassEffectID(Self.morphID, in: glassNS)
                         .overlay(
@@ -51,6 +60,10 @@ struct GlassMorphDropdown<ButtonLabel: View, Panel: View>: View {
                         .glassEffectID(Self.morphID, in: glassNS)
                 }
             }
+            // Inset from the screen corner into the bar area; the container respects the safe area (no
+            // ignoresSafeArea here), so the button/panel sit just below the status bar.
+            .padding(.top, 6)
+            .padding(.horizontal, 12)
             // The container fills the overlay and pins its single shape to `anchor`; the empty area around it
             // is transparent + non-interactive, so those taps reach the backdrop (dismiss) — never the grid.
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: anchor)
