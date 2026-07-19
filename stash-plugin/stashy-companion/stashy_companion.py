@@ -2594,6 +2594,136 @@ def run_thumbhash_map(stash, settings, rebuild=False):
     log_progress(1.0)
 
 
+# ----------------------------------------------------------------------------
+# Loudness map: measure each scene's integrated loudness (EBU R128, via ffmpeg loudnorm's analysis pass)
+# once and store it in served cache/loudness.json. The app folds a per-scene gain into playback volume so
+# scene-to-scene loudness is consistent — no re-encode, nothing baked into the file. Audio-only decode
+# (fast); incremental + resumable; zero scene writes.
+# ----------------------------------------------------------------------------
+def _loudness_path():
+    return os.path.join(CACHE_DIR, "loudness.json")
+
+
+@contextlib.contextmanager
+def _loudness_lock():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    lockf = open(_loudness_path() + ".lock", "w")
+    try:
+        if fcntl:
+            try:
+                fcntl.flock(lockf, fcntl.LOCK_EX)
+            except OSError:
+                pass
+        yield
+    finally:
+        try:
+            if fcntl:
+                fcntl.flock(lockf, fcntl.LOCK_UN)
+        finally:
+            lockf.close()
+
+
+def _load_loudness():
+    try:
+        with open(_loudness_path()) as fh:
+            scenes = (json.load(fh) or {}).get("scenes")
+        return scenes if isinstance(scenes, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_loudness_raw(report):
+    blob = {"generated": int(time.time()), "count": len(report), "scenes": report}
+    tmp = _loudness_path() + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(blob, fh)
+    os.replace(tmp, _loudness_path())
+
+
+def _parse_loudnorm(err):
+    """Extract (integrated_LUFS, true_peak_dBTP) from ffmpeg loudnorm's JSON summary (printed on stderr), or
+    None. The JSON is the LAST {...} block in the output."""
+    start = err.rfind("{")
+    end = err.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        data = json.loads(err[start:end + 1])
+        i = float(data.get("input_i"))
+        tp = float(data.get("input_tp"))
+    except (ValueError, TypeError):
+        return None
+    if i != i or i <= -70:   # NaN, or silent / no real audio
+        return None
+    return i, tp
+
+
+def _measure_loudness(src, ffmpeg):
+    """Integrated loudness + true peak via ffmpeg loudnorm's JSON analysis pass, audio-only (`-vn` → no video
+    decode, fast). Returns (i, tp) or None."""
+    cmd = [ffmpeg, "-nostdin", "-hide_banner", "-i", src, "-vn",
+           "-af", "loudnorm=print_format=json", "-f", "null", "-"]
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=1800)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return _parse_loudnorm(proc.stderr.decode("utf-8", "replace"))
+
+
+def run_loudness(stash, settings, rebuild=False):
+    """LIBRARY task: measure each scene's integrated loudness once → served cache/loudness.json, so the app can
+    keep loudness consistent scene-to-scene. Incremental (skips scenes already measured), resumable, zero
+    scene writes."""
+    ffmpeg = _bin("ffmpeg", settings.get("ffmpegPath"), hw=False)
+    report = _load_loudness()
+    processed = measured = skipped = failed = since_ckpt = 0
+    seen = set()
+    full_pass = False   # prune deleted scenes only after a clean complete pass (partial `seen` would gut it)
+    try:
+        for count, scenes in _iter_scenes(stash):
+            total = count or 0
+            for scene in scenes:
+                processed += 1
+                if total:
+                    log_progress(processed / float(total))
+                sid = str(scene["id"])
+                seen.add(sid)
+                if sid in report and not rebuild:
+                    skipped += 1
+                    continue
+                try:
+                    files = scene.get("files") or []
+                    src = files[0].get("path") if files else None
+                    if not src or not os.path.isfile(src):
+                        continue
+                    res = _measure_loudness(src, ffmpeg)
+                    if not res:
+                        failed += 1
+                        continue
+                    i, tp = res
+                    report[sid] = {"i": round(i, 2), "tp": round(tp, 2)}
+                    measured += 1
+                    since_ckpt += 1
+                except Exception as ex:
+                    failed += 1
+                    log_info("Loudness: scene {} skipped after {}: {}".format(sid, type(ex).__name__, ex))
+                if since_ckpt >= 25:
+                    since_ckpt = 0
+                    with _loudness_lock():
+                        _write_loudness_raw(report)
+        full_pass = True
+    finally:
+        if full_pass:
+            for sid in [s for s in report if s not in seen]:
+                del report[sid]
+        with _loudness_lock():
+            _write_loudness_raw(report)
+    log_info("Loudness map ({}) — {} scenes seen, {} newly measured, {} already done, {} failed. Served "
+             "loudness.json ({} scenes). Zero scene writes.".format(
+                 "rebuild" if rebuild else "incremental", processed, measured, skipped, failed, len(report)))
+    log_progress(1.0)
+
+
 def _scene_cover(stash, scene_id):
     """Fetch just one scene's cover URL field (a lighter query than SCENE_FIELDS — no files/ffprobe data)."""
     data = stash.call("query($id: ID!) { findScene(id: $id) { id paths { screenshot } } }",
@@ -2753,6 +2883,8 @@ def main():
             run_vmaf_map(stash, settings, rebuild=bool(args.get("rebuild")))
         elif mode == "thumbhash":
             run_thumbhash_map(stash, settings, rebuild=bool(args.get("rebuild")))
+        elif mode == "loudness":
+            run_loudness(stash, settings, rebuild=bool(args.get("rebuild")))
         elif mode == "tag":
             # Legacy task id (≤0.1.17 tagged scenes). Now a no-tag alias for the report — it writes the
             # served playability.json and makes zero scene writes, so an old invocation can't storm hooks.

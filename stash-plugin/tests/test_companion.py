@@ -571,5 +571,28 @@ class TestThumbhashSceneRemove(unittest.TestCase):
                 self.assertEqual(set(sc._load_thumbhash().keys()), {"1", "3"})
 
 
+class TestLoudnessParse(unittest.TestCase):
+    SAMPLE = (
+        "[Parsed_loudnorm_0 @ 0x55] \n"
+        '{\n\t"input_i" : "-19.43",\n\t"input_tp" : "-1.20",\n\t"input_lra" : "7.30",\n'
+        '\t"input_thresh" : "-29.61",\n\t"output_i" : "-24.00",\n\t"target_offset" : "0.15"\n}\n'
+    )
+
+    def test_parses_integrated_and_true_peak(self):
+        self.assertEqual(sc._parse_loudnorm(self.SAMPLE), (-19.43, -1.20))
+
+    def test_picks_last_json_block(self):
+        noisy = "some log {not json}\n" + self.SAMPLE
+        self.assertEqual(sc._parse_loudnorm(noisy), (-19.43, -1.20))
+
+    def test_silent_source_is_none(self):
+        silent = '{ "input_i" : "-70.00", "input_tp" : "-70.00" }'
+        self.assertIsNone(sc._parse_loudnorm(silent))
+
+    def test_garbage_is_none(self):
+        self.assertIsNone(sc._parse_loudnorm("no json here at all"))
+        self.assertIsNone(sc._parse_loudnorm('{ "input_i" : "oops" }'))
+
+
 if __name__ == "__main__":
     unittest.main()

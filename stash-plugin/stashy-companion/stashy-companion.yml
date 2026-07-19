@@ -10,7 +10,7 @@ description: >-
   phone model), ffprobe-based codec + HDR stats, and auto-tagging of
   direct-play-ready scenes — capabilities vanilla Stash lacks. Output is served
   back to the app over Stash's own HTTP with real Job progress.
-version: 0.3.6
+version: 0.3.7
 url: https://github.com/nphil/stashy/tree/main/stash-plugin
 exec:
   - python
@@ -161,6 +161,15 @@ tasks:
     description: "Recompute the ThumbHash placeholder for EVERY scene from scratch (e.g. after regenerating covers). Same as Compute ThumbHash Map but ignores the incremental cache. Still fast; zero scene writes."
     defaultArgs:
       mode: thumbhash
+      rebuild: true
+  - name: Compute Loudness Map
+    description: "Measure each scene's integrated loudness (EBU R128, via ffmpeg's loudnorm analysis) into served loudness.json, so the Stashy app can keep playback volume CONSISTENT scene-to-scene (it folds a per-scene gain into the volume — no re-encode, nothing changed in your files). Audio-only decode, so it's much faster than a transcode. INCREMENTAL (skips scenes already measured) and resumable. Zero scene writes."
+    defaultArgs:
+      mode: loudness
+  - name: Rebuild Loudness Map (full)
+    description: "Re-measure the loudness of EVERY scene from scratch (e.g. after replacing files). Same as Compute Loudness Map but ignores the incremental cache. Zero scene writes."
+    defaultArgs:
+      mode: loudness
       rebuild: true
   - name: Remove Stashy Tags (cleanup)
     description: "One-time cleanup for installs that ran plugin v0.1.16/0.1.17 (which tagged scenes): DELETE the Stashy:* tag definitions. Stash cascade-removes them from every scene with NO per-scene sceneUpdate, so this fires no Scene.Update hooks and queues NO Sync tasks. Your own tags are untouched. (A residual stashy_probe custom field, if present, is left as harmless dead data — clearing it would be a per-scene write = a Sync-task storm.)"
