@@ -17,6 +17,7 @@ final class ThumbHashStore {
     private let decoded = NSCache<NSString, UIImage>()       // id → decoded ≤32px placeholder image
     private let fileURL: URL
     private var persistTask: Task<Void, Never>?
+    private var lastRefresh: Date?
 
     private init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -59,6 +60,30 @@ final class ThumbHashStore {
         for (k, v) in incoming where hashes[k] == nil { hashes[k] = v; changed = true }
         if changed { schedulePersist() }
     }
+
+    /// Fetch the Companion plugin's served `thumbhashes.json` (written by the "Compute ThumbHash Map" task)
+    /// and merge it in — instant blur placeholders for scenes the user has never opened. Throttled to ~5 min
+    /// once it has succeeded; silent on any failure (plugin not installed / no map yet ⇒ retry next time,
+    /// behaviour unchanged). `merge` keeps on-device hashes, so the served map only fills the gaps. Mirrors
+    /// `PlayabilityStore.refresh`; the base64 decode is on-main but trivial (kilobytes, at most every 5 min).
+    func refresh(serverURL: String, apiKey: String, force: Bool = false) async {
+        if !force, let last = lastRefresh, Date().timeIntervalSince(last) < 300 { return }
+        guard var comps = URLComponents(string: "\(serverURL)/plugin/\(StashCompanion.pluginID)/assets/cache/thumbhashes.json") else { return }
+        if !apiKey.isEmpty { comps.queryItems = [URLQueryItem(name: "apikey", value: apiKey)] }
+        guard let url = comps.url else { return }
+        var req = URLRequest(url: url)
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        req.timeoutInterval = 15
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let payload = try? JSONDecoder().decode(Payload.self, from: data) else { return }
+        let incoming = payload.scenes.compactMapValues { Data(base64Encoded: $0) }
+        guard !incoming.isEmpty else { return }   // no served map yet — don't start the throttle, retry later
+        lastRefresh = Date()
+        merge(incoming)
+    }
+
+    private struct Payload: Decodable { let scenes: [String: String] }
 
     private func record(_ hash: Data, for id: String) {
         guard hashes[id] == nil else { return }
