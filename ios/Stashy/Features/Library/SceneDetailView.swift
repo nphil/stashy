@@ -235,7 +235,7 @@ struct SceneDetailView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(themeManager.current.surfaceColor, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .detailCardBackground(themeManager.current.surfaceColor)
         }
     }
 
