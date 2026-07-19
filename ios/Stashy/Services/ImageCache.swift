@@ -22,8 +22,10 @@ actor ImageCache {
 
     private let directory: URL
     private let session: URLSession
-    /// Soft cap for the on-disk thumbnail store; LRU-evicted past this.
-    private let maxBytes = 200 * 1024 * 1024
+    /// Soft cap for the on-disk thumbnail store; LRU-evicted past this. Sized to hold a full-library
+    /// thumbnail pre-cache (see `ThumbnailPrefetcher`) — downsampled thumbs are only a few KB each, so this
+    /// fits tens of thousands. Normal browsing never approaches it; it only binds when pre-caching.
+    private let maxBytes = 800 * 1024 * 1024
     /// Running total of on-disk bytes, tracked incrementally so a write doesn't re-scan the whole
     /// directory each time (that scan on every cached thumbnail added up during fast scrolling).
     private var diskBytes = 0

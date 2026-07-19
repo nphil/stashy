@@ -283,12 +283,28 @@ struct SettingsView: View {
                         "Cached previews & images",
                         value: ByteCountFormatter.string(fromByteCount: Int64(cacheSize), countStyle: .file)
                     )
+                    if ThumbnailPrefetcher.shared.isRunning {
+                        HStack {
+                            ProgressView(value: ThumbnailPrefetcher.shared.progress)
+                            Text("\(ThumbnailPrefetcher.shared.done)/\(ThumbnailPrefetcher.shared.total)")
+                                .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                            Button("Stop") { ThumbnailPrefetcher.shared.cancel() }
+                                .buttonStyle(.borderless)
+                        }
+                    } else {
+                        Button("Cache All Thumbnails") {
+                            if let client = appState.client {
+                                ThumbnailPrefetcher.shared.start(client: client, imageCache: imageCache)
+                            }
+                        }
+                        .disabled(appState.client == nil)
+                    }
                     Button("Clear Cache", role: .destructive) { clearCache() }
                         .disabled(isClearingCache || cacheSize == 0)
                 } header: {
                     Text("Cache")
                 } footer: {
-                    Text("Preview clips and images are cached on this device for smooth, instant playback. Clearing frees the space; it rebuilds automatically as you browse.")
+                    Text("Preview clips and images are cached on this device for smooth, instant playback. Cache All Thumbnails fetches every scene thumbnail for offline browsing and instant blur placeholders — it runs gently in the background (one at a time). Clearing frees the space; it rebuilds automatically as you browse.")
                 }
 
                 // Developer / diagnostics section
