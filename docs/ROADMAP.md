@@ -200,6 +200,18 @@ nothing to switch between.
   slow playback (setting `AVPlayer` rate < 1) doesn't create frames — it just holds each real frame on
   screen longer, so a 30fps file at 0.25× shows ~7.5 distinct fps = judder. Fix = **synthesise the
   in-between frames** so slowed footage looks like true high-fps slow motion.
+  - **🔴 URGENT BUG (owner-reported 2026-07-19 — fix right after the jobs-panel feature): enabling AI
+    slow-mo DEGRADES the quality of the video being played.** Turning on the `aiSlowMoEnabled` beta visibly
+    lowers picture quality for the whole time slow-mo is engaged — and it hits the **real** frames, not just
+    the synthesised ones. **Likely cause:** while engaged, the native player surface is covered by the Metal
+    overlay `Features/Player/SlowMoRenderView.swift` (MTKView + CIContext) which presents EVERY frame (real +
+    synth), so any fidelity loss in that path degrades the whole picture. Suspects: (1) it renders at the
+    interpolation cap — `VTFrameProcessor` is capped ≤1280×720, so a 1080p/4K source shown through the
+    overlay is downscaled to 720p; (2) the CIContext / pixel-format path (the 420v biplanar-YUV conversion,
+    colour/HDR handling) is lower fidelity than the direct `AVPlayerLayer`. **Fix direction:** present the
+    **real** frames at native resolution/colour (only the *synthesised* in-betweens are bound by the model's
+    720p cap), or keep the native layer for real frames and overlay only the synths, or render the overlay
+    at source resolution with correct colour. Test a 1080p+ source, slow-mo on vs off, on device.
   - **Native tool (chosen): `VTFrameProcessor`** — VideoToolbox's ML/Neural-Engine frame processor, new in
     **iOS 26** (the app's target) and supported on the owner's A19 iPhone 17 Pro. No Core ML model to ship,
     no licensing. Two relevant effects: (a) **Frame Rate Conversion** (quality) — `VTFrameRateConversion
