@@ -130,6 +130,33 @@ nothing to switch between.
     too high, **use the vertical gap between the progress bar and the bottom row**, keep the transport
     cluster centred on the video, and decide **elapsed/duration placement** (keep both in the bottom row vs
     move elapsed left / remaining right of the scrubber). Needs on-device visual iteration.
+- **Filmstrip timeline + scene-aware navigation (owner-requested 2026-07-19 — queue right after the
+  Netflix player rework).** A thin, always-visible strip of thumbnails spanning the whole scene (a visual
+  table-of-contents) with tap/drag-to-seek, plus **shot-boundary detection** powering "skip to next shot"
+  and making the strip show **one frame per real shot** instead of evenly-spaced near-duplicates. Do the
+  work **server-side / from server-served data** so it works for **BOTH streaming and downloads** (same
+  pattern as the loudness / thumbhash / vmaf maps — the on-device routes are just the offline safety net):
+  - **Filmstrip** — cheapest route **reuses Stash's existing sprite sheet**: the app already fetches
+    `spriteURL`/`vttURL` for stream *and* download, and the VTT maps each tile → its timestamp for
+    tap-to-seek, so it needs **zero generation** and works while streaming. Offline fallback =
+    `AVAssetImageGenerator` (already wired as the scrub-frame provider); a plugin `thumbnail,scale,tile`
+    task can generate strips for scenes Stash never sprited.
+  - **Scene detect** — a plugin task runs `-vf "scale=320:-1,select='gt(scene,0.4)',metadata=print" -an`
+    (downscaled + audio-off = fast) → served `scenes.json` of cut timestamps the app applies to any
+    playback. Threshold tunable (~0.3–0.4); hard cuts reliable, dissolves/fades missed. `select`/`scene`
+    is LGPL (present in BOTH the plugin ffmpeg and the on-device videoengine build).
+  - **Representative-frame covers (sibling)** — ffmpeg's `thumbnail` filter picks the most informative
+    frame in a window (skips black/blur/transition frames) → better auto-covers AND better strip frames.
+  - **On-device ffmpeg (stashy-videoengine) capability audit — recorded 2026-07-19** (so we don't re-derive
+    it). LGPL build, FFmpeg **8.1.2** + VideoToolbox, ships the FULL non-GPL set (all LGPL filters/decoders
+    + libass, libdav1d, libzimg). **Available on-device:** loudnorm/dynaudnorm/ebur128, select/scene,
+    silencedetect/blackdetect/freezedetect, thumbnail, subtitles (+ pgssub/dvdsub/dvbsub image-sub
+    decoders → burn-in), tonemap+zscale (HDR→SDR), overlay/drawtext, atempo/aresample/pan, dav1d (AV1
+    **decode**), h264/hevc_videotoolbox (HW **encode**), yadif/scale/transpose_videotoolbox (HW). **NOT
+    available (GPL or unbuilt):** **cropdetect + blackframe (GPL)** — so **on-device black-bar detection
+    must use a pixel-scan or the server plugin's BtbN cropdetect, NEVER `--enable-gpl` (taints the app)**;
+    also no x264/x265, no AV1/VP9/WebP encode. The **server** plugin ffmpeg (BtbN gpl) has everything incl.
+    cropdetect + libvmaf.
 - **Custom WYSIWYG player-control layout editor (Settings) — owner-requested 2026-07-04.** A Settings
   entry opens a "custom layout" mode where the user hand-places the on-video controls, with **separate
   layouts for landscape (fullscreen) and portrait (inline)**. The default ships as the Netflix-style
