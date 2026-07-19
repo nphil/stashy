@@ -7,9 +7,9 @@ struct PerformersView: View {
     @Environment(\.imageCache) private var imageCache
     @State private var loader = PaginatedLoader<Performer>(pageSize: 30)
     @State private var query = PerformerQuery()
-    // Custom top-bar search (nav bar hidden) — glass magnifier that expands into a field. Debounced below.
+    // Native minimized search (magnifier → field), top-right. Debounced into query.search below.
     @State private var searchText = ""
-    @State private var searchExpanded = false
+    @State private var searchPresented = false
     @State private var filterExpanded = false
     // The jobs status dropdown (title button, top-leading). Mutually exclusive with the filter dropdown.
     @State private var jobsExpanded = false
@@ -50,27 +50,43 @@ struct PerformersView: View {
             ZStack(alignment: .top) {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    // Reserve space so the grid starts below the floating glass bar.
-                    .safeAreaInset(edge: .top) { Color.clear.frame(height: 50) }
-                // Custom glass top bar (jobs dropdown / search / filter) — a stable ZStack sibling of the
-                // churning `content`; the dropdowns' own dim backdrop catches taps (no `dismissesPopover`).
-                topChrome
+                    // Swipe/tap the list to close either dropdown AND scroll in one motion (no modal backdrop).
+                    .dismissesPopover($filterExpanded)
+                    .dismissesPopover($jobsExpanded)
+                // Stable ZStack siblings of the churning `content`; exist only while open, so glass never
+                // samples the scrolling grid per-frame. Jobs = top-leading (under the title), filter = trailing.
+                LibraryDropdownPanel(isPresented: $jobsExpanded, anchor: .topLeading) {
+                    JobsPanel(showActions: false)
+                }
+                LibraryDropdownPanel(isPresented: $filterExpanded, anchor: .topTrailing) {
+                    PerformerFilterPanel(query: $query)
+                }
             }
-            // Only one dropdown / the search field open at a time.
+            // Only one dropdown open at a time.
             .onChange(of: filterExpanded) { _, open in if open { jobsExpanded = false } }
             .onChange(of: jobsExpanded) { _, open in if open { filterExpanded = false } }
-            .onChange(of: searchExpanded) { _, open in if open { jobsExpanded = false; filterExpanded = false } }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .themedBackground()
             // Briefly lock scrolling right after a zoom-back so the iOS 26 source-card freeze is never seen.
             .zoomReturnScrollGate(depth: path.count)
-            // The nav bar is replaced by the custom glass top bar; hide it (pushed detail keeps its own).
-            .toolbar(.hidden, for: .navigationBar)
+            .navigationBarTitleDisplayMode(.inline)
+            // Native minimized search (magnifier → field), pinned top-right; debounced below.
+            .searchable(text: $searchText, isPresented: $searchPresented, prompt: "Search performers")
+            .searchToolbarBehavior(.minimize)
             .task(id: searchText) {
                 guard searchText != query.search else { return }
                 try? await Task.sleep(for: .milliseconds(350))
                 guard !Task.isCancelled else { return }
                 query.search = searchText
+            }
+            .toolbar {
+                // Title (top-left) = the jobs dropdown button.
+                ToolbarItem(placement: .topBarLeading) { titleJobsButton }
+                // Search magnifier (top-right), then the funnel.
+                DefaultToolbarItem(kind: .search, placement: .topBarTrailing)
+                ToolbarItem(placement: .topBarTrailing) {
+                    FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
+                }
             }
             .navigationDestination(for: Route.self) { route in
                 // Pair the zoom with the grid cell's matchedTransitionSource for performer detail; a scene
@@ -103,46 +119,23 @@ struct PerformersView: View {
         .libraryEditErrorToast(edits)
     }
 
-    // MARK: - Custom glass top bar (replaces the nav bar)
+    // MARK: - Top-bar
 
-    /// Jobs dropdown (top-left, status only — no action buttons on Performers), search, and the filter
-    /// dropdown (top-right). Same custom overlay as Scenes; see the note there.
-    @ViewBuilder
-    private var topChrome: some View {
-        ZStack(alignment: .top) {
-            if !searchExpanded {
-                GlassMorphDropdown(expanded: $jobsExpanded, anchor: .topLeading) {
-                    morphTitleButton
-                } panel: {
-                    JobsPanel(showActions: false)
-                }
-                GlassMorphDropdown(expanded: $filterExpanded, anchor: .topTrailing) {
-                    funnelLabel
-                } panel: {
-                    PerformerFilterPanel(query: $query)
-                }
+    /// The nav-bar title, as a button that drops the jobs panel down (top-leading). Lives in the SYSTEM nav
+    /// bar so scrolling stays buttery and the bar collapses natively.
+    private var titleJobsButton: some View {
+        Button {
+            jobsExpanded.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Text("Performers").font(.headline)
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.bold))
+                    .rotationEffect(.degrees(jobsExpanded ? 180 : 0))
             }
-            LibrarySearchField(text: $searchText, expanded: $searchExpanded, prompt: "Search performers")
+            .foregroundStyle(jobsExpanded ? themeManager.current.accentColor : themeManager.current.foregroundColor)
+            .animation(.snappy(duration: 0.28), value: jobsExpanded)
         }
-    }
-
-    /// The glass title button (top-left) that morphs into the jobs panel.
-    private var morphTitleButton: some View {
-        HStack(spacing: 6) {
-            Text("Performers").font(.title3.weight(.semibold))
-            Image(systemName: "chevron.down").font(.caption.weight(.bold))
-        }
-        .foregroundStyle(themeManager.current.foregroundColor)
-        .padding(.horizontal, 16)
-        .frame(height: 38)
-    }
-
-    /// The filter-funnel label (top-right), tinted when a filter is active.
-    private var funnelLabel: some View {
-        Image(systemName: "line.3.horizontal.decrease")
-            .font(.title3.weight(.semibold))
-            .foregroundStyle(filterActive ? themeManager.current.accentColor : themeManager.current.foregroundColor)
-            .frame(width: 34, height: 34)
     }
 
     @ViewBuilder

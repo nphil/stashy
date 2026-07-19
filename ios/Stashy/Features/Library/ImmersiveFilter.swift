@@ -1,9 +1,39 @@
 import SwiftUI
 
-// NOTE: `FilterFunnelButton`, `FilterPopoverAnchor`, and the `dismissesPopover` View extension used to live
-// here — the nav-bar funnel toggle + the custom filter dropdown + its scroll/tap-to-dismiss helper. They were
-// replaced by `DesignSystem/GlassMorphDropdown` (Liquid-Glass morph + a tap-catching backdrop) when Scenes &
-// Performers moved to the custom glass top bar, and are gone. Git history has them if ever needed.
+/// Funnel toggle button for the nav bar. It only flips `expanded` — the panel is presented from a stable
+/// sibling of the list content (`LibraryDropdownPanel`), NOT from this toolbar item, because a panel hosted
+/// on a toolbar item is torn down and re-presented whenever the toolbar rebuilds (which happens on every
+/// query change, since `isActive` changes) — the pop-down/pop-up flicker.
+struct FilterFunnelButton: View {
+    @Binding var expanded: Bool
+    var isActive: Bool
+    @Environment(ThemeManager.self) private var themeManager
+
+    var body: some View {
+        Button {
+            expanded.toggle()
+        } label: {
+            Image(systemName: "line.3.horizontal.decrease")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(isActive ? themeManager.current.accentColor : themeManager.current.foregroundColor)
+        }
+    }
+}
+
+extension View {
+    /// Dismiss an open dropdown when the user scrolls OR taps the list behind it. Applied to the list content
+    /// so a swipe both scrolls the list AND closes the panel in one seamless gesture (there's no blocking
+    /// backdrop over the list). No-ops while the panel is closed. Works for scenes + performers.
+    func dismissesPopover(_ isPresented: Binding<Bool>) -> some View {
+        self
+            .onScrollPhaseChange { _, phase in
+                if phase != .idle, isPresented.wrappedValue { isPresented.wrappedValue = false }
+            }
+            .simultaneousGesture(TapGesture().onEnded {
+                if isPresented.wrappedValue { isPresented.wrappedValue = false }
+            })
+    }
+}
 
 /// Sort + inline tag filter panel. Themed, semi-transparent; floats over the list so the content
 /// scrolls behind it. Editing updates the bound query in real time.

@@ -364,6 +364,16 @@ struct StashClient: Sendable {
         let resp: Response = try await query(gql, variables: ScanMetadataVariables(input: ScanMetadataInput()))
         return resp.metadataScan
     }
+
+    /// Ask Stash to stop a running/queued job (the jobs panel's cancel button). `stopJob(job_id:)` returns
+    /// true when the stop was accepted; the job then transitions to STOPPING → CANCELLED in the queue.
+    @discardableResult
+    func stopJob(id: String) async throws -> Bool {
+        struct Response: Decodable, Sendable { let stopJob: Bool }
+        let gql = "mutation StopJob($job_id: ID!) { stopJob(job_id: $job_id) }"
+        let resp: Response = try await query(gql, variables: StopJobVariables(job_id: id))
+        return resp.stopJob
+    }
 }
 
 /// One entry in Stash's job queue. `progress` is 0…1 (nil = indeterminate); `status` is one of
@@ -378,6 +388,7 @@ struct JobInfo: Decodable, Sendable, Identifiable, Equatable {
 
 private struct ScanMetadataInput: Encodable, Sendable {}   // empty = scan all library paths, server defaults
 private struct ScanMetadataVariables: Encodable, Sendable { let input: ScanMetadataInput }
+private struct StopJobVariables: Encodable, Sendable { let job_id: String }
 
 // MARK: - Scene query model
 

@@ -86,4 +86,13 @@ final class JobMonitor {
         _ = try? await StashCompanion(client: client).run(task, args: [:])
         await refreshNow()
     }
+
+    /// Cancel the currently-running job (the panel's stop button). Optimistically drops it from the snapshot
+    /// so the UI updates instantly, then refreshes from the server (it becomes STOPPING → CANCELLED).
+    func cancelRunningJob() async {
+        guard let client, let job = running else { return }
+        running = nil
+        _ = try? await client.stopJob(id: job.id)
+        await refreshNow()
+    }
 }

@@ -13,10 +13,10 @@ struct ScenesView: View {
     @State private var path: [Route] = []
     @State private var previewPresenter = ScenePreviewPresenter()
     @State private var filterExpanded = false
-    // Custom top-bar search (nav bar is hidden): a glass magnifier that expands into a field. Debounced
-    // into query.search. `searchExpanded` drives the magnifier ⇄ field morph in `LibrarySearchField`.
+    // Native list search: a minimized toolbar magnifier (top-right) that expands into the field on tap.
+    // Debounced into query.search.
     @State private var searchText = ""
-    @State private var searchExpanded = false
+    @State private var searchPresented = false
     @State private var reloadDebounce: Task<Void, Never>?
     // Bulk download (additive): fetch the whole filtered set, then pick one quality for all.
     @State private var bulkSheet = false
@@ -221,35 +221,7 @@ struct ScenesView: View {
         }
     }
 
-    // MARK: - Custom glass top bar (replaces the nav bar)
-
-    /// The whole top-bar overlay: in selection mode a Cancel/Download bar; otherwise the jobs dropdown
-    /// (top-left, morphs its title button into the jobs panel), the filter dropdown (top-right, morphs the
-    /// funnel into the filter panel), and the search magnifier/field. Each dropdown/field is a full-screen
-    /// sibling that positions itself; the grid content is inset below the bar via a `safeAreaInset`.
-    @ViewBuilder
-    private var topChrome: some View {
-        if selectionMode {
-            selectionBar
-        } else {
-            ZStack(alignment: .top) {
-                // Hidden while searching so the expanded field spans the bar without overlapping them.
-                if !searchExpanded {
-                    GlassMorphDropdown(expanded: $jobsExpanded, anchor: .topLeading) {
-                        morphTitleButton
-                    } panel: {
-                        JobsPanel(showActions: !query.downloadedOnly)
-                    }
-                    GlassMorphDropdown(expanded: $filterExpanded, anchor: .topTrailing) {
-                        funnelLabel
-                    } panel: {
-                        sceneFilterPanel
-                    }
-                }
-                LibrarySearchField(text: $searchText, expanded: $searchExpanded, prompt: "Search scenes")
-            }
-        }
-    }
+    // MARK: - Top-bar panels
 
     /// The filter panel with the old ⋯ actions (Download all / Select) folded in. Explicitly-typed optionals
     /// avoid a ternary-with-closure inference pitfall; the actions are suppressed in downloaded-only (nothing
@@ -263,47 +235,22 @@ struct ScenesView: View {
                                 bulkLoading: bulkLoading)
     }
 
-    /// The glass title button (top-left) that morphs into the jobs panel. Just the label — `GlassMorphDropdown`
-    /// wraps it in the button + glass capsule.
-    private var morphTitleButton: some View {
-        HStack(spacing: 6) {
-            Text("Scenes").font(.title3.weight(.semibold))
-            Image(systemName: "chevron.down").font(.caption.weight(.bold))
-        }
-        .foregroundStyle(themeManager.current.foregroundColor)
-        .padding(.horizontal, 16)
-        .frame(height: 38)
-    }
-
-    /// The filter-funnel label (top-right), tinted when a filter is active.
-    private var funnelLabel: some View {
-        Image(systemName: "line.3.horizontal.decrease")
-            .font(.title3.weight(.semibold))
-            .foregroundStyle(filterActive ? themeManager.current.accentColor : themeManager.current.foregroundColor)
-            .frame(width: 34, height: 34)
-    }
-
-    /// The multi-select action bar shown in place of the top chrome while selecting.
-    private var selectionBar: some View {
-        HStack(spacing: 12) {
-            Button("Cancel") { exitSelection() }
-            Spacer(minLength: 8)
-            Button { startSelectionDownload() } label: {
-                Text("Download (\(selectedIDs.count))")
-                    .fontWeight(.semibold)
-                    .contentTransition(.numericText())   // count rolls as scenes are selected
+    /// The nav-bar title, as a button that drops the jobs panel down (top-leading). A chevron marks it
+    /// tappable; it tints to the accent while the panel is open. Lives in the SYSTEM nav bar, so scrolling
+    /// stays buttery (no custom glass over the grid) and the bar collapses natively.
+    private var titleJobsButton: some View {
+        Button {
+            jobsExpanded.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Text("Scenes").font(.headline)
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.bold))
+                    .rotationEffect(.degrees(jobsExpanded ? 180 : 0))
             }
-            .disabled(selectedIDs.isEmpty)
-            .animation(.snappy, value: selectedIDs.count)
+            .foregroundStyle(jobsExpanded ? themeManager.current.accentColor : themeManager.current.foregroundColor)
+            .animation(.snappy(duration: 0.28), value: jobsExpanded)
         }
-        .font(.body)
-        .foregroundStyle(themeManager.current.foregroundColor)
-        .padding(.horizontal, 16)
-        .frame(height: 40)
-        .glassEffect(.regular, in: Capsule())
-        .padding(.top, 6)
-        .padding(.horizontal, 12)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     var body: some View {
@@ -311,31 +258,63 @@ struct ScenesView: View {
             ZStack(alignment: .top) {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    // Reserve space so the grid starts below the floating glass bar (the bar is an overlay,
-                    // not a nav bar, so it wouldn't otherwise push content down).
-                    .safeAreaInset(edge: .top) { Color.clear.frame(height: 50) }
-                // Custom glass top bar (jobs dropdown / search / filter), a stable ZStack sibling of the
-                // churning `content` — it survives `content`'s branch flips during reloads, the reason the
-                // old filter anchor never lived on the reloading subtree. The dropdowns' own dim backdrop now
-                // catches taps (fixing the old tap-through-to-scene-cards bug), so no `dismissesPopover`.
-                topChrome
+                    // Swipe/tap the list to close either dropdown AND scroll in one motion (no modal backdrop).
+                    .dismissesPopover($filterExpanded)
+                    .dismissesPopover($jobsExpanded)
+                // Both dropdowns are stable ZStack siblings of the churning `content` (they survive its
+                // reload branch-flips — the FilterPopoverAnchor landmine) and exist only while open, so glass
+                // never samples the scrolling grid per-frame. Jobs = top-leading (under the title button),
+                // filter = top-trailing (under the funnel).
+                LibraryDropdownPanel(isPresented: $jobsExpanded, anchor: .topLeading) {
+                    JobsPanel(showActions: !query.downloadedOnly)
+                }
+                LibraryDropdownPanel(isPresented: $filterExpanded, anchor: .topTrailing) {
+                    sceneFilterPanel
+                }
             }
-            // Only one dropdown / the search field open at a time.
+            // Only one dropdown open at a time.
             .onChange(of: filterExpanded) { _, open in if open { jobsExpanded = false } }
             .onChange(of: jobsExpanded) { _, open in if open { filterExpanded = false } }
-            .onChange(of: searchExpanded) { _, open in if open { jobsExpanded = false; filterExpanded = false } }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .themedBackground()
             // Briefly lock scrolling right after a zoom-back so the iOS 26 source-card freeze is never seen.
             .zoomReturnScrollGate(depth: path.count)
-            // The nav bar is replaced by the custom glass top bar; hide it (only on this root — pushed
-            // destinations keep their own nav bar + back button).
-            .toolbar(.hidden, for: .navigationBar)
+            .navigationBarTitleDisplayMode(.inline)
+            // Native minimized search (magnifier → field), pinned top-right; debounced below.
+            .searchable(text: $searchText, isPresented: $searchPresented, prompt: "Search scenes")
+            .searchToolbarBehavior(.minimize)
             .task(id: searchText) {
                 guard searchText != query.search else { return }
                 try? await Task.sleep(for: .milliseconds(350))   // debounce; cancelled by the next keystroke
                 guard !Task.isCancelled else { return }
                 query.search = searchText                        // triggers the existing query reload
+            }
+            // Stable ToolbarItem identities with conditional CONTENT — swapping whole ToolbarItems behind an
+            // if/else makes SwiftUI's toolbar builder drop them (the "button vanished" bug).
+            .toolbar {
+                // Title (top-left) = the jobs dropdown button; Cancel replaces it while selecting.
+                ToolbarItem(placement: .topBarLeading) {
+                    if selectionMode {
+                        Button("Cancel") { exitSelection() }
+                    } else {
+                        titleJobsButton
+                    }
+                }
+                // Search magnifier (top-right), then the funnel / selection-download button.
+                DefaultToolbarItem(kind: .search, placement: .topBarTrailing)
+                ToolbarItem(placement: .topBarTrailing) {
+                    if selectionMode {
+                        Button { startSelectionDownload() } label: {
+                            Text("Download (\(selectedIDs.count))")
+                                .fontWeight(.semibold)
+                                .contentTransition(.numericText())   // count rolls as scenes are selected
+                        }
+                        .disabled(selectedIDs.isEmpty)
+                        .animation(.snappy, value: selectedIDs.count)
+                    } else {
+                        FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
+                    }
+                }
             }
             .sheet(isPresented: $bulkSheet) {
                 BulkDownloadSheet(sceneCount: bulkScenes.count) { opts in

@@ -47,11 +47,25 @@ struct JobsPanel: View {
                 .foregroundStyle(.secondary)
         } else if let job = monitor.running {
             VStack(alignment: .leading, spacing: 7) {
-                Text(title(job))
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(themeManager.current.foregroundColor)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)   // wrap cleanly, never truncate mid-word
+                HStack(alignment: .top, spacing: 8) {
+                    Text(title(job))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(themeManager.current.foregroundColor)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)   // wrap cleanly, never truncate mid-word
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    // Cancel the running job — a clean stop glyph beside the title.
+                    Button {
+                        Task { await monitor.cancelRunningJob() }
+                    } label: {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.title3)
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(.red)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(job.status == "STOPPING")   // already stopping
+                }
                 if let p = monitor.progress {
                     ProgressView(value: p)
                         .tint(themeManager.current.accentColor)
