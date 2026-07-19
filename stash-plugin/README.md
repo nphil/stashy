@@ -10,14 +10,16 @@ direct-play first, minimal server load, privacy*:
 | **Transcode for iPhone** | Turns one scene into an iPhone-native MP4 — **HEVC via `hevc_nvenc`** (NVIDIA GPU, e.g. Tesla P40), CPU `libx265` fallback, or optional CPU **AV1** (SVT-AV1). Tagged `hvc1` + `+faststart` so AVPlayer direct-plays it. Quality is set by **VMAF perceptual targeting** (below), not a fixed CRF. | Stash's own transcoder is hard-coded to **H.264 / libx264** — no HEVC, no AV1, no per-request quality. |
 | **VMAF quality targeting** | Picks the encoder's CRF/CQ by **binary-searching short samples to hit a target VMAF** (Netflix's perceptual metric), measured with the **phone-viewing model** — the smallest file that still looks good to the eye on a phone. Default on; falls back to a fixed preset if libvmaf is missing. | Stash has no perceptual-quality control at all — quality is whatever the server config's H.264 CRF happens to be. |
 | **VMAF map (library)** | A scheduled task pre-computes each scene's VMAF-optimal CRF (per resolution) once and caches just the **number + curve** (kilobytes, never the video). Downloads then skip the ~30s live analysis and are instant + VMAF-tuned; one search serves High/Balanced/Small via the curve. | — |
+| **ThumbHash map (library)** | **Compute ThumbHash Map** pre-computes a compact ~25-byte blurry-placeholder ([ThumbHash](https://evanw.github.io/thumbhash/)) for every scene's cover into one served file, `cache/thumbhashes.json` (kilobytes total). The app fetches it once and shows an **instant blurry preview of scenes you've never opened** — so a fast flick never flashes blank cards before the real thumbnail loads. Incremental + resumable; no GPU (a light ffmpeg decode per cover). **Zero scene writes.** | — |
 | **Library Codec Report** | ffprobes the library (incremental — only new scenes; hooks keep it current on scan) and writes ONE served report, `cache/playability.json` (codec / pixel format / **HDR transfer** / 10-bit / direct-play tier), that the app fetches for smarter routing and its playability filter, plus an aggregate summary to the job log. **Zero scene writes** — no custom_fields, no Scene.Update hooks, no Sync tasks. | Stash's GraphQL `VideoFile` exposes only codec/res/bitrate — never profile, pix_fmt, or HDR. |
 | **Playability filter (app)** | The served report powers the app's Any / Direct-play / Needs-transcode scene filter and smarter playback routing — no tags involved. (Installs that ran plugin ≤0.1.17 — which DID tag scenes — get a one-time **Remove Stashy Tags (cleanup)** task that deletes the `Stashy:*` tag definitions via cascade, no per-scene writes.) | — |
 | **Purge Transcode Cache** | Deletes the companion cache, or trims it to a size cap (LRU). | — |
 
 Other tasks: **Delete Cache File** (per-scene; the app invokes it automatically the moment a
 server-transcoded download finishes, so served proxies don't accumulate — added v0.1.21); **Rebuild
-Codec Report (full)** / **Rebuild VMAF Map (full)** (force re-analysis from scratch — e.g. files changed
-in place or targets changed — ignoring the incremental cache); **Install / Switch ffmpeg** and
+Codec Report (full)** / **Rebuild VMAF Map (full)** / **Rebuild ThumbHash Map (full)** (force
+re-analysis from scratch — e.g. files changed in place or targets changed — ignoring the incremental
+cache); **Install / Switch ffmpeg** and
 **Self-Test** (see "Managing ffmpeg" below); **Remove Stashy Tags (cleanup)** (one-time migration for
 ≤0.1.17 installs, above).
 

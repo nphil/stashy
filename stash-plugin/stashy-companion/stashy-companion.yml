@@ -10,7 +10,7 @@ description: >-
   phone model), ffprobe-based codec + HDR stats, and auto-tagging of
   direct-play-ready scenes — capabilities vanilla Stash lacks. Output is served
   back to the app over Stash's own HTTP with real Job progress.
-version: 0.3.4
+version: 0.3.5
 url: https://github.com/nphil/stashy/tree/main/stash-plugin
 exec:
   - python
@@ -65,6 +65,10 @@ settings:
   vmafMapBudgetMin:
     displayName: VMAF map time budget per run (min)
     description: "Optional cap (minutes) on how long each 'Compute VMAF Map' run works before stopping — it's resumable, so a nightly scheduled run can chip through the library in chunks. 0 = no limit (run to completion). Useful to keep the GPU free during the day."
+    type: NUMBER
+  thumbhashBudgetMin:
+    displayName: ThumbHash map time budget per run (min)
+    description: "Optional cap (minutes) on how long each 'Compute ThumbHash Map' run works before stopping — it's resumable, so it can chip through a big library in chunks. 0 = no limit (run to completion). ThumbHashing is fast (no GPU), so most libraries finish in one pass; this is only for very large collections."
     type: NUMBER
   cacheCapGB:
     displayName: Transcode cache cap (GB)
@@ -141,6 +145,15 @@ tasks:
     description: "Recompute the VMAF CRF map for EVERY scene from scratch (e.g. after changing the target VMAF or replacing files). Same as Compute VMAF Map but ignores the incremental cache. GPU-heavy — run overnight."
     defaultArgs:
       mode: vmafmap
+      rebuild: true
+  - name: Compute ThumbHash Map
+    description: "Pre-compute a tiny ThumbHash (a ~25-byte blurry-placeholder) for every scene's cover into served thumbhashes.json, so the Stashy app can show an INSTANT blurry preview of scenes you've never opened (no blank cards on a fast flick) before the real thumbnail loads. Kilobytes for the whole library; INCREMENTAL (skips scenes already hashed) and resumable; set a 'ThumbHash map time budget' to chip through a huge library. No GPU — fast (a light ffmpeg decode per cover). Zero scene writes."
+    defaultArgs:
+      mode: thumbhash
+  - name: Rebuild ThumbHash Map (full)
+    description: "Recompute the ThumbHash placeholder for EVERY scene from scratch (e.g. after regenerating covers). Same as Compute ThumbHash Map but ignores the incremental cache. Still fast; zero scene writes."
+    defaultArgs:
+      mode: thumbhash
       rebuild: true
   - name: Remove Stashy Tags (cleanup)
     description: "One-time cleanup for installs that ran plugin v0.1.16/0.1.17 (which tagged scenes): DELETE the Stashy:* tag definitions. Stash cascade-removes them from every scene with NO per-scene sceneUpdate, so this fires no Scene.Update hooks and queues NO Sync tasks. Your own tags are untouched. (A residual stashy_probe custom field, if present, is left as harmless dead data — clearing it would be a per-scene write = a Sync-task storm.)"

@@ -40,14 +40,17 @@ Progress + logs are emitted on stderr in Stash's control format and surface as
 live `Job.progress` / log lines the app reads via findJob / loggingSubscribe.
 """
 
+import base64
 import contextlib
 import json
+import math
 import os
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 
 try:
     import fcntl   # POSIX advisory file lock (the plugin runs on the Linux Stash host)
@@ -2229,6 +2232,368 @@ def run_vmaf_map(stash, settings, rebuild=False):
     log_progress(1.0)
 
 
+# ----------------------------------------------------------------------------
+# ThumbHash placeholder map: a scheduled/manual LIBRARY task computes a compact ~25-byte ThumbHash
+# (evanw/thumbhash, MIT) for every scene's cover and stores it (base64) in the served
+# cache/thumbhashes.json. The app fetches this once and shows an INSTANT blurry placeholder for a scene
+# it has never opened — so a fast flick never flashes blank cards before the real thumbnail loads.
+# Kilobytes for the whole library; zero scene writes; incremental + resumable like the VMAF/codec maps.
+#
+# The encoder is a pure-stdlib port of ios/Stashy/Services/ThumbHash.swift (rgbaToThumbHash) — same byte
+# format, so the app's Swift decoder renders these hashes. Validated by round-trip in tests/.
+# ----------------------------------------------------------------------------
+THUMBHASH_EDGE = 100   # long-edge cap fed to the encoder (encoding above 100px is slow with no benefit)
+
+
+def _th_round(x):
+    # Ports thumbhash's round() (round-half-AWAY-from-zero). Every call-site arg below is >= 0, so
+    # floor(x + 0.5) matches it exactly. Python's built-in round() is banker's rounding — do NOT use it.
+    return int(math.floor(x + 0.5))
+
+
+def rgba_to_thumbhash(w, h, rgba):
+    """Pure-stdlib port of evanw/thumbhash rgbaToThumbHash (MIT). Returns the ~25-byte hash as bytes.
+    `rgba` is w*h*4 bytes, RGBA8 straight-alpha. Byte-format-identical to ThumbHash.swift."""
+    assert w <= 100 and h <= 100
+    assert len(rgba) == w * h * 4
+    n = w * h
+
+    # Average color (alpha-weighted).
+    avg_r = avg_g = avg_b = avg_a = 0.0
+    for i in range(n):
+        j = i * 4
+        alpha = rgba[j + 3] / 255.0
+        avg_r += alpha / 255.0 * rgba[j + 0]
+        avg_g += alpha / 255.0 * rgba[j + 1]
+        avg_b += alpha / 255.0 * rgba[j + 2]
+        avg_a += alpha
+    if avg_a > 0:
+        avg_r /= avg_a
+        avg_g /= avg_a
+        avg_b /= avg_a
+
+    has_alpha = avg_a < float(w * h)
+    l_limit = 5 if has_alpha else 7
+    max_wh = max(w, h)
+    lx = max(1, _th_round(float(l_limit * w) / float(max_wh)))
+    ly = max(1, _th_round(float(l_limit * h) / float(max_wh)))
+
+    # RGBA -> LPQA (composited atop the average color), de-interleaved into 4 flat channels.
+    ch_l = [0.0] * n
+    ch_p = [0.0] * n
+    ch_q = [0.0] * n
+    ch_a = [0.0] * n
+    for i in range(n):
+        j = i * 4
+        alpha = rgba[j + 3] / 255.0
+        r = avg_r * (1 - alpha) + alpha / 255.0 * rgba[j + 0]
+        g = avg_g * (1 - alpha) + alpha / 255.0 * rgba[j + 1]
+        b = avg_b * (1 - alpha) + alpha / 255.0 * rgba[j + 2]
+        ch_l[i] = (r + g + b) / 3.0
+        ch_p[i] = (r + g) / 2.0 - b
+        ch_q[i] = r - g
+        ch_a[i] = alpha
+
+    def encode_channel(channel, nx, ny):
+        dc = 0.0
+        ac = []
+        scale = 0.0
+        # Cosine bases — identical values to the reference's inline cos, computed once (no numeric change).
+        cos_x = [[math.cos(math.pi / w * cx * (x + 0.5)) for x in range(w)] for cx in range(nx)]
+        cos_y = [[math.cos(math.pi / h * cy * (y + 0.5)) for y in range(h)] for cy in range(ny)]
+        cy = 0
+        while cy < ny:
+            cx = 0
+            while cx * ny < nx * (ny - cy):
+                f = 0.0
+                cxr = cos_x[cx]
+                cyr = cos_y[cy]
+                y = 0
+                while y < h:
+                    fyv = cyr[y]
+                    row = y * w
+                    x = 0
+                    while x < w:
+                        f += channel[row + x] * cxr[x] * fyv
+                        x += 1
+                    y += 1
+                f /= float(w * h)
+                if cx > 0 or cy > 0:
+                    ac.append(f)
+                    scale = max(scale, abs(f))
+                else:
+                    dc = f
+                cx += 1
+            cy += 1
+        if scale > 0:
+            for i in range(len(ac)):
+                ac[i] = 0.5 + 0.5 / scale * ac[i]
+        return dc, ac, scale
+
+    l_dc, l_ac, l_scale = encode_channel(ch_l, max(3, lx), max(3, ly))
+    p_dc, p_ac, p_scale = encode_channel(ch_p, 3, 3)
+    q_dc, q_ac, q_scale = encode_channel(ch_q, 3, 3)
+    if has_alpha:
+        a_dc, a_ac, a_scale = encode_channel(ch_a, 5, 5)
+    else:
+        a_dc, a_ac, a_scale = 1.0, [], 1.0
+
+    # Write the constants (masks are belt-and-braces; the maths already keeps each field in range).
+    is_landscape = w > h
+    il_dc = _th_round(63.0 * l_dc) & 63
+    ip_dc = _th_round(31.5 + 31.5 * p_dc) & 63
+    iq_dc = _th_round(31.5 + 31.5 * q_dc) & 63
+    il_scale = _th_round(31.0 * l_scale) & 31
+    ihas_alpha = 1 if has_alpha else 0
+    header24 = il_dc | (ip_dc << 6) | (iq_dc << 12) | (il_scale << 18) | (ihas_alpha << 23)
+    ip_scale = _th_round(63.0 * p_scale) & 63
+    iq_scale = _th_round(63.0 * q_scale) & 63
+    ilxy = (ly if is_landscape else lx) & 7
+    iis_landscape = 1 if is_landscape else 0
+    header16 = ilxy | (ip_scale << 3) | (iq_scale << 9) | (iis_landscape << 15)
+
+    out = bytearray()
+    out.append(header24 & 255)
+    out.append((header24 >> 8) & 255)
+    out.append((header24 >> 16) & 255)
+    out.append(header16 & 255)
+    out.append((header16 >> 8) & 255)
+    is_odd = [False]
+    if has_alpha:
+        ia_dc = _th_round(15.0 * a_dc) & 15
+        ia_scale = _th_round(15.0 * a_scale) & 15
+        out.append(ia_dc | (ia_scale << 4))
+
+    def emit_ac(ac):
+        for fv in ac:
+            i15 = _th_round(15.0 * fv)
+            if i15 < 0:
+                i15 = 0
+            elif i15 > 15:
+                i15 = 15
+            if is_odd[0]:
+                out[-1] |= i15 << 4
+            else:
+                out.append(i15)
+            is_odd[0] = not is_odd[0]
+
+    emit_ac(l_ac)
+    emit_ac(p_ac)
+    emit_ac(q_ac)
+    if has_alpha:
+        emit_ac(a_ac)
+    return bytes(out)
+
+
+def _ppm_to_rgba(data):
+    """Parse a binary PPM (P6) -> (w, h, rgba bytes) with alpha forced to 255. Robust to the whitespace/
+    comment variations in the netpbm header. Returns None if malformed / truncated."""
+    if data[:2] != b"P6":
+        return None
+    idx = 2
+    vals = []
+    while len(vals) < 3 and idx < len(data):
+        while idx < len(data) and data[idx:idx + 1].isspace():
+            idx += 1
+        if idx < len(data) and data[idx:idx + 1] == b"#":       # comment to end of line
+            while idx < len(data) and data[idx:idx + 1] not in (b"\n", b"\r"):
+                idx += 1
+            continue
+        start = idx
+        while idx < len(data) and not data[idx:idx + 1].isspace():
+            idx += 1
+        try:
+            vals.append(int(data[start:idx]))
+        except ValueError:
+            return None
+    if len(vals) < 3:
+        return None
+    w, h, maxval = vals
+    idx += 1   # exactly one whitespace byte separates the header from the binary pixel data
+    if w <= 0 or h <= 0 or maxval != 255:
+        return None
+    rgb = data[idx:idx + w * h * 3]
+    if len(rgb) < w * h * 3:
+        return None
+    rgba = bytearray(w * h * 4)
+    rgba[0::4] = rgb[0::3]
+    rgba[1::4] = rgb[1::3]
+    rgba[2::4] = rgb[2::3]
+    rgba[3::4] = b"\xff" * (w * h)
+    return w, h, rgba
+
+
+def _cover_rgba(url, ffmpeg):
+    """Fetch a scene cover over HTTP and decode+downscale it to (w, h, rgba) with the long edge
+    <= THUMBHASH_EDGE, preserving aspect. One ffmpeg call emits a PPM whose ASCII header carries the scaled
+    dimensions and whose body is RGB (widened to opaque RGBA). Returns None on any failure."""
+    # Fit inside THUMBHASH_EDGE x THUMBHASH_EDGE preserving aspect (both output dims end up <= the cap, which
+    # is all the encoder requires). A plain `scale=w=N:h=N:...` — no quotes / no `min(,)` comma to escape (a
+    # quoted expression passed via argv, no shell, makes ffmpeg see literal quotes; same reason as line ~910).
+    scale = "scale=w={e}:h={e}:force_original_aspect_ratio=decrease".format(e=THUMBHASH_EDGE)
+    # -pix_fmt rgb24 forces 8-bit output so the PPM is always maxval 255 (a 10-bit source would otherwise
+    # emit a 16-bit P6 that _ppm_to_rgba rejects); covers are JPEG/8-bit anyway, this is just insurance.
+    cmd = [ffmpeg, "-v", "error", "-nostdin", "-i", url, "-vf", scale, "-pix_fmt", "rgb24",
+           "-frames:v", "1", "-f", "image2pipe", "-c:v", "ppm", "-"]
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    return _ppm_to_rgba(proc.stdout)
+
+
+def _cover_fetch_url(stash, screenshot):
+    """Build a reachable, authenticated cover URL: keep the path + query Stash gave us but force the netloc
+    to the plugin's OWN Stash base (from server_connection) so it resolves from inside the host, and
+    (re)apply the api key — mirrors how the app fetches the same image. Returns None if no path."""
+    if not screenshot:
+        return None
+    base = urllib.parse.urlsplit(stash.url)                 # scheme://host:port/graphql
+    parts = urllib.parse.urlsplit(screenshot)
+    if not parts.path:
+        return None
+    q = [(k, v) for (k, v) in urllib.parse.parse_qsl(parts.query) if k.lower() != "apikey"]
+    key = stash.headers.get("ApiKey")
+    if key:
+        q.append(("apikey", key))
+    return urllib.parse.urlunsplit((base.scheme, base.netloc, parts.path, urllib.parse.urlencode(q), ""))
+
+
+THUMBHASH_SCENE_FIELDS = "id paths { screenshot }"
+
+
+def _iter_scene_covers(stash, page_size=100):
+    page = 1
+    while True:
+        data = stash.call(
+            "query($f: FindFilterType!) { findScenes(filter: $f) { count scenes { %s } } }" % THUMBHASH_SCENE_FIELDS,
+            {"f": {"per_page": page_size, "page": page, "sort": "id", "direction": "ASC"}},
+        )
+        block = data.get("findScenes") or {}
+        scenes = block.get("scenes") or []
+        if not scenes:
+            break
+        yield block.get("count", 0), scenes
+        if len(scenes) < page_size:
+            break
+        page += 1
+
+
+def _thumbhash_path():
+    return os.path.join(CACHE_DIR, "thumbhashes.json")
+
+
+@contextlib.contextmanager
+def _thumbhash_lock():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    lockf = open(_thumbhash_path() + ".lock", "w")
+    try:
+        if fcntl:
+            try:
+                fcntl.flock(lockf, fcntl.LOCK_EX)
+            except OSError:
+                pass
+        yield
+    finally:
+        try:
+            if fcntl:
+                fcntl.flock(lockf, fcntl.LOCK_UN)
+        finally:
+            lockf.close()
+
+
+def _load_thumbhash():
+    """The served map as {scene_id: base64_hash}, or {} if none/unreadable."""
+    try:
+        with open(_thumbhash_path()) as fh:
+            scenes = (json.load(fh) or {}).get("scenes")
+        return scenes if isinstance(scenes, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_thumbhash_raw(report):
+    blob = {"generated": int(time.time()), "count": len(report), "scenes": report}
+    tmp = _thumbhash_path() + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(blob, fh)
+    os.replace(tmp, _thumbhash_path())
+
+
+def run_thumbhash_map(stash, settings, rebuild=False):
+    """Scheduled/manual LIBRARY task: compute a ThumbHash placeholder for every scene's cover and store it
+    (base64) in the served cache/thumbhashes.json. The app fetches this once and shows an instant blurry
+    placeholder for scenes it has never opened. Incremental (skips scenes already hashed), resumable, and
+    honours an optional per-run time budget. Kilobytes total; zero scene writes."""
+    ffmpeg = _bin("ffmpeg", settings.get("ffmpegPath"), hw=False)
+    try:
+        budget_min = float(settings.get("thumbhashBudgetMin") or 0)
+    except (TypeError, ValueError):
+        budget_min = 0
+    deadline = (time.time() + budget_min * 60) if budget_min > 0 else None
+
+    report = _load_thumbhash()   # always load: a budget-stopped run keeps prior entries for unreached scenes
+    processed = hashed = skipped = failed = since_ckpt = 0
+    seen = set()
+    stopped = False
+    full_pass = False   # True ONLY when the scene loop finished without a break — see the prune guard below
+    try:
+        for count, scenes in _iter_scene_covers(stash):
+            total = count or 0
+            for scene in scenes:
+                processed += 1
+                if total:
+                    log_progress(processed / float(total))
+                sid = str(scene["id"])
+                seen.add(sid)
+                if sid in report and not rebuild:
+                    skipped += 1
+                    continue
+                if deadline and time.time() > deadline:
+                    stopped = True
+                    break
+                # One bad cover (missing screenshot, ffmpeg failure, weird image) must never kill the whole
+                # library run: count it and move on — it stays unhashed and is retried next run.
+                try:
+                    url = _cover_fetch_url(stash, (scene.get("paths") or {}).get("screenshot"))
+                    if not url:
+                        continue
+                    decoded = _cover_rgba(url, ffmpeg)
+                    if not decoded:
+                        failed += 1
+                        continue
+                    cw, ch, rgba = decoded
+                    hsh = rgba_to_thumbhash(cw, ch, rgba)
+                    report[sid] = base64.b64encode(hsh).decode("ascii")
+                    hashed += 1
+                    since_ckpt += 1
+                except Exception as ex:
+                    failed += 1
+                    log_info("ThumbHash: scene {} skipped after {}: {}".format(sid, type(ex).__name__, ex))
+                if since_ckpt >= 50:                  # checkpoint so an interrupted run keeps its progress
+                    since_ckpt = 0
+                    with _thumbhash_lock():
+                        _write_thumbhash_raw(report)
+            if stopped:
+                break
+        full_pass = not stopped
+    finally:
+        # Prune deleted scenes ONLY after a clean COMPLETE pass. On a break (time budget) `seen` is partial,
+        # and pruning against it would erase every hash the run never reached (the VMAF-map data-loss bug).
+        if full_pass:
+            for sid in [s for s in report if s not in seen]:
+                del report[sid]
+        with _thumbhash_lock():
+            _write_thumbhash_raw(report)
+    log_info("ThumbHash map ({}) — {} scenes seen, {} newly hashed, {} already done, {} failed{}. "
+             "Served thumbhashes.json ({} scenes). Zero scene writes.".format(
+                 "rebuild" if rebuild else "incremental", processed, hashed, skipped, failed,
+                 " — hit the time budget; run again to continue" if stopped else "", len(report)))
+    log_progress(1.0)
+
+
 def run_hook(stash, settings, hook_ctx):
     """Dispatch a Stash plugin hook: Scene.Create.Post appends the new scene to the report,
     Scene.Destroy.Post drops it. Opt out via the 'autoReportNewScenes' setting."""
@@ -2337,6 +2702,8 @@ def main():
             run_stats(stash, settings, rebuild=bool(args.get("rebuild")))
         elif mode == "vmafmap":
             run_vmaf_map(stash, settings, rebuild=bool(args.get("rebuild")))
+        elif mode == "thumbhash":
+            run_thumbhash_map(stash, settings, rebuild=bool(args.get("rebuild")))
         elif mode == "tag":
             # Legacy task id (≤0.1.17 tagged scenes). Now a no-tag alias for the report — it writes the
             # served playability.json and makes zero scene writes, so an old invocation can't storm hooks.
