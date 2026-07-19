@@ -120,8 +120,26 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.274** (app fetches the plugin's served ThumbHash map, commit `89993d0`,
-  IPA 8,694,565 B). Verify the newest release/IPA size each push.
+- Latest release: **v1.0.282** (jobs-panel custom glass top bar on Scenes & Performers, commit `7277505`,
+  IPA 8,755,790 B). Verify the newest release/IPA size each push.
+- **Jobs panel + custom glass top bar shipped (v1.0.280–282)** — Scenes & Performers dropped the system nav
+  bar (title + `.searchable` + `.toolbar`) for a **custom Liquid-Glass top-bar overlay** (owner wanted a true
+  glass *morph*, not the funnel scale/fade). New `DesignSystem/GlassMorphDropdown` = a glass button that melts
+  into a glass panel via one `GlassEffectContainer` + shared `glassEffectID`, with a dim tap-catching backdrop
+  AND a per-panel hit-catcher `.background(Color…opacity(0.0001).onTapGesture{})` so taps in the gaps between
+  chips are absorbed (fixes the old filter tap-through-to-scene-cards bug). Top-left = a title button
+  (“Scenes”/“Performers” + chevron) morphs into `Features/Library/JobsPanel` (live Stash job title + a
+  progress bar bound to Stash’s 0…1 `progress`, idle line, “+N queued”); Scenes shows Scan Library / Compute
+  VMAF / ThumbHash / Loudness buttons, Performers is status-only. `Services/JobMonitor` (@MainActor
+  @Observable singleton) polls `jobQueue` **only while a panel is open** (start on JobsPanel `.onAppear`, stop
+  on `.onDisappear`) — nothing polls in the background. `StashClient.jobQueue()`/`metadataScan()` +
+  `JobInfo` back it; `StashCompanion.Task` gained the three map tasks. Top-right = the funnel morphs into the
+  filter panel; search is now `DesignSystem/LibrarySearchField` (glass magnifier ⇄ field, replacing
+  `.searchable`). The old ⋯ menu is gone — its Download-all / Select fold into `SceneFilterPanel`
+  (`onDownloadAll`/`onSelect`/`bulkLoading`). Nav bar hidden via `.toolbar(.hidden, for: .navigationBar)` on
+  the root only (pushed detail keeps its back button); grid inset below the bar via a top `safeAreaInset`.
+  `FilterPopoverAnchor`/`FilterFunnelButton`/`dismissesPopover` deleted (replaced). Owner will iterate on
+  positioning/sizing on-device. **NEXT (owner-queued URGENT): fix AI slow-mo quality degradation** (ROADMAP).
 - **ThumbHash blur placeholders shipped (v1.0.272–274 + Companion v0.3.5–0.3.6)** — a card now shows an instant
   tiny blur *before* its real thumbnail loads, so a fast flick never flashes blank cards. Three sources,
   merged (on-device hashes always win): (1) **on-device** — `Services/ThumbHash.swift` (verbatim MIT port
