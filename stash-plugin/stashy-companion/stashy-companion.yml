@@ -10,7 +10,7 @@ description: >-
   phone model), ffprobe-based codec + HDR stats, and auto-tagging of
   direct-play-ready scenes — capabilities vanilla Stash lacks. Output is served
   back to the app over Stash's own HTTP with real Job progress.
-version: 0.3.5
+version: 0.3.6
 url: https://github.com/nphil/stashy/tree/main/stash-plugin
 exec:
   - python
@@ -102,16 +102,23 @@ settings:
     displayName: Auto codec-report new scenes (on scan)
     description: "When a Stash scan creates a new scene, automatically ffprobe it and append it to the served playability report (no scene writes) — so the app's routing + filter stay current without re-running the Library Codec Report. Default on. Turn off if you'd rather run the report manually."
     type: BOOLEAN
+  autoThumbhashNewScenes:
+    displayName: Auto ThumbHash new scenes (on scan)
+    description: "When a Stash scan creates a new scene, automatically compute its ThumbHash blur placeholder and append it to the served thumbhashes.json (no scene writes) — so the app has an instant blur for freshly-scanned scenes without re-running Compute ThumbHash Map. Default on. A light ffmpeg decode per new scene; turn off if you'd rather hash on-device / by task."
+    type: BOOLEAN
 
-# Event hooks — fire the plugin automatically. These write ONLY the served playability.json (filesystem),
-# never a scene, so they queue no Scene.Update/Sync tasks. Gated by the autoReportNewScenes setting.
+# Event hooks — fire the plugin automatically. These write ONLY served files (playability.json /
+# thumbhashes.json), never a scene, so they queue no Scene.Update/Sync tasks even on a big scan. Each served
+# map is maintained independently, gated by its own setting (autoReportNewScenes / autoThumbhashNewScenes).
+# NOTE: keep ONE entry per trigger — the single run_hook dispatch handles both maps, so a second entry for
+# the same event would just invoke the plugin twice.
 hooks:
-  - name: Codec-report new scenes
-    description: "On a new scene (e.g. from a library Scan), ffprobe it and append to the served playability report."
+  - name: Report + hash new scenes
+    description: "On a new scene (e.g. from a library Scan), ffprobe it into the served playability report and compute its ThumbHash blur placeholder — each gated by its own setting."
     triggeredBy:
       - Scene.Create.Post
-  - name: Drop deleted scenes from the report
-    description: "When a scene is deleted, remove it from the served playability report."
+  - name: Drop deleted scenes from the served maps
+    description: "When a scene is deleted, remove it from the served playability report and the ThumbHash map."
     triggeredBy:
       - Scene.Destroy.Post
 

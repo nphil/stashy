@@ -516,5 +516,60 @@ class TestPpmParse(unittest.TestCase):
         self.assertIsNone(sc._ppm_to_rgba(b"P6\n4 4\n255\n" + b"\x00" * 3))  # far fewer bytes than 4*4*3
 
 
+class TestHookDispatch(unittest.TestCase):
+    """run_hook maintains the playability report and the ThumbHash map INDEPENDENTLY, each gated by its own
+    setting. We patch the four append/remove helpers so no GraphQL/ffmpeg/file IO runs — this tests only the
+    dispatch + gating logic."""
+
+    def setUp(self):
+        patches = {
+            "_report_scene_append": mock.patch.object(sc, "_report_scene_append"),
+            "_report_scene_remove": mock.patch.object(sc, "_report_scene_remove"),
+            "_thumbhash_scene_append": mock.patch.object(sc, "_thumbhash_scene_append"),
+            "_thumbhash_scene_remove": mock.patch.object(sc, "_thumbhash_scene_remove"),
+        }
+        self.m = {k: p.start() for k, p in patches.items()}
+        for p in patches.values():
+            self.addCleanup(p.stop)
+
+    def test_create_with_both_on_hashes_and_reports(self):
+        sc.run_hook(object(), {}, {"type": "Scene.Create.Post", "id": 42})
+        self.m["_report_scene_append"].assert_called_once()
+        self.m["_thumbhash_scene_append"].assert_called_once()
+        # id is normalized to a string for both
+        self.assertEqual(self.m["_thumbhash_scene_append"].call_args.args[-1], "42")
+
+    def test_thumbhash_toggle_off_still_reports(self):
+        sc.run_hook(object(), {"autoThumbhashNewScenes": False}, {"type": "Scene.Create.Post", "id": 7})
+        self.m["_report_scene_append"].assert_called_once()
+        self.m["_thumbhash_scene_append"].assert_not_called()
+
+    def test_report_toggle_off_still_hashes(self):
+        sc.run_hook(object(), {"autoReportNewScenes": "off"}, {"type": "Scene.Create.Post", "id": 7})
+        self.m["_report_scene_append"].assert_not_called()
+        self.m["_thumbhash_scene_append"].assert_called_once()
+
+    def test_destroy_drops_from_both_maps(self):
+        sc.run_hook(object(), {}, {"type": "Scene.Destroy.Post", "id": 9})
+        self.m["_report_scene_remove"].assert_called_once_with("9")
+        self.m["_thumbhash_scene_remove"].assert_called_once_with("9")
+
+    def test_missing_id_is_a_noop(self):
+        sc.run_hook(object(), {}, {"type": "Scene.Create.Post"})
+        for mm in self.m.values():
+            mm.assert_not_called()
+
+
+class TestThumbhashSceneRemove(unittest.TestCase):
+    def test_removes_only_the_named_scene(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(sc, "CACHE_DIR", d):
+                sc._write_thumbhash_raw({"1": "aaa", "2": "bbb", "3": "ccc"})
+                sc._thumbhash_scene_remove("2")
+                self.assertEqual(set(sc._load_thumbhash().keys()), {"1", "3"})
+                sc._thumbhash_scene_remove("999")   # absent id → no-op, no crash
+                self.assertEqual(set(sc._load_thumbhash().keys()), {"1", "3"})
+
+
 if __name__ == "__main__":
     unittest.main()

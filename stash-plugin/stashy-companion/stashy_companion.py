@@ -2594,19 +2594,68 @@ def run_thumbhash_map(stash, settings, rebuild=False):
     log_progress(1.0)
 
 
-def run_hook(stash, settings, hook_ctx):
-    """Dispatch a Stash plugin hook: Scene.Create.Post appends the new scene to the report,
-    Scene.Destroy.Post drops it. Opt out via the 'autoReportNewScenes' setting."""
-    if str(settings.get("autoReportNewScenes", True)).strip().lower() in ("false", "0", "no", "off"):
+def _scene_cover(stash, scene_id):
+    """Fetch just one scene's cover URL field (a lighter query than SCENE_FIELDS — no files/ffprobe data)."""
+    data = stash.call("query($id: ID!) { findScene(id: $id) { id paths { screenshot } } }",
+                      {"id": str(scene_id)})
+    return data.get("findScene")
+
+
+def _thumbhash_scene_append(stash, settings, scene_id):
+    """Compute a ThumbHash for ONE scene's cover and merge it into the served map (under the lock). The
+    Scene.Create.Post hook calls this so a newly-scanned scene gets an instant blur placeholder without a
+    manual task run. Zero scene writes. Best-effort: a cover that won't fetch/decode is simply skipped."""
+    scene = _scene_cover(stash, scene_id)
+    url = _cover_fetch_url(stash, ((scene or {}).get("paths") or {}).get("screenshot"))
+    if not url:
         return
+    ffmpeg = _bin("ffmpeg", settings.get("ffmpegPath"), hw=False)
+    decoded = _cover_rgba(url, ffmpeg)
+    if not decoded:
+        return
+    cw, ch, rgba = decoded
+    b64 = base64.b64encode(rgba_to_thumbhash(cw, ch, rgba)).decode("ascii")
+    with _thumbhash_lock():
+        data = _load_thumbhash()
+        data[str(scene_id)] = b64
+        _write_thumbhash_raw(data)
+    log_info("ThumbHash: auto-hashed new scene {} (served file, no scene writes).".format(scene_id))
+
+
+def _thumbhash_scene_remove(scene_id):
+    with _thumbhash_lock():
+        data = _load_thumbhash()
+        if str(scene_id) in data:
+            del data[str(scene_id)]
+            _write_thumbhash_raw(data)
+
+
+def _hook_enabled(settings, key):
+    return str(settings.get(key, True)).strip().lower() not in ("false", "0", "no", "off")
+
+
+def run_hook(stash, settings, hook_ctx):
+    """Dispatch a Stash plugin hook. Scene.Create.Post appends the new scene to the served maps; Scene.
+    Destroy.Post drops it. The playability report and the ThumbHash map are maintained INDEPENDENTLY, each
+    gated by its own setting ('autoReportNewScenes' / 'autoThumbhashNewScenes'). Both write only served
+    files — zero scene writes, so no Scene.Update hooks / Sync-task storms even on a big scan."""
     typ = str(hook_ctx.get("type") or "")
     sid = hook_ctx.get("id")
     if sid is None:
         return
+    sid = str(sid)
+    report_on = _hook_enabled(settings, "autoReportNewScenes")
+    thumb_on = _hook_enabled(settings, "autoThumbhashNewScenes")
     if typ.startswith("Scene.Create"):
-        _report_scene_append(stash, settings, str(sid))
+        if report_on:
+            _report_scene_append(stash, settings, sid)
+        if thumb_on:
+            _thumbhash_scene_append(stash, settings, sid)
     elif typ.startswith("Scene.Destroy"):
-        _report_scene_remove(str(sid))
+        if report_on:
+            _report_scene_remove(sid)
+        if thumb_on:
+            _thumbhash_scene_remove(sid)
 
 
 # Legacy Stashy:* tag names created by v0.1.16/0.1.17 (before playability moved to a served file). Kept

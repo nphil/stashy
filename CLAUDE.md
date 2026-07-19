@@ -122,7 +122,7 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
 ## Current state (update as you go; keep this section short)
 - Latest release: **v1.0.274** (app fetches the plugin's served ThumbHash map, commit `89993d0`,
   IPA 8,694,565 B). Verify the newest release/IPA size each push.
-- **ThumbHash blur placeholders shipped (v1.0.272–274 + Companion v0.3.5)** — a card now shows an instant
+- **ThumbHash blur placeholders shipped (v1.0.272–274 + Companion v0.3.5–0.3.6)** — a card now shows an instant
   tiny blur *before* its real thumbnail loads, so a fast flick never flashes blank cards. Three sources,
   merged (on-device hashes always win): (1) **on-device** — `Services/ThumbHash.swift` (verbatim MIT port
   of evanw/thumbhash; keep its non-idiomatic `while` loops — they dodge Swift's slow type-checker) +
@@ -137,8 +137,10 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   merges (wired in `ScenesView.task` beside Playability/VMAF refresh; mirrors `PlayabilityStore.refresh`).
   The plugin encoder is a pure-stdlib port of `ThumbHash.swift` using `floor(x+0.5)` — **NOT** Python’s
   banker's `round()` — so its bytes decode in-app; covers decoded via one ffmpeg PPM pass. Scene-only
-  (performers get on-device hashes only); no auto-hash-on-scan hook (re-run the task, or on-device covers it).
-  **Owner step: deploy Companion v0.3.5 + run Compute ThumbHash Map once.**
+  (performers get on-device hashes only). A **Scene.Create/Destroy hook auto-maintains the map on scan**
+  (Companion v0.3.6, gated by `autoThumbhashNewScenes`, independent of the codec-report toggle; ONE hook
+  entry per trigger — `run_hook` maintains both served maps, a 2nd entry would double-invoke).
+  **Owner step: deploy Companion v0.3.6 + run Compute ThumbHash Map once.**
 - **120 Hz scroll-perf pass shipped (v1.0.269)** — browse-grid flick judder fixed: (1) `ScenePreview` was
   writing each cell's `.frame(in:.global)` to `@State` via `onGeometryChange` on EVERY scroll frame,
   re-rendering every visible cell at 120 Hz → now a reference box (`FrameBox`, no invalidation) — the
