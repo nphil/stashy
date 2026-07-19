@@ -21,6 +21,12 @@ struct PerformerCard: View {
                             .resizable()
                             .scaledToFill()
                             .privacyImageBlur()
+                    } else if let ph = ThumbHashStore.shared.placeholder(for: "perf-" + performer.id) {
+                        // Instant blurry preview from the tiny ThumbHash while the real portrait loads.
+                        Image(uiImage: ph)
+                            .resizable()
+                            .scaledToFill()
+                            .privacyImageBlur()
                     } else {
                         PerformerPlaceholder()
                     }
@@ -44,6 +50,7 @@ struct PerformerCard: View {
         .task(id: performer.id) {
             guard let url = performer.imageURL(apiKey: apiKey) else { return }
             image = try? await imageCache.image(for: url, priority: true)
+            if let img = image { ThumbHashStore.shared.ingest(img, for: "perf-" + performer.id) }
         }
     }
 }

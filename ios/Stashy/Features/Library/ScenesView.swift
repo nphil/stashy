@@ -539,6 +539,12 @@ struct SceneCard: View {
                             .resizable()
                             .scaledToFill()
                             .privacyImageBlur()
+                    } else if let ph = ThumbHashStore.shared.placeholder(for: scene.id) {
+                        // Instant blurry preview from the tiny ThumbHash while the real thumbnail loads.
+                        Image(uiImage: ph)
+                            .resizable()
+                            .scaledToFill()
+                            .privacyImageBlur()
                     } else {
                         Image(systemName: "film")
                             .font(.title2)
@@ -603,6 +609,7 @@ struct SceneCard: View {
         .task(id: scene.id) {
             guard let url = scene.thumbnailURL(apiKey: apiKey) else { return }
             thumbnail = try? await imageCache.image(for: url)
+            if let img = thumbnail { ThumbHashStore.shared.ingest(img, for: scene.id) }
         }
     }
 
