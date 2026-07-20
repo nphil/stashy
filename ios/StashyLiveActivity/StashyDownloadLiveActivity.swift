@@ -3,150 +3,235 @@ import Foundation
 import SwiftUI
 import WidgetKit
 
+private let segmentCount = 8
+
 struct StashyDownloadLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: DownloadActivityAttributes.self) { context in
             LockScreenTransferView(context: context)
-                .activityBackgroundTint(.black.opacity(0.88))
+                .activityBackgroundTint(Color(red: 0.055, green: 0.055, blue: 0.085).opacity(0.96))
                 .activitySystemActionForegroundColor(.white)
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Label("Stashy", systemImage: context.state.phase.symbol)
-                        .font(.headline)
-                        .foregroundStyle(.purple)
+                    HStack(spacing: 7) {
+                        LiveSegmentRing(state: context.state)
+                            .frame(width: 25, height: 25)
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text("STASHY")
+                                .font(.system(size: 9, weight: .bold, design: .rounded))
+                                .foregroundStyle(.secondary)
+                            Text(context.isStale ? "Updating" : context.state.phase.shortTitle)
+                                .font(.caption.weight(.semibold))
+                                .lineLimit(1)
+                        }
+                    }
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    TransferPercent(state: context.state)
-                        .font(.headline.monospacedDigit())
+                    LiveTransferPercent(state: context.state)
+                        .font(.title3.weight(.semibold).monospacedDigit())
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    VStack(alignment: .leading, spacing: 7) {
+                    VStack(spacing: 6) {
+                        LiveSegmentBar(state: context.state)
+                            .frame(height: 5)
                         HStack(spacing: 8) {
-                            Text(context.isStale ? "Waiting for update" : context.state.phase.title)
-                                .font(.subheadline.weight(.semibold))
-                            Spacer(minLength: 8)
+                            Text(context.isStale ? "Open Stashy to refresh" : context.state.status)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                            Spacer(minLength: 4)
                             if context.state.activeJobCount > 1 {
-                                Text("\(context.state.activeJobCount) active")
-                                    .font(.caption)
+                                Text("+\(context.state.activeJobCount - 1)")
+                                    .font(.caption2.weight(.semibold).monospacedDigit())
                                     .foregroundStyle(.secondary)
                             }
                         }
-                        TransferProgress(state: context.state)
-                        Text(context.isStale ? "Open Stashy to refresh progress" : context.state.status)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
                     }
                 }
             } compactLeading: {
-                Image(systemName: context.state.phase.symbol)
-                    .foregroundStyle(.purple)
+                LiveSegmentRing(state: context.state)
+                    .frame(width: 19, height: 19)
             } compactTrailing: {
-                CompactTransferValue(state: context.state)
-                    .font(.caption2.monospacedDigit())
+                LiveTransferPercent(state: context.state)
+                    .font(.caption2.weight(.semibold).monospacedDigit())
             } minimal: {
-                Image(systemName: context.state.phase.symbol)
-                    .foregroundStyle(.purple)
+                LiveSegmentRing(state: context.state)
+                    .frame(width: 18, height: 18)
             }
             .keylineTint(.purple)
         }
     }
 }
 
+/// A deliberately short Lock Screen presentation: identity, percentage, one segmented bar and one status
+/// line. The system owns the outer Live Activity container, so reducing internal padding is what keeps the
+/// card from looking like an oversized notification.
 private struct LockScreenTransferView: View {
     let context: ActivityViewContext<DownloadActivityAttributes>
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 10) {
-                Image(systemName: context.state.phase.symbol)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(.purple)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(context.isStale ? "Waiting for update" : context.state.phase.title)
-                        .font(.headline)
-                    Text(context.isStale ? "Open Stashy to refresh progress" : context.state.status)
-                        .font(.caption)
+        HStack(spacing: 10) {
+            LiveSegmentRing(state: context.state)
+                .frame(width: 30, height: 30)
+            VStack(spacing: 5) {
+                HStack(spacing: 8) {
+                    Text(context.isStale ? "Updating download" : context.state.phase.title)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    LiveTransferPercent(state: context.state)
+                        .font(.subheadline.weight(.semibold).monospacedDigit())
+                }
+                LiveSegmentBar(state: context.state)
+                    .frame(height: 5)
+                HStack(spacing: 6) {
+                    Text(context.isStale ? "Open Stashy to refresh" : context.state.status)
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-                }
-                Spacer(minLength: 8)
-                VStack(alignment: .trailing, spacing: 1) {
-                    TransferPercent(state: context.state)
-                        .font(.headline.monospacedDigit())
+                    Spacer(minLength: 4)
                     if context.state.activeJobCount > 1 {
                         Text("\(context.state.activeJobCount) active")
-                            .font(.caption2)
+                            .font(.caption2.weight(.medium).monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
                 }
             }
-            TransferProgress(state: context.state)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 13)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
     }
 }
 
-private struct TransferProgress: View {
+/// Eight arcs represent eight equal byte regions of the featured transfer. Completed regions stay filled,
+/// the current region fills continuously, and future regions remain as a quiet track.
+private struct LiveSegmentRing: View {
     let state: DownloadActivityAttributes.ContentState
 
     var body: some View {
-        if let start = state.estimatedStart, let end = state.estimatedEnd, start < end, end > Date.now {
-            ProgressView(timerInterval: start...end, countsDown: false)
-                .tint(.purple)
-        } else if let progress = state.progress {
-            ProgressView(value: progress)
-                .tint(.purple)
-        } else {
-            ProgressView()
-                .tint(.purple)
+        TimelineView(.periodic(from: Date.now, by: 1)) { timeline in
+            SegmentedRing(progress: state.projectedProgress(at: timeline.date), phase: state.phase)
         }
     }
 }
 
-private struct TransferPercent: View {
+private struct SegmentedRing: View {
+    let progress: Double?
+    let phase: DownloadActivityAttributes.ContentState.Phase
+
+    var body: some View {
+        ZStack {
+            ForEach(0..<segmentCount, id: \.self) { index in
+                let start = CGFloat(index) / CGFloat(segmentCount)
+                let end = CGFloat(index + 1) / CGFloat(segmentCount)
+                let gap: CGFloat = 0.018
+                let filled = segmentProgress(overall: progress, index: index)
+
+                Circle()
+                    .trim(from: start + gap, to: end - gap)
+                    .stroke(.white.opacity(0.13), style: StrokeStyle(lineWidth: 2.7, lineCap: .round))
+                if filled > 0 {
+                    Circle()
+                        .trim(from: start + gap, to: start + gap + (end - start - gap * 2) * filled)
+                        .stroke(segmentColor(index, phase: phase),
+                                style: StrokeStyle(lineWidth: 2.7, lineCap: .round))
+                }
+            }
+        }
+        .rotationEffect(.degrees(-90))
+    }
+}
+
+private struct LiveSegmentBar: View {
     let state: DownloadActivityAttributes.ContentState
 
     var body: some View {
-        if let progress = state.progress {
-            Text(progress, format: .percent.precision(.fractionLength(0)))
-                .contentTransition(.numericText())
-        } else {
-            Image(systemName: "ellipsis")
+        TimelineView(.periodic(from: Date.now, by: 1)) { timeline in
+            let progress = state.projectedProgress(at: timeline.date)
+            HStack(spacing: 3) {
+                ForEach(0..<segmentCount, id: \.self) { index in
+                    GeometryReader { geometry in
+                        let filled = segmentProgress(overall: progress, index: index)
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(.white.opacity(0.12))
+                            Capsule()
+                                .fill(segmentColor(index, phase: state.phase))
+                                .frame(width: geometry.size.width * filled)
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
-/// The compact island has room for one short value. Prefer a system-updating countdown while the app is
-/// suspended; fall back to the last real percentage when an ETA isn't available yet.
-private struct CompactTransferValue: View {
+private struct LiveTransferPercent: View {
     let state: DownloadActivityAttributes.ContentState
 
     var body: some View {
-        if let end = state.estimatedEnd, end > Date.now {
-            Text(timerInterval: Date.now...end, countsDown: true, showsHours: false)
-        } else {
-            TransferPercent(state: state)
+        TimelineView(.periodic(from: Date.now, by: 1)) { timeline in
+            if let progress = state.projectedProgress(at: timeline.date) {
+                Text(progress, format: .percent.precision(.fractionLength(0)))
+                    .contentTransition(.numericText())
+            } else {
+                Text("•••")
+            }
         }
+    }
+}
+
+private func segmentProgress(overall: Double?, index: Int) -> CGFloat {
+    guard let overall else { return 0 }
+    return CGFloat(min(1, max(0, overall * Double(segmentCount) - Double(index))))
+}
+
+private func segmentColor(_ index: Int, phase: DownloadActivityAttributes.ContentState.Phase) -> Color {
+    switch phase {
+    case .waitingForNetwork:
+        return .orange
+    case .preparing:
+        return .cyan
+    case .downloading:
+        let colors: [Color] = [
+            Color(red: 0.27, green: 0.78, blue: 1.00),
+            Color(red: 0.32, green: 0.62, blue: 1.00),
+            Color(red: 0.42, green: 0.48, blue: 1.00),
+            Color(red: 0.55, green: 0.39, blue: 1.00),
+            Color(red: 0.67, green: 0.34, blue: 0.98),
+            Color(red: 0.76, green: 0.34, blue: 0.88),
+            Color(red: 0.84, green: 0.38, blue: 0.78),
+            Color(red: 0.89, green: 0.44, blue: 0.68)
+        ]
+        return colors[index % colors.count]
+    }
+}
+
+private extension DownloadActivityAttributes.ContentState {
+    /// Project the last byte snapshot along its measured ETA so the system-owned Live Activity keeps moving
+    /// while Stashy's process is suspended. Real delegate updates replace this estimate whenever available.
+    func projectedProgress(at date: Date) -> Double? {
+        if let start = estimatedStart, let end = estimatedEnd, start < end {
+            return min(1, max(0, date.timeIntervalSince(start) / end.timeIntervalSince(start)))
+        }
+        return progress.map { min(1, max(0, $0)) }
     }
 }
 
 private extension DownloadActivityAttributes.ContentState.Phase {
+    var shortTitle: String {
+        switch self {
+        case .downloading: "Download"
+        case .waitingForNetwork: "Waiting"
+        case .preparing: "Preparing"
+        }
+    }
+
     var title: String {
         switch self {
         case .downloading: "Downloading"
         case .waitingForNetwork: "Waiting for network"
         case .preparing: "Preparing download"
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .downloading: "arrow.down.circle.fill"
-        case .waitingForNetwork: "wifi.exclamationmark"
-        case .preparing: "shippingbox.fill"
         }
     }
 }

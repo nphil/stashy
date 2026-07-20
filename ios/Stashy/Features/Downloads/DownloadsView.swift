@@ -362,8 +362,8 @@ private struct DownloadCard: View {
         .frame(height: 6)
     }
 
-    /// Staged card options before the download starts. Two sources: the Original file (single/multi-thread)
-    /// or a Server Transcode — always the Stashy Companion plugin pipeline (HEVC/AV1 via its modern ffmpeg).
+    /// Staged card options before the download starts. Original files use the system background transfer
+    /// service; Server Transcode uses the Stashy Companion plugin pipeline (HEVC/AV1 via modern ffmpeg).
     private var stageSource: Binding<StageSource> {
         Binding(
             get: { item.companionCodec != nil ? .serverTranscode : .original },
@@ -391,11 +391,9 @@ private struct DownloadCard: View {
 
             switch stageSource.wrappedValue {
             case .original:
-                Picker("Connections", selection: $item.multiThread) {
-                    Text("Single").tag(false)
-                    Text("Multi-thread").tag(true)
-                }
-                .pickerStyle(.segmented)
+                Label("Continues while Stashy is in the background", systemImage: "arrow.down.circle")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             case .serverTranscode:
                 LabeledSegment("Codec") {
                     Picker("Codec", selection: companionCodecBinding) {

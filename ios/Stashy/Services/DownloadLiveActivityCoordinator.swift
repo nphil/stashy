@@ -24,15 +24,27 @@ final class DownloadLiveActivityCoordinator {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else {
             return "ActivityKit reports that Live Activities are disabled for Stashy."
         }
+        // A person can dismiss the card, or the system can end it under resource pressure. Don't retain a
+        // dead handle forever and silently send every later update to an activity that no longer renders.
+        if let activity {
+            switch activity.activityState {
+            case .dismissed, .ended:
+                self.activity = nil
+                lastState = nil
+            case .active, .stale:
+                break
+            @unknown default:
+                self.activity = nil
+                lastState = nil
+            }
+        }
         guard state != lastState else { return nil }
         lastState = state
 
-        // A known-size transfer carries a system-animated ETA projection, so keep it fresh through that
-        // estimate even if iOS suspends the app. Unknown-size streams become explicitly stale sooner.
-        let staleDate = min(
-            state.estimatedEnd?.addingTimeInterval(60) ?? Date.now.addingTimeInterval(90),
-            Date.now.addingTimeInterval(8 * 60 * 60)
-        )
+        // Local background URLSession progress may be coalesced while the app is suspended. The ETA drives
+        // system-side interpolation, so don't mark a healthy long download stale merely because its first
+        // estimate elapsed before iOS delivered another byte snapshot.
+        let staleDate = Date.now.addingTimeInterval(8 * 60 * 60)
         let content = ActivityContent(
             state: state,
             staleDate: staleDate,
