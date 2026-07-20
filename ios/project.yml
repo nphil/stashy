@@ -26,6 +26,8 @@ targets:
     dependencies:
       - package: stashy-videoengine
         product: FFmpeg
+      - target: StashyLiveActivity
+        embed: true
     info:
       path: Info.plist
       properties:
@@ -44,6 +46,7 @@ targets:
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
         NSFaceIDUsageDescription: Unlock Stashy with Face ID.
+        NSSupportsLiveActivities: true
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
@@ -74,3 +77,31 @@ targets:
         Debug:
           SWIFT_OPTIMIZATION_LEVEL: -Onone
           DEBUG_INFORMATION_FORMAT: dwarf
+
+  StashyLiveActivity:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: StashyLiveActivity
+        excludes:
+          - Info.plist
+      - path: Stashy/Services/DownloadActivityAttributes.swift
+    info:
+      path: StashyLiveActivity/Info.plist
+      properties:
+        CFBundleDisplayName: Stashy Activity
+        CFBundleIdentifier: com.nphil.stashy.liveactivity
+        CFBundleShortVersionString: "1.0.291"
+        CFBundleVersion: "292"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nphil.stashy.liveactivity
+        SWIFT_VERSION: 6.0
+        SWIFT_STRICT_CONCURRENCY: complete
+        APPLICATION_EXTENSION_API_ONLY: YES
+        MARKETING_VERSION: "1.0.291"
+        CURRENT_PROJECT_VERSION: "292"
+        SKIP_INSTALL: YES

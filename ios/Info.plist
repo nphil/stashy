@@ -31,6 +31,8 @@
 	</dict>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Unlock Stashy with Face ID.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UIRequiresFullScreen</key>

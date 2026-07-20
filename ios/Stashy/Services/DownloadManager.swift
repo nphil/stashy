@@ -296,6 +296,8 @@ final class DownloadManager {
     @ObservationIgnored private var resumeData: [String: [Int: Data]] = [:]
     @ObservationIgnored private var finished: [String: Set<Int>] = [:]
     @ObservationIgnored private var pollTask: Task<Void, Never>?
+    @ObservationIgnored private var liveActivityTask: Task<Void, Never>?
+    @ObservationIgnored private let liveActivity = DownloadLiveActivityCoordinator()
     @ObservationIgnored private let monitor = NWPathMonitor()
     /// Latest connectivity status from the monitor (whether the current path can carry traffic).
     @ObservationIgnored private var pathSatisfied = true
@@ -372,6 +374,7 @@ final class DownloadManager {
         observeAppPhase()
         startNetworkMonitor()
         startPolling()
+        startLiveActivitySync()
     }
 
     // MARK: - Public API
@@ -553,6 +556,7 @@ final class DownloadManager {
         item.transcodeTargetLabel = "\(codec.label) \(resolution.label)"
         appendTranscodeLog(item, "Requesting \(codec.label) \(resolution.label) transcode…")
         markActive(item.id)   // so a relaunch resurrects this item and reconnects
+        syncLiveActivity()
 
         Task { @MainActor in
             do {
@@ -888,6 +892,7 @@ final class DownloadManager {
         cleanupParts(item.id)
         cleanupMeta(item.id)   // reclaim the sidecar/thumb/sprite/vtt now; retry() re-heals if resumed
         clearActive(item.id)
+        syncLiveActivity()
     }
 
     /// Tell Stash to stop the running companion transcode job so cancelling in the app actually frees the
@@ -912,6 +917,7 @@ final class DownloadManager {
         cleanupParts(item.id)
         cleanupMeta(item.id)
         items.removeAll { $0.id == item.id }
+        syncLiveActivity()
     }
 
     /// Called when the Downloads screen re-appears: drop rows the user stopped while away.
@@ -1246,12 +1252,14 @@ final class DownloadManager {
         resumeData[item.id] = nil
         clearResumeFiles(item.id)                          // resume blobs are now consumed by live tasks
         if newTasks.isEmpty { finalizeIfComplete(item) }   // everything was already downloaded
+        syncLiveActivity()
     }
 
     private func suspend(_ item: DownloadItem, auto: Bool) {
         guard item.state == .downloading else { return }
         item.state = auto ? .waitingForNetwork : .paused
         cancelTasks(item, produceResumeData: true)
+        syncLiveActivity()
     }
 
     private func cancelTasks(_ item: DownloadItem, produceResumeData: Bool) {
@@ -1296,6 +1304,97 @@ final class DownloadManager {
     /// idle-sleep backgrounds the app, which would pause a foreground-only transcode.
     var keepScreenAwake: Bool { downloadsScreenVisible || hasActiveWork }
 
+    // MARK: - Live Activity
+
+    /// ActivityKit updates are intentionally slower than the Downloads screen's 120 ms paint loop. One
+    /// real byte snapshot every two seconds is visually smooth in the Dynamic Island and avoids wasting
+    /// background execution time. The activity view interpolates between snapshots using measured speed.
+    private func startLiveActivitySync() {
+        syncLiveActivity()
+        liveActivityTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                self?.syncLiveActivity()
+            }
+        }
+    }
+
+    private func syncLiveActivity() {
+        liveActivity.sync(liveActivityState())
+    }
+
+    /// Select one privacy-safe transfer to feature. Scene titles never leave the app; the Lock Screen only
+    /// receives byte progress, speed/ETA, and a count when a bulk operation has multiple active jobs.
+    private func liveActivityState() -> DownloadActivityAttributes.ContentState? {
+        let active = items.filter {
+            $0.state == .downloading || $0.state == .waitingForNetwork ||
+            $0.state == .merging || $0.state == .serverProcessing
+        }
+        guard !active.isEmpty else { return nil }
+
+        // Prefer bytes actively moving, then recoverable waits/finalization, then a server preparing the
+        // downloadable file. This keeps a queued companion job from displacing an actual phone transfer.
+        let item = active.first(where: { $0.state == .downloading })
+            ?? active.first(where: { $0.state == .waitingForNetwork })
+            ?? active.first(where: { $0.state == .merging })
+            ?? active.first!
+        let now = Date.now
+        let count = active.count
+
+        switch item.state {
+        case .downloading:
+            let progress = item.totalBytes > 0
+                ? min(1, max(0, Double(item.receivedBytes) / Double(item.totalBytes)))
+                : nil
+            let statusParts = [item.speedLabel, item.etaLabel].filter { !$0.isEmpty }
+            let status = statusParts.isEmpty ? "Receiving data" : statusParts.joined(separator: " · ")
+
+            // Project a complete time interval from the latest real byte speed. ProgressView(timerInterval:)
+            // advances inside the system-owned Live Activity even while Stashy's process is suspended.
+            var estimatedStart: Date?
+            var estimatedEnd: Date?
+            if item.speed > 100, item.totalBytes > item.receivedBytes, item.totalBytes > 0 {
+                estimatedStart = now.addingTimeInterval(-Double(item.receivedBytes) / item.speed)
+                estimatedEnd = now.addingTimeInterval(Double(item.totalBytes - item.receivedBytes) / item.speed)
+            }
+            return .init(
+                phase: .downloading, progress: progress,
+                estimatedStart: estimatedStart, estimatedEnd: estimatedEnd,
+                updatedAt: now, status: status, activeJobCount: count
+            )
+
+        case .waitingForNetwork:
+            let progress = item.totalBytes > 0
+                ? min(1, max(0, Double(item.receivedBytes) / Double(item.totalBytes)))
+                : nil
+            return .init(
+                phase: .waitingForNetwork, progress: progress,
+                estimatedStart: nil, estimatedEnd: nil, updatedAt: now,
+                status: "Resumes automatically when the connection returns", activeJobCount: count
+            )
+
+        case .merging:
+            return .init(
+                phase: .preparing, progress: 1,
+                estimatedStart: nil, estimatedEnd: nil, updatedAt: now,
+                status: "Assembling the offline file", activeJobCount: count
+            )
+
+        case .serverProcessing:
+            let detail = item.transcodeStatus.isEmpty
+                ? (item.analyzing ? "Analyzing quality" : "Server is preparing the download")
+                : item.transcodeStatus
+            return .init(
+                phase: .preparing, progress: min(1, max(0, item.serverJobProgress)),
+                estimatedStart: nil, estimatedEnd: nil, updatedAt: now,
+                status: String(detail.prefix(80)), activeJobCount: count
+            )
+
+        default:
+            return nil
+        }
+    }
+
     // MARK: - Foreground / background handoff
 
     /// Move active downloads between the fast foreground engine and the suspend-surviving single-connection
@@ -1323,6 +1422,7 @@ final class DownloadManager {
             item.transcodeStatus = "Paused — resumes automatically when you reopen Stashy"
         }
         for item in items where item.state == .downloading { handoff(item, toBackground: true) }
+        syncLiveActivity()
         // Hold a short assertion so the resume-data cancellations finish and the background tasks actually
         // start before iOS suspends us (a background URLSession task, once running, then survives on its own).
         if !pendingHandoff.isEmpty, handoffAssertion == .invalid {
@@ -1346,6 +1446,7 @@ final class DownloadManager {
             item.error = nil
             transcode(item, settings: settings)
         }
+        syncLiveActivity()
     }
 
     private func endHandoffAssertion() {
@@ -1426,6 +1527,7 @@ final class DownloadManager {
         store.register(task: task.taskIdentifier, item: item.id, conn: i, part: partURL(item.id, i))
         tasks[item.id] = [task]
         task.resume()
+        syncLiveActivity()
     }
 
     // MARK: - Completion / merge
@@ -1467,6 +1569,7 @@ final class DownloadManager {
                     item.state = .failed
                 }
                 self.cleanupParts(item.id)
+                self.syncLiveActivity()
                 if bg != .invalid { UIApplication.shared.endBackgroundTask(bg) }
             }
         }
@@ -1544,6 +1647,7 @@ final class DownloadManager {
             item.error = message
             cancelTasks(item, produceResumeData: false)
         }
+        syncLiveActivity()
     }
 
     /// Relaunch a waiting item shortly after a transient failure if the current path is healthy (covers
