@@ -384,6 +384,7 @@ struct ScenesView: View {
         .onDisappear {
             reloadDebounce?.cancel()
             queryReloadPending = false
+            setBrowseScrolling(false)
         }
     }
 
@@ -453,6 +454,9 @@ struct ScenesView: View {
                 }
             }
             .refreshable { await reload() }
+            .onScrollPhaseChange { _, phase in
+                setBrowseScrolling(phase != .idle)
+            }
         }
     }
 
@@ -479,10 +483,16 @@ struct ScenesView: View {
                 }
                 .padding(12)
             }
+            .onScrollPhaseChange { _, phase in
+                setBrowseScrolling(phase != .idle)
+            }
         }
     }
 
     private func prefetchThumbnails(around scene: StashScene) {
+        // Initial stationary cells seed the look-ahead queue. Cells entering during a fling do no
+        // per-card index scan or URL construction; their visible load resumes once inertia reaches idle.
+        guard !BrowseScrollCoordinator.shared.isScrolling else { return }
         guard let idx = loader.items.firstIndex(where: { $0.id == scene.id }),
               let apiKey = appState.client?.apiKey else { return }
         let start = min(idx + 1, loader.items.count - 1)
@@ -491,6 +501,13 @@ struct ScenesView: View {
         let urls = loader.items[start..<end].compactMap { $0.thumbnailURL(apiKey: apiKey) }
         Task(priority: .background) {
             await imageCache.prefetch(urls: urls)
+        }
+    }
+
+    private func setBrowseScrolling(_ scrolling: Bool) {
+        BrowseScrollCoordinator.shared.setScrolling(scrolling)
+        Task {
+            await imageCache.setPrefetchPaused(scrolling)
         }
     }
 
@@ -513,9 +530,6 @@ struct SceneCard: View {
     @Environment(DownloadManager.self) private var downloads
     @State private var thumbnail: UIImage?
 
-    private var isDownloaded: Bool { downloads.localFile(sceneID: scene.id) != nil }
-    private var wasTranscoded: Bool { downloads.wasTranscoded(sceneID: scene.id) }
-
     /// Rating on a 0–5 scale, reading through the edits store so a rating set on the detail screen
     /// shows here immediately.
     private var ratingStars: Double? {
@@ -524,6 +538,10 @@ struct SceneCard: View {
     }
 
     var body: some View {
+        // One indexed-array walk per body, not separate `localFile` + `wasTranscoded` walks. This matters
+        // when a large downloads library is consulted as each new scene card enters the viewport.
+        let downloadStatus = downloads.cardStatus(sceneID: scene.id)
+
         ZStack(alignment: .bottom) {
             // Thumbnail layer: a fixed 16:9 frame the image fills + crops into (no distortion).
             Rectangle()
@@ -535,7 +553,8 @@ struct SceneCard: View {
                             .resizable()
                             .scaledToFill()
                             .privacyImageBlur()
-                    } else if let ph = ThumbHashStore.shared.placeholder(for: scene.id) {
+                    } else if !BrowseScrollCoordinator.shared.isScrolling,
+                              let ph = ThumbHashStore.shared.placeholder(for: scene.id) {
                         // Instant blurry preview from the tiny ThumbHash while the real thumbnail loads.
                         Image(uiImage: ph)
                             .resizable()
@@ -565,9 +584,9 @@ struct SceneCard: View {
                                 .overlayBadge()
                         }
                         // Offline status, tucked under the duration: green = downloaded, accent = transcoded.
-                        if isDownloaded {
+                        if downloadStatus.isDownloaded {
                             HStack(spacing: 4) {
-                                if wasTranscoded {
+                                if downloadStatus.wasTranscoded {
                                     statusIcon("wand.and.stars", tint: themeManager.current.accentColor)
                                 }
                                 statusIcon("arrow.down.circle.fill", tint: .green)
@@ -600,12 +619,19 @@ struct SceneCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .clipShape(RoundedRectangle(cornerRadius: CornerRadius.card, style: .continuous))
-        .cardElevation(isDark: themeManager.current.preferredColorScheme == .dark)
+        .cardContour(isDark: themeManager.current.preferredColorScheme == .dark)
         .contentShape(RoundedRectangle(cornerRadius: CornerRadius.card, style: .continuous))
         .task(id: scene.id) {
             guard let url = scene.thumbnailURL(apiKey: apiKey) else { return }
-            thumbnail = try? await imageCache.image(for: url)
-            if let img = thumbnail { ThumbHashStore.shared.ingest(img, for: scene.id) }
+            // Cold disk/network/decode and, critically, @State publication both stay outside active
+            // deceleration. A fetch that began while idle is checked again before its texture lands.
+            await BrowseScrollCoordinator.shared.waitUntilIdle()
+            guard !Task.isCancelled else { return }
+            let loaded = try? await imageCache.image(for: url)
+            await BrowseScrollCoordinator.shared.waitUntilIdle()
+            guard !Task.isCancelled, let loaded else { return }
+            thumbnail = loaded
+            ThumbHashStore.shared.ingest(loaded, for: scene.id)
         }
     }
 

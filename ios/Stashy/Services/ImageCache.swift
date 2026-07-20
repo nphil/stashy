@@ -48,6 +48,7 @@ actor ImageCache {
     private var prefetchQueue: [PrefetchRequest] = []
     private var queuedPrefetchKeys: Set<String> = []
     private var activePrefetchWorkers = 0
+    private var prefetchPaused = false
     private let maxPrefetchWorkers = 2
     private let maxQueuedPrefetches = 48
 
@@ -200,8 +201,20 @@ actor ImageCache {
         startPrefetchWorkersIfNeeded()
     }
 
+    /// Keep speculative disk/network/decode work out of active library deceleration. Visible cards resume
+    /// their own loads at the same idle boundary, then this lower-priority queue continues behind them.
+    func setPrefetchPaused(_ paused: Bool) {
+        guard paused != prefetchPaused else { return }
+        prefetchPaused = paused
+        if !paused {
+            startPrefetchWorkersIfNeeded()
+        }
+    }
+
     private func startPrefetchWorkersIfNeeded() {
-        while activePrefetchWorkers < maxPrefetchWorkers, !prefetchQueue.isEmpty {
+        while !prefetchPaused,
+              activePrefetchWorkers < maxPrefetchWorkers,
+              !prefetchQueue.isEmpty {
             activePrefetchWorkers += 1
             Task(priority: .background) {
                 await self.runPrefetchWorker()
@@ -214,7 +227,7 @@ actor ImageCache {
             activePrefetchWorkers -= 1
             startPrefetchWorkersIfNeeded()
         }
-        while let request = prefetchQueue.popLast() {
+        while !prefetchPaused, let request = prefetchQueue.popLast() {
             queuedPrefetchKeys.remove(request.key)
             _ = try? await image(
                 for: request.url,

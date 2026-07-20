@@ -9,18 +9,16 @@ enum CornerRadius {
 }
 
 extension View {
-    /// A subtle shadow so a content card floats over the themed mesh background. Cast the shadow from an
-    /// opaque backing `RoundedRectangle`, NOT from the clipped card itself: a `.shadow` on a clipped/rounded
-    /// view forces Core Animation to rasterize the whole cell offscreen every frame to derive the shadow's
-    /// alpha silhouette — hundreds of offscreen passes/second across a scrolling grid = 120 Hz judder.
-    /// Shadowing a plain filled shape uses its known vector path instead (image-independent, cheap). The
-    /// backing shape is fully covered by the opaque card, so only its shadow shows; its `cornerRadius` +
-    /// `.continuous` MUST match the card's `clipShape`. Apply after the card's `clipShape`.
-    func cardElevation(isDark: Bool, cornerRadius: CGFloat = CornerRadius.card) -> some View {
-        background(
+    /// A cheap contour separating grid media from the mesh. The former blurred elevation shadow still
+    /// consumed compositor fill-rate for every visible card at 120 Hz, even though its source was already
+    /// a vector path. A sub-point stroke preserves edge definition without a blur pass.
+    func cardContour(isDark: Bool, cornerRadius: CGFloat = CornerRadius.card) -> some View {
+        overlay(
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(Color.black)
-                .shadow(color: .black.opacity(isDark ? 0.28 : 0.12), radius: 4, y: 2)
+                .strokeBorder(
+                    isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.10),
+                    lineWidth: 0.75
+                )
         )
     }
 

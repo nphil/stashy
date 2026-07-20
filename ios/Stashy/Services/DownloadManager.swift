@@ -784,6 +784,14 @@ final class DownloadManager {
         return nil
     }
 
+    /// The two lightweight badges a scene-grid card needs, resolved in one array walk. Keeping this as a
+    /// single query avoids doubling main-actor work as cards enter the viewport in a large downloads library.
+    func cardStatus(sceneID: String) -> (isDownloaded: Bool, wasTranscoded: Bool) {
+        guard let item = items.first(where: { $0.id == sceneID }),
+              item.state == .completed else { return (false, false) }
+        return (true, item.wasTranscoded)
+    }
+
     /// True if this scene's local file was produced by our on-device transcoder (a clean hvc1/avc1 MP4 that
     /// direct-plays). Persists across relaunch via the sidecar's `transcoded` flag.
     func wasTranscoded(sceneID: String) -> Bool {
@@ -1564,6 +1572,9 @@ final class DownloadManager {
     }
 
     private func poll() {
+        // This poll only publishes UI progress; the transfer engines continue independently. Avoid its
+        // 120 ms main-actor scan/update cadence while a library grid is delivering inertial frames.
+        guard !BrowseScrollCoordinator.shared.isScrolling else { return }
         guard items.contains(where: { $0.state == .downloading || $0.state == .waitingForNetwork }) else { return }
         let snap = store.snapshot()
         for item in items where item.state == .downloading || item.state == .waitingForNetwork {

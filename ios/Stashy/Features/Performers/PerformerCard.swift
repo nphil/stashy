@@ -21,7 +21,8 @@ struct PerformerCard: View {
                             .resizable()
                             .scaledToFill()
                             .privacyImageBlur()
-                    } else if let ph = ThumbHashStore.shared.placeholder(for: "perf-" + performer.id) {
+                    } else if !BrowseScrollCoordinator.shared.isScrolling,
+                              let ph = ThumbHashStore.shared.placeholder(for: "perf-" + performer.id) {
                         // Instant blurry preview from the tiny ThumbHash while the real portrait loads.
                         Image(uiImage: ph)
                             .resizable()
@@ -32,7 +33,7 @@ struct PerformerCard: View {
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: CornerRadius.card, style: .continuous))
-                .cardElevation(isDark: themeManager.current.preferredColorScheme == .dark)
+                .cardContour(isDark: themeManager.current.preferredColorScheme == .dark)
 
             Text(performer.name)
                 .font(.subheadline.weight(.semibold))
@@ -49,8 +50,13 @@ struct PerformerCard: View {
         .frame(width: width)
         .task(id: performer.id) {
             guard let url = performer.imageURL(apiKey: apiKey) else { return }
-            image = try? await imageCache.image(for: url, priority: true)
-            if let img = image { ThumbHashStore.shared.ingest(img, for: "perf-" + performer.id) }
+            await BrowseScrollCoordinator.shared.waitUntilIdle()
+            guard !Task.isCancelled else { return }
+            let loaded = try? await imageCache.image(for: url, priority: true)
+            await BrowseScrollCoordinator.shared.waitUntilIdle()
+            guard !Task.isCancelled, let loaded else { return }
+            image = loaded
+            ThumbHashStore.shared.ingest(loaded, for: "perf-" + performer.id)
         }
     }
 }

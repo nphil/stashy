@@ -61,6 +61,11 @@ final class PaginatedLoader<T: Identifiable & Sendable> where T.ID: Hashable {
         guard hasMore, !isLoading, fetch != nil,
               items.suffix(max(1, pageSize / 2)).contains(where: { $0.id == triggerID })
         else { return }
+        // A page append changes the LazyVGrid's data and `isLoading` footer. Landing that mutation during
+        // inertial deceleration produces a distinct dropped-frame cadence, so wait until the grid is idle.
+        await BrowseScrollCoordinator.shared.waitUntilIdle()
+        // Other near-end cells may have waited alongside us; only the first one should start the page.
+        guard hasMore, !isLoading, fetch != nil else { return }
         let gen = generation
         isLoading = true
         page += 1

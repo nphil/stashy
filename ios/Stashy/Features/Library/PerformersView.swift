@@ -104,7 +104,10 @@ struct PerformersView: View {
             guard loader.items.isEmpty else { return }
             await reload()
         }
-        .onDisappear { reloadDebounce?.cancel() }
+        .onDisappear {
+            reloadDebounce?.cancel()
+            setBrowseScrolling(false)
+        }
         .libraryEditErrorToast(edits)
     }
 
@@ -168,6 +171,16 @@ struct PerformersView: View {
                     ProgressView().padding()
                 }
             }
+            .onScrollPhaseChange { _, phase in
+                setBrowseScrolling(phase != .idle)
+            }
+        }
+    }
+
+    private func setBrowseScrolling(_ scrolling: Bool) {
+        BrowseScrollCoordinator.shared.setScrolling(scrolling)
+        Task {
+            await imageCache.setPrefetchPaused(scrolling)
         }
     }
 }

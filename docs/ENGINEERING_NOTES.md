@@ -334,8 +334,10 @@ that is **not biased toward black**; **fluid scrolling above all**.
     (Login, Scenes, Performers, Downloads ×2, Scene/Performer detail, Settings) replacing the old flat
     `backgroundColor.ignoresSafeArea()`. **One static layer, never per-cell** — recomputed only on theme /
     slider change, so it is free while scrolling (the scroll-perf rule).
-  - `CardStyle.swift` — `CornerRadius` (card 12 / small 10 / large 18) + `cardElevation(isDark:)` (a small,
-    cheap shadow so a card floats over the mesh; apply **after** the card's `clipShape`).
+  - `CardStyle.swift` — `CornerRadius` (card 12 / small 10 / large 18) +
+    `cardContour(isDark:)` (a sub-point edge stroke). The former blurred grid-card elevation was removed
+    in the inertial-scroll pass: even with a vector source, a blur still consumes compositor fill-rate for
+    every visible card at 120 Hz.
   - `FilterPill.swift` — `filterPill(active:tint:foreground:)`, the one filter-chip style. Active = solid
     `tint` fill + white label; inactive = `foreground.opacity(0.12)` capsule. **Solid, never glass** (see
     glass discipline). Panel control chips use it; the smaller inline-tag chips use the same solid fills
@@ -369,6 +371,15 @@ that is **not biased toward black**; **fluid scrolling above all**.
   source rect is reconstructed once. The long-press fake hero is preserved. Keep global
   `frame(in: .global)` / preference writes, unbounded task creation, JSON decoding, animated glass, and
   matched-transition source state out of visible grid cells and scroll-time main-actor work.
+- **Inertial scroll is a protected render window:** `BrowseScrollCoordinator` is driven by
+  `onScrollPhaseChange` on Scenes, downloaded Scenes, Performers, and performer-detail scene grids.
+  While non-idle: card image tasks may finish but cannot publish their `UIImage` into `@State`; next-page
+  loads wait before toggling `isLoading`/appending data; ImageCache's speculative prefetch queue pauses;
+  Scenes skips per-appearing-cell look-ahead construction; new cards skip first-time ThumbHash decode;
+  and DownloadManager skips only its 120 ms **UI progress poll** (the transfer engines continue untouched).
+  Scene download/transcode badges are also resolved in one array walk, not two. On idle, continuations
+  resume and UI catches up. The coordinator is deliberately **not Observable**, so phase changes do not
+  invalidate all visible cards. Preserve this boundary in future browse bug fixes.
 
 ### Minimized search (v1.0.268) — no scroll-top drawer, tap-to-expand button
 Owner ask: search must NOT appear when the list scrolls to the top; it should pop up only when the
@@ -456,3 +467,6 @@ magnifier is tapped. Applied to Scenes & Performers.
   geometry conversion; bounded thumbnail prefetch to two deduplicating workers; decoded companion maps
   off-main; removed iOS 26 zoom-navigation sources and their 600 ms return scroll lock. §6 is the guardrail
   for future browse fixes.
+- **2026-07-20 inertial-frame follow-up:** protected active/decelerating library scroll from asynchronous
+  image publication, pagination mutations, speculative prefetch, and the transfer UI poll; replaced blurred
+  grid elevation with a contour stroke. Actual downloads and their foreground eight-way engine are unchanged.

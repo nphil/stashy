@@ -70,6 +70,9 @@ struct PerformerDetailView: View {
             }
             .padding(.vertical, 12)
         }
+        .onScrollPhaseChange { _, phase in
+            setBrowseScrolling(phase != .idle)
+        }
         .themedBackground()
         .environment(\.scenePreviewPresenter, previewPresenter)
         .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: { path.openScene($0) }) }
@@ -94,8 +97,12 @@ struct PerformerDetailView: View {
         }
         .task(id: performer.id) {
             guard let url = performer.imageURL(apiKey: apiKey) else { return }
-            portrait = try? await imageCache.image(for: url, priority: true)
+            let loaded = try? await imageCache.image(for: url, priority: true)
+            await BrowseScrollCoordinator.shared.waitUntilIdle()
+            guard !Task.isCancelled else { return }
+            portrait = loaded
         }
+        .onDisappear { setBrowseScrolling(false) }
         .libraryEditErrorToast(edits)
         .confirmationDialog(
             "Delete this performer?",
@@ -119,6 +126,13 @@ struct PerformerDetailView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("“Delete Performer Only” removes just \(performer.name); their scenes stay. “Delete Performer & All Their Scenes” also permanently deletes every scene featuring them, including the video files on disk — this can't be undone.")
+        }
+    }
+
+    private func setBrowseScrolling(_ scrolling: Bool) {
+        BrowseScrollCoordinator.shared.setScrolling(scrolling)
+        Task {
+            await imageCache.setPrefetchPaused(scrolling)
         }
     }
 
