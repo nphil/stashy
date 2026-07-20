@@ -345,7 +345,10 @@ that is **not biased toward black**; **fluid scrolling above all**.
     `.perceptual` colour space) exposed as `.themedBackground()`. Wired behind every browse screen
     (Login, Scenes, Performers, Downloads ×2, Scene/Performer detail, Settings) replacing the old flat
     `backgroundColor.ignoresSafeArea()`. **One static layer, never per-cell** — recomputed only on theme /
-    slider change, so it is free while scrolling (the scroll-perf rule).
+    slider change, so it is free while scrolling (the scroll-perf rule). Its explicit `RenderIdentity`
+    includes only palette/vibrancy/lift: this forces iOS 26 to replace a retained off-screen tab's stale
+    mesh layer after a theme change (Scenes once restored an old dark Synthwave mesh over light Meadow)
+    without adding any scroll-time invalidation.
   - `CardStyle.swift` — `CornerRadius` (card 12 / small 10 / large 18) +
     `cardContour(isDark:)` (a sub-point edge stroke). The former blurred grid-card elevation was removed
     in the inertial-scroll pass: even with a vector source, a blur still consumes compositor fill-rate for
