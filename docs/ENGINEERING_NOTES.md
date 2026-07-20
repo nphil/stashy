@@ -287,7 +287,9 @@ churns.** History on the filter/sort panel:
 - `ImageCache` (actor): 2-tier (NSCache + downsampled JPEG on disk), LRU-evicted, priority tier for
   performer portraits (kept longest). Cache keys strip the `apikey` query param. Ahead-of-scroll work
   goes through a **48-request deduplicated queue with two workers**; never restore the former
-  task-per-URL fan-out from every appearing cell.
+  task-per-URL fan-out from every appearing cell. The persistent tier is 800 MB. The decoded-memory
+  budget adapts to physical RAM (128–256 MB), and the decoded ThumbHash cache holds up to 20,000 entries
+  under a separate 64 MB cost cap.
 - Companion served-map stores (`PlayabilityStore`, `VmafMapStore`, `LoudnessStore`, `ThumbHashStore`)
   fetch on their main-actor owners but decode JSON/base64 in utility detached tasks, then publish the
   completed Sendable value on main. A large library map must never parse during a scrolling frame.
@@ -371,15 +373,24 @@ that is **not biased toward black**; **fluid scrolling above all**.
   source rect is reconstructed once. The long-press fake hero is preserved. Keep global
   `frame(in: .global)` / preference writes, unbounded task creation, JSON decoding, animated glass, and
   matched-transition source state out of visible grid cells and scroll-time main-actor work.
-- **Inertial scroll is a protected render window:** `BrowseScrollCoordinator` is driven by
-  `onScrollPhaseChange` on Scenes, downloaded Scenes, Performers, and performer-detail scene grids.
-  While non-idle: card image tasks may finish but cannot publish their `UIImage` into `@State`; next-page
-  loads wait before toggling `isLoading`/appending data; ImageCache's speculative prefetch queue pauses;
-  Scenes skips per-appearing-cell look-ahead construction; new cards skip first-time ThumbHash decode;
-  and DownloadManager skips only its 120 ms **UI progress poll** (the transfer engines continue untouched).
-  Scene download/transcode badges are also resolved in one array walk, not two. On idle, continuations
-  resume and UI catches up. The coordinator is deliberately **not Observable**, so phase changes do not
-  invalidate all visible cards. Preserve this boundary in future browse bug fixes.
+- **Inertial scroll protects structural mutations, never thumbnail visibility:** `BrowseScrollCoordinator`
+  is driven by `onScrollPhaseChange` on Scenes, downloaded Scenes, Performers, and performer-detail scene
+  grids. Next-page loads still wait before toggling `isLoading`/appending data, Scenes skips repeated
+  per-appearing-cell look-ahead construction, and DownloadManager skips only its 120 ms **UI progress
+  poll** (transfer engines continue untouched). But v1.0.286's image freeze was a failed tradeoff: it made
+  new cards blank and did not materially improve device scrolling. ThumbHashes now render during motion,
+  memory hits publish immediately, disk/network loads keep moving and publish on completion, and the
+  already-seeded two-worker prefetch queue continues throughout inertia. Scene download/transcode badges
+  remain one array walk. The coordinator is deliberately **not Observable**, so phase changes do not
+  invalidate all visible cards.
+- **Browse scroll telemetry (opt-in RemoteLog):** `BrowseScrollPerformanceMonitor` attaches a 120 Hz
+  `CADisplayLink` only while a tracked grid is moving and Settings → Diagnostics → Stream debug logs is
+  enabled. It records callback intervals and phase with no per-frame observation writes, then does all
+  sorting/string/log work after `.idle`. ntfy receives separate `scroll-segment` lines for interaction
+  and deceleration plus `scroll-end`: effective FPS, target Hz, avg/p95/p99/max frame time, hitch %, severe
+  ≥50 ms gaps, missed maximum-Hz intervals, coefficient-of-variation "judder", a cadence histogram, and
+  real-thumbnail publication/memory-hit/load-latency counts. It diagnoses main-run-loop cadence; it cannot
+  directly prove a compositor-only missed presentation. Normal use with logging off has no display link.
 
 ### Minimized search (v1.0.268) — no scroll-top drawer, tap-to-expand button
 Owner ask: search must NOT appear when the list scrolls to the top; it should pop up only when the
@@ -467,6 +478,9 @@ magnifier is tapped. Applied to Scenes & Performers.
   geometry conversion; bounded thumbnail prefetch to two deduplicating workers; decoded companion maps
   off-main; removed iOS 26 zoom-navigation sources and their 600 ms return scroll lock. §6 is the guardrail
   for future browse fixes.
-- **2026-07-20 inertial-frame follow-up:** protected active/decelerating library scroll from asynchronous
-  image publication, pagination mutations, speculative prefetch, and the transfer UI poll; replaced blurred
-  grid elevation with a contour stroke. Actual downloads and their foreground eight-way engine are unchanged.
+- **2026-07-20 inertial-frame follow-up:** pagination mutations and the transfer UI poll remain protected;
+  replaced blurred grid elevation with a contour stroke. The attempted thumbnail publication/prefetch/
+  ThumbHash freeze was reverted after device feedback (blank cards, no meaningful FPS gain). Real images
+  and ThumbHashes now remain live during motion, memory/decoded-placeholder caches are larger, and opt-in
+  ntfy scroll frame telemetry supplies evidence for the next isolation pass. Actual downloads and their
+  foreground eight-way engine are unchanged.

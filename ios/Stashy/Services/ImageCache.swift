@@ -14,9 +14,13 @@ actor ImageCache {
         let cache = NSCache<NSString, UIImage>()
         cache.countLimit = 500
         // Cost is now the decoded bitmap size (see `memoryCost`), not the compressed JPEG size, so this
-        // budget finally binds. Raised from 64MB to soften the scroll-back regression from honest costing
-        // (still an order of magnitude under the ~400-700MB the mis-costed cache could hold).
-        cache.totalCostLimit = 128 * 1024 * 1024
+        // budget finally binds. The adaptive ceiling softens scroll-back churn from honest costing while
+        // remaining well below the old unintentional ~400–700 MB worst case.
+        // Use more of modern devices without hard-coding the high watermark for older phones. This is
+        // ~128 MB at 6 GB RAM, ~171 MB at 8 GB, and caps at 256 MB on 12+ GB devices. NSCache remains
+        // purgeable under memory pressure; the persistent 800 MB disk tier is unaffected.
+        let physical = Int(ProcessInfo.processInfo.physicalMemory)
+        cache.totalCostLimit = min(256 * 1024 * 1024, max(128 * 1024 * 1024, physical / 48))
         return cache
     }()
 
@@ -48,7 +52,6 @@ actor ImageCache {
     private var prefetchQueue: [PrefetchRequest] = []
     private var queuedPrefetchKeys: Set<String> = []
     private var activePrefetchWorkers = 0
-    private var prefetchPaused = false
     private let maxPrefetchWorkers = 2
     private let maxQueuedPrefetches = 48
 
@@ -201,19 +204,8 @@ actor ImageCache {
         startPrefetchWorkersIfNeeded()
     }
 
-    /// Keep speculative disk/network/decode work out of active library deceleration. Visible cards resume
-    /// their own loads at the same idle boundary, then this lower-priority queue continues behind them.
-    func setPrefetchPaused(_ paused: Bool) {
-        guard paused != prefetchPaused else { return }
-        prefetchPaused = paused
-        if !paused {
-            startPrefetchWorkersIfNeeded()
-        }
-    }
-
     private func startPrefetchWorkersIfNeeded() {
-        while !prefetchPaused,
-              activePrefetchWorkers < maxPrefetchWorkers,
+        while activePrefetchWorkers < maxPrefetchWorkers,
               !prefetchQueue.isEmpty {
             activePrefetchWorkers += 1
             Task(priority: .background) {
@@ -227,7 +219,7 @@ actor ImageCache {
             activePrefetchWorkers -= 1
             startPrefetchWorkersIfNeeded()
         }
-        while !prefetchPaused, let request = prefetchQueue.popLast() {
+        while let request = prefetchQueue.popLast() {
             queuedPrefetchKeys.remove(request.key)
             _ = try? await image(
                 for: request.url,

@@ -455,7 +455,11 @@ struct ScenesView: View {
             }
             .refreshable { await reload() }
             .onScrollPhaseChange { _, phase in
-                setBrowseScrolling(phase != .idle)
+                setBrowseScrolling(
+                    phase != .idle,
+                    surface: "scenes",
+                    phase: String(describing: phase)
+                )
             }
         }
     }
@@ -484,14 +488,19 @@ struct ScenesView: View {
                 .padding(12)
             }
             .onScrollPhaseChange { _, phase in
-                setBrowseScrolling(phase != .idle)
+                setBrowseScrolling(
+                    phase != .idle,
+                    surface: "downloaded-scenes",
+                    phase: String(describing: phase)
+                )
             }
         }
     }
 
     private func prefetchThumbnails(around scene: StashScene) {
-        // Initial stationary cells seed the look-ahead queue. Cells entering during a fling do no
-        // per-card index scan or URL construction; their visible load resumes once inertia reaches idle.
+        // Initial stationary cells seed the bounded look-ahead queue. Cells entering during a fling do no
+        // repeated index scan or URL construction, but the two already-seeded workers KEEP running so
+        // upcoming real thumbnails are in memory/disk before their cards appear.
         guard !BrowseScrollCoordinator.shared.isScrolling else { return }
         guard let idx = loader.items.firstIndex(where: { $0.id == scene.id }),
               let apiKey = appState.client?.apiKey else { return }
@@ -504,11 +513,14 @@ struct ScenesView: View {
         }
     }
 
-    private func setBrowseScrolling(_ scrolling: Bool) {
-        BrowseScrollCoordinator.shared.setScrolling(scrolling)
-        Task {
-            await imageCache.setPrefetchPaused(scrolling)
-        }
+    private func setBrowseScrolling(
+        _ scrolling: Bool,
+        surface: String = "scenes",
+        phase: String = "idle"
+    ) {
+        BrowseScrollCoordinator.shared.setScrolling(
+            scrolling, surface: surface, phase: phase
+        )
     }
 
     /// Open only from a stable grid. Query reloads deliberately keep the previous page visible; allowing one
@@ -553,8 +565,7 @@ struct SceneCard: View {
                             .resizable()
                             .scaledToFill()
                             .privacyImageBlur()
-                    } else if !BrowseScrollCoordinator.shared.isScrolling,
-                              let ph = ThumbHashStore.shared.placeholder(for: scene.id) {
+                    } else if let ph = ThumbHashStore.shared.placeholder(for: scene.id) {
                         // Instant blurry preview from the tiny ThumbHash while the real thumbnail loads.
                         Image(uiImage: ph)
                             .resizable()
@@ -623,14 +634,23 @@ struct SceneCard: View {
         .contentShape(RoundedRectangle(cornerRadius: CornerRadius.card, style: .continuous))
         .task(id: scene.id) {
             guard let url = scene.thumbnailURL(apiKey: apiKey) else { return }
-            // Cold disk/network/decode and, critically, @State publication both stay outside active
-            // deceleration. A fetch that began while idle is checked again before its texture lands.
-            await BrowseScrollCoordinator.shared.waitUntilIdle()
-            guard !Task.isCancelled else { return }
+            // Publish memory hits synchronously at task start; otherwise keep the persistent disk/network
+            // request moving during inertia and replace the ThumbHash immediately when it finishes.
+            if let cached = imageCache.cachedImage(for: url) {
+                thumbnail = cached
+                BrowseScrollCoordinator.shared.recordThumbnailPublication(
+                    loadMilliseconds: 0, memoryHit: true
+                )
+                return
+            }
+            let started = Date()
             let loaded = try? await imageCache.image(for: url)
-            await BrowseScrollCoordinator.shared.waitUntilIdle()
             guard !Task.isCancelled, let loaded else { return }
             thumbnail = loaded
+            BrowseScrollCoordinator.shared.recordThumbnailPublication(
+                loadMilliseconds: Date().timeIntervalSince(started) * 1_000,
+                memoryHit: false
+            )
             ThumbHashStore.shared.ingest(loaded, for: scene.id)
         }
     }

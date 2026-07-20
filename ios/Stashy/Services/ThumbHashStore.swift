@@ -23,7 +23,10 @@ final class ThumbHashStore {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
         fileURL = support.appendingPathComponent("thumbhashes.json")
-        decoded.countLimit = 400
+        // A decoded ThumbHash is only a tiny ~32 px bitmap. Keep broad/full-library coverage resident so
+        // a fast fling never re-decodes recently evicted placeholders on the main actor.
+        decoded.countLimit = 20_000
+        decoded.totalCostLimit = 64 * 1024 * 1024
         // Load the persisted map off-main, then merge (never clobbering a hash recorded before load finished).
         Task { [fileURL] in
             let loaded = await Self.load(from: fileURL)
@@ -37,7 +40,8 @@ final class ThumbHashStore {
         if let cached = decoded.object(forKey: id as NSString) { return cached }
         guard let hash = hashes[id], hash.count >= 5 else { return nil }
         let image = thumbHashToImage(hash: hash)
-        decoded.setObject(image, forKey: id as NSString)
+        let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 4_096
+        decoded.setObject(image, forKey: id as NSString, cost: cost)
         return image
     }
 

@@ -1,9 +1,9 @@
 import Foundation
 
-/// One app-wide idle boundary for the two library grids. Work that changes grid structure or publishes
-/// new image textures waits here while the user's finger or inertial deceleration is active. This keeps
-/// frame delivery even: a cold thumbnail or next-page response can finish at any time, but it cannot land
-/// in SwiftUI halfway through a scroll frame.
+/// One app-wide idle boundary for the library grids. Structural work such as a next-page append may wait
+/// here while the user's finger or inertial deceleration is active. Thumbnail work deliberately does not:
+/// cards must always show their ThumbHash immediately and replace it with the real cached image as soon as
+/// available.
 ///
 /// Deliberately not Observable. Changing scroll phase must not itself invalidate every visible card.
 @MainActor
@@ -15,7 +15,11 @@ final class BrowseScrollCoordinator {
 
     private init() {}
 
-    func setScrolling(_ scrolling: Bool) {
+    func setScrolling(_ scrolling: Bool, surface: String, phase: String) {
+        // The monitor is a no-op unless the owner's opt-in RemoteLog switch is enabled.
+        BrowseScrollPerformanceMonitor.shared.setScrolling(
+            scrolling, surface: surface, phase: phase
+        )
         guard scrolling != isScrolling else { return }
         isScrolling = scrolling
         guard !scrolling else { return }
@@ -38,5 +42,12 @@ final class BrowseScrollCoordinator {
                 continuation.resume()
             }
         }
+    }
+
+    func recordThumbnailPublication(loadMilliseconds: Double, memoryHit: Bool) {
+        BrowseScrollPerformanceMonitor.shared.recordThumbnailPublication(
+            loadMilliseconds: loadMilliseconds,
+            memoryHit: memoryHit
+        )
     }
 }

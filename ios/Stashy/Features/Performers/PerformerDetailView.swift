@@ -71,7 +71,11 @@ struct PerformerDetailView: View {
             .padding(.vertical, 12)
         }
         .onScrollPhaseChange { _, phase in
-            setBrowseScrolling(phase != .idle)
+            setBrowseScrolling(
+                phase != .idle,
+                surface: "performer-scenes",
+                phase: String(describing: phase)
+            )
         }
         .themedBackground()
         .environment(\.scenePreviewPresenter, previewPresenter)
@@ -97,10 +101,7 @@ struct PerformerDetailView: View {
         }
         .task(id: performer.id) {
             guard let url = performer.imageURL(apiKey: apiKey) else { return }
-            let loaded = try? await imageCache.image(for: url, priority: true)
-            await BrowseScrollCoordinator.shared.waitUntilIdle()
-            guard !Task.isCancelled else { return }
-            portrait = loaded
+            portrait = try? await imageCache.image(for: url, priority: true)
         }
         .onDisappear { setBrowseScrolling(false) }
         .libraryEditErrorToast(edits)
@@ -129,11 +130,14 @@ struct PerformerDetailView: View {
         }
     }
 
-    private func setBrowseScrolling(_ scrolling: Bool) {
-        BrowseScrollCoordinator.shared.setScrolling(scrolling)
-        Task {
-            await imageCache.setPrefetchPaused(scrolling)
-        }
+    private func setBrowseScrolling(
+        _ scrolling: Bool,
+        surface: String = "performer-scenes",
+        phase: String = "idle"
+    ) {
+        BrowseScrollCoordinator.shared.setScrolling(
+            scrolling, surface: surface, phase: phase
+        )
     }
 
     // Portrait enlarged ~1.5x (was 120×160) and tappable to open the Photos-style fullscreen viewer.

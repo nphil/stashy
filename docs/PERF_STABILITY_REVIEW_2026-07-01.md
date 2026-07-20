@@ -392,10 +392,14 @@ treat full chunked streaming as a separate follow-up only if 4K shows pressure.
   cell size. At long-press, the existing `UIGestureRecognizerRepresentable` coordinate converter provides
   global + local locations and reconstructs the source rect once. No global frame conversion remains on
   the scroll hot path.
-- **Inertial mutation cadence — DONE 2026-07-20 follow-up:** `BrowseScrollCoordinator` defers thumbnail
-  `@State` publication and pagination appends until `.idle`, pauses speculative ImageCache prefetch, and
-  suppresses DownloadManager's UI-only 120 ms poll during library motion. Blurred per-grid-card elevation
-  was replaced by a contour stroke. This is a rendering boundary only; transfer work is not paused.
+- **Inertial mutation cadence — PARTIALLY REVISED 2026-07-20:** pagination appends still wait until `.idle`
+  and DownloadManager's UI-only 120 ms poll remains suppressed during library motion. Blurred per-grid-card
+  elevation remains a contour stroke. Device testing showed that deferring thumbnail `@State`, pausing
+  bounded prefetch, and suppressing first-time ThumbHash display caused blank cards without a meaningful
+  scroll improvement, so those three policies were reverted. Cards now use immediate ThumbHash/memory hits,
+  publish completed loads during motion, and keep the two-worker prefetch queue active. An opt-in 120 Hz
+  `BrowseScrollPerformanceMonitor` now emits touch-vs-deceleration frame-time/FPS/hitch/judder evidence to
+  RemoteLog after idle, including thumbnail-publication correlation.
 - **[L] deadline data race** — `FFmpegRemuxer.swift:62`: `deadline` written from main (`abort()`) and the
   remux utility queue with no sync. Benign in practice (aligned 8-byte writes). Fix: route through the
   existing `progressLock`. Note the interrupt reads from a `@convention(c)` trampoline — NSLock/os_unfair_lock

@@ -4,7 +4,6 @@ struct PerformersView: View {
     @Environment(AppState.self) private var appState
     @Environment(LibraryEdits.self) private var edits
     @Environment(ThemeManager.self) private var themeManager
-    @Environment(\.imageCache) private var imageCache
     @State private var loader = PaginatedLoader<Performer>(pageSize: 30)
     @State private var query = PerformerQuery()
     // Native minimized search (magnifier → field), top-right. Debounced into query.search below.
@@ -172,16 +171,23 @@ struct PerformersView: View {
                 }
             }
             .onScrollPhaseChange { _, phase in
-                setBrowseScrolling(phase != .idle)
+                setBrowseScrolling(
+                    phase != .idle,
+                    surface: "performers",
+                    phase: String(describing: phase)
+                )
             }
         }
     }
 
-    private func setBrowseScrolling(_ scrolling: Bool) {
-        BrowseScrollCoordinator.shared.setScrolling(scrolling)
-        Task {
-            await imageCache.setPrefetchPaused(scrolling)
-        }
+    private func setBrowseScrolling(
+        _ scrolling: Bool,
+        surface: String = "performers",
+        phase: String = "idle"
+    ) {
+        BrowseScrollCoordinator.shared.setScrolling(
+            scrolling, surface: surface, phase: phase
+        )
     }
 }
 

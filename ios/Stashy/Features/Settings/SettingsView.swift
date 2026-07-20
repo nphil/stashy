@@ -357,7 +357,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Diagnostics")
                 } footer: {
-                    Text("Streams playback/transcode diagnostics (and screenshots via the floating camera button) to an ntfy server + topic. Point \"Log server\" at a self-hosted ntfy (e.g. an Unraid container) to keep it private; on https://ntfy.sh the topic is readable by anyone who knows it. ntfy has no delete command — messages auto-expire (public: ~12h; attachments ~3h) and \"New topic\" abandons the old channel so it clears itself. To wipe on demand, self-host with a short cache-duration / attachment-expiry-duration. Off by default; telemetry is temporary and will be removed.")
+                    Text("Streams playback/transcode diagnostics, browse-scroll frame-time metrics, and screenshots via the floating camera button to an ntfy server + topic. Scroll reports separate touch and inertial segments and include FPS, p95/p99/max frame time, hitch rate, missed 120 Hz intervals, and judder. Point \"Log server\" at a self-hosted ntfy (e.g. an Unraid container) to keep it private; on https://ntfy.sh the topic is readable by anyone who knows it. ntfy has no delete command — messages auto-expire (public: ~12h; attachments ~3h) and \"New topic\" abandons the old channel so it clears itself. Off by default.")
                 }
 
                 // About section
