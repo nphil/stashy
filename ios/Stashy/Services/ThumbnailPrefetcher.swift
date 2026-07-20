@@ -16,6 +16,9 @@ final class ThumbnailPrefetcher {
     private(set) var isRunning = false
     private(set) var done = 0
     private(set) var total = 0
+    /// Advances only after a run has fully unwound, including cancellation. Settings observes this
+    /// terminal signal to measure the final on-disk cache size after the last image write has settled.
+    private(set) var completionRevision = 0
     private var task: Task<Void, Never>?
 
     var progress: Double { total > 0 ? min(1, Double(done) / Double(total)) : 0 }
@@ -30,12 +33,17 @@ final class ThumbnailPrefetcher {
 
     func cancel() {
         task?.cancel()
-        task = nil
-        isRunning = false
+        // Keep the job visibly running until `run` reaches its defer. Besides making completion
+        // reporting exact, this prevents a replacement run from starting while cancelled work is
+        // still unwinding and then having the old run clear the new task's state.
     }
 
     private func run(client: StashClient, imageCache: ImageCache) async {
-        defer { isRunning = false; task = nil }
+        defer {
+            isRunning = false
+            task = nil
+            completionRevision &+= 1
+        }
         let apiKey = client.apiKey
         var page = 1
         let perPage = 100

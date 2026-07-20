@@ -390,6 +390,11 @@ struct SettingsView: View {
                 editingKey = savedKey
             }
             .task { await refreshCacheSize() }
+            .onChange(of: ThumbnailPrefetcher.shared.completionRevision) { _, _ in
+                // One exact terminal measurement, after the prefetch task (and its final disk write)
+                // has fully unwound. Avoid polling progress or scanning cache directories mid-job.
+                Task { await refreshCacheSize() }
+            }
         }
     }
 

@@ -295,6 +295,11 @@ churns.** History on the filter/sort panel:
   task-per-URL fan-out from every appearing cell. The persistent tier is 800 MB. The decoded-memory
   budget adapts to physical RAM (128–256 MB), and the decoded ThumbHash cache holds up to 20,000 entries
   under a separate 64 MB cost cap.
+- Settings measures "Cached previews & images" when it opens and once on
+  `ThumbnailPrefetcher.completionRevision`. That revision advances only after a Cache All Thumbnails run
+  has fully unwound (success or cancellation), so the displayed bytes include the final settled image
+  write without polling progress or scanning cache directories during the job. Cancellation keeps
+  `isRunning` true until that terminal point, preventing an old cancelled run from clobbering a new one.
 - Companion served-map stores (`PlayabilityStore`, `VmafMapStore`, `LoudnessStore`, `ThumbHashStore`)
   fetch on their main-actor owners but decode JSON/base64 in utility detached tasks, then publish the
   completed Sendable value on main. A large library map must never parse during a scrolling frame.
