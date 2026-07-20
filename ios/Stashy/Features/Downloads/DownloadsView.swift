@@ -389,9 +389,18 @@ private struct DownloadCard: View {
             }
             .pickerStyle(.segmented)
 
+            Picker("Transfer", selection: $item.multiThread) {
+                Text("Background").tag(false)
+                Text("Multi-thread").tag(true)
+            }
+            .pickerStyle(.segmented)
+
             switch stageSource.wrappedValue {
             case .original:
-                Label("Continues while Stashy is in the background", systemImage: "arrow.down.circle")
+                Label(item.multiThread
+                      ? "8 connections open · 1 continues in background"
+                      : "1 connection continues in background",
+                      systemImage: "arrow.down.circle")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             case .serverTranscode:
@@ -415,6 +424,11 @@ private struct DownloadCard: View {
                 }
                 // Compact one-liner (no wrap): the live size/ETA estimate shows in the log box once running.
                 Text("→ \(companionCodecBinding.wrappedValue.label) · \(item.serverResolution.label)")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                Text(item.multiThread
+                     ? "Output downloads with adaptive multi-threading"
+                     : "Output downloads with one background connection")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .lineLimit(1)
             }
