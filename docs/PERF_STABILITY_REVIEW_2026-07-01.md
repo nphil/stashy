@@ -392,14 +392,16 @@ treat full chunked streaming as a separate follow-up only if 4K shows pressure.
   cell size. At long-press, the existing `UIGestureRecognizerRepresentable` coordinate converter provides
   global + local locations and reconstructs the source rect once. No global frame conversion remains on
   the scroll hot path.
-- **Inertial mutation cadence — PARTIALLY REVISED 2026-07-20:** pagination appends still wait until `.idle`
-  and DownloadManager's UI-only 120 ms poll remains suppressed during library motion. Blurred per-grid-card
-  elevation remains a contour stroke. Device testing showed that deferring thumbnail `@State`, pausing
-  bounded prefetch, and suppressing first-time ThumbHash display caused blank cards without a meaningful
-  scroll improvement, so those three policies were reverted. Cards now use immediate ThumbHash/memory hits,
-  publish completed loads during motion, and keep the two-worker prefetch queue active. An opt-in 120 Hz
-  `BrowseScrollPerformanceMonitor` now emits touch-vs-deceleration frame-time/FPS/hitch/judder evidence to
-  RemoteLog after idle, including thumbnail-publication correlation.
+- **Inertial mutation cadence — TELEMETRY-REVISED 2026-07-20:** DownloadManager's UI-only 120 ms poll
+  remains suppressed during library motion and blurred grid elevation remains a contour stroke. Deferring
+  thumbnail `@State`, pausing bounded prefetch, and suppressing first-time ThumbHash display caused blank
+  cards without meaningful improvement, so those policies were reverted. The subsequent pagination idle
+  gate also caused visible hard stops at the end of each materialized page despite healthy frame cadence.
+  `PaginatedLoader` now starts early (first quarter of newest page), uses an unobserved in-flight token,
+  appends during motion, and increments `contentRevision` so each grid enqueues the new page's images once.
+  The opt-in 120 Hz monitor measured 42 sessions / ~80 s at 119.67 FPS Scenes and 119.92 Performers, both
+  worst-p95 8.33 ms, zero ≥50 ms gaps, across 4,137 thumbnail publications. It now also correlates page
+  append count/items/request p95 with each touch/deceleration segment.
 - **[L] deadline data race** — `FFmpegRemuxer.swift:62`: `deadline` written from main (`abort()`) and the
   remux utility queue with no sync. Benign in practice (aligned 8-byte writes). Fix: route through the
   existing `progressLock`. Note the interrupt reads from a `@convention(c)` trampoline — NSLock/os_unfair_lock

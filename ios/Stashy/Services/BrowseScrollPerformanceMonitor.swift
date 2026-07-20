@@ -24,10 +24,17 @@ final class BrowseScrollPerformanceMonitor {
         let phase: String
     }
 
+    private struct PageSample {
+        let itemCount: Int
+        let loadMilliseconds: Double
+        let phase: String
+    }
+
     private var displayLink: CADisplayLink?
     private var linkProxy: BrowseScrollDisplayLinkProxy?
     private var samples: [FrameSample] = []
     private var thumbnailSamples: [ThumbnailSample] = []
+    private var pageSamples: [PageSample] = []
     private var surface = ""
     private var phase = ""
     private var lastTimestamp = 0.0
@@ -66,11 +73,21 @@ final class BrowseScrollPerformanceMonitor {
         ))
     }
 
+    func recordPageAppend(itemCount: Int, loadMilliseconds: Double) {
+        guard displayLink != nil else { return }
+        pageSamples.append(PageSample(
+            itemCount: itemCount,
+            loadMilliseconds: loadMilliseconds,
+            phase: phase
+        ))
+    }
+
     private func start(surface: String, phase: String) {
         self.surface = surface
         self.phase = phase
         samples.removeAll(keepingCapacity: true)
         thumbnailSamples.removeAll(keepingCapacity: true)
+        pageSamples.removeAll(keepingCapacity: true)
         lastTimestamp = 0
         maximumHz = max(60, UIScreen.main.maximumFramesPerSecond)
 
@@ -106,6 +123,7 @@ final class BrowseScrollPerformanceMonitor {
             emit(
                 samples.filter { $0.phase == phase },
                 thumbnails: thumbnailSamples.filter { $0.phase == phase },
+                pages: pageSamples.filter { $0.phase == phase },
                 tag: "scroll-segment",
                 phase: phase,
                 reason: nil
@@ -114,6 +132,7 @@ final class BrowseScrollPerformanceMonitor {
         emit(
             samples,
             thumbnails: thumbnailSamples,
+            pages: pageSamples,
             tag: "scroll-end",
             phase: "all",
             reason: reason
@@ -123,6 +142,7 @@ final class BrowseScrollPerformanceMonitor {
         linkProxy = nil
         samples.removeAll(keepingCapacity: true)
         thumbnailSamples.removeAll(keepingCapacity: true)
+        pageSamples.removeAll(keepingCapacity: true)
         lastTimestamp = 0
     }
 
@@ -144,6 +164,7 @@ final class BrowseScrollPerformanceMonitor {
     private func emit(
         _ frames: [FrameSample],
         thumbnails: [ThumbnailSample],
+        pages: [PageSample],
         tag: String,
         phase: String,
         reason: String?
@@ -164,6 +185,8 @@ final class BrowseScrollPerformanceMonitor {
         let cadence = cadenceBuckets(intervals)
         let loads = thumbnails.filter { !$0.memoryHit }.map(\.loadMilliseconds).sorted()
         let loadP95 = loads.isEmpty ? nil : percentile(loads, 0.95)
+        let pageLoads = pages.map(\.loadMilliseconds).sorted()
+        let pageLoadP95 = pageLoads.isEmpty ? nil : percentile(pageLoads, 0.95)
 
         RemoteLog.shared.event(tag, [
             ("surface", surface),
@@ -183,7 +206,10 @@ final class BrowseScrollPerformanceMonitor {
             ("gaps_8_12_16_25_34p", cadence),
             ("thumb_publishes", thumbnails.count),
             ("thumb_mem_hits", thumbnails.filter { $0.memoryHit }.count),
-            ("thumb_load_p95_ms", loadP95.map { format($0, digits: 0) })
+            ("thumb_load_p95_ms", loadP95.map { format($0, digits: 0) }),
+            ("page_appends", pages.count),
+            ("page_items", pages.reduce(0) { $0 + $1.itemCount }),
+            ("page_load_p95_ms", pageLoadP95.map { format($0, digits: 0) })
         ])
     }
 

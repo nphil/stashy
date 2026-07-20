@@ -77,6 +77,9 @@ struct PerformerDetailView: View {
                 phase: String(describing: phase)
             )
         }
+        .onChange(of: loader.contentRevision, initial: true) { _, _ in
+            prefetchNewestScenePage()
+        }
         .themedBackground()
         .environment(\.scenePreviewPresenter, previewPresenter)
         .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: { path.openScene($0) }) }
@@ -138,6 +141,16 @@ struct PerformerDetailView: View {
         BrowseScrollCoordinator.shared.setScrolling(
             scrolling, surface: surface, phase: phase
         )
+    }
+
+    private func prefetchNewestScenePage() {
+        let urls = loader.items.suffix(loader.pageSize).compactMap {
+            $0.thumbnailURL(apiKey: apiKey)
+        }
+        guard !urls.isEmpty else { return }
+        Task(priority: .background) {
+            await imageCache.prefetch(urls: urls)
+        }
     }
 
     // Portrait enlarged ~1.5x (was 120×160) and tappable to open the Photos-style fullscreen viewer.

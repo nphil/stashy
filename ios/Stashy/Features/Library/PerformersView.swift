@@ -4,6 +4,7 @@ struct PerformersView: View {
     @Environment(AppState.self) private var appState
     @Environment(LibraryEdits.self) private var edits
     @Environment(ThemeManager.self) private var themeManager
+    @Environment(\.imageCache) private var imageCache
     @State private var loader = PaginatedLoader<Performer>(pageSize: 30)
     @State private var query = PerformerQuery()
     // Native minimized search (magnifier → field), top-right. Debounced into query.search below.
@@ -177,6 +178,20 @@ struct PerformersView: View {
                     phase: String(describing: phase)
                 )
             }
+            .onChange(of: loader.contentRevision, initial: true) { _, _ in
+                prefetchNewestPerformerPage()
+            }
+        }
+    }
+
+    private func prefetchNewestPerformerPage() {
+        guard let apiKey = appState.client?.apiKey else { return }
+        let urls = loader.items.suffix(loader.pageSize).compactMap {
+            $0.imageURL(apiKey: apiKey)
+        }
+        guard !urls.isEmpty else { return }
+        Task(priority: .background) {
+            await imageCache.prefetch(urls: urls, priority: true)
         }
     }
 

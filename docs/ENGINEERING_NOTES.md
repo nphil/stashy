@@ -373,24 +373,28 @@ that is **not biased toward black**; **fluid scrolling above all**.
   source rect is reconstructed once. The long-press fake hero is preserved. Keep global
   `frame(in: .global)` / preference writes, unbounded task creation, JSON decoding, animated glass, and
   matched-transition source state out of visible grid cells and scroll-time main-actor work.
-- **Inertial scroll protects structural mutations, never thumbnail visibility:** `BrowseScrollCoordinator`
-  is driven by `onScrollPhaseChange` on Scenes, downloaded Scenes, Performers, and performer-detail scene
-  grids. Next-page loads still wait before toggling `isLoading`/appending data, Scenes skips repeated
-  per-appearing-cell look-ahead construction, and DownloadManager skips only its 120 ms **UI progress
-  poll** (transfer engines continue untouched). But v1.0.286's image freeze was a failed tradeoff: it made
-  new cards blank and did not materially improve device scrolling. ThumbHashes now render during motion,
-  memory hits publish immediately, disk/network loads keep moving and publish on completion, and the
-  already-seeded two-worker prefetch queue continues throughout inertia. Scene download/transcode badges
-  remain one array walk. The coordinator is deliberately **not Observable**, so phase changes do not
-  invalidate all visible cards.
+- **Inertial scroll keeps content flowing:** `BrowseScrollCoordinator` is driven by
+  `onScrollPhaseChange` on Scenes, downloaded Scenes, Performers, and performer-detail scene grids.
+  DownloadManager skips only its 120 ms **UI progress poll** while moving (transfer engines continue
+  untouched). v1.0.286's image freeze was a failed tradeoff: it made cards blank and did not materially
+  improve device scrolling. ThumbHashes render during motion, memory hits publish immediately, and
+  disk/network loads publish on completion. The later idle-gated pagination was also wrong: device
+  telemetry showed 119.67–119.92 FPS / 8.33 ms p95 while the visible "stop" was the fling reaching the
+  physical end of a 25-item page. `PaginatedLoader` now starts the next request one quarter into the newest
+  page, appends immediately without showing a layout-changing next-page footer, and exposes a cheap
+  `contentRevision`; each grid uses that revision to enqueue the newest page's images once. This removes
+  the former per-appearing-card index/suffix scan while giving thumbnails maximum lead time. Scene
+  download/transcode badges remain one array walk. The coordinator is deliberately **not Observable**.
 - **Browse scroll telemetry (opt-in RemoteLog):** `BrowseScrollPerformanceMonitor` attaches a 120 Hz
   `CADisplayLink` only while a tracked grid is moving and Settings → Diagnostics → Stream debug logs is
   enabled. It records callback intervals and phase with no per-frame observation writes, then does all
   sorting/string/log work after `.idle`. ntfy receives separate `scroll-segment` lines for interaction
   and deceleration plus `scroll-end`: effective FPS, target Hz, avg/p95/p99/max frame time, hitch %, severe
   ≥50 ms gaps, missed maximum-Hz intervals, coefficient-of-variation "judder", a cadence histogram, and
-  real-thumbnail publication/memory-hit/load-latency counts. It diagnoses main-run-loop cadence; it cannot
-  directly prove a compositor-only missed presentation. Normal use with logging off has no display link.
+  real-thumbnail publication/memory-hit/load-latency counts. Pagination adds page-append count/item count/
+  p95 request latency so any append hitch is directly correlated. It diagnoses main-run-loop cadence; it
+  cannot directly prove a compositor-only missed presentation. Normal use with logging off has no display
+  link.
 
 ### Minimized search (v1.0.268) — no scroll-top drawer, tap-to-expand button
 Owner ask: search must NOT appear when the list scrolls to the top; it should pop up only when the
@@ -478,9 +482,15 @@ magnifier is tapped. Applied to Scenes & Performers.
   geometry conversion; bounded thumbnail prefetch to two deduplicating workers; decoded companion maps
   off-main; removed iOS 26 zoom-navigation sources and their 600 ms return scroll lock. §6 is the guardrail
   for future browse fixes.
-- **2026-07-20 inertial-frame follow-up:** pagination mutations and the transfer UI poll remain protected;
+- **2026-07-20 inertial-frame follow-up:** initially deferred pagination mutations and the transfer UI poll;
   replaced blurred grid elevation with a contour stroke. The attempted thumbnail publication/prefetch/
   ThumbHash freeze was reverted after device feedback (blank cards, no meaningful FPS gain). Real images
   and ThumbHashes now remain live during motion, memory/decoded-placeholder caches are larger, and opt-in
-  ntfy scroll frame telemetry supplies evidence for the next isolation pass. Actual downloads and their
-  foreground eight-way engine are unchanged.
+  ntfy scroll frame telemetry supplies evidence for the next isolation pass. The pagination part was later
+  superseded by the telemetry-driven fix below; the transfer UI poll remains protected. Actual downloads
+  and their foreground eight-way engine are unchanged.
+- **2026-07-20 telemetry-driven pagination follow-up:** 42 sessions / ~80 seconds measured Scenes at
+  119.67 FPS and Performers at 119.92 FPS, both with worst p95 8.33 ms and no ≥50 ms severe hitch, even
+  across 4,137 thumbnail publications. The perceived hard stops were 25/30-item content boundaries caused
+  by `loadNextIfNeeded` waiting for `.idle`. Pagination now fetches early during motion, hides next-page
+  loading state, appends atomically, and prefetches every new page's images once via `contentRevision`.

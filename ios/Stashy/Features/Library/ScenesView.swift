@@ -430,7 +430,6 @@ struct ScenesView: View {
                             }
                         ) {
                             Task { await loader.loadNextIfNeeded(triggerID: scene.id) }
-                            prefetchThumbnails(around: scene)
                         }
                         // Selection affordance — the `if selectionMode` short-circuits before reading
                         // `selectedIDs`, so normal browsing takes on no selection-tracking cost.
@@ -460,6 +459,9 @@ struct ScenesView: View {
                     surface: "scenes",
                     phase: String(describing: phase)
                 )
+            }
+            .onChange(of: loader.contentRevision, initial: true) { _, _ in
+                prefetchNewestScenePage()
             }
         }
     }
@@ -497,17 +499,14 @@ struct ScenesView: View {
         }
     }
 
-    private func prefetchThumbnails(around scene: StashScene) {
-        // Initial stationary cells seed the bounded look-ahead queue. Cells entering during a fling do no
-        // repeated index scan or URL construction, but the two already-seeded workers KEEP running so
-        // upcoming real thumbnails are in memory/disk before their cards appear.
-        guard !BrowseScrollCoordinator.shared.isScrolling else { return }
-        guard let idx = loader.items.firstIndex(where: { $0.id == scene.id }),
-              let apiKey = appState.client?.apiKey else { return }
-        let start = min(idx + 1, loader.items.count - 1)
-        let end = min(idx + loader.pageSize, loader.items.count)
-        guard start < end else { return }
-        let urls = loader.items[start..<end].compactMap { $0.thumbnailURL(apiKey: apiKey) }
+    /// Seed each fetched page into the bounded image queue once. This replaces the old per-card
+    /// firstIndex/suffix scan and gives every page's thumbnails a head start before a fast fling reaches it.
+    private func prefetchNewestScenePage() {
+        guard let apiKey = appState.client?.apiKey else { return }
+        let urls = loader.items.suffix(loader.pageSize).compactMap {
+            $0.thumbnailURL(apiKey: apiKey)
+        }
+        guard !urls.isEmpty else { return }
         Task(priority: .background) {
             await imageCache.prefetch(urls: urls)
         }
