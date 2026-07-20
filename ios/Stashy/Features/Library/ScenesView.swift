@@ -19,7 +19,7 @@ struct ScenesView: View {
     @State private var searchPresented = false
     @State private var reloadDebounce: Task<Void, Never>?
     // A tag/sort change leaves the old grid visible while its replacement loads. Block scene navigation
-    // during that window so a card cannot become a zoom source and then disappear underneath the transition.
+    // during that window so a stale card cannot open just as its replacement page arrives.
     @State private var queryReloadGeneration = 0
     @State private var queryReloadPending = false
     // Bulk download (additive): fetch the whole filtered set, then pick one quality for all.
@@ -31,9 +31,6 @@ struct ScenesView: View {
     @State private var selectedIDs: Set<String> = []
     // The jobs status dropdown (title button, top-leading). Mutually exclusive with the filter dropdown.
     @State private var jobsExpanded = false
-    // Shared namespace for the Apple-Photos-style zoom transition from a grid cell into the scene detail.
-    @Namespace private var zoomNS
-
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
     // Sort (field + direction) persists across launches; filters (tags) always start cleared.
@@ -281,10 +278,8 @@ struct ScenesView: View {
             .onChange(of: jobsExpanded) { _, open in if open { filterExpanded = false } }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .themedBackground()
-            // Briefly lock scrolling right after a zoom-back so the iOS 26 source-card freeze is never seen.
-            .zoomReturnScrollGate(depth: path.count)
             // Scene detail deliberately hides the navigation bar. The root must explicitly own a visible bar
-            // so a rapid dropdown-dismiss + zoom push/pop cannot leave the detail's hidden preference behind.
+            // so a rapid dropdown-dismiss + push/pop cannot leave the detail's hidden preference behind.
             .toolbar(.visible, for: .navigationBar)
             .navigationTitle("Scenes")
             .navigationBarTitleDisplayMode(.inline)
@@ -339,14 +334,9 @@ struct ScenesView: View {
             // (OLED-black), not just the content area.
             .toolbar(previewPresenter.active != nil ? .hidden : .automatic, for: .tabBar)
             .navigationDestination(for: Route.self) { route in
-                // Pair the zoom with the grid cell's matchedTransitionSource for scene detail; other
-                // routes (performer/downloads) use the default push.
-                if case .scene(let scene) = route {
-                    RouteDestination(route: route, path: $path)
-                        .navigationTransition(.zoom(sourceID: scene.id, in: zoomNS))
-                } else {
-                    RouteDestination(route: route, path: $path)
-                }
+                // iOS 26's zoom transition holds its source card out of the grid after a pop. A native
+                // push/pop keeps every return immediately scrollable and avoids per-card transition state.
+                RouteDestination(route: route, path: $path)
             }
         }
         .environment(\.scenePreviewPresenter, previewPresenter)
@@ -453,9 +443,6 @@ struct ScenesView: View {
                                     .padding(6)
                             }
                         }
-                        // Source for the Apple-Photos-style zoom into the scene detail (paired with the
-                        // .navigationTransition(.zoom) on the .scene destination below).
-                        .matchedTransitionSource(id: scene.id, in: zoomNS)
                     }
                 }
                 .padding(12)
@@ -488,7 +475,6 @@ struct ScenesView: View {
                             apiKey: appState.client?.apiKey ?? "",
                             onOpen: openScene
                         ) {}
-                        .matchedTransitionSource(id: scene.id, in: zoomNS)
                     }
                 }
                 .padding(12)
@@ -503,14 +489,13 @@ struct ScenesView: View {
         let end = min(idx + loader.pageSize, loader.items.count)
         guard start < end else { return }
         let urls = loader.items[start..<end].compactMap { $0.thumbnailURL(apiKey: apiKey) }
-        Task.detached(priority: .background) {
+        Task(priority: .background) {
             await imageCache.prefetch(urls: urls)
         }
     }
 
     /// Open only from a stable grid. Query reloads deliberately keep the previous page visible; allowing one
-    /// of those stale cards to navigate would let the async replacement remove the matchedTransitionSource
-    /// while the zoom is active, which can strand both transition and navigation-bar state.
+    /// of those stale cards to navigate just as the async replacement lands can race navigation-bar state.
     private func openScene(_ scene: StashScene) {
         guard !queryReloadPending, !filterExpanded, !jobsExpanded else { return }
         path.append(.scene(scene))

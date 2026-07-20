@@ -35,6 +35,22 @@ actor ImageCache {
     /// `image(for:)` for the cancellation-shield reasoning.
     private var inFlight: [String: Task<UIImage, Error>] = [:]
 
+    /// Ahead-of-scroll work is intentionally small and bounded. The old implementation launched one
+    /// detached task per URL from every appearing cell, which could produce hundreds of tasks, duplicate
+    /// file probes and network/decode contention during a fast fling — exactly when the render thread needs
+    /// the most headroom.
+    private struct PrefetchRequest: Sendable {
+        let url: URL
+        let maxPixel: CGFloat
+        let priority: Bool
+        let key: String
+    }
+    private var prefetchQueue: [PrefetchRequest] = []
+    private var queuedPrefetchKeys: Set<String> = []
+    private var activePrefetchWorkers = 0
+    private let maxPrefetchWorkers = 2
+    private let maxQueuedPrefetches = 48
+
     private func ensureDiskBytesLoaded() {
         guard !diskBytesReady else { return }
         diskBytes = totalSize()   // one full scan on first use, then kept up to date incrementally
@@ -164,14 +180,47 @@ actor ImageCache {
     }
 
     func prefetch(urls: [URL], maxPixel: CGFloat = 600, priority: Bool = false) {
-        for url in urls {
+        // Reverse before appending because workers pop from the end: the closest upcoming thumbnail is
+        // processed first. Overlapping windows from adjacent cells collapse to one queued request per key.
+        for url in urls.reversed() {
             let key = cacheKey(url, maxPixel, priority: priority)
             if memoryCache.object(forKey: key as NSString) != nil { continue }
             if FileManager.default.fileExists(atPath: directory.appendingPathComponent(key + ".jpg").path) { continue }
-            // Capture only Sendable values (self + url); `image(for:)` populates the cache.
-            Task.detached(priority: .background) { [weak self] in
-                _ = try? await self?.image(for: url, maxPixel: maxPixel, priority: priority)
+            if inFlight[key] != nil || queuedPrefetchKeys.contains(key) { continue }
+
+            if prefetchQueue.count >= maxQueuedPrefetches {
+                let dropped = prefetchQueue.removeFirst()
+                queuedPrefetchKeys.remove(dropped.key)
             }
+            prefetchQueue.append(PrefetchRequest(
+                url: url, maxPixel: maxPixel, priority: priority, key: key
+            ))
+            queuedPrefetchKeys.insert(key)
+        }
+        startPrefetchWorkersIfNeeded()
+    }
+
+    private func startPrefetchWorkersIfNeeded() {
+        while activePrefetchWorkers < maxPrefetchWorkers, !prefetchQueue.isEmpty {
+            activePrefetchWorkers += 1
+            Task(priority: .background) {
+                await self.runPrefetchWorker()
+            }
+        }
+    }
+
+    private func runPrefetchWorker() async {
+        defer {
+            activePrefetchWorkers -= 1
+            startPrefetchWorkersIfNeeded()
+        }
+        while let request = prefetchQueue.popLast() {
+            queuedPrefetchKeys.remove(request.key)
+            _ = try? await image(
+                for: request.url,
+                maxPixel: request.maxPixel,
+                priority: request.priority
+            )
         }
     }
 

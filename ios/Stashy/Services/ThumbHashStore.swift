@@ -65,7 +65,8 @@ final class ThumbHashStore {
     /// and merge it in — instant blur placeholders for scenes the user has never opened. Throttled to ~5 min
     /// once it has succeeded; silent on any failure (plugin not installed / no map yet ⇒ retry next time,
     /// behaviour unchanged). `merge` keeps on-device hashes, so the served map only fills the gaps. Mirrors
-    /// `PlayabilityStore.refresh`; the base64 decode is on-main but trivial (kilobytes, at most every 5 min).
+    /// `PlayabilityStore.refresh`; JSON + base64 decoding stays off the main actor so even a full-library
+    /// map cannot steal a scrolling frame.
     func refresh(serverURL: String, apiKey: String, force: Bool = false) async {
         if !force, let last = lastRefresh, Date().timeIntervalSince(last) < 300 { return }
         guard var comps = URLComponents(string: "\(serverURL)/plugin/\(StashCompanion.pluginID)/assets/cache/thumbhashes.json") else { return }
@@ -75,15 +76,19 @@ final class ThumbHashStore {
         req.cachePolicy = .reloadIgnoringLocalCacheData
         req.timeoutInterval = 15
         guard let (data, resp) = try? await URLSession.shared.data(for: req),
-              (resp as? HTTPURLResponse)?.statusCode == 200,
-              let payload = try? JSONDecoder().decode(Payload.self, from: data) else { return }
-        let incoming = payload.scenes.compactMapValues { Data(base64Encoded: $0) }
+              (resp as? HTTPURLResponse)?.statusCode == 200 else { return }
+        let incoming = await Task.detached(priority: .utility) {
+            guard let payload = try? JSONDecoder().decode(Payload.self, from: data) else {
+                return [String: Data]()
+            }
+            return payload.scenes.compactMapValues { Data(base64Encoded: $0) }
+        }.value
         guard !incoming.isEmpty else { return }   // no served map yet — don't start the throttle, retry later
         lastRefresh = Date()
         merge(incoming)
     }
 
-    private struct Payload: Decodable { let scenes: [String: String] }
+    private struct Payload: Decodable, Sendable { let scenes: [String: String] }
 
     private func record(_ hash: Data, for id: String) {
         guard hashes[id] == nil else { return }

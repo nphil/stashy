@@ -33,7 +33,7 @@ final class PlayabilityStore {
         var qscore: Double = 0        // codec-normalized bits-per-pixel (continuous), for Quality sort
     }
 
-    private struct Payload: Decodable { let scenes: [String: Info] }
+    private struct Payload: Decodable, Sendable { let scenes: [String: Info] }
 
     private(set) var scenes: [String: Info] = [:]
     private var lastFetch: Date?
@@ -101,8 +101,11 @@ final class PlayabilityStore {
         req.cachePolicy = .reloadIgnoringLocalCacheData
         req.timeoutInterval = 10
         guard let (data, resp) = try? await URLSession.shared.data(for: req),
-              (resp as? HTTPURLResponse)?.statusCode == 200,
-              let payload = try? JSONDecoder().decode(Payload.self, from: data) else { return }
+              (resp as? HTTPURLResponse)?.statusCode == 200 else { return }
+        let payload = await Task.detached(priority: .utility) {
+            try? JSONDecoder().decode(Payload.self, from: data)
+        }.value
+        guard let payload else { return }
         scenes = payload.scenes
         lastFetch = Date()
     }

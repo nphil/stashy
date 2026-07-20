@@ -40,7 +40,7 @@ extension EnvironmentValues {
 /// UIKit long-press (standard delay) with haptic, bridged so it doesn't fight the ScrollView or
 /// the card's tap.
 struct LongPressTrigger: UIGestureRecognizerRepresentable {
-    var onTrigger: () -> Void
+    var onTrigger: (_ globalLocation: CGPoint, _ localLocation: CGPoint) -> Void
 
     func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator { Coordinator() }
 
@@ -55,7 +55,7 @@ struct LongPressTrigger: UIGestureRecognizerRepresentable {
     func handleUIGestureRecognizerAction(_ recognizer: UILongPressGestureRecognizer, context: Context) {
         if recognizer.state == .began {
             context.coordinator.haptic.impactOccurred()
-            onTrigger()
+            onTrigger(context.converter.location(in: .global), context.converter.localLocation)
         }
     }
 
@@ -71,12 +71,11 @@ struct LongPressTrigger: UIGestureRecognizerRepresentable {
 
 // MARK: - Reusable preview gesture
 
-/// Holds the cell's latest global frame WITHOUT triggering SwiftUI invalidation. `onGeometryChange`
-/// tracking `.frame(in: .global)` fires on EVERY scroll frame; writing that into `@State` re-evaluated
-/// every visible cell's body at up to 120 Hz (the browse-scroll judder). A reference box is invisible to
-/// SwiftUI's dependency tracking, so mutating it is free — we only read it when a long-press begins.
-private final class FrameBox {
-    var rect: CGRect = .zero
+/// Holds the cell's layout size without invalidating SwiftUI. Unlike a global frame, size stays constant
+/// while scrolling, so `onGeometryChange` does no per-frame work. The long-press bridge supplies global
+/// and local touch coordinates on demand; their difference reconstructs the source origin only when used.
+private final class SizeBox {
+    var size: CGSize = .zero
 }
 
 /// Adds tap-to-open + press-hold-to-preview to any scene view (card, row, …) so the preview works
@@ -90,27 +89,29 @@ struct ScenePreviewGesture: ViewModifier {
     @Environment(\.scenePreviewPresenter) private var presenter
     @Environment(\.imageCache) private var imageCache
     @AppStorage("animatedPreviews") private var animatedPreviews = true
-    // Reference box, NOT @State: the .global frame changes every scroll frame, so writing it to @State
-    // re-rendered every visible cell at 120 Hz. We only need its CURRENT value at long-press time. See FrameBox.
-    @State private var frameBox = FrameBox()
+    @State private var sizeBox = SizeBox()
 
     func body(content: Content) -> some View {
         content
-            // Track the cell's global frame for the long-press "hero" origin into the FrameBox — no @State
-            // write, so no per-frame body invalidation. Reports the identical .global frame the old path did,
-            // so the preview's start rect and animation are unchanged.
-            .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }, action: { frameBox.rect = $0 })
+            .onGeometryChange(for: CGSize.self, of: { $0.size }, action: { sizeBox.size = $0 })
             .contentShape(Rectangle())
             // Don't navigate if a long-press already opened the preview (avoids tap+preview both firing).
             .onTapGesture { if presenter?.active == nil { onOpen(scene) } }
             .gesture(
-                LongPressTrigger {
+                LongPressTrigger { globalLocation, localLocation in
                     guard animatedPreviews else { return }
+                    let sourceRect = CGRect(
+                        origin: CGPoint(
+                            x: globalLocation.x - localLocation.x,
+                            y: globalLocation.y - localLocation.y
+                        ),
+                        size: sizeBox.size
+                    )
                     // Resolve the poster from the memory cache synchronously (the visible SceneCard already
                     // loaded it) instead of a second `.task`-driven fetch/decode of the same URL per cell.
                     // A miss just shows black until the clip's first frame — the popup already handles that.
                     let poster = scene.thumbnailURL(apiKey: apiKey).flatMap { imageCache.cachedImage(for: $0) }
-                    presenter?.begin(scene: scene, apiKey: apiKey, sourceRect: frameBox.rect, thumbnail: poster)
+                    presenter?.begin(scene: scene, apiKey: apiKey, sourceRect: sourceRect, thumbnail: poster)
                 }
             )
     }

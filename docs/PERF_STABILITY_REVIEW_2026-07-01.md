@@ -388,9 +388,10 @@ treat full chunked streaming as a separate follow-up only if 4K shows pressure.
 - **[L] Disk-hit lazy decode** — `ImageCache.swift:58`: `UIImage(data:)` defers JPEG decode to the main-thread
   render commit. Fix: `image.preparingForDisplay() ?? image` inside the actor before returning. Couples with
   #16 (decoded bitmaps cost more) — land together. Worse on originalImage sprite sheets (:91).
-- **[L] Per-scroll-frame @State writes** — `ScenePreview.swift:94`: GeometryReader tracks each cell's global
-  frame every scroll tick; value used once at long-press. Fix: capture the rect at trigger time via the
-  `CoordinateSpaceConverter` already threaded into `LongPressTrigger.makeCoordinator` (currently discarded).
+- **[L] Per-scroll-frame @State writes — DONE 2026-07-20:** `ScenePreview.swift` now tracks only stable
+  cell size. At long-press, the existing `UIGestureRecognizerRepresentable` coordinate converter provides
+  global + local locations and reconstructs the source rect once. No global frame conversion remains on
+  the scroll hot path.
 - **[L] deadline data race** — `FFmpegRemuxer.swift:62`: `deadline` written from main (`abort()`) and the
   remux utility queue with no sync. Benign in practice (aligned 8-byte writes). Fix: route through the
   existing `progressLock`. Note the interrupt reads from a `@convention(c)` trampoline — NSLock/os_unfair_lock

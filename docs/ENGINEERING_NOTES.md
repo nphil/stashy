@@ -248,7 +248,7 @@ predates this discovery and asserts the opposite — this file is the correction
 
 ## 6. UI / library patterns
 
-### The popover saga (bit us FOUR times)
+### The popover saga (bit us FIVE times)
 **SwiftUI `.popover` is torn down & re-presented whenever its host view's structural identity
 churns.** History on the filter/sort panel:
 1. Hosted on a `.toolbar` ToolbarItem → rebuilt on every `isActive` change → flicker.
@@ -261,11 +261,17 @@ churns.** History on the filter/sort panel:
    pattern for any new filtered list; never host a popover/dropdown on a conditional/churning view.**
 4. **Tap-through + navigation race (v1.0.284):** the old `simultaneousGesture(TapGesture)` dismissed
    the dropdown while the card beneath handled the *same tap*. After a tag change, that could push an
-   old card as a zoom source just before the debounced reload replaced the grid, losing the transition
-   source and occasionally stranding the detail screen's hidden navigation-bar preference on the root.
+   old card just before the debounced reload replaced the grid, occasionally stranding the detail
+   screen's hidden navigation-bar preference on the root.
    `dismissesPopover` now installs a high-priority tap only while open (first outside tap dismisses
    only; drags still scroll+dismiss). `ScenesView` also gates `openScene` until the current query reload
    completes, and explicitly owns a visible system navigation bar plus a real `navigationTitle`.
+5. **Whole-grid identity flicker (2026-07-20 perf pass):** `PopoverDismissalModifier.body` used an
+   `if isPresented` around `content`, changing the structural type that wrapped the entire grid every
+   time a dropdown opened or closed. Keep the modifier chain **unconditional**; disable its tap with
+   `GestureMask.none` while closed. Scroll dismissal uses a transaction with animations disabled so the
+   glass sheet is gone in the first moving frame. `InlineTagEditor` also renders its synchronous ranking
+   cache on frame one and uses solid chips — no delayed panel resize and no nested glass samplers.
 
 ### Stores and loaders
 - **`PaginatedLoader<T>`** (generic, `@Observable @MainActor`): dedups pages by id,
@@ -279,7 +285,12 @@ churns.** History on the filter/sort panel:
   500/1000/1500 ms). `SceneQuery.downloadedOnly` is served locally from `downloads.items`, bypassing
   the network.
 - `ImageCache` (actor): 2-tier (NSCache + downsampled JPEG on disk), LRU-evicted, priority tier for
-  performer portraits (kept longest). Cache keys strip the `apikey` query param.
+  performer portraits (kept longest). Cache keys strip the `apikey` query param. Ahead-of-scroll work
+  goes through a **48-request deduplicated queue with two workers**; never restore the former
+  task-per-URL fan-out from every appearing cell.
+- Companion served-map stores (`PlayabilityStore`, `VmafMapStore`, `LoudnessStore`, `ThumbHashStore`)
+  fetch on their main-actor owners but decode JSON/base64 in utility detached tasks, then publish the
+  completed Sendable value on main. A large library map must never parse during a scrolling frame.
 
 ### Behavior defaults
 Filters reset on launch; **sort field+direction persist** (UserDefaults). Blur toggles for
@@ -327,7 +338,8 @@ that is **not biased toward black**; **fluid scrolling above all**.
     cheap shadow so a card floats over the mesh; apply **after** the card's `clipShape`).
   - `FilterPill.swift` — `filterPill(active:tint:foreground:)`, the one filter-chip style. Active = solid
     `tint` fill + white label; inactive = `foreground.opacity(0.12)` capsule. **Solid, never glass** (see
-    glass discipline). Every chip in `ImmersiveFilter.swift`'s panels uses it.
+    glass discipline). Panel control chips use it; the smaller inline-tag chips use the same solid fills
+    with their compact padding.
 - **Theme.swift** — 14 distinct palettes (dark: nocturne/aurora/synthwave/ember/verdant/ruby/slate/mocha;
   light: daybreak/blossom/meadow/citrus/periwinkle/seabreeze — synthwave & mocha kept by owner request).
   `meshColors(vibrancy:lift:)` builds the 9 mesh colours from the palette tokens, blending toward
@@ -336,12 +348,13 @@ that is **not biased toward black**; **fluid scrolling above all**.
   values — vibrancy & lift, **separately for light & dark** (`stashy.mesh.{vib,lift}.{dark,light}`);
   `currentMeshVibrancy/currentMeshLift` select by `current.variant`. Settings → "Background depth" hosts the
   4 sliders (`meshSliderRow`).
-- **Motion** (system springs → reduce-motion-safe): hero **zoom** grid→detail —
-  `.matchedTransitionSource(id:in:)` on the grid cell + `.navigationTransition(.zoom(sourceID:in:))` on the
-  destination, one `@Namespace` per grid (Scenes + Performers). Coexists with the long-press preview and the
-  player's `.id(route.url)` rebuild — verified no double-hero. `.tabBarMinimizeBehavior(.onScrollDown)` on the
-  `TabView` (iOS 26, iPhone). `.contentTransition(.numericText())` + `.animation(.snappy, value:)` on the
-  selection-count button (rolling digits).
+- **Motion** (system springs → reduce-motion-safe): Scenes and Performers use the native navigation
+  push/pop. The earlier grid→detail `.navigationTransition(.zoom)` was removed in the 2026-07-20
+  performance pass: iOS 26 FB21961572 retained the matched source after pop, forcing a 600 ms scroll lock
+  or showing a frozen card. Owner chose immediate, consistently fluid scrolling over that hero. The
+  long-press scene preview keeps its own fake hero. `.tabBarMinimizeBehavior(.onScrollDown)` remains on the
+  `TabView` (iOS 26, iPhone). `.contentTransition(.numericText())` + `.animation(.snappy, value:)` remains on
+  the selection-count button (rolling digits).
 - **Glass discipline (cost a CI cycle):** Liquid Glass only shows character over **vibrant/varied content**
   (the mesh, media) — NOT over flat `Material` or over another glass surface. So the floating filter **panel**
   (`LibraryDropdownPanel`) is `.glassEffect(.regular)` because it sits over the mesh/grid, but the **chips
@@ -350,9 +363,12 @@ that is **not biased toward black**; **fluid scrolling above all**.
 - **No scrollbars anywhere** (owner standing pref): `UIScrollView.appearance()` indicator flags off in
   `StashyApp.init()` + `.scrollIndicators(.hidden)` in `ContentView` (propagates via environment). Reinforce
   on any new scroll view; never reintroduce an indicator (incl. `UIScrollView`-backed views).
-- **Scroll-perf fix:** `ScenePreview`'s per-cell global-frame tracking moved from a background
-  `GeometryReader` to a single `onGeometryChange(for: CGRect...)` — no per-cell `frame(in:.global)` writes on
-  the hot path. The long-press "fake hero" preview still works.
+- **Scroll-perf rule (strengthened 2026-07-20):** `ScenePreview` does **no global frame conversion while
+  scrolling**. It tracks only the cell's stable `CGSize`; on long-press,
+  `UIGestureRecognizerRepresentable.Context.converter` supplies the global + local locations and the
+  source rect is reconstructed once. The long-press fake hero is preserved. Keep global
+  `frame(in: .global)` / preference writes, unbounded task creation, JSON decoding, animated glass, and
+  matched-transition source state out of visible grid cells and scroll-time main-actor work.
 
 ### Minimized search (v1.0.268) — no scroll-top drawer, tap-to-expand button
 Owner ask: search must NOT appear when the list scrolls to the top; it should pop up only when the
@@ -435,3 +451,8 @@ magnifier is tapped. Applied to Scenes & Performers.
   `LabeledSegment`/`overlayBadge`/`capsuleField` + `SceneFilterBar` → `filterPill`; and search reworked to
   an iOS 26 minimized toolbar button (no scroll-top drawer — `.searchToolbarBehavior(.minimize)` +
   `DefaultToolbarItem(kind: .search)`, §6).
+- **2026-07-20 library performance pass:** fixed dropdown whole-grid identity flicker; immediate
+  no-animation glass removal on scroll; removed nested tag-chip glass; eliminated scroll-time global
+  geometry conversion; bounded thumbnail prefetch to two deduplicating workers; decoded companion maps
+  off-main; removed iOS 26 zoom-navigation sources and their 600 ms return scroll lock. §6 is the guardrail
+  for future browse fixes.

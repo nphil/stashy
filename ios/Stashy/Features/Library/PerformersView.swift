@@ -15,9 +15,6 @@ struct PerformersView: View {
     @State private var jobsExpanded = false
     @State private var path: [Route] = []
     @State private var reloadDebounce: Task<Void, Never>?
-    // Shared namespace for the zoom transition from a performer cell into the performer detail.
-    @Namespace private var zoomNS
-
     private let columns = [GridItem(.adaptive(minimum: 110), spacing: 12)]
 
     // Sort persists across launches; filters (search/ethnicity/tags/favorites) always start cleared.
@@ -67,8 +64,6 @@ struct PerformersView: View {
             .onChange(of: jobsExpanded) { _, open in if open { filterExpanded = false } }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .themedBackground()
-            // Briefly lock scrolling right after a zoom-back so the iOS 26 source-card freeze is never seen.
-            .zoomReturnScrollGate(depth: path.count)
             .navigationBarTitleDisplayMode(.inline)
             // Native minimized search (magnifier → field), pinned top-right; debounced below.
             .searchable(text: $searchText, isPresented: $searchPresented, prompt: "Search performers")
@@ -89,14 +84,8 @@ struct PerformersView: View {
                 }
             }
             .navigationDestination(for: Route.self) { route in
-                // Pair the zoom with the grid cell's matchedTransitionSource for performer detail; a scene
-                // opened from within a performer page uses the default push.
-                if case .performer(let performer) = route {
-                    RouteDestination(route: route, path: $path)
-                        .navigationTransition(.zoom(sourceID: performer.id, in: zoomNS))
-                } else {
-                    RouteDestination(route: route, path: $path)
-                }
+                // Native push/pop avoids iOS 26's zoom-source freeze and is immediately scrollable on return.
+                RouteDestination(route: route, path: $path)
             }
         }
         // Debounced: rapid filter changes (e.g. tapping the favorites toggle repeatedly) coalesce into
@@ -171,8 +160,6 @@ struct PerformersView: View {
                         .onAppear {
                             Task { await loader.loadNextIfNeeded(triggerID: performer.id) }
                         }
-                        // Source for the zoom into the performer detail (Apple-Photos style).
-                        .matchedTransitionSource(id: performer.id, in: zoomNS)
                     }
                 }
                 .padding(12)

@@ -19,9 +19,9 @@ final class VmafMapStore {
 
     // Only `bitrates` is consumed; the rest of each res entry (crf/vmaf/curve/…) is ignored. `bitrates`
     // is keyed by preset name ("high"/"balanced"/"small") → bits per second.
-    private struct ResEntry: Decodable { var bitrates: [String: Int]? }
-    private struct SceneEntry: Decodable { var res: [String: ResEntry]? }
-    private struct Payload: Decodable { var scenes: [String: SceneEntry]? }
+    private struct ResEntry: Decodable, Sendable { var bitrates: [String: Int]? }
+    private struct SceneEntry: Decodable, Sendable { var res: [String: ResEntry]? }
+    private struct Payload: Decodable, Sendable { var scenes: [String: SceneEntry]? }
 
     private var scenes: [String: SceneEntry] = [:]
     private var lastFetch: Date?
@@ -57,8 +57,11 @@ final class VmafMapStore {
         req.cachePolicy = .reloadIgnoringLocalCacheData
         req.timeoutInterval = 12
         guard let (data, resp) = try? await URLSession.shared.data(for: req),
-              (resp as? HTTPURLResponse)?.statusCode == 200,
-              let payload = try? JSONDecoder().decode(Payload.self, from: data) else { return }
+              (resp as? HTTPURLResponse)?.statusCode == 200 else { return }
+        let payload = await Task.detached(priority: .utility) {
+            try? JSONDecoder().decode(Payload.self, from: data)
+        }.value
+        guard let payload else { return }
         scenes = payload.scenes ?? [:]
         lastFetch = Date()
     }

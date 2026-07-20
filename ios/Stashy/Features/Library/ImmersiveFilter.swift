@@ -34,21 +34,23 @@ extension View {
 private struct PopoverDismissalModifier: ViewModifier {
     @Binding var isPresented: Bool
 
-    @ViewBuilder
     func body(content: Content) -> some View {
-        if isPresented {
-            content
+        content
             .onScrollPhaseChange { _, phase in
-                if phase != .idle { isPresented = false }
+                guard isPresented, phase != .idle else { return }
+                // The grid is already moving. Remove the glass in this same transaction instead of
+                // animating it for another 280 ms while it re-samples every scrolling frame.
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    isPresented = false
+                }
             }
             // Higher priority than a card's tap gesture: an outside tap dismisses ONLY. A drag still fails
             // this TapGesture and proceeds into the ScrollView, preserving swipe-to-dismiss-and-scroll.
             .highPriorityGesture(TapGesture().onEnded {
                 isPresented = false
-            })
-        } else {
-            content
-        }
+            }, including: isPresented ? GestureMask.all : GestureMask.none)
     }
 }
 
@@ -358,6 +360,13 @@ struct InlineTagEditor: View {
     @State private var searchTask: Task<Void, Never>?
 
     var body: some View {
+        // Populate from the synchronous ranking cache on the first frame. Waiting for `.task` to assign
+        // the same tags one frame later resized the glass sheet immediately after it appeared, which read
+        // as a flash on both library screens.
+        let shownResults = results.isEmpty && search.trimmingCharacters(in: .whitespaces).isEmpty
+            ? TagRankingStore.shared.popularTags
+            : results
+
         VStack(alignment: .leading, spacing: 8) {
             Label("Tags", systemImage: "tag").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
 
@@ -370,9 +379,11 @@ struct InlineTagEditor: View {
                                 Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
                             }
                             .font(.caption)
+                            .foregroundStyle(.white)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
-                            .glassEffect(.regular.tint(themeManager.current.accentColor), in: Capsule())
+                            // Solid inside the panel's glass: nested glass layers add a sampler per chip.
+                            .background(themeManager.current.accentColor, in: Capsule())
                         }
                         .buttonStyle(.plain)
                     }
@@ -386,7 +397,7 @@ struct InlineTagEditor: View {
 
             // Suggestions with favourited tags floated to the front. Each chip has a heart (toggles the
             // tag's favorite) and a tap area (adds it to the filter) — adjacent buttons, not nested.
-            let unselected = results.filter { !selected.contains($0) }
+            let unselected = shownResults.filter { !selected.contains($0) }
             let suggestions = unselected.filter { edits.isFavorite($0) } + unselected.filter { !edits.isFavorite($0) }
             if !suggestions.isEmpty {
                 FlowLayout(spacing: 6) {
@@ -402,7 +413,13 @@ struct InlineTagEditor: View {
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
-                        .glassEffect(edits.isFavorite(tag) ? .regular.tint(.pink.opacity(0.5)) : .regular, in: Capsule())
+                        // Keep one glass surface (the sheet), not up to sixteen nested glass surfaces.
+                        .background(
+                            edits.isFavorite(tag)
+                                ? Color.pink.opacity(0.28)
+                                : themeManager.current.foregroundColor.opacity(0.12),
+                            in: Capsule()
+                        )
                     }
                 }
             }
