@@ -22,16 +22,33 @@ struct FilterFunnelButton: View {
 
 extension View {
     /// Dismiss an open dropdown when the user scrolls OR taps the list behind it. Applied to the list content
-    /// so a swipe both scrolls the list AND closes the panel in one seamless gesture (there's no blocking
-    /// backdrop over the list). No-ops while the panel is closed. Works for scenes + performers.
+    /// so a swipe both scrolls the list AND closes the panel in one seamless gesture. While open, the
+    /// high-priority tap consumes the first tap instead of allowing the same tap to dismiss the panel AND
+    /// activate a scene/performer underneath it. No-ops while the panel is closed. Works for scenes +
+    /// performers.
     func dismissesPopover(_ isPresented: Binding<Bool>) -> some View {
-        self
+        modifier(PopoverDismissalModifier(isPresented: isPresented))
+    }
+}
+
+private struct PopoverDismissalModifier: ViewModifier {
+    @Binding var isPresented: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if isPresented {
+            content
             .onScrollPhaseChange { _, phase in
-                if phase != .idle, isPresented.wrappedValue { isPresented.wrappedValue = false }
+                if phase != .idle { isPresented = false }
             }
-            .simultaneousGesture(TapGesture().onEnded {
-                if isPresented.wrappedValue { isPresented.wrappedValue = false }
+            // Higher priority than a card's tap gesture: an outside tap dismisses ONLY. A drag still fails
+            // this TapGesture and proceeds into the ScrollView, preserving swipe-to-dismiss-and-scroll.
+            .highPriorityGesture(TapGesture().onEnded {
+                isPresented = false
             })
+        } else {
+            content
+        }
     }
 }
 

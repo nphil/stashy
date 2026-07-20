@@ -18,6 +18,10 @@ struct ScenesView: View {
     @State private var searchText = ""
     @State private var searchPresented = false
     @State private var reloadDebounce: Task<Void, Never>?
+    // A tag/sort change leaves the old grid visible while its replacement loads. Block scene navigation
+    // during that window so a card cannot become a zoom source and then disappear underneath the transition.
+    @State private var queryReloadGeneration = 0
+    @State private var queryReloadPending = false
     // Bulk download (additive): fetch the whole filtered set, then pick one quality for all.
     @State private var bulkSheet = false
     @State private var bulkScenes: [StashScene] = []
@@ -279,6 +283,10 @@ struct ScenesView: View {
             .themedBackground()
             // Briefly lock scrolling right after a zoom-back so the iOS 26 source-card freeze is never seen.
             .zoomReturnScrollGate(depth: path.count)
+            // Scene detail deliberately hides the navigation bar. The root must explicitly own a visible bar
+            // so a rapid dropdown-dismiss + zoom push/pop cannot leave the detail's hidden preference behind.
+            .toolbar(.visible, for: .navigationBar)
+            .navigationTitle("Scenes")
             .navigationBarTitleDisplayMode(.inline)
             // Native minimized search (magnifier → field), pinned top-right; debounced below.
             .searchable(text: $searchText, isPresented: $searchPresented, prompt: "Search scenes")
@@ -292,11 +300,15 @@ struct ScenesView: View {
             // Stable ToolbarItem identities with conditional CONTENT — swapping whole ToolbarItems behind an
             // if/else makes SwiftUI's toolbar builder drop them (the "button vanished" bug).
             .toolbar {
-                // Title (top-left) = the jobs dropdown button; Cancel replaces it while selecting.
+                // Keep stable item identities. A real navigationTitle owns the system bar; the principal
+                // button supplies its interactive Jobs title without creating a second visible title.
                 ToolbarItem(placement: .topBarLeading) {
                     if selectionMode {
                         Button("Cancel") { exitSelection() }
-                    } else {
+                    }
+                }
+                ToolbarItem(placement: .principal) {
+                    if !selectionMode {
                         titleJobsButton
                     }
                 }
@@ -338,16 +350,21 @@ struct ScenesView: View {
             }
         }
         .environment(\.scenePreviewPresenter, previewPresenter)
-        .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: { path.append(.scene($0)) }) }
+        .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: openScene) }
         // Hide the status bar too, so the preview dim goes edge-to-edge black on an OLED screen.
         .statusBarHidden(previewPresenter.active != nil)
         // Debounced so rapid filter changes coalesce into one reload instead of an overlapping storm.
         .onChange(of: query) { _, _ in
             reloadDebounce?.cancel()
+            queryReloadGeneration &+= 1
+            let generation = queryReloadGeneration
+            queryReloadPending = true
             reloadDebounce = Task {
                 try? await Task.sleep(for: .milliseconds(250))
                 guard !Task.isCancelled else { return }
                 await reload()
+                guard !Task.isCancelled, generation == queryReloadGeneration else { return }
+                queryReloadPending = false
             }
         }
         .onChange(of: query.sort) { _, s in UserDefaults.standard.set(s.rawValue, forKey: "sort.scenes.field") }
@@ -374,7 +391,10 @@ struct ScenesView: View {
             guard loader.items.isEmpty else { return }
             await reload()
         }
-        .onDisappear { reloadDebounce?.cancel() }
+        .onDisappear {
+            reloadDebounce?.cancel()
+            queryReloadPending = false
+        }
     }
 
     @ViewBuilder
@@ -415,7 +435,7 @@ struct ScenesView: View {
                             apiKey: appState.client?.apiKey ?? "",
                             // In selection mode a tap toggles selection instead of opening the scene.
                             onOpen: { s in
-                                if selectionMode { toggleSelection(s.id) } else { path.append(.scene(s)) }
+                                if selectionMode { toggleSelection(s.id) } else { openScene(s) }
                             }
                         ) {
                             Task { await loader.loadNextIfNeeded(triggerID: scene.id) }
@@ -466,7 +486,7 @@ struct ScenesView: View {
                         SceneGridCell(
                             scene: scene,
                             apiKey: appState.client?.apiKey ?? "",
-                            onOpen: { path.append(.scene($0)) }
+                            onOpen: openScene
                         ) {}
                         .matchedTransitionSource(id: scene.id, in: zoomNS)
                     }
@@ -486,6 +506,14 @@ struct ScenesView: View {
         Task.detached(priority: .background) {
             await imageCache.prefetch(urls: urls)
         }
+    }
+
+    /// Open only from a stable grid. Query reloads deliberately keep the previous page visible; allowing one
+    /// of those stale cards to navigate would let the async replacement remove the matchedTransitionSource
+    /// while the zoom is active, which can strand both transition and navigation-bar state.
+    private func openScene(_ scene: StashScene) {
+        guard !queryReloadPending, !filterExpanded, !jobsExpanded else { return }
+        path.append(.scene(scene))
     }
 }
 

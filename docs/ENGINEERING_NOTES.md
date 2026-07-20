@@ -248,17 +248,24 @@ predates this discovery and asserts the opposite — this file is the correction
 
 ## 6. UI / library patterns
 
-### The popover saga (bit us THREE times)
+### The popover saga (bit us FOUR times)
 **SwiftUI `.popover` is torn down & re-presented whenever its host view's structural identity
 churns.** History on the filter/sort panel:
 1. Hosted on a `.toolbar` ToolbarItem → rebuilt on every `isActive` change → flicker.
 2. Moved to `.overlay` on the list `content` — but `content` is a `@ViewBuilder` that flips
-   `_ConditionalContent` branches (grid ⇄ spinner ⇄ empty) every time `PaginatedLoader.reload()`
-   clears `items` (it sets `items=[]` + `isLoading=true` synchronously). A branch flip tears down the
-   overlay's host → popover closes & reopens.
-3. **FIX (final):** host from a **stable `ZStack` sibling** of `content` — `FilterPopoverAnchor` in
-   `Features/Library/ImmersiveFilter.swift`, used in `ScenesView` and `PerformersView`. **Reuse this
-   pattern for any new filtered list; never host a popover on a conditional/churning view.**
+   `_ConditionalContent` branches (grid ⇄ spinner ⇄ empty). A branch flip tears down the overlay's
+   host → popover closes & reopens. (`PaginatedLoader.reload()` now keeps the old page visible and
+   atomically replaces it, but the host still must not depend on list state.)
+3. **Stable-host fix:** host from a **stable `ZStack` sibling** of `content` —
+   `LibraryDropdownPanel` in `DesignSystem`, used in `ScenesView` and `PerformersView`. **Reuse this
+   pattern for any new filtered list; never host a popover/dropdown on a conditional/churning view.**
+4. **Tap-through + navigation race (v1.0.284):** the old `simultaneousGesture(TapGesture)` dismissed
+   the dropdown while the card beneath handled the *same tap*. After a tag change, that could push an
+   old card as a zoom source just before the debounced reload replaced the grid, losing the transition
+   source and occasionally stranding the detail screen's hidden navigation-bar preference on the root.
+   `dismissesPopover` now installs a high-priority tap only while open (first outside tap dismisses
+   only; drags still scroll+dismiss). `ScenesView` also gates `openScene` until the current query reload
+   completes, and explicitly owns a visible system navigation bar plus a real `navigationTitle`.
 
 ### Stores and loaders
 - **`PaginatedLoader<T>`** (generic, `@Observable @MainActor`): dedups pages by id,
@@ -337,7 +344,7 @@ that is **not biased toward black**; **fluid scrolling above all**.
   selection-count button (rolling digits).
 - **Glass discipline (cost a CI cycle):** Liquid Glass only shows character over **vibrant/varied content**
   (the mesh, media) — NOT over flat `Material` or over another glass surface. So the floating filter **panel**
-  (`FilterPopoverAnchor`) is `.glassEffect(.regular)` because it sits over the mesh/grid, but the **chips
+  (`LibraryDropdownPanel`) is `.glassEffect(.regular)` because it sits over the mesh/grid, but the **chips
   inside it are solid `filterPill`s**. History: v1.0.262 glassed the chips over the then-material panel →
   invisible; v1.0.264 flipped it (glass panel, solid chips); v1.0.265 made active chips fill accent.
 - **No scrollbars anywhere** (owner standing pref): `UIScrollView.appearance()` indicator flags off in
