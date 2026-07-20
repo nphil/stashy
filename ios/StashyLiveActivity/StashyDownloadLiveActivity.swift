@@ -93,7 +93,7 @@ private struct TransferProgress: View {
     let state: DownloadActivityAttributes.ContentState
 
     var body: some View {
-        if let start = state.estimatedStart, let end = state.estimatedEnd, start < end, end > .now {
+        if let start = state.estimatedStart, let end = state.estimatedEnd, start < end, end > Date.now {
             ProgressView(timerInterval: start...end, countsDown: false)
                 .tint(.purple)
         } else if let progress = state.progress {
@@ -125,7 +125,7 @@ private struct CompactTransferValue: View {
     let state: DownloadActivityAttributes.ContentState
 
     var body: some View {
-        if let end = state.estimatedEnd, end > .now {
+        if let end = state.estimatedEnd, end > Date.now {
             Text(timerInterval: Date.now...end, countsDown: true, showsHours: false)
         } else {
             TransferPercent(state: state)
