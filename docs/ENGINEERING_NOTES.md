@@ -272,6 +272,11 @@ churns.** History on the filter/sort panel:
    `GestureMask.none` while closed. Scroll dismissal uses a transaction with animations disabled so the
    glass sheet is gone in the first moving frame. `InlineTagEditor` also renders its synchronous ranking
    cache on frame one and uses solid chips — no delayed panel resize and no nested glass samplers.
+- **Scenes/Performers title parity:** both interactive jobs titles live in `.topBarLeading` and drive the
+   same stable top-leading `LibraryDropdownPanel` spring. Scenes retains its real
+   `.navigationTitle("Scenes")` for navigation-bar ownership, but a stable zero-size `.principal` item
+   suppresses duplicate centered title chrome. Do not move the trigger back into `.principal`; it makes
+   Scenes feel unlike Performers. This is toolbar-only and does not wrap or invalidate the grid.
 
 ### Stores and loaders
 - **`PaginatedLoader<T>`** (generic, `@Observable @MainActor`): dedups pages by id,

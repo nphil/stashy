@@ -295,17 +295,22 @@ struct ScenesView: View {
             // Stable ToolbarItem identities with conditional CONTENT — swapping whole ToolbarItems behind an
             // if/else makes SwiftUI's toolbar builder drop them (the "button vanished" bug).
             .toolbar {
-                // Keep stable item identities. A real navigationTitle owns the system bar; the principal
-                // button supplies its interactive Jobs title without creating a second visible title.
+                // Match Performers: the interactive Jobs title lives at top-left and Cancel replaces its
+                // content during selection. Keep the real navigationTitle above so this root still owns the
+                // bar visibility after a detail push/pop.
                 ToolbarItem(placement: .topBarLeading) {
                     if selectionMode {
                         Button("Cancel") { exitSelection() }
-                    }
-                }
-                ToolbarItem(placement: .principal) {
-                    if !selectionMode {
+                    } else {
                         titleJobsButton
                     }
+                }
+                // A stable zero-size principal suppresses the duplicate centered navigationTitle chrome
+                // without removing the real title that fixed the dropdown→player navigation-bar race.
+                ToolbarItem(placement: .principal) {
+                    Color.clear
+                        .frame(width: 0, height: 0)
+                        .accessibilityHidden(true)
                 }
                 // Search magnifier (top-right), then the funnel / selection-download button.
                 DefaultToolbarItem(kind: .search, placement: .topBarTrailing)
