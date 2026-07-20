@@ -19,6 +19,9 @@ struct DownloadsView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 12) {
+                        if let error = downloads.liveActivityError {
+                            LiveActivityDiagnostic(error: error)
+                        }
                         ForEach(downloads.items) { item in
                             DownloadCard(item: item) { if item.scene != nil { playing = item } }
                         }
@@ -40,6 +43,33 @@ struct DownloadsView: View {
         .fullScreenCover(item: $playing) { item in
             DownloadPlayerCover(item: item)
         }
+    }
+}
+
+/// Visible only when ActivityKit rejects creation of the download Live Activity. This is especially
+/// important for sideloaded builds, where the host app can install successfully while its WidgetKit
+/// extension was signed or provisioned incorrectly by the on-device signer.
+private struct LiveActivityDiagnostic: View {
+    let error: String
+    @Environment(ThemeManager.self) private var themeManager
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Dynamic Island unavailable")
+                    .font(.subheadline.weight(.semibold))
+                Text(error)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .detailCardBackground(themeManager.current.surfaceColor)
+        .overlay(RoundedRectangle(cornerRadius: CornerRadius.detail, style: .continuous).strokeBorder(.orange.opacity(0.35)))
     }
 }
 

@@ -286,6 +286,9 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unc
 @MainActor
 final class DownloadManager {
     var items: [DownloadItem] = []
+    /// Exact ActivityKit request failure, surfaced on Downloads so sideload/provisioning problems aren't
+    /// silently indistinguishable from a lifecycle bug. Cleared after a successful activity starts.
+    var liveActivityError: String?
 
     @ObservationIgnored private let connectionCount = 8
     @ObservationIgnored private let store = TransferStore()
@@ -1320,7 +1323,12 @@ final class DownloadManager {
     }
 
     private func syncLiveActivity() {
-        liveActivity.sync(liveActivityState())
+        let state = liveActivityState()
+        if let error = liveActivity.sync(state) {
+            liveActivityError = error
+        } else if state != nil, liveActivity.hasActivity {
+            liveActivityError = nil
+        }
     }
 
     /// Select one privacy-safe transfer to feature. Scene titles never leave the app; the Lock Screen only

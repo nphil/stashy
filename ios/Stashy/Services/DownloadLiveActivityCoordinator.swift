@@ -7,19 +7,24 @@ import Foundation
 final class DownloadLiveActivityCoordinator {
     private var activity: Activity<DownloadActivityAttributes>?
     private var lastState: DownloadActivityAttributes.ContentState?
+    var hasActivity: Bool { activity != nil }
 
     init() {
         // Reattach after a system/background relaunch instead of starting a duplicate activity.
         activity = Activity<DownloadActivityAttributes>.activities.first
     }
 
-    func sync(_ state: DownloadActivityAttributes.ContentState?) {
+    /// Returns a user-displayable diagnostic only when ActivityKit rejects the request. Updates to an
+    /// existing activity are fire-and-forget and therefore return nil.
+    func sync(_ state: DownloadActivityAttributes.ContentState?) -> String? {
         guard let state else {
             end()
-            return
+            return nil
         }
-        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
-        guard state != lastState else { return }
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else {
+            return "ActivityKit reports that Live Activities are disabled for Stashy."
+        }
+        guard state != lastState else { return nil }
         lastState = state
 
         // A known-size transfer carries a system-animated ETA projection, so keep it fresh through that
@@ -35,6 +40,7 @@ final class DownloadLiveActivityCoordinator {
         )
         if let activity {
             Task { await activity.update(content) }
+            return nil
         } else {
             do {
                 activity = try Activity.request(
@@ -42,10 +48,13 @@ final class DownloadLiveActivityCoordinator {
                     content: content,
                     pushType: nil
                 )
+                return nil
             } catch {
                 // Live Activities may be disabled per-app or unavailable under the current signing/profile.
                 // The transfer itself must never depend on this optional presentation layer.
                 lastState = nil
+                let nsError = error as NSError
+                return "\(nsError.domain) (\(nsError.code)): \(nsError.localizedDescription)"
             }
         }
     }
