@@ -125,18 +125,26 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.300** (scene-delete options simplified + nav-chrome fade-in, commit `8284b1e`,
-  IPA 9,391,384 B); **v1.0.297 restored the multiThread download default to ON** (owner decision
-  2026-07-24). Verify the newest release/IPA size each push.
-- **v1.0.300 — scene delete + nav polish:** the scene delete dialog no longer offers “remove from Stash
+- Latest release: **v1.0.301** (nav bar stays present on the scene player, commit `d715092`, IPA
+  9,390,437 B); **v1.0.297 restored the multiThread download default to ON** (owner decision 2026-07-24).
+  Verify the newest release/IPA size each push.
+- **v1.0.301 — nav-bar reappearance fixed the right way (superseded the v1.0.300 fade):** hiding the nav
+  bar on the scene player made the return to the grid a jarring hide→show pop; the v1.0.300 fade masked it
+  but the owner disliked the delay. **Now the scene player KEEPS a mini inline nav bar** (`.toolbar(
+  isFullscreen ? .hidden : .visible, for: .navigationBar)` + inline `shown.title`), so list⇄scene is a
+  normal nav-bar item cross-fade (smooth, no custom animation). The video still bleeds behind it
+  (`.ignoresSafeArea(.top)`); layout stays aligned because it’s driven by `geo.safeAreaInsets.top` (grows
+  by the bar height, visible 16:9 area unchanged). This also removes the old hidden-bar preference
+  ScenesView had to counteract. **`DownloadsView(compact:)`** = mini empty-title bar when pushed from a
+  scene (RouteDestination), full “Downloads” title from the tab. **To verify on device:** the mini glass
+  bar over the video (title redundant with the metadata heading? can blank it), and that PORTRAIT
+  fullscreen (button, no rotation) hides the bar — the in-place toolbar-visibility toggle is the tab-bar
+  landmine’s cousin.
+- **v1.0.300 — scene delete options simplified:** the delete dialog no longer offers “remove from Stash
   but keep the file” (**owner standing rule: NEVER delete a scene from Stash while keeping its disk
   file**). Downloaded scene → **“Delete Download from Phone”** (local copy only, scene stays;
   `DownloadManager.deleteDownload(sceneID:)`) + **“Delete from Stash & Disk”** (`deleteScene(deleteFile:
-  true)` + also removes any phone copy). Stream-only → just the latter. Also: returning to the
-  Scenes/Performers grid now **fades the custom nav chrome** (title button / funnel / “+”) in over 0.35s
-  instead of a hard pop — driven by `path`→empty, opacity committed to 0 for a frame then animated to 1
-  on the next tick (the system search magnifier is untouched). Nav-fade is a blind fix — owner to confirm
-  the feel on device.
+  true)` + also removes any phone copy). Stream-only → just the latter.
 - **v1.0.299 — metadata scrape rework (auto multi-source; supersedes the v1.0.298 source-picker flow):**
   “Scrape Metadata” now queries **StashDB / ThePornDB / FansDB in PARALLEL** — no scraper picker (only
   those three are kept; `StashScraper.isAllowed` filters by name/endpoint keyword). **Scenes** merge all
