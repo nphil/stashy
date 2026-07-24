@@ -402,6 +402,13 @@ final class DownloadManager {
     /// would otherwise read as "nothing is downloading" and end the Live Activity on every background
     /// relaunch — precisely when the user most wants it.
     @ObservationIgnored private var restoringTasks = true
+    /// Bumped every time a transfer starts. `cancel(byProducingResumeData:)` delivers its blob one
+    /// async hop later, so without this a blob from a SUPERSEDED task can land after its replacement
+    /// started and be handed to iOS next time — which rejects it and costs the whole download.
+    @ObservationIgnored private var transferEpoch: [String: Int] = [:]
+    /// Items whose pause is still waiting for that blob. Resuming inside the window would find nothing
+    /// and silently restart a multi-GB transfer from byte 0.
+    @ObservationIgnored private var awaitingBlob: Set<String> = []
     @ObservationIgnored private let downloadsDir: URL
     @ObservationIgnored private let partsDir: URL
     @ObservationIgnored private let metaDir: URL
@@ -1019,6 +1026,23 @@ final class DownloadManager {
     }
     func resume(_ item: DownloadItem) {
         guard item.state == .paused || item.state == .waitingForNetwork || item.state == .failed else { return }
+        // A pause hands us its resume blob one async hop later. Resuming inside that window would find
+        // nothing and quietly restart the whole file, so wait for it — briefly, and never forever.
+        guard !awaitingBlob.contains(item.id) else {
+            let id = item.id
+            Task { @MainActor [weak self] in
+                for _ in 0..<10 {
+                    try? await Task.sleep(for: .milliseconds(100))
+                    guard let self, self.awaitingBlob.contains(id) else { break }
+                }
+                guard let self, let item = self.items.first(where: { $0.id == id }),
+                      item.state == .paused || item.state == .waitingForNetwork || item.state == .failed
+                else { return }
+                self.awaitingBlob.remove(id)
+                self.launch(item, reset: false)
+            }
+            return
+        }
         launch(item, reset: false)
     }
     func retry(_ item: DownloadItem) {
@@ -1446,6 +1470,7 @@ final class DownloadManager {
     private func startFullBackgroundDownload(_ item: DownloadItem) {
         guard backgroundTasks[item.id] == nil else { return }
         if (finished[item.id] ?? []).contains(0) { finalizeIfComplete(item); return }
+        transferEpoch[item.id, default: 0] += 1
         let task: URLSessionDownloadTask
         let resumed = resumeData[item.id]?[0] != nil
         if let data = resumeData[item.id]?[0] {
@@ -1453,6 +1478,7 @@ final class DownloadManager {
             resumeData[item.id]?[0] = nil
         } else {
             task = bgSession.downloadTask(with: URLRequest(url: item.url))
+            clearResumeFiles(item.id)   // genuinely starting over — drop any stale blob on disk
         }
         if let blob = resumeData[item.id]?[0] {
             item.receivedBytes = max(item.receivedBytes, Self.resumedBytes(in: blob))
@@ -1460,7 +1486,6 @@ final class DownloadManager {
         register(task, item: item, conn: 0, engine: .background, base: 0,
                  expected: item.totalBytes, rangeRequest: false)
         backgroundTasks[item.id] = task
-        clearResumeFiles(item.id)
         task.resume()
         trace("dl-start", [("item", item.id), ("resumed", resumed ? 1 : 0),
                            ("total", item.totalBytes), ("free", availableBytes())])
@@ -1591,11 +1616,19 @@ final class DownloadManager {
         let conn = taskConnection(background) ?? 0
         if produceResumeData {
             let id = item.id
+            let epoch = transferEpoch[id] ?? 0
+            awaitingBlob.insert(id)
             background.cancel(byProducingResumeData: { [weak self] data in
-                guard let data else { return }
                 Task { @MainActor in
                     guard let self else { return }
+                    self.awaitingBlob.remove(id)
+                    // A newer transfer already started: this blob points at a temp file iOS has
+                    // superseded, and handing it back would fail the next download outright.
+                    guard let data, self.transferEpoch[id] ?? 0 == epoch else { return }
                     self.resumeData[id, default: [:]][conn] = data
+                    if let item = self.items.first(where: { $0.id == id }) {
+                        item.receivedBytes = max(item.receivedBytes, Self.resumedBytes(in: data))
+                    }
                     try? data.write(to: self.resumeDataURL(id, conn), options: .atomic)
                 }
             })
