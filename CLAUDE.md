@@ -125,9 +125,18 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.299** (metadata scrape/edit rework — auto multi-source merge + photo upload,
-  commit `a51eaa7`, IPA 9,386,551 B); **v1.0.297 restored the multiThread download default to ON**
-  (owner decision 2026-07-24). Verify the newest release/IPA size each push.
+- Latest release: **v1.0.300** (scene-delete options simplified + nav-chrome fade-in, commit `8284b1e`,
+  IPA 9,391,384 B); **v1.0.297 restored the multiThread download default to ON** (owner decision
+  2026-07-24). Verify the newest release/IPA size each push.
+- **v1.0.300 — scene delete + nav polish:** the scene delete dialog no longer offers “remove from Stash
+  but keep the file” (**owner standing rule: NEVER delete a scene from Stash while keeping its disk
+  file**). Downloaded scene → **“Delete Download from Phone”** (local copy only, scene stays;
+  `DownloadManager.deleteDownload(sceneID:)`) + **“Delete from Stash & Disk”** (`deleteScene(deleteFile:
+  true)` + also removes any phone copy). Stream-only → just the latter. Also: returning to the
+  Scenes/Performers grid now **fades the custom nav chrome** (title button / funnel / “+”) in over 0.35s
+  instead of a hard pop — driven by `path`→empty, opacity committed to 0 for a frame then animated to 1
+  on the next tick (the system search magnifier is untouched). Nav-fade is a blind fix — owner to confirm
+  the feel on device.
 - **v1.0.299 — metadata scrape rework (auto multi-source; supersedes the v1.0.298 source-picker flow):**
   “Scrape Metadata” now queries **StashDB / ThePornDB / FansDB in PARALLEL** — no scraper picker (only
   those three are kept; `StashScraper.isAllowed` filters by name/endpoint keyword). **Scenes** merge all
