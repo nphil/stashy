@@ -64,6 +64,8 @@ struct PerformersView: View {
             // Only one dropdown open at a time.
             .onChange(of: filterExpanded) { _, open in if open { jobsExpanded = false } }
             .onChange(of: jobsExpanded) { _, open in if open { filterExpanded = false } }
+            // Floating live download/transcode status (bottom-right, root grid only) → Downloads tab.
+            .downloadStatusOverlay()
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .themedBackground()
             .navigationBarTitleDisplayMode(.inline)

@@ -276,6 +276,8 @@ struct ScenesView: View {
             // Only one dropdown open at a time.
             .onChange(of: filterExpanded) { _, open in if open { jobsExpanded = false } }
             .onChange(of: jobsExpanded) { _, open in if open { filterExpanded = false } }
+            // Floating live download/transcode status (bottom-right, root grid only) → Downloads tab.
+            .downloadStatusOverlay()
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .themedBackground()
             // Scene detail deliberately hides the navigation bar. The root must explicitly own a visible bar

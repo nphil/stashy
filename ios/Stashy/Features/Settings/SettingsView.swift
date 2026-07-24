@@ -395,6 +395,8 @@ struct SettingsView: View {
                 // has fully unwound. Avoid polling progress or scanning cache directories mid-job.
                 Task { await refreshCacheSize() }
             }
+            // Floating live download/transcode status (bottom-right) → Downloads tab.
+            .downloadStatusOverlay()
         }
     }
 
