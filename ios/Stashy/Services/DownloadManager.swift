@@ -537,7 +537,14 @@ final class DownloadManager {
 
         let fgConfig = URLSessionConfiguration.default
         fgConfig.waitsForConnectivity = true
-        fgSession = URLSession(configuration: fgConfig, delegate: delegate, delegateQueue: delegateQueue)
+        fgConfig.timeoutIntervalForRequest = 60
+        // Its OWN serial queue, NOT the background session's: that one is shared with the daemon, and a
+        // backlog there can starve this task's didReceive(data:) until the connection times out with
+        // zero bytes — which is exactly what the fallback was doing on every attempt.
+        let fgQueue = OperationQueue()
+        fgQueue.maxConcurrentOperationCount = 1
+        fgQueue.qualityOfService = .userInitiated
+        fgSession = URLSession(configuration: fgConfig, delegate: delegate, delegateQueue: fgQueue)
 
         let bgConfig = URLSessionConfiguration.background(withIdentifier: BackgroundDownloadSession.identifier)
         bgConfig.sessionSendsLaunchEvents = true
@@ -1518,6 +1525,19 @@ final class DownloadManager {
             let margin: Int64 = 512 << 20
             let directNeed = item.totalBytes + margin
             let daemonNeed = item.totalBytes * 2 + margin
+            // Before judging, make the system release what it says it already has.
+            if free > 0, free < daemonNeed, availableBytes() >= daemonNeed {
+                reserveSpace(daemonNeed)
+            }
+            let freeAfter = availableBytesStrict()
+            if freeAfter >= daemonNeed { return startAfterSpaceCheck(item) }
+            if freeAfter > 0, freeAfter >= directNeed, !foregroundFallback.contains(item.id) {
+                foregroundFallback.insert(item.id)
+                RemoteLog.shared.event("dl-space", [
+                    ("item", item.id), ("why", "route-direct"), ("need", daemonNeed),
+                    ("strict", freeAfter), ("lenient", availableBytes())])
+                return startAfterSpaceCheck(item)
+            }
             if free > 0, free < directNeed {
                 item.state = .failed
                 item.error = "Not enough space for this download — needs "
@@ -1528,13 +1548,12 @@ final class DownloadManager {
                 syncLiveActivity()
                 return
             }
-            if free > 0, free < daemonNeed, !foregroundFallback.contains(item.id) {
-                foregroundFallback.insert(item.id)
-                RemoteLog.shared.event("dl-space", [
-                    ("item", item.id), ("why", "route-direct"), ("need", daemonNeed),
-                    ("strict", free), ("lenient", availableBytes())])
-            }
         }
+        startAfterSpaceCheck(item)
+    }
+
+    /// Everything after the space decision — split out so the pre-flight can return through it.
+    private func startAfterSpaceCheck(_ item: DownloadItem) {
         item.state = .downloading
         item.error = nil
         item.lastSampleTime = Date()
@@ -1549,13 +1568,16 @@ final class DownloadManager {
     /// THE engine: one full-file (200) download task on the background session, whether or not the app
     /// is in the foreground.
     ///
-    /// This is deliberately the ONLY transfer path. Two device-verified facts pin it there: a
-    /// background-session task cannot deliver a Range/206 response at all (it transfers the whole body
-    /// then fails -3000 "Cannot create file" at delivery — see the -3000 landmine), and benchmarking
-    /// against the owner's own server showed parallel range connections buy nothing over LAN or
-    /// cellular. So the segmented foreground engine bought complexity and no speed, while being the one
-    /// thing that could NOT continue with the app suspended. A single daemon task keeps running while
-    /// the app is minimized, survives the app being killed, and relaunches the app to finalise.
+    /// This is the default path because it is the only one that continues while the app is suspended:
+    /// it keeps running when Stashy is minimized, survives the app being killed, and relaunches the app
+    /// to deliver the finished file. Benchmarking against the owner's own server also killed the case
+    /// for the old segmented engine — one connection beat eight, so parallelism bought complexity and
+    /// no speed while being the one thing that could NOT run unattended.
+    ///
+    /// Its known weakness is the hand-over: the system stages the file in its own container and moves
+    /// it to us at the end, and that move fails on this device with -3000 "Cannot create file" — seen
+    /// at 98% of a 560 MB file with 8 GB free, so not simply space. `startForegroundFallback` exists
+    /// for that; do not retry this transport after a delivery failure.
     private func startFullBackgroundDownload(_ item: DownloadItem) {
         guard backgroundTasks[item.id] == nil else { return }
         if (finished[item.id] ?? []).contains(0) { finalizeIfComplete(item); return }
@@ -1588,7 +1610,17 @@ final class DownloadManager {
     /// is written by us, so progress is durable and a retry resumes with a Range header. The trade is
     /// that it only advances while Stashy is open, so it is a fallback, never the default.
     private func startForegroundFallback(_ item: DownloadItem) {
-        guard foregroundTasks[item.id] == nil else { return }
+        // In-process transfers do not run while the app is suspended — starting one from the background
+        // burns a retry and returns zero bytes. Park it; enterForeground picks it up.
+        guard !inBackground else {
+            item.state = .waitingForNetwork
+            item.error = nil
+            cancelTasks(item, produceResumeData: false)
+            trace("dl-fg-defer", [("item", item.id), ("bytes", item.receivedBytes)])
+            syncLiveActivity()
+            return
+        }
+        foregroundTasks.removeValue(forKey: item.id)?.cancel()   // never leave an orphan writing part 0
         cancelTasks(item, produceResumeData: false)
         let base = fileSize(partURL(item.id, 0))
         // Unlike the daemon path, these bytes are ours and on disk — report them as progress.
@@ -1987,8 +2019,10 @@ final class DownloadManager {
         // (a rare daemon-side failure, or a relaunch that raced reconnectTasks). Restart it from
         // whatever the resume blob holds; a fresh foreground session also deserves fresh retries.
         fileRecoveryAttempts.removeAll()
-        for item in items where item.state == .downloading && backgroundTasks[item.id] == nil {
+        for item in items where (item.state == .downloading || item.state == .waitingForNetwork)
+            && backgroundTasks[item.id] == nil {
             guard foregroundTasks[item.id] == nil else { continue }
+            guard item.state == .downloading || foregroundFallback.contains(item.id) else { continue }
             trace("dl-revive", [("item", item.id), ("bytes", item.receivedBytes)])
             // A fallback item resumes on the fallback — its bytes are in OUR part file, and the
             // daemon would start over from zero and overwrite them.
@@ -2523,6 +2557,38 @@ final class DownloadManager {
         let task = bgSession.downloadTask(withResumeData: blob)
         task.cancel()
         trace("dl-blob-release", [("item", itemID), ("bytes", Self.resumedBytes(in: blob))])
+    }
+
+    /// Make iOS actually hand over the space it claims is available.
+    ///
+    /// `volumeAvailableCapacityForImportantUsage` promises space that INCLUDES purgeable caches — it
+    /// read 40 GB on this device while only 6 GB was genuinely free — but the system reclaims those
+    /// caches under real allocation pressure, and a background download asking the daemon for room
+    /// evidently does not count. Preallocating a file of the required size IS that pressure:
+    /// `F_PREALLOCATE` with `F_ALLOCATEALL` reserves real blocks (not a sparse hole), which forces the
+    /// purge, and the freed space remains available for the transfer that follows.
+    ///
+    /// Best-effort by design: on failure the download proceeds exactly as before.
+    @discardableResult
+    private func reserveSpace(_ bytes: Int64) -> Bool {
+        guard bytes > 0 else { return false }
+        let fm = FileManager.default
+        let probe = partsDir.appendingPathComponent(".space-probe")
+        try? fm.removeItem(at: probe)
+        try? fm.createDirectory(at: partsDir, withIntermediateDirectories: true)
+        guard fm.createFile(atPath: probe.path, contents: nil),
+              let handle = FileHandle(forWritingAtPath: probe.path) else { return false }
+        var request = fstore_t(fst_flags: UInt32(F_ALLOCATEALL),
+                               fst_posmode: F_PEOFPOSMODE,
+                               fst_offset: 0,
+                               fst_length: off_t(bytes),
+                               fst_bytesalloc: 0)
+        let allocated = fcntl(handle.fileDescriptor, F_PREALLOCATE, &request) != -1
+        try? handle.close()
+        try? fm.removeItem(at: probe)
+        RemoteLog.shared.event("dl-reserve", [
+            ("need", bytes), ("ok", allocated ? 1 : 0), ("after", availableBytesStrict())])
+        return allocated
     }
 
     /// Reclaim everything a run of failed transfers can strand.
