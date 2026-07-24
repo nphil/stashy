@@ -128,9 +128,26 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.305** (background-download engine fixes + floating status button + Live
-  Activity clipping, commit `645c69a`, IPA 9,421,417 B); **v1.0.297 restored the multiThread download
-  default to ON** (owner decision 2026-07-24). Verify the newest release/IPA size each push.
+- Latest release: **v1.0.30x** (durable ranged single engine + LA % clamp + tab-bar auto-collapse —
+  3 commits `e313b71`/`0820e1f`/`459b971`; verify tag + IPA size vs v1.0.305's 9,421,417 B);
+  **v1.0.297 restored the multiThread download default to ON** (owner decision 2026-07-24).
+- **Latest push — backgrounded-downloads robustness round 2 + auto-collapse:**
+  (1) **Ranged single engine**: known-size single downloads now run the SAME durable engine as multi
+  with one segment (fg data task streaming into part 0 ⇄ one bg range task from the durable offset);
+  the legacy full-file task + iOS resume blob (validator-dependent, silently restarts from byte 0 when
+  the blob can't be produced — the owner's "backgrounded single restarts" report) survives ONLY for
+  unknown sizes and range-refusing servers (`rangeUnsupported` set, fed by the 206 check; in-memory,
+  self-healing after relaunch). Single downloads therefore get true pause/resume + cross-relaunch
+  part-based resume. (2) **-3000 hold unified**: any durable progress (8 parts or single part 0) is
+  held, never wiped; fg -3003 no longer orphans a live bg task; held items keep the **Live Activity
+  alive** ("Progress saved — resumes when you reopen Stashy") instead of ending it mid-background.
+  (3) **LA projection clamp** (widget): projected % capped at last real snapshot +8% and never below
+  it (fixes "% went down then up"). (4) **`TabBarMinimizer`** (`Features/Player/TabBarVisibility.swift`):
+  no public force-minimize API exists, so it registers a hidden non-interactive scroll view via
+  `UIViewController.setContentScrollView(_:for:.bottom)` (iOS 15+, the documented "bars observe this
+  scroll view" hook) and nudges it downward (animated offset) ~400 ms after push → the system runs its
+  own minimize animation. Attached to SceneDetailView + compact DownloadsView. UNVERIFIED on device —
+  if the bar still doesn't collapse, this is the component to iterate on (it's harmless when inert).
 - **v1.0.305 — background-download audit fixes (the "minimize → stall/crawl → fail to build" report):**
   (1) the transient-network suspend path now registers the SAME `pendingForegroundStops` drain barrier
   as collapseToBackground, and `startConnections` refuses to start any engine mid-drain (a stale

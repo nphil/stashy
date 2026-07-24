@@ -150,6 +150,22 @@ predates this discovery and asserts the opposite — this file is the correction
   and the whole suspend→continue→relaunch flow. If single-bg -3000s, fall back to leaving downloads
   paused-on-background (foreground still works).
 
+### Ranged single engine (post-v1.0.305 — "single" is no longer full-file by default)
+Known-size **single-connection** downloads now run the SAME durable range engine as multi, with one
+segment: a foreground data task streams appends into `part 0`; backgrounding hands off (drain barrier
+included) to ONE bg range task from the durable offset. Rationale: the legacy full-file
+`downloadTask` + iOS resume blob is validator-dependent (`ETag`/`Last-Modified`); when the blob can't
+be produced the old path silently restarted from byte 0 — the owner's "backgrounded single download
+restarts" bug. The full-file task survives ONLY for (a) unknown `totalBytes` (server transcode
+restores) and (b) servers that refuse ranges: any non-206 to a range request inserts the item into
+the in-memory `rangeUnsupported` set (`usesLegacySingle`), demotes via `launch(reset:true)`, and the
+set self-heals after relaunch (ranged attempt → 206 check refuses → lands back in the set once).
+Consequences: single downloads get true pause/resume and cross-relaunch part-based resume; the
+-3000/-3003 handler holds ANY durable progress (8 parts or single part 0) — paused +
+`resumeOnForeground`, Live Activity kept alive with a "Progress saved" state — and never wipes;
+the old "ignore fg errors when !multiThread" guard is now scoped to `rangeUnsupported` members only,
+because ranged-single items legitimately run foreground data tasks with multiThread off.
+
 ### Storage & privacy
 - Video + sidecars live in **`Application Support/Stashy/{Downloads,DownloadsMeta}`** — private to
   the app (NOT visible in the Files app, unlike `Documents`), **excluded from backup**, migrated from
