@@ -419,6 +419,10 @@ final class DownloadManager {
     var liveActivityError: String?
 
     @ObservationIgnored private let connectionCount = 8
+    /// Ceiling on a single background range request — see `startAdaptiveBackgroundConnection`. Bounds
+    /// how much transferred-but-uncommitted data one interruption can throw away. Small enough that a
+    /// regression is invisible, large enough that a multi-GB file doesn't need thousands of wakeups.
+    @ObservationIgnored private let backgroundSliceBytes: Int64 = 16 << 20
     @ObservationIgnored private let store = TransferStore()
     /// Multi-thread mode writes range data directly into durable parts on this in-process session.
     @ObservationIgnored private var fgSession: URLSession!
@@ -469,16 +473,25 @@ final class DownloadManager {
         let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
         // Downloaded media + sidecars live under Application Support (private to the app — never surfaced
         // in the Files app or to other apps, unlike Documents which *can* be exposed via file-sharing), in
-        // a Stashy-scoped folder excluded from iCloud/iTunes backup. Parts are transient → Caches.
+        // a Stashy-scoped folder excluded from iCloud/iTunes backup.
+        //
+        // Part files live there TOO, and must: they are not a cache, they are the resume state. iOS
+        // purges ~/Library/Caches under disk pressure and does so preferentially while an app is NOT
+        // running — precisely a multi-GB download minimized overnight. A reaped part is invisible to the
+        // engine (every progress number is derived from part FILE SIZES via reconcileDurableParts), so it
+        // surfaces as progress silently going BACKWARDS and then restarting. Parts were in Caches until
+        // v1.0.307; `migrateLegacyParts` moves any in-flight ones across on first launch.
         let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Stashy", isDirectory: true)
         downloadsDir = base.appendingPathComponent("Downloads", isDirectory: true)
         metaDir = base.appendingPathComponent("DownloadsMeta", isDirectory: true)
-        partsDir = caches.appendingPathComponent("DownloadParts", isDirectory: true)
+        partsDir = base.appendingPathComponent("DownloadParts", isDirectory: true)
         for dir in [downloadsDir, partsDir, metaDir] {
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
         Self.excludeFromBackup(base)
+        Self.migrateLegacyParts(from: caches.appendingPathComponent("DownloadParts", isDirectory: true),
+                                to: base.appendingPathComponent("DownloadParts", isDirectory: true))
         // The legacy Documents store is a one-time migration; after the first run there is nothing left to
         // move, so skip the Documents enumeration on every subsequent launch. The move is best-effort and
         // idempotent (dest-exists guarded), so setting the flag right after the call is safe.
@@ -1083,7 +1096,19 @@ final class DownloadManager {
            !FileManager.default.fileExists(atPath: metaDir.appendingPathComponent("\(item.id).json").path) {
             fetchSidecar(item, scene: scene, apiKey: item.apiKey)
         }
-        launch(item, reset: true)
+        // RESUME, don't restart. Two failure paths deliberately keep their durable parts precisely so
+        // Retry can continue from them — a merge failure ("Retry re-merges instead of re-downloading")
+        // and an exhausted background hold ("parts stay on disk"). An unconditional reset here deleted
+        // all eight and re-fetched the whole file, making the only recovery affordance the destructive
+        // one. Reset is now reserved for the cases where there is genuinely nothing to salvage.
+        reconcileDurableParts(item)
+        if (finished[item.id] ?? []).count == item.connections.count, item.connections.count > 0,
+           item.receivedBytes > 0 {
+            item.error = nil
+            finalizeIfComplete(item)   // every part complete → the failure was the merge; just re-merge
+            return
+        }
+        launch(item, reset: item.receivedBytes == 0)
     }
 
     func stop(_ item: DownloadItem) {
@@ -1420,6 +1445,14 @@ final class DownloadManager {
     // MARK: - Launch / suspend
 
     private func launch(_ item: DownloadItem, reset: Bool) {
+        // Always logged (not trace-gated): a reset is the only thing that legitimately destroys durable
+        // bytes, so "how much progress did we just throw away, and who asked for it" must be visible in
+        // any diagnostic session.
+        if reset, item.receivedBytes > 0 {
+            RemoteLog.shared.event("dl-wipe", [
+                ("item", item.id), ("lost", item.receivedBytes), ("total", item.totalBytes),
+                ("conns", item.connections.count), ("multi", item.multiThread)])
+        }
         if reset {
             cancelTasks(item, produceResumeData: false)
             cleanupParts(item.id)
@@ -1443,12 +1476,18 @@ final class DownloadManager {
         let desiredCount = item.multiThread && item.totalBytes > 0 ? connectionCount : 1
         // A mode change changes the part geometry, so it is only applied before starting or on an explicit
         // retry. Normal foreground/background transitions keep the same durable eight-part layout.
-        if item.connections.count != desiredCount {
+        //
+        // Guarded on having NO durable bytes: rebuilding deletes every part, so a demote arriving
+        // mid-transfer (e.g. a late range refusal on an item that is already 15% downloaded) would
+        // silently restart from zero. The paths that legitimately change geometry all come through
+        // launch(reset: true), which zeroes the item first — so they still rebuild as intended.
+        if item.connections.count != desiredCount, item.receivedBytes == 0 {
             cancelTasks(item, produceResumeData: false)
             cleanupParts(item.id)
             item.rebuildConnections(count: desiredCount, totalBytes: item.totalBytes)
             item.receivedBytes = 0
             item.lastSampleBytes = 0
+            trace("dl-geometry", [("item", item.id), ("conns", desiredCount), ("multi", item.multiThread)])
             if let scene = item.scene {
                 fetchSidecar(item, scene: scene, apiKey: item.apiKey, transcoded: item.wasTranscoded)
             }
@@ -1497,16 +1536,21 @@ final class DownloadManager {
         task.resume()
     }
 
-    /// Start durable foreground range writers for every unfinished segment except the one already owned by
-    /// the background daemon. Returning to the app therefore expands back to eight connections without
-    /// cancelling or duplicating the background connection.
+    /// Open durable foreground range writers for every unfinished segment that doesn't already have a
+    /// live writer, skipping the one the background daemon still owns — so returning to the app expands
+    /// back to eight connections without cancelling or duplicating the background connection. This TOPS
+    /// UP rather than being all-or-nothing: when a background slice completes while the app is in the
+    /// foreground, its segment would otherwise sit idle until every other connection had finished.
     private func startForegroundConnections(_ item: DownloadItem) {
-        guard foregroundTasks[item.id]?.isEmpty != false else { return }
         reconcileDurableParts(item)
         let backgroundConn = backgroundTasks[item.id].flatMap { taskConnection($0) }
         let done = finished[item.id] ?? []
-        var started: [URLSessionDataTask] = []
-        for i in item.connections.indices where !done.contains(i) && i != backgroundConn {
+        // Drop writers that have already ended (finished, failed or cancelled) so their segments are
+        // eligible again; a live task's segment must never get a second writer appending to the part.
+        var live = (foregroundTasks[item.id] ?? []).filter { $0.state == .running || $0.state == .suspended }
+        let busy = Set(live.compactMap { taskConnection($0) })
+        for i in item.connections.indices
+        where !done.contains(i) && i != backgroundConn && !busy.contains(i) {
             let part = partURL(item.id, i)
             let base = fileSize(part)
             let (lo, hi) = chunkRange(item, i)
@@ -1516,15 +1560,28 @@ final class DownloadManager {
             let task = fgSession.dataTask(with: request)
             register(task, item: item, conn: i, engine: .foreground, base: base,
                      expected: item.connections[i].total, rangeRequest: true)
-            started.append(task)
+            live.append(task)
             task.resume()
         }
-        foregroundTasks[item.id] = started
-        if started.isEmpty, backgroundTasks[item.id] == nil { finalizeIfComplete(item) }
+        foregroundTasks[item.id] = live
+        trace("dl-fg-start", [("item", item.id), ("live", live.count),
+                              ("bg_conn", backgroundConn), ("done", done.count),
+                              ("bytes", item.receivedBytes)])
+        if live.isEmpty, backgroundTasks[item.id] == nil { finalizeIfComplete(item) }
     }
 
     /// Run exactly one fresh range request in the background. It appends to the durable bytes written by
     /// foreground data tasks; no resume blob ever crosses session boundaries.
+    ///
+    /// **The range is a bounded SLICE, not the whole remaining segment.** A background *download task*
+    /// streams into URLSession's private temp file and only lands in our durable part at
+    /// `didFinishDownloadingTo` — so an interrupted range discards EVERY byte it had transferred. With
+    /// one task per whole segment (up to totalBytes/8, or the entire file for a single download) a
+    /// minimized transfer could work for minutes and commit nothing: each retry re-read the smaller
+    /// durable size, so the Dynamic Island percentage visibly went BACKWARDS (the owner's 15 → 12 → 8),
+    /// and foregrounding resumed from a long-stale offset, i.e. "the download restarts". Slicing caps
+    /// the loss from any single interruption at `backgroundSliceBytes` and makes background progress
+    /// monotonic, because every completed slice is durable.
     private func startAdaptiveBackgroundConnection(_ item: DownloadItem) {
         guard backgroundTasks[item.id] == nil else { return }
         reconcileDurableParts(item)
@@ -1540,12 +1597,18 @@ final class DownloadManager {
             startAdaptiveBackgroundConnection(item)
             return
         }
+        let from = lo + base
+        let to = min(hi, from + backgroundSliceBytes - 1)
         var request = URLRequest(url: item.url)
-        request.setValue("bytes=\(lo + base)-\(hi)", forHTTPHeaderField: "Range")
+        request.setValue("bytes=\(from)-\(to)", forHTTPHeaderField: "Range")
         let task = bgSession.downloadTask(with: request)
+        // `expected` is the part's size AFTER this slice appends — exactly what the delegate's
+        // post-append size check validates.
         register(task, item: item, conn: i, engine: .background, base: base,
-                 expected: item.connections[i].total, rangeRequest: true)
+                 expected: base + (to - from + 1), rangeRequest: true)
         backgroundTasks[item.id] = task
+        trace("dl-slice", [("item", item.id), ("conn", i), ("from", from), ("to", to),
+                           ("base", base), ("part_total", item.connections[i].total)])
         task.resume()
     }
 
@@ -1575,6 +1638,34 @@ final class DownloadManager {
 
     private func fileSize(_ url: URL) -> Int64 {
         ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.int64Value ?? 0
+    }
+
+    // MARK: - Download tracing (Settings → Diagnostics → Download tracing)
+
+    /// High-frequency diagnostic event. Gated separately from `RemoteLog.isLoggingEnabled` so a long
+    /// transfer's per-slice detail is opt-in; structural events call `RemoteLog.shared.event` directly.
+    private func trace(_ tag: String, _ fields: [(String, Any?)]) {
+        guard RemoteLog.isDownloadTracingEnabled else { return }
+        RemoteLog.shared.event(tag, fields)
+    }
+
+    /// The single most useful line for diagnosing a transfer: the real on-disk size of every part,
+    /// alongside what the UI believes and which engines are live. A background regression shows up here
+    /// as a part shrinking (or the sum dropping below a previous census).
+    private func partCensus(_ item: DownloadItem, _ why: String) {
+        guard RemoteLog.isDownloadTracingEnabled else { return }
+        let sizes = item.connections.indices
+            .map { String(fileSize(partURL(item.id, $0)) / 1024) }
+            .joined(separator: ",")
+        let pct: Int? = item.totalBytes > 0
+            ? Int(Double(item.receivedBytes) / Double(item.totalBytes) * 100) : nil
+        RemoteLog.shared.event("dl-parts", [
+            ("item", item.id), ("why", why), ("kb", sizes),
+            ("sum", item.receivedBytes), ("total", item.totalBytes), ("pct", pct),
+            ("fg", foregroundTasks[item.id]?.count ?? 0),
+            ("bg", backgroundTasks[item.id] != nil ? 1 : 0),
+            ("done", (finished[item.id] ?? []).count),
+            ("state", String(describing: item.state))])
     }
 
     private func reconcileDurableParts(_ item: DownloadItem) {
@@ -1681,11 +1772,41 @@ final class DownloadManager {
 
     private func syncLiveActivity() {
         let state = liveActivityState()
+        logActivityPush(state)
         if let error = liveActivity.sync(state) {
             liveActivityError = error
         } else if state != nil, liveActivity.hasActivity {
             liveActivityError = nil
         }
+    }
+
+    @ObservationIgnored private var lastLoggedActivityPct = -1
+    @ObservationIgnored private var lastLoggedActivityPhase = ""
+
+    /// Record what the Live Activity was actually handed, so a Dynamic Island report can be checked
+    /// against the values the app pushed. Emitted on a phase change, a ≥2 point move, or ANY decrease —
+    /// a percentage going backwards is the signature of uncommitted background bytes being re-read from
+    /// disk, so it is deliberately never filtered out.
+    private func logActivityPush(_ state: DownloadActivityAttributes.ContentState?) {
+        guard RemoteLog.isDownloadTracingEnabled else { return }
+        guard let state else {
+            guard lastLoggedActivityPct >= 0 || !lastLoggedActivityPhase.isEmpty else { return }
+            lastLoggedActivityPct = -1
+            lastLoggedActivityPhase = ""
+            RemoteLog.shared.event("dl-la", [("push", "end")])
+            return
+        }
+        let pct = state.progress.map { Int(($0 * 100).rounded()) } ?? -1
+        let phase = String(describing: state.phase)
+        let decreased = lastLoggedActivityPct >= 0 && pct < lastLoggedActivityPct
+        let moved = abs(pct - lastLoggedActivityPct) >= 2 || phase != lastLoggedActivityPhase
+        guard decreased || moved else { return }
+        lastLoggedActivityPct = pct
+        lastLoggedActivityPhase = phase
+        let regressed: Int? = decreased ? 1 : nil
+        RemoteLog.shared.event("dl-la", [
+            ("pct", pct), ("phase", phase), ("jobs", state.activeJobCount),
+            ("down", regressed), ("status", String(state.status.prefix(40)))])
     }
 
     /// Select one privacy-safe transfer to feature. Scene titles never leave the app; the Lock Screen only
@@ -1800,15 +1921,25 @@ final class DownloadManager {
             cancelTranscode(item, preserveResume: true)   // keep committed chunks so it resumes, not restarts
             item.transcodeStatus = "Paused — resumes automatically when you reopen Stashy"
         }
+        let live = items.filter { $0.state == .downloading }
+        RemoteLog.shared.event("dl-phase", [("to", "background"), ("active", live.count)])
+        for item in live { partCensus(item, "enter-bg") }
         for item in items where item.state == .downloading && !usesLegacySingle(item) {
             collapseToBackground(item)
         }
         syncLiveActivity()
+        RemoteLog.shared.flushNow()   // the periodic timer stops once we're suspended
     }
 
     private func enterForeground() {
         guard inBackground else { return }
         inBackground = false
+        // First thing on waking: publish everything the background run buffered, then census the real
+        // on-disk state before any engine restarts and overwrites the evidence.
+        RemoteLog.shared.flushNow()
+        let live = items.filter { $0.state == .downloading || $0.state == .paused }
+        RemoteLog.shared.event("dl-phase", [("to", "foreground"), ("active", live.count)])
+        for item in live { partCensus(item, "enter-fg") }
         // Auto-resume transcodes that were paused by backgrounding — no manual tap needed.
         let resumes = transcodeResumeOnForeground
         transcodeResumeOnForeground.removeAll()
@@ -1979,6 +2110,24 @@ final class DownloadManager {
         } else {
             foregroundTasks[itemID]?.removeAll { taskConnection($0) == conn }
         }
+        // A finished BACKGROUND task means one bounded slice is now durable — not that the whole
+        // connection is done. Only a part that reached its full segment size closes the connection;
+        // otherwise keep slicing (or hand the segment back to the foreground engine if we returned).
+        if engine == .background, conn < item.connections.count {
+            let size = fileSize(partURL(itemID, conn))
+            let total = item.connections[conn].total
+            trace("dl-slice-done", [("item", itemID), ("conn", conn), ("size", size), ("total", total)])
+            if total > 0, size < total {
+                item.connections[conn].received = size
+                item.receivedBytes = item.connections.reduce(Int64(0)) { $0 + $1.received }
+                if item.state == .downloading {
+                    if inBackground { startAdaptiveBackgroundConnection(item) }
+                    else { startForegroundConnections(item) }
+                }
+                syncLiveActivity()
+                return
+            }
+        }
         finished[itemID, default: []].insert(conn)
         if conn < item.connections.count { item.connections[conn].received = item.connections[conn].total }
         if (finished[itemID] ?? []).count == item.connections.count {
@@ -2001,17 +2150,52 @@ final class DownloadManager {
 
     private func connectionFailed(itemID: String, message: String, code: Int, engine: TransferEngine) {
         guard let item = items.first(where: { $0.id == itemID }), item.state == .downloading else { return }
+        // Every non-cancellation transfer error, always (not trace-gated) — the code + engine pair is
+        // what distinguishes a daemon range refusal from a server problem from an append-guard trip.
+        RemoteLog.shared.event("dl-err", [
+            ("item", itemID), ("code", code), ("engine", engine.rawValue),
+            ("bytes", item.receivedBytes), ("conns", item.connections.count),
+            ("bg", inBackground ? 1 : 0), ("msg", String(message.prefix(60)))])
+        partCensus(item, "err-\(code)")
         // A server output that doesn't honor byte ranges cannot use the range engines at all. Collapse
         // once to the universally supported full-file background task and keep the download moving —
         // from multi (demote to single) or from the ranged-single engine alike.
+        //
+        // ONLY with zero durable bytes. A server that can't do ranges refuses the very FIRST request, so
+        // a refusal arriving mid-transfer means something else: a proxy collapsing one Range into a 200,
+        // a 416 because Stash's recorded size overshoots the file on disk, a transient 5xx/auth page.
+        // Demoting there ran launch(reset: true) — deleting all eight parts and restarting from byte 0,
+        // permanently (the demote is persisted) — which is one of the ways the owner's download "restarts".
+        // With progress on disk, treat it as a transient error and let the retry path below preserve it.
         if code == NSURLErrorBadServerResponse, !rangeUnsupported.contains(itemID),
-           item.multiThread || !usesLegacySingle(item) {
+           item.receivedBytes == 0, item.multiThread || !usesLegacySingle(item) {
             rangeUnsupported.insert(itemID)
             if item.multiThread {
                 item.multiThread = false
                 persistTransferPreference(item)
             }
             launch(item, reset: true)
+            return
+        }
+        // Mid-transfer range refusal: keep every durable byte, back off, and try again. A genuinely
+        // range-hostile server that somehow got this far still converges — repeated failures exhaust
+        // maxNetworkRetries and land in .failed with the parts intact for a resuming Retry.
+        if code == NSURLErrorBadServerResponse, item.receivedBytes > 0 {
+            RemoteLog.shared.event("dl-range-refused", [
+                ("item", itemID), ("engine", engine.rawValue), ("bytes", item.receivedBytes),
+                ("retries", networkRetries[itemID] ?? 0)])
+            if engine == .background { backgroundTasks[itemID] = nil }
+            if (networkRetries[itemID] ?? 0) < maxNetworkRetries {
+                item.state = .waitingForNetwork
+                item.error = nil
+                cancelTasks(item, produceResumeData: false)
+                scheduleNetworkRetry(item)
+            } else {
+                item.state = .failed
+                item.error = message
+                cancelTasks(item, produceResumeData: false)
+            }
+            syncLiveActivity()
             return
         }
         // Ignore late error callbacks from foreground range tasks that the full-file fallback just
@@ -2258,6 +2442,12 @@ final class DownloadManager {
             item.receivedBytes = sum
             item.state = .paused   // reconnectTasks() flips this to .downloading if a live task is found
             items.append(item)
+            // Always logged: what actually survived to this launch is the ground truth a "it restarted"
+            // report has to be checked against.
+            let pct: Int? = total > 0 ? Int(Double(sum) / Double(total) * 100) : nil
+            RemoteLog.shared.event("dl-restore", [
+                ("item", id), ("conns", n), ("bytes", sum), ("total", total), ("pct", pct),
+                ("multi", item.multiThread), ("done", (finished[id] ?? []).count)])
         }
         pumpCompanionQueue()   // resume any restored bulk-transcode queue (serial; waits if a job reconnected)
     }
@@ -2313,6 +2503,20 @@ final class DownloadManager {
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
         try? u.setResourceValues(values)
+    }
+
+    /// Carry in-flight part files across the Caches → Application Support move (v1.0.307) so an upgrade
+    /// mid-download resumes instead of restarting. Best-effort and idempotent: anything already present at
+    /// the destination wins, and the old directory is removed once drained.
+    nonisolated private static func migrateLegacyParts(from old: URL, to new: URL) {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(at: old, includingPropertiesForKeys: nil) else { return }
+        for file in files {
+            let dest = new.appendingPathComponent(file.lastPathComponent)
+            if fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: file); continue }
+            try? fm.moveItem(at: file, to: dest)
+        }
+        try? fm.removeItem(at: old)
     }
 
     /// Move downloads/meta from the old `Documents` location into the private Application Support store so
