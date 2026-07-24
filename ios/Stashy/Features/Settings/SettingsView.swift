@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AppState.self) private var appState
     @Environment(ThemeManager.self) private var themeManager
+    @Environment(DownloadManager.self) private var downloads
     @Environment(\.imageCache) private var imageCache
     @Environment(\.previewCache) private var previewCache
     @State private var showDisconnectAlert = false
@@ -23,6 +24,7 @@ struct SettingsView: View {
     @State private var debugServer = RemoteLog.server
     @State private var debugTopic = RemoteLog.topic
     @State private var downloadTrace = RemoteLog.isDownloadTracingEnabled
+    @State private var reclaimed = false
 
     private let swatchColumns = [GridItem(.adaptive(minimum: 64), spacing: 12)]
 
@@ -354,6 +356,18 @@ struct SettingsView: View {
                                 .onSubmit { debugTopic = RemoteLog.topic }
                         }
                         .padding(.vertical, 2)
+                        LabeledContent("Free space", value: downloads.freeSpaceLabel)
+                            .font(.callout)
+                        Button {
+                            downloads.reclaimTransferStorage()
+                            reclaimed = true
+                        } label: {
+                            Label(reclaimed ? "Reclaiming…" : "Reclaim Download Storage",
+                                  systemImage: "internaldrive")
+                        }
+                        Text("A failed download leaves its partial file with the system, where it counts as \"System Data\" and can't be seen or removed from Stashy's own storage. This hands those back so iOS releases them.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                         Toggle("Trace downloads", isOn: $downloadTrace)
                             .onChange(of: downloadTrace) { _, on in
                                 RemoteLog.isDownloadTracingEnabled = on

@@ -1148,6 +1148,7 @@ final class DownloadManager {
         cancelCompanionJob(item)   // if a server transcode is still running, tell Stash to stop it
         releaseCompanionSlot(item.id)   // free the serial bulk-transcode slot (no-op for non-bulk)
         cancelTasks(item, produceResumeData: false)
+        releaseResumeBlob(item.id)   // otherwise the daemon keeps this download's partial file forever
         item.state = .stopped
         cleanupParts(item.id)
         cleanupMeta(item.id)   // reclaim the sidecar/thumb/sprite/vtt now; retry() re-heals if resumed
@@ -1489,7 +1490,7 @@ final class DownloadManager {
         if reset {
             cancelTasks(item, produceResumeData: false)
             cleanupParts(item.id)
-            resumeData[item.id] = nil
+            releaseResumeBlob(item.id)   // let the daemon drop its partial file
             for i in item.connections.indices { item.connections[i].received = 0 }
             item.receivedBytes = 0
             item.error = nil
@@ -2195,7 +2196,7 @@ final class DownloadManager {
                 foregroundFallback.insert(itemID)
                 item.transcodeStatus = ""
                 // Start clean on our own file: the daemon's bytes live in a temp file we can't reach.
-                resumeData[itemID] = nil
+                releaseResumeBlob(itemID)   // let the daemon drop its partial file
                 cleanupParts(itemID)
                 item.receivedBytes = 0
                 for i in item.connections.indices { item.connections[i].received = 0 }
@@ -2505,6 +2506,61 @@ final class DownloadManager {
     private func resumeDataURL(_ itemID: String, _ conn: Int) -> URL {
         partsDir.appendingPathComponent("\(itemID)-\(conn).resume")
     }
+    /// Hand a resume blob back to the system so it releases the partial file behind it.
+    ///
+    /// A blob is a POINTER to a partially-downloaded file the download daemon is holding for you, in
+    /// its own cache — outside the app sandbox, where it lands in iOS's "System Data". Dropping the
+    /// blob (`resumeData[id] = nil`) orphans that file: the app can no longer reach it and the system
+    /// has no idea we're finished with it. Repeated across a run of failed multi-GB downloads that is
+    /// tens of gigabytes of invisible, unreclaimable storage — and, because it eats real free space,
+    /// the direct cause of the next download failing. Materialising a task from the blob and
+    /// cancelling it WITHOUT asking for new resume data is what tells the daemon to let go.
+    private func releaseResumeBlob(_ itemID: String) {
+        let blob = resumeData[itemID]?[0] ?? (try? Data(contentsOf: resumeDataURL(itemID, 0)))
+        resumeData[itemID] = nil
+        try? FileManager.default.removeItem(at: resumeDataURL(itemID, 0))
+        guard let blob, !blob.isEmpty else { return }
+        let task = bgSession.downloadTask(withResumeData: blob)
+        task.cancel()
+        trace("dl-blob-release", [("item", itemID), ("bytes", Self.resumedBytes(in: blob))])
+    }
+
+    /// Reclaim everything a run of failed transfers can strand: partial files the daemon is still
+    /// holding for abandoned resume blobs, part files with no owning download, and any background task
+    /// that no longer belongs to anything. Reports the real free space either side.
+    func reclaimTransferStorage() {
+        let before = availableBytesStrict()
+        let fm = FileManager.default
+        let live = Set(items.filter { $0.state != .completed && $0.state != .stopped }.map(\.id))
+        if let files = try? fm.contentsOfDirectory(at: partsDir, includingPropertiesForKeys: nil) {
+            for url in files where url.pathExtension == "resume" {
+                let name = url.deletingPathExtension().lastPathComponent   // "<itemID>-<conn>"
+                guard let dash = name.lastIndex(of: "-") else { continue }
+                let id = String(name[name.startIndex..<dash])
+                guard !live.contains(id) else { continue }
+                releaseResumeBlob(id)
+            }
+        }
+        sweepOrphanedParts()
+        let handler: @Sendable ([URLSessionTask]) -> Void = { [weak self] tasks in
+            let box = UncheckedSendableBox(tasks)
+            Task { @MainActor in
+                guard let self else { return }
+                for task in box.value where self.taskConnection(task) == nil
+                    || !live.contains(task.taskDescription?.components(separatedBy: "\u{1}").first ?? "") {
+                    task.cancel()
+                }
+                RemoteLog.shared.event("dl-reclaim", [
+                    ("before", before), ("after", self.availableBytesStrict())])
+            }
+        }
+        bgSession.getAllTasks(completionHandler: handler)
+    }
+
+    /// Real free space, for the Diagnostics readout — iOS's own Settings figure counts purgeable
+    /// caches and can read tens of gigabytes higher than what a download can actually use.
+    var freeSpaceLabel: String { Self.bytesLabel(availableBytesStrict()) }
+
     private func clearResumeFiles(_ itemID: String) {
         try? FileManager.default.removeItem(at: resumeDataURL(itemID, 0))
     }
