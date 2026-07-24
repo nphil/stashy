@@ -959,6 +959,9 @@ def run_transcode(stash, args, settings):
     vmaf_score = None
     vmaf_target = None
     vmaf_engine = None                       # engine chosen_cq/vmaf_score were calibrated for (None = search off/failed)
+    crf_source = "preset"                    # how the knob was decided — "map" / "live" / "preset"; published
+    map_res = None                           # to the app (progress file + result) so its log shows WHICH
+                                             # vmaf-map entry was read (owner: map usage was invisible client-side)
     src_w = int(sv.get("width") or 0)
     src_h_probe = int(sv.get("height") or src_h or 0)
     if _truthy(settings.get("vmafTargeting"), True) and not _source_is_hdr(sv) and duration > 0 \
@@ -971,6 +974,8 @@ def run_transcode(stash, args, settings):
             chosen_cq, vmaf_score = cached
             vmaf_target = target
             vmaf_engine = primary_engine
+            crf_source = "map"
+            map_res = _res_key(map_h)
             log_info("VMAF: using precomputed CRF {} (~VMAF {:.1f}, target {}) for scene {} @ {} — "
                      "skipping live analysis".format(chosen_cq, vmaf_score, target, scene_id, _res_key(map_h)))
         else:
@@ -1028,6 +1033,7 @@ def run_transcode(stash, args, settings):
                     chosen_cq, vmaf_score = res
                     vmaf_target = target
                     vmaf_engine = primary_engine
+                    crf_source = "live"
                     log_info("VMAF targeting: chose cq {} → ~VMAF {:.1f} (target {}) for {}".format(
                         chosen_cq, vmaf_score, target, primary_engine))
                 else:
@@ -1037,7 +1043,7 @@ def run_transcode(stash, args, settings):
     # custom_fields — so a running transcode never fires sceneUpdate/Scene.Update hooks (which were
     # queuing "sync" tasks). custom_fields is written exactly TWICE per transcode: the early "running"
     # marker above, and the terminal result at the end.
-    status_state = {"last": 0.0, "label": attempts[0][0]}
+    status_state = {"last": 0.0, "label": attempts[0][0], "quality": None}
 
     def _on_status(prog, secs):
         now = time.time()
@@ -1059,13 +1065,15 @@ def run_transcode(stash, args, settings):
         pct = (secs / duration) if duration > 0 else 0.0
         eta = int((duration - secs) / speed) if speed > 0 and duration > secs else None
         size_est = int(cur_size / pct) if pct > 0.02 and cur_size > 0 else None
-        _write_progress_file(scene_id, {
+        blob = {
             "status": "running", "stage": "encoding", "codec": codec, "resolution": res_label,
             "engine": status_state["label"], "progress": round(pct, 4),
             "out_time": round(secs, 1), "duration": round(duration, 1),
             "speed": round(speed, 2), "fps": round(fps, 1),
             "size": cur_size, "size_estimate": size_est, "eta": eta,
-        })
+        }
+        blob.update(status_state.get("quality") or {})   # cq + crf_source (map/live/preset) + map_res
+        _write_progress_file(scene_id, blob)
 
     rc = -1
     eng = attempts[0][0]
@@ -1079,11 +1087,22 @@ def run_transcode(stash, args, settings):
         label = "{}{}".format(engine, " +NVDEC" if gpu_decode else "")
         status_state["label"] = label
         status_state["last"] = 0.0   # let the first block of a new attempt publish immediately
+        # Quality provenance for THIS attempt, published with every status write. Honest across engine
+        # fallbacks: a non-VMAF engine runs on its own preset cq, so its provenance is "preset".
+        status_state["quality"] = {
+            "cq": used_cq,
+            "crf_source": crf_source if is_vmaf else "preset",
+            "map_res": map_res if (is_vmaf and crf_source == "map") else None,
+            "vmaf_target": vmaf_target if is_vmaf else None,
+            "vmaf_expected": round(vmaf_score, 2) if (is_vmaf and vmaf_score is not None) else None,
+        }
         log_info("Transcoding scene {} → {} {}p (cq {}{}, {})".format(
             scene_id, codec, res_label, used_cq,
             " for VMAF {}".format(vmaf_target) if is_vmaf else "", label))
-        _write_progress_file(scene_id, {"status": "running", "stage": "starting",
-                                        "codec": codec, "resolution": res_label, "engine": label})
+        start_blob = {"status": "running", "stage": "starting",
+                      "codec": codec, "resolution": res_label, "engine": label}
+        start_blob.update(status_state["quality"])
+        _write_progress_file(scene_id, start_blob)
         ff = ffmpeg_hw if engine == "hevc_nvenc" else ffmpeg   # NVENC → driver-safe build; SW → main
         cmd = build_transcode_cmd(src, tmp, codec, target_h, used_cq, ff, engine, gpu_decode,
                                   av1_preset, cfr_fps, hdr, maxrate)
@@ -1109,10 +1128,13 @@ def run_transcode(stash, args, settings):
     size = os.path.getsize(dst)
 
     # If the encode fell back to an engine other than the one VMAF was searched on, the measured VMAF/target
-    # don't describe the file we actually shipped — don't report them as achieved (the cq scales differ).
+    # don't describe the file we actually shipped — don't report them as achieved (the cq scales differ),
+    # and the provenance reverts to the fallback engine's preset.
     if eng != vmaf_engine:
         vmaf_score = None
         vmaf_target = None
+        crf_source = "preset"
+        map_res = None
 
     # Probe the ACTUAL output once (not a spam loop) so we report — and hand the app — the real codec /
     # dimensions / bitrate of the file we produced, rather than what was requested. This also makes it
@@ -1151,6 +1173,8 @@ def run_transcode(stash, args, settings):
         "cq": used_cq,                          # the quality knob actually used (VMAF-chosen or preset)
         "vmaf": round(vmaf_score, 2) if vmaf_score is not None else None,   # achieved (sampled) VMAF, or null
         "vmaf_target": vmaf_target,             # the target it aimed for, or null when VMAF wasn't applied
+        "crf_source": crf_source,               # "map" (vmaf-map entry) / "live" (sampled search) / "preset"
+        "map_res": map_res,                     # the vmaf-map res key consumed (e.g. "1080p"), map hits only
         "source_scene": scene_id,
         "created": int(time.time()),
         "status": "ready",
