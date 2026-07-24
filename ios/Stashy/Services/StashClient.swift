@@ -349,11 +349,15 @@ struct StashClient: Sendable {
     // MARK: - Job queue / library scan
 
     /// The whole Stash job queue (running + queued). Used by the jobs panel — only called while it's open.
+    /// Stash declares `jobQueue: [Job!]` (nullable list) and its Go resolver returns a nil slice when the
+    /// queue is EMPTY, so the wire value for "no jobs" is `null`, not `[]`. Decode it optionally — a
+    /// non-optional array made every idle-queue poll a decode failure, which froze the panel's last
+    /// snapshot mid-scan and eventually killed the monitor's poll loop (the stuck-progress-bar bug).
     func jobQueue() async throws -> [JobInfo] {
-        struct Response: Decodable, Sendable { let jobQueue: [JobInfo] }
+        struct Response: Decodable, Sendable { let jobQueue: [JobInfo]? }
         let resp: Response = try await query(
             "query JobQueue { jobQueue { id status description subTasks progress } }")
-        return resp.jobQueue
+        return resp.jobQueue ?? []
     }
 
     /// Kick Stash's native library scan with server defaults (all configured paths). Returns the Job id.

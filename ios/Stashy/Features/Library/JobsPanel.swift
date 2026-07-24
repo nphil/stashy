@@ -4,13 +4,19 @@ import SwiftUI
 /// matches Stash's own 0…1 progress), an idle line when nothing is running, a "+N queued" note, and — on the
 /// Scenes tab only (`showActions`) — buttons to queue the common library tasks.
 ///
-/// Polling is driven here: `JobMonitor.start()` on appear (the panel only exists while the dropdown is open)
-/// and `.stop()` on disappear, so nothing polls Stash in the background when the panel is closed.
+/// Polling is driven here: `JobMonitor.attach()` on appear (the panel only exists while the dropdown is
+/// open) and `.detach()` on disappear, so nothing polls Stash in the background when the panel is closed.
+/// Attach/detach is refcounted in the monitor — a rapid close→reopen can deliver the old instance's
+/// `onDisappear` after the new instance's `onAppear`, and a plain stop there killed polling for the panel
+/// still on screen.
 struct JobsPanel: View {
     /// Scenes shows the action buttons; Performers shows the status only (for now).
     var showActions: Bool
     @Environment(ThemeManager.self) private var themeManager
     @Environment(AppState.self) private var appState
+    // Whether THIS instance holds a monitor attach — so onDisappear only releases what onAppear took
+    // (onAppear can no-op when the client isn't connected yet).
+    @State private var attached = false
 
     private var monitor: JobMonitor { JobMonitor.shared }
 
@@ -26,25 +32,42 @@ struct JobsPanel: View {
                 Divider().opacity(0.25)
                 VStack(spacing: 8) {
                     actionButton("Scan Library", "arrow.clockwise") { await monitor.scanLibrary() }
-                    actionButton("Compute VMAF Map", "gauge.medium") { await monitor.runCompanionTask(.vmafMap) }
-                    actionButton("Compute ThumbHash Map", "square.grid.3x3.fill") { await monitor.runCompanionTask(.thumbhashMap) }
-                    actionButton("Compute Loudness Map", "speaker.wave.3.fill") { await monitor.runCompanionTask(.loudnessMap) }
+                    actionButton("Compute VMAF Map", "gauge.medium") {
+                        await monitor.runCompanionTask(.vmafMap, title: "VMAF map")
+                    }
+                    actionButton("Compute ThumbHash Map", "square.grid.3x3.fill") {
+                        await monitor.runCompanionTask(.thumbhashMap, title: "ThumbHash map")
+                    }
+                    actionButton("Compute Loudness Map", "speaker.wave.3.fill") {
+                        await monitor.runCompanionTask(.loudnessMap, title: "loudness map")
+                    }
                 }
             }
         }
         .padding(16)
         .frame(width: 320, alignment: .leading)
-        .onAppear { if let client = appState.client { monitor.start(client: client) } }
-        .onDisappear { monitor.stop() }
+        .onAppear { if attached == false, let client = appState.client { attached = true; monitor.attach(client: client) } }
+        .onDisappear { if attached { attached = false; monitor.detach() } }
     }
 
     // MARK: Status
 
     @ViewBuilder private var status: some View {
-        if monitor.isIdle {
-            Label("Idle — no jobs running", systemImage: "checkmark.circle")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+        if let err = monitor.actionError {
+            // A task tap that failed (plugin not installed / auth / network) — never swallow it silently.
+            Label(err, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if monitor.pollFailing {
+            // The queue can't be read right now. Saying so beats freezing the last snapshot on screen.
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Can't reach Stash — retrying…")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
         } else if let job = monitor.running {
             VStack(alignment: .leading, spacing: 7) {
                 HStack(alignment: .top, spacing: 8) {
@@ -81,9 +104,21 @@ struct JobsPanel: View {
                         .foregroundStyle(.secondary)
                 }
             }
-        } else {
+        } else if let starting = monitor.starting {
+            // Instant feedback for a just-queued task, until the next poll shows the real queue entry.
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Starting \(starting)…")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        } else if monitor.queuedCount > 0 {
             // Jobs queued but none marked RUNNING yet (brief transition state).
             Text("\(monitor.queuedCount) queued")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        } else {
+            Label("Idle — no jobs running", systemImage: "checkmark.circle")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
