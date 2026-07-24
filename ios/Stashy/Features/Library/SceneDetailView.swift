@@ -16,9 +16,15 @@ struct SceneDetailView: View {
     /// screen appears we re-fetch this one scene's full performer profiles (rating, urls, tags…) for
     /// the performer card and social links. Nil until the fetch lands; falls back to the slim scene.
     @State private var fullScene: StashScene?
+    /// Metadata scrape/edit mini-sheet (••• menu). Item-driven so each mode opens in the right stage.
+    @State private var metadataMode: SceneMetadataMode?
 
     /// Full performers if the detail fetch has landed, otherwise the slim (id+name) list.
     private var performers: [Performer] { (fullScene ?? scene).performers }
+
+    /// The freshest scene we have — metadata edits refetch into `fullScene`, so the header/tags update
+    /// in place after a save.
+    private var shown: StashScene { fullScene ?? scene }
 
     private var route: PlaybackRoute? {
         // Manual server-quality override (gear menu) wins over everything — force the Stash HLS transcode
@@ -112,6 +118,16 @@ struct SceneDetailView: View {
             guard let client = appState.client else { return }
             fullScene = try? await client.findScene(id: scene.id)
         }
+        // Metadata mini-window: a medium-detent glass sheet floating over the (still playing) video.
+        // On save, refetch so the header/tags reflect the new metadata immediately.
+        .sheet(item: $metadataMode) { mode in
+            SceneMetadataSheet(sceneID: scene.id, mode: mode) {
+                Task {
+                    guard let client = appState.client else { return }
+                    fullScene = try? await client.findScene(id: scene.id)
+                }
+            }
+        }
         .libraryEditErrorToast(edits)
         .confirmationDialog(
             "Delete this scene?",
@@ -144,7 +160,7 @@ struct SceneDetailView: View {
                 // Title + studio + date (left) with the star rating anchored trailing.
                 HStack(alignment: .top, spacing: 10) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(scene.title ?? "Untitled")
+                        Text(shown.title ?? "Untitled")
                             .font(.headline)
                             .foregroundStyle(themeManager.current.foregroundColor)
                             .lineLimit(1)
@@ -154,7 +170,7 @@ struct SceneDetailView: View {
                             StarRating(rating100: edits.rating(for: scene), starSize: 18) { new in
                                 edits.setSceneRating(new, id: scene.id, client: appState.client)
                             }
-                            if let date = scene.date {
+                            if let date = shown.date {
                                 Text(date).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                             }
                         }
@@ -167,6 +183,12 @@ struct SceneDetailView: View {
                             // server resolution, then Start.
                             downloads.stage(scene: fullScene ?? scene, apiKey: apiKey)
                             path.append(.downloads)
+                        },
+                        PopupMenuAction(title: "Scrape Metadata", systemImage: "sparkle.magnifyingglass") {
+                            metadataMode = .scrape
+                        },
+                        PopupMenuAction(title: "Edit Metadata", systemImage: "square.and.pencil") {
+                            metadataMode = .edit
                         },
                         PopupMenuAction(title: "Delete Scene", systemImage: "trash", isDestructive: true) {
                             confirmDelete = true
@@ -188,7 +210,7 @@ struct SceneDetailView: View {
                 }
 
                 // Tags card — full width of the two cards above, scrolls internally when it overflows.
-                TagsCard(tags: scene.tags)
+                TagsCard(tags: shown.tags)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 techBox
