@@ -183,6 +183,14 @@ struct TranscodeResult: Decodable, Sendable {
     let cq: Int?
     let vmaf: Double?
     let vmaf_target: Double?
+    /// How the quality knob was decided (Companion v0.3.8+): "map" = a precomputed vmaf-map entry was
+    /// read (live analysis skipped), "live" = sampled VMAF search, "preset" = fixed preset cq (map miss +
+    /// analysis unavailable, or a fallback engine). nil from older plugins — the app then logs nothing.
+    let crf_source: String?
+    /// The vmaf-map resolution key consumed (e.g. "1080p") when `crf_source == "map"`.
+    let map_res: String?
+    /// The map's expected VMAF for the chosen CRF (map hits; the live path reports `vmaf` at the end).
+    let vmaf_expected: Double?
     // Live fields written ~every 3s while status == "running" (the app's rich-stats side-channel):
     let stage: String?
     let engine: String?

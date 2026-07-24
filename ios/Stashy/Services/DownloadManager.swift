@@ -741,6 +741,7 @@ final class DownloadManager {
         var lastStage = ""
         var networkFails = 0     // consecutive poll exceptions (offline / server down)
         var doneMisses = 0       // consecutive polls where the job is gone but no ready result yet
+        var qualityLogged = false   // the one-time "which VMAF map entry decided the cq" log line
         while true {
             try? await Task.sleep(for: .milliseconds(1800))
             guard item.state == .serverProcessing else { return }   // cancelled / deleted / paused
@@ -787,6 +788,13 @@ final class DownloadManager {
                         if !line.isEmpty { item.transcodeStatus = line }
                         let stage = stats.engine ?? "encoding"
                         if stage != lastStage { lastStage = stage; appendTranscodeLog(item, "Encoding · \(stage)") }
+                        // Which VMAF map entry (if any) decided the quality knob — logged once, as soon
+                        // as encoding starts (Companion v0.3.8+ stamps crf_source into its status;
+                        // older plugins send nothing and no line appears).
+                        if !qualityLogged, let source = stats.crf_source {
+                            qualityLogged = true
+                            appendTranscodeLog(item, Self.qualityDecisionLine(stats: stats, source: source))
+                        }
                         if (update.job?.progress ?? -1) < 0, let ot = stats.out_time, let d = stats.duration, d > 0 {
                             item.serverJobProgress = min(1, ot / d)
                         }
@@ -855,6 +863,13 @@ final class DownloadManager {
             if let t = result.vmaf_target { line += "target \(Int(t.rounded())) → " }
             line += "achieved \(Int(v.rounded()))"
             if let c = result.cq { line += " · cq \(c)" }
+            // Provenance tag (Companion v0.3.8+): whether the cq came from the precomputed map or a
+            // live search — the map case names the entry it read.
+            switch result.crf_source {
+            case "map": line += " · from map" + (result.map_res.map { " (\($0))" } ?? "")
+            case "live": line += " · live analysis"
+            default: break
+            }
             appendTranscodeLog(item, line)
         }
         item.transcodeStatus = ""
@@ -881,6 +896,27 @@ final class DownloadManager {
         guard let (data, resp) = try? await URLSession.shared.data(for: req),
               (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         return try? JSONDecoder().decode(TranscodeResult.self, from: data)
+    }
+
+    /// One log line explaining how the server transcode's quality knob was chosen — the VMAF-map entry
+    /// it read, a live analysis, or the preset fallback (owner: map usage was invisible client-side).
+    private static func qualityDecisionLine(stats: TranscodeResult, source: String) -> String {
+        let cq = stats.cq.map(String.init) ?? "?"
+        switch source {
+        case "map":
+            var bits: [String] = []
+            if let res = stats.map_res { bits.append("\(res) entry") }
+            if let e = stats.vmaf_expected { bits.append("≈VMAF \(Int(e.rounded()))") }
+            if let t = stats.vmaf_target { bits.append("target \(Int(t.rounded()))") }
+            let detail = bits.isEmpty ? "" : " (" + bits.joined(separator: ", ") + ")"
+            return "Quality: cq \(cq) from VMAF map\(detail) — live analysis skipped"
+        case "live":
+            var line = "Quality: cq \(cq) from live VMAF analysis"
+            if let t = stats.vmaf_target { line += " (target \(Int(t.rounded())))" }
+            return line
+        default:
+            return "Quality: preset cq \(cq) (VMAF map/analysis not used)"
+        }
     }
 
     /// Append a distinct event line to the transcode log box (bounded), mirroring the on-device path.
