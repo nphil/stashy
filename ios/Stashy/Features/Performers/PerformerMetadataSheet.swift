@@ -7,21 +7,23 @@ enum PerformerMetadataMode: String, Identifiable {
 }
 
 /// Performer metadata "mini window" — the same medium-detent glass sheet pattern as the scene one.
-/// EDIT stage = the full performer form (seeded from a fresh server fetch, richer than the app's list
-/// model). SCRAPE stage = pick a source → results for the performer's name → tapping a result pulls
-/// full detail (stash-box results are already complete; classic scrapers re-scrape the selected
-/// fragment, like Stash's UI) and merges it into the form, including a photo picker over the scraped
-/// images. Nothing is written until Save.
+/// EDIT stage = the full performer form (seeded from a fresh server fetch). SCRAPE queries **all three
+/// configured sources (StashDB / ThePornDB / FansDB) at once** for the performer's name and shows a
+/// merged candidate list: the same person reported by several sources collapses into one row (tagged
+/// with its sources); different people stay separate so you pick the right one. Choosing a row pulls
+/// full detail from every contributing source, merges it (priority order), unions the photos into the
+/// picker, and drops you back on the form. Nothing is written until Save.
 struct PerformerMetadataSheet: View {
     let performerID: String
     let mode: PerformerMetadataMode
-    var onSaved: () -> Void
+    /// Handed the freshly-refetched performer after a save so the detail screen updates in place.
+    var onSaved: (Performer?) -> Void
 
     @Environment(AppState.self) private var appState
     @Environment(ThemeManager.self) private var themeManager
     @Environment(\.dismiss) private var dismiss
 
-    private enum Stage { case edit, sources, results }
+    private enum Stage { case edit, results }
 
     @State private var stage: Stage = .edit
     @State private var loaded = false
@@ -30,16 +32,13 @@ struct PerformerMetadataSheet: View {
     @State private var draft = PerformerDraft()
     @State private var existingStashIDs: [StashScraper.StashIDPair] = []
     @State private var pendingStashIDs: [StashScraper.StashIDPair]?
-    @State private var currentImagePath: String?
     @State private var scrapedImages: [String] = []
     @State private var selectedImage: String?
 
-    @State private var sources: [StashScraper.Source] = []
-    @State private var busySourceID: String?
-    @State private var results: [StashScraper.ScrapedPerformerData] = []
-    @State private var resultsSource: StashScraper.Source?
+    @State private var candidates: [StashScraper.MergedPerformerCandidate] = []
+    @State private var searching = false
     @State private var scrapeError: String?
-    @State private var applyingResultID: String?
+    @State private var applyingID: String?
 
     @State private var saving = false
     @State private var saveError: String?
@@ -51,7 +50,7 @@ struct PerformerMetadataSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             SheetHeader(
-                title: stage == .edit ? "Edit Performer" : (stage == .sources ? "Scrape From" : "Results"),
+                title: stage == .edit ? "Edit Performer" : "Results",
                 actionTitle: stage == .edit ? "Save" : nil,
                 actionDisabled: !loaded || saving || draft.name.trimmingCharacters(in: .whitespaces).isEmpty,
                 busy: saving,
@@ -59,13 +58,10 @@ struct PerformerMetadataSheet: View {
                 onAction: { save() }
             )
 
-            if let loadError {
-                SheetErrorLine(message: loadError)
-            }
+            if let loadError { SheetErrorLine(message: loadError) }
 
             switch stage {
             case .edit: editStage
-            case .sources: sourcesStage
             case .results: resultsStage
             }
         }
@@ -86,9 +82,8 @@ struct PerformerMetadataSheet: View {
             }
             draft = PerformerDraft(data: data)
             existingStashIDs = data.stash_ids ?? []
-            currentImagePath = data.image_path
             loaded = true
-            if mode == .scrape { openSources() }
+            if mode == .scrape { searchAll() }
         } catch {
             loadError = message(error)
         }
@@ -99,27 +94,13 @@ struct PerformerMetadataSheet: View {
     @ViewBuilder private var editStage: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                if !scrapedImages.isEmpty {
-                    ScrapedImagePicker(images: scrapedImages, selected: $selectedImage)
-                }
+                PerformerPhotoPicker(images: $scrapedImages, selected: $selectedImage)
 
                 PerformerFormFields(draft: $draft)
 
-                Button {
-                    openSources()
-                } label: {
-                    Label("Scrape Metadata…", systemImage: "sparkle.magnifyingglass")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(themeManager.current.accentColor)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(themeManager.current.accentColor.opacity(0.12), in: Capsule())
-                }
-                .buttonStyle(.plain)
+                scrapeButton
 
-                if let saveError {
-                    SheetErrorLine(message: saveError)
-                }
+                if let saveError { SheetErrorLine(message: saveError) }
             }
             .padding(.bottom, 12)
         }
@@ -127,77 +108,26 @@ struct PerformerMetadataSheet: View {
         .scrollDismissesKeyboard(.interactively)
     }
 
-    // MARK: - Sources stage
-
-    @ViewBuilder private var sourcesStage: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Searches for “\(draft.name)”. Stash-box accounts first, then name-capable scrapers.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            if let scrapeError {
-                SheetErrorLine(message: scrapeError)
-            }
-            if sources.isEmpty && scrapeError == nil {
+    private var scrapeButton: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                searchAll()
+            } label: {
                 HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Loading sources…").font(.subheadline).foregroundStyle(.secondary)
+                    if searching { ProgressView().controlSize(.small) }
+                    Label(searching ? "Searching StashDB · ThePornDB · FansDB…" : "Scrape Metadata",
+                          systemImage: "sparkle.magnifyingglass")
+                        .font(.subheadline.weight(.semibold))
                 }
-            } else {
-                ScrapeSourceList(sources: sources, busySourceID: busySourceID) { source in
-                    search(with: source)
-                }
+                .foregroundStyle(themeManager.current.accentColor)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(themeManager.current.accentColor.opacity(0.12), in: Capsule())
             }
-            backToEditButton
-        }
-    }
+            .buttonStyle(.plain)
+            .disabled(searching)
 
-    private var backToEditButton: some View {
-        Button {
-            stage = .edit
-        } label: {
-            Label("Back to editing", systemImage: "chevron.left")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-        }
-        .buttonStyle(.plain)
-        .padding(.top, 2)
-    }
-
-    private func openSources() {
-        stage = .sources
-        scrapeError = nil
-        guard sources.isEmpty, let scraper else { return }
-        Task {
-            do {
-                sources = try await scraper.performerSources()
-                if sources.isEmpty { scrapeError = "No performer scrapers or stash-box accounts are configured on the server." }
-            } catch {
-                scrapeError = message(error)
-            }
-        }
-    }
-
-    private func search(with source: StashScraper.Source) {
-        guard let scraper, busySourceID == nil else { return }
-        let name = draft.name.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty else { scrapeError = "The performer has no name to search for."; return }
-        busySourceID = source.id
-        scrapeError = nil
-        Task {
-            defer { busySourceID = nil }
-            do {
-                let found = try await scraper.searchPerformers(source: source, name: name)
-                if found.isEmpty {
-                    scrapeError = "\(source.name) found no match for “\(name)”."
-                    return
-                }
-                results = found
-                resultsSource = source
-                stage = .results
-            } catch {
-                scrapeError = message(error)
-            }
+            if let scrapeError, stage == .edit { SheetErrorLine(message: scrapeError) }
         }
     }
 
@@ -205,45 +135,83 @@ struct PerformerMetadataSheet: View {
 
     @ViewBuilder private var resultsStage: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("\(results.count) matches from \(resultsSource?.name ?? "scraper") — tap one to merge it into the form.")
+            Text("\(candidates.count) \(candidates.count == 1 ? "match" : "matches") for “\(draft.name)” — tap the right person to merge their details in.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let scrapeError { SheetErrorLine(message: scrapeError) }
             ScrollView {
                 VStack(spacing: 8) {
-                    ForEach(results) { result in
+                    ForEach(candidates) { candidate in
                         Button {
-                            apply(result)
+                            pick(candidate)
                         } label: {
-                            PerformerResultRow(result: result, busy: applyingResultID == result.id)
+                            MergedPerformerRow(candidate: candidate, busy: applyingID == candidate.id)
                         }
                         .buttonStyle(.plain)
-                        .disabled(applyingResultID != nil)
+                        .disabled(applyingID != nil)
                     }
                 }
             }
             .scrollIndicators(.hidden)
-            backToEditButton
+            Button {
+                stage = .edit
+            } label: {
+                Label("Back to editing", systemImage: "chevron.left")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 2)
         }
     }
 
-    private func apply(_ candidate: StashScraper.ScrapedPerformerData) {
-        guard let scraper, let source = resultsSource, applyingResultID == nil else { return }
-        applyingResultID = candidate.id
+    // MARK: - Scrape
+
+    private func searchAll() {
+        guard let scraper, !searching else { return }
+        let name = draft.name.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { scrapeError = "The performer has no name to search for."; return }
+        searching = true
+        scrapeError = nil
         Task {
-            defer { applyingResultID = nil }
+            defer { searching = false }
             do {
-                let full = try await scraper.performerDetail(source: source, candidate: candidate)
-                draft.merge(scraped: full)
-                scrapedImages = full.images ?? []
-                if selectedImage == nil { selectedImage = scrapedImages.first }
-                if case .stashBox(let endpoint) = source.kind {
-                    pendingStashIDs = StashScraper.mergedStashIDs(
-                        existing: existingStashIDs, endpoint: endpoint, remoteID: full.remote_site_id)
+                let result = try await scraper.searchPerformersEverywhere(name: name)
+                let grouped = StashScraper.groupPerformers(result.items)
+                guard !grouped.isEmpty else {
+                    scrapeError = result.failed.isEmpty
+                        ? "No match found on StashDB, ThePornDB or FansDB for “\(name)”."
+                        : "Couldn't reach \(StashScraper.sourceList(result.failed)) — check they're online and try again."
+                    return
                 }
-                stage = .edit
+                candidates = grouped
+                scrapeError = result.failed.isEmpty ? nil
+                    : "\(StashScraper.sourceList(result.failed)) \(result.failed.count == 1 ? "was" : "were") unreachable — showing the rest."
+                stage = .results
             } catch {
                 scrapeError = message(error)
             }
+        }
+    }
+
+    private func pick(_ candidate: StashScraper.MergedPerformerCandidate) {
+        guard let scraper, applyingID == nil else { return }
+        applyingID = candidate.id
+        Task {
+            defer { applyingID = nil }
+            let resolved = await scraper.resolvePerformer(candidate)
+            // Apply highest-priority last so StashDB wins each non-empty field.
+            for scraped in resolved.ordered.reversed() { draft.merge(scraped: scraped) }
+            scrapedImages = resolved.images
+            if selectedImage == nil { selectedImage = scrapedImages.first }
+            var merged = existingStashIDs
+            for pair in resolved.stashIDs {
+                merged.removeAll { $0.endpoint.caseInsensitiveCompare(pair.endpoint) == .orderedSame }
+                merged.append(pair)
+            }
+            pendingStashIDs = merged == existingStashIDs ? nil : merged
+            stage = .edit
         }
     }
 
@@ -258,7 +226,8 @@ struct PerformerMetadataSheet: View {
             do {
                 try await scraper.updatePerformer(draft.updateInput(
                     id: performerID, stashIDs: pendingStashIDs, image: selectedImage))
-                onSaved()
+                let fresh = try? await scraper.findPerformer(id: performerID)
+                onSaved(fresh)
                 dismiss()
             } catch {
                 saveError = message(error)
@@ -271,24 +240,25 @@ struct PerformerMetadataSheet: View {
     }
 }
 
-/// One performer search result row: leading photo, name + disambiguation, birthdate · country line.
-struct PerformerResultRow: View {
-    let result: StashScraper.ScrapedPerformerData
+/// One merged candidate row: leading photo, name + disambiguation, birthdate · country, and a row of
+/// source badges (the sources that reported this same person).
+struct MergedPerformerRow: View {
+    let candidate: StashScraper.MergedPerformerCandidate
     var busy = false
     @Environment(ThemeManager.self) private var themeManager
 
     var body: some View {
         HStack(spacing: 10) {
-            ScrapedImageView(source: result.images?.first, maxPixel: 200)
+            ScrapedImageView(source: candidate.previewImage, maxPixel: 200)
                 .frame(width: 44, height: 58)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 5) {
-                    Text(result.name ?? "Unknown")
+                    Text(candidate.name)
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(themeManager.current.foregroundColor)
                         .lineLimit(1)
-                    if let dis = result.disambiguation, !dis.isEmpty {
+                    if let dis = candidate.disambiguation, !dis.isEmpty {
                         Text("(\(dis))")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -296,11 +266,21 @@ struct PerformerResultRow: View {
                     }
                 }
                 HStack(spacing: 6) {
-                    if let birth = result.birthdate, !birth.isEmpty { Text(birth) }
-                    if let country = result.country, !country.isEmpty { Text(country.countryFlag) }
+                    if let birth = candidate.birthdate, !birth.isEmpty { Text(birth) }
+                    if let country = candidate.country, !country.isEmpty { Text(country.countryFlag) }
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    ForEach(candidate.sourceNames, id: \.self) { name in
+                        Text(name)
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(themeManager.current.accentColor)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(themeManager.current.accentColor.opacity(0.14), in: Capsule())
+                    }
+                }
             }
             Spacer(minLength: 0)
             if busy {

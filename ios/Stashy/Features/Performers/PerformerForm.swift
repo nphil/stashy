@@ -1,4 +1,5 @@
 import SwiftUI
+import PhotosUI
 
 /// The editable performer fields, shared by the performer edit sheet and the add-performer flow.
 /// Mirrors Stash's own `scrapedPerformerToCreateInput` mapping: comma-joined aliases split to a list,
@@ -242,51 +243,86 @@ struct PerformerFormFields: View {
     }
 }
 
-/// Horizontal picker over a scraped performer's candidate images — "select the pic you want". The
-/// chosen one gets the accent ring and is sent as the performer image (base64 data URL or plain URL,
-/// both accepted by Stash).
-struct ScrapedImagePicker: View {
-    let images: [String]
+/// Horizontal photo strip for a performer — scraped candidate images PLUS a native "upload" tile
+/// (`PhotosPicker`) so the user can supply their own picture. The chosen one gets the accent ring and is
+/// sent to Stash as the performer image (base64 data URL for an upload, or the scraped URL/data URL —
+/// both accepted). An uploaded photo is downscaled + JPEG-encoded off-main and prepended, auto-selected.
+struct PerformerPhotoPicker: View {
+    /// All candidate images (scraped + uploaded data URLs). Uploads prepend here.
+    @Binding var images: [String]
     @Binding var selected: String?
     @Environment(ThemeManager.self) private var themeManager
+    @State private var pickerItem: PhotosPickerItem?
+    @State private var uploading = false
 
     var body: some View {
-        if !images.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Photo")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                ScrollView(.horizontal) {
-                    HStack(spacing: 8) {
-                        ForEach(Array(images.enumerated()), id: \.offset) { _, image in
-                            ScrapedImageView(source: image)
-                                .frame(width: 84, height: 112)
-                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                .overlay {
-                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                        .strokeBorder(
-                                            selected == image ? themeManager.current.accentColor : .clear,
-                                            lineWidth: 2.5
-                                        )
-                                }
-                                .overlay(alignment: .topTrailing) {
-                                    if selected == image {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .font(.subheadline)
-                                            .symbolRenderingMode(.palette)
-                                            .foregroundStyle(.white, themeManager.current.accentColor)
-                                            .padding(4)
-                                    }
-                                }
-                                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                .onTapGesture {
-                                    selected = selected == image ? nil : image
-                                }
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Photo")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            ScrollView(.horizontal) {
+                HStack(spacing: 8) {
+                    PhotosPicker(selection: $pickerItem, matching: .images) {
+                        VStack(spacing: 5) {
+                            if uploading {
+                                ProgressView()
+                            } else {
+                                Image(systemName: "photo.badge.plus")
+                                    .font(.title3)
+                                Text("Upload")
+                                    .font(.caption2.weight(.medium))
+                            }
+                        }
+                        .foregroundStyle(themeManager.current.accentColor)
+                        .frame(width: 84, height: 112)
+                        .background(themeManager.current.accentColor.opacity(0.10),
+                                    in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .strokeBorder(themeManager.current.accentColor.opacity(0.4),
+                                              style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
                         }
                     }
+                    .buttonStyle(.plain)
+
+                    ForEach(Array(images.enumerated()), id: \.offset) { _, image in
+                        ScrapedImageView(source: image)
+                            .frame(width: 84, height: 112)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .strokeBorder(
+                                        selected == image ? themeManager.current.accentColor : .clear,
+                                        lineWidth: 2.5
+                                    )
+                            }
+                            .overlay(alignment: .topTrailing) {
+                                if selected == image {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.subheadline)
+                                        .symbolRenderingMode(.palette)
+                                        .foregroundStyle(.white, themeManager.current.accentColor)
+                                        .padding(4)
+                                }
+                            }
+                            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .onTapGesture {
+                                selected = selected == image ? nil : image
+                            }
+                    }
                 }
-                .scrollIndicators(.hidden)
             }
+            .scrollIndicators(.hidden)
+        }
+        .task(id: pickerItem) {
+            guard let pickerItem else { return }
+            uploading = true
+            defer { uploading = false }
+            guard let data = try? await pickerItem.loadTransferable(type: Data.self),
+                  let dataURL = await ImageUpload.dataURL(from: data) else { return }
+            images.insert(dataURL, at: 0)
+            selected = dataURL
+            self.pickerItem = nil
         }
     }
 }

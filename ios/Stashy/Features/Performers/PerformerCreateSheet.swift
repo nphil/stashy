@@ -1,9 +1,9 @@
 import SwiftUI
 
-/// Add-performer flow (the + button on the Performers screen), mirroring Stash's workflow: type a
-/// name → pick a scrape source → search → tap the right match → review the pre-filled form and pick
-/// the photo you want → Create. A manual path ("create without scraping") covers performers no
-/// scraper knows.
+/// Add-performer flow (the + button on the Performers screen), mirroring Stash: type a name → search
+/// **all three sources (StashDB / ThePornDB / FansDB) at once** → pick the right person from a merged
+/// list (same person across sources collapses into one row) → review the pre-filled form, pick or
+/// upload the photo → Create. A manual path covers performers no source knows.
 struct PerformerCreateSheet: View {
     var onCreated: () -> Void
 
@@ -15,13 +15,10 @@ struct PerformerCreateSheet: View {
 
     @State private var stage: Stage = .search
     @State private var name = ""
-    @State private var sources: [StashScraper.Source] = []
-    @State private var sourcesError: String?
-    @State private var busySourceID: String?
-    @State private var results: [StashScraper.ScrapedPerformerData] = []
-    @State private var resultsSource: StashScraper.Source?
-    @State private var applyingResultID: String?
+    @State private var candidates: [StashScraper.MergedPerformerCandidate] = []
+    @State private var searching = false
     @State private var searchError: String?
+    @State private var applyingID: String?
 
     @State private var draft = PerformerDraft()
     @State private var scrapedImages: [String] = []
@@ -56,16 +53,6 @@ struct PerformerCreateSheet: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
-        .task { await loadSources() }
-    }
-
-    private func loadSources() async {
-        guard sources.isEmpty, let scraper else { return }
-        do {
-            sources = try await scraper.performerSources()
-        } catch {
-            sourcesError = message(error)
-        }
     }
 
     // MARK: - Search stage
@@ -74,32 +61,28 @@ struct PerformerCreateSheet: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 EditFieldRow(label: "Performer name", placeholder: "Name", text: $name)
-                    .onSubmit { if let first = sources.first { search(with: first) } }
+                    .onSubmit { searchAll() }
 
-                if let searchError {
-                    SheetErrorLine(message: searchError)
-                }
-                if let sourcesError {
-                    SheetErrorLine(message: sourcesError)
-                }
+                if let searchError { SheetErrorLine(message: searchError) }
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Search with")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    if sources.isEmpty && sourcesError == nil {
-                        HStack(spacing: 8) {
-                            ProgressView().controlSize(.small)
-                            Text("Loading sources…").font(.subheadline).foregroundStyle(.secondary)
-                        }
-                    } else {
-                        ScrapeSourceList(sources: sources, busySourceID: busySourceID) { source in
-                            search(with: source)
-                        }
+                Button {
+                    searchAll()
+                } label: {
+                    HStack(spacing: 8) {
+                        if searching { ProgressView().controlSize(.small) }
+                        Label(searching ? "Searching StashDB · ThePornDB · FansDB…" : "Search",
+                              systemImage: "sparkle.magnifyingglass")
+                            .font(.subheadline.weight(.semibold))
                     }
+                    .foregroundStyle(themeManager.current.accentColor)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(themeManager.current.accentColor.opacity(0.12), in: Capsule())
                 }
+                .buttonStyle(.plain)
+                .disabled(searching || name.trimmingCharacters(in: .whitespaces).isEmpty)
 
-                // Manual path for performers no scraper knows — straight to the empty form.
+                // Manual path for performers no source knows — straight to the empty form.
                 Button {
                     draft = PerformerDraft()
                     draft.name = name.trimmingCharacters(in: .whitespaces)
@@ -120,22 +103,26 @@ struct PerformerCreateSheet: View {
         .scrollDismissesKeyboard(.interactively)
     }
 
-    private func search(with source: StashScraper.Source) {
-        guard let scraper, busySourceID == nil else { return }
+    private func searchAll() {
+        guard let scraper, !searching else { return }
         let query = name.trimmingCharacters(in: .whitespaces)
         guard !query.isEmpty else { searchError = "Type a name to search for."; return }
-        busySourceID = source.id
+        searching = true
         searchError = nil
         Task {
-            defer { busySourceID = nil }
+            defer { searching = false }
             do {
-                let found = try await scraper.searchPerformers(source: source, name: query)
-                if found.isEmpty {
-                    searchError = "\(source.name) found no match for “\(query)”."
+                let result = try await scraper.searchPerformersEverywhere(name: query)
+                let grouped = StashScraper.groupPerformers(result.items)
+                guard !grouped.isEmpty else {
+                    searchError = result.failed.isEmpty
+                        ? "No match found on StashDB, ThePornDB or FansDB for “\(query)”."
+                        : "Couldn't reach \(StashScraper.sourceList(result.failed)) — check they're online and try again."
                     return
                 }
-                results = found
-                resultsSource = source
+                candidates = grouped
+                searchError = result.failed.isEmpty ? nil
+                    : "\(StashScraper.sourceList(result.failed)) \(result.failed.count == 1 ? "was" : "were") unreachable — showing the rest."
                 stage = .results
             } catch {
                 searchError = message(error)
@@ -147,19 +134,20 @@ struct PerformerCreateSheet: View {
 
     @ViewBuilder private var resultsStage: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("\(results.count) matches from \(resultsSource?.name ?? "scraper") — pick the right one.")
+            Text("\(candidates.count) \(candidates.count == 1 ? "match" : "matches") — pick the right person.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if let searchError { SheetErrorLine(message: searchError) }
             ScrollView {
                 VStack(spacing: 8) {
-                    ForEach(results) { result in
+                    ForEach(candidates) { candidate in
                         Button {
-                            pick(result)
+                            pick(candidate)
                         } label: {
-                            PerformerResultRow(result: result, busy: applyingResultID == result.id)
+                            MergedPerformerRow(candidate: candidate, busy: applyingID == candidate.id)
                         }
                         .buttonStyle(.plain)
-                        .disabled(applyingResultID != nil)
+                        .disabled(applyingID != nil)
                     }
                 }
             }
@@ -175,25 +163,21 @@ struct PerformerCreateSheet: View {
         }
     }
 
-    private func pick(_ candidate: StashScraper.ScrapedPerformerData) {
-        guard let scraper, let source = resultsSource, applyingResultID == nil else { return }
-        applyingResultID = candidate.id
+    private func pick(_ candidate: StashScraper.MergedPerformerCandidate) {
+        guard let scraper, applyingID == nil else { return }
+        applyingID = candidate.id
         Task {
-            defer { applyingResultID = nil }
-            do {
-                let full = try await scraper.performerDetail(source: source, candidate: candidate)
-                draft = PerformerDraft(scraped: full)
-                if draft.name.isEmpty { draft.name = name.trimmingCharacters(in: .whitespaces) }
-                scrapedImages = full.images ?? []
-                selectedImage = scrapedImages.first     // Stash's default: images[0]; picker overrides
-                if case .stashBox(let endpoint) = source.kind {
-                    pendingStashIDs = StashScraper.mergedStashIDs(
-                        existing: nil, endpoint: endpoint, remoteID: full.remote_site_id)
-                }
-                stage = .form
-            } catch {
-                searchError = message(error)
-            }
+            defer { applyingID = nil }
+            let resolved = await scraper.resolvePerformer(candidate)
+            var merged = PerformerDraft()
+            merged.name = name.trimmingCharacters(in: .whitespaces)
+            for scraped in resolved.ordered.reversed() { merged.merge(scraped: scraped) }
+            if merged.name.isEmpty { merged.name = name.trimmingCharacters(in: .whitespaces) }
+            draft = merged
+            scrapedImages = resolved.images
+            selectedImage = resolved.images.first      // Stash's default: images[0]; picker/upload overrides
+            pendingStashIDs = resolved.stashIDs.isEmpty ? nil : resolved.stashIDs
+            stage = .form
         }
     }
 
@@ -202,20 +186,16 @@ struct PerformerCreateSheet: View {
     @ViewBuilder private var formStage: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                if !scrapedImages.isEmpty {
-                    ScrapedImagePicker(images: scrapedImages, selected: $selectedImage)
-                }
+                PerformerPhotoPicker(images: $scrapedImages, selected: $selectedImage)
 
                 PerformerFormFields(draft: $draft)
 
-                if let createError {
-                    SheetErrorLine(message: createError)
-                }
+                if let createError { SheetErrorLine(message: createError) }
 
                 Button {
-                    stage = results.isEmpty ? .search : .results
+                    stage = candidates.isEmpty ? .search : .results
                 } label: {
-                    Label("Back to results", systemImage: "chevron.left")
+                    Label(candidates.isEmpty ? "Back to search" : "Back to results", systemImage: "chevron.left")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                 }

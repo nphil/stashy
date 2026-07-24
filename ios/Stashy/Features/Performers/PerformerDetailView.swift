@@ -102,13 +102,11 @@ struct PerformerDetailView: View {
                 FullScreenImageViewer(image: portrait)
             }
         }
-        // Metadata mini-window (scrape/edit). On save, refetch so the header + portrait update in place.
+        // Metadata mini-window (scrape/edit). The sheet refetches the performer after saving and hands it
+        // back, so the header + portrait update in place (portrait is keyed on image_path below).
         .sheet(item: $metadataMode) { mode in
-            PerformerMetadataSheet(performerID: performer.id, mode: mode) {
-                Task {
-                    guard let client = appState.client else { return }
-                    refreshed = try? await StashScraper(client: client).findPerformer(id: performer.id)
-                }
+            PerformerMetadataSheet(performerID: performer.id, mode: mode) { fresh in
+                if let fresh { refreshed = fresh }
             }
         }
         .task {
