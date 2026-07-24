@@ -223,11 +223,19 @@ private func segmentColor(_ index: Int, phase: DownloadActivityAttributes.Conten
 private extension DownloadActivityAttributes.ContentState {
     /// Project the last byte snapshot along its measured ETA so the system-owned Live Activity keeps moving
     /// while Stashy's process is suspended. Real delegate updates replace this estimate whenever available.
+    ///
+    /// The projection is CLAMPED to a small window above the last real byte snapshot: an optimistic ETA
+    /// (throughput drops after the snapshot — typical once the app suspends) otherwise races far ahead,
+    /// and the next real update yanks the shown % back DOWN. Capping the overshoot keeps any correction
+    /// within a barely-noticeable band while the ring still visibly moves between updates.
     func projectedProgress(at date: Date) -> Double? {
+        let real = progress.map { min(1, max(0, $0)) }
         if let start = estimatedStart, let end = estimatedEnd, start < end {
-            return min(1, max(0, date.timeIntervalSince(start) / end.timeIntervalSince(start)))
+            let projected = min(1, max(0, date.timeIntervalSince(start) / end.timeIntervalSince(start)))
+            guard let real else { return projected }
+            return min(1, max(real, min(projected, real + 0.08)))
         }
-        return progress.map { min(1, max(0, $0)) }
+        return real
     }
 }
 
