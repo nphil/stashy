@@ -161,9 +161,9 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.307** (`22cc493`, IPA 9,442,019 B) — durable background slices + parts moved out
-  of Caches + non-destructive range-refusal/retry; **v1.0.308 pending** (`16026a7` drain-barrier deadlock
-  + cold-relaunch adoption). v1.0.306 = ranged single engine + LA % clamp + tab-bar auto-collapse.
+- Latest release: **v1.0.308** (`4dea9a4`, IPA 9,444,230 B) — drain-barrier deadlock + cold-relaunch
+  adoption; **v1.0.307** (`22cc493`, 9,442,019 B) = durable background slices + parts moved out of Caches
+  + non-destructive range-refusal/retry. v1.0.306 = ranged single engine + LA % clamp + tab-bar collapse.
   **v1.0.297 restored the multiThread download default to ON** (owner decision 2026-07-24).
 - **Backgrounded-downloads round 3 (v1.0.307–308) — SIX defects, all "durable bytes thrown away or
   never committed"**: the owner's "% went 15→12→8, froze, restarted on reopen" was NOT one bug. See the
