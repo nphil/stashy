@@ -450,6 +450,12 @@ final class DownloadManager {
     /// The pre-v1.0.304 behavior wiped every part and restarted single-threaded from byte 0 in the
     /// background, which read as "the download stalled/slowed to a crawl" after minimizing.
     @ObservationIgnored private var resumeOnForeground: Set<String> = []
+    /// Items whose server refused a range request (no 206). Only these — plus unknown-size transfers —
+    /// use the legacy full-file download task; every known-size single download runs on the durable
+    /// range engine (one foreground data task streaming into part 0 ⇄ one background range task), so a
+    /// network blip or backgrounding never loses bytes to an unresumable full-file restart. In-memory
+    /// only: after a relaunch the ranged attempt self-heals (206 check refuses → lands back here).
+    @ObservationIgnored private var rangeUnsupported: Set<String> = []
     /// True while the app is backgrounded. Transfers need no phase handoff; this only governs work such as
     /// on-device transcoding that must pause while the process is suspended.
     @ObservationIgnored private var inBackground = false
@@ -1453,7 +1459,13 @@ final class DownloadManager {
         item.lastSampleBytes = item.receivedBytes
         markActive(item.id)
         reconcileDurableParts(item)
-        if item.connections.count == 1 {
+        // Known-size single downloads run on the SAME durable engine as multi, with one segment: a
+        // foreground data task streams appends into part 0 (a blip loses nothing), backgrounding hands
+        // off to one background range task from the durable offset. The legacy full-file task — whose
+        // only mid-flight recovery is an iOS resume BLOB needing validator headers the server may not
+        // send, silently restarting from byte 0 when absent (the owner's "backgrounded single download
+        // restarts" report) — is kept ONLY for unknown sizes and servers that refused a range (no 206).
+        if usesLegacySingle(item) {
             startFullBackgroundDownload(item)
         } else if inBackground {
             startAdaptiveBackgroundConnection(item)
@@ -1461,6 +1473,11 @@ final class DownloadManager {
             startForegroundConnections(item)
         }
         syncLiveActivity()
+    }
+
+    /// Whether this item must use the legacy full-file background task instead of the durable range engine.
+    private func usesLegacySingle(_ item: DownloadItem) -> Bool {
+        item.connections.count == 1 && (item.totalBytes == 0 || rangeUnsupported.contains(item.id))
     }
 
     private func startFullBackgroundDownload(_ item: DownloadItem) {
@@ -1678,6 +1695,20 @@ final class DownloadManager {
             $0.state == .downloading || $0.state == .waitingForNetwork ||
             $0.state == .merging || $0.state == .serverProcessing
         }
+        // Items HELD after the daemon refused background ranges (parts intact, resumes on foreground)
+        // must keep the Live Activity alive — ending it mid-background read as "the download vanished".
+        let held = items.filter { $0.state == .paused && resumeOnForeground.contains($0.id) }
+        if active.isEmpty, let firstHeld = held.first {
+            let progress = firstHeld.totalBytes > 0
+                ? min(1, max(0, Double(firstHeld.receivedBytes) / Double(firstHeld.totalBytes)))
+                : nil
+            return .init(
+                phase: .waitingForNetwork, progress: progress,
+                estimatedStart: nil, estimatedEnd: nil, updatedAt: Date.now,
+                status: "Progress saved — resumes when you reopen Stashy",
+                activeJobCount: held.count
+            )
+        }
         guard !active.isEmpty else { return nil }
 
         // Prefer bytes actively moving, then recoverable waits/finalization, then a server preparing the
@@ -1769,7 +1800,7 @@ final class DownloadManager {
             cancelTranscode(item, preserveResume: true)   // keep committed chunks so it resumes, not restarts
             item.transcodeStatus = "Paused — resumes automatically when you reopen Stashy"
         }
-        for item in items where item.state == .downloading && item.connections.count > 1 {
+        for item in items where item.state == .downloading && !usesLegacySingle(item) {
             collapseToBackground(item)
         }
         syncLiveActivity()
@@ -1786,7 +1817,7 @@ final class DownloadManager {
             item.error = nil
             transcode(item, settings: settings)
         }
-        for item in items where item.state == .downloading && item.connections.count > 1 {
+        for item in items where item.state == .downloading && !usesLegacySingle(item) {
             // Keep any in-flight background range; fill the other unfinished segments in parallel.
             // If foreground writers are still draining their cancellation callbacks, wait for the shared
             // delegate queue to finish those file writes before opening replacement writers.
@@ -1970,45 +2001,68 @@ final class DownloadManager {
 
     private func connectionFailed(itemID: String, message: String, code: Int, engine: TransferEngine) {
         guard let item = items.first(where: { $0.id == itemID }), item.state == .downloading else { return }
-        // A server output that doesn't honor byte ranges cannot use adaptive multi-threading. Collapse once
-        // to the universally supported full-file background task and keep the download moving.
-        if code == NSURLErrorBadServerResponse, item.multiThread {
-            item.multiThread = false
+        // A server output that doesn't honor byte ranges cannot use the range engines at all. Collapse
+        // once to the universally supported full-file background task and keep the download moving —
+        // from multi (demote to single) or from the ranged-single engine alike.
+        if code == NSURLErrorBadServerResponse, !rangeUnsupported.contains(itemID),
+           item.multiThread || !usesLegacySingle(item) {
+            rangeUnsupported.insert(itemID)
+            if item.multiThread {
+                item.multiThread = false
+                persistTransferPreference(item)
+            }
             launch(item, reset: true)
-            persistTransferPreference(item)
             return
         }
-        // Ignore late cancellation/error callbacks from foreground tasks that the fallback just replaced.
-        if engine == .foreground, !item.multiThread { return }
-        // The daemon refused a background range/file operation (-3000 family). For a MULTI download this
-        // used to demote to single-thread with launch(reset:) — wiping every durable part and restarting
-        // from byte 0 in the background, which the owner experienced as "minimize → download stalls or
-        // crawls". Now: one clean retry of a fresh background range; if that's refused too, HOLD the item
-        // with its parts intact and resume the full 8-way engine when the app returns to the foreground.
+        // Ignore late error callbacks from foreground range tasks that the full-file fallback just
+        // replaced. Scoped to items KNOWN range-refusing: the ranged-single engine legitimately runs
+        // foreground data tasks with multiThread off, and their errors must be handled normally.
+        if engine == .foreground, rangeUnsupported.contains(itemID) { return }
+        // The daemon refused a background range/file operation (-3000 family). This used to demote with
+        // launch(reset:) — wiping every durable part and restarting from byte 0 in the background, which
+        // the owner experienced as "minimize → download stalls or crawls" (multi) and "backgrounded single
+        // downloads never finish, restart on return" (single). Now: ANY durable progress — eight parts or
+        // the single-connection part 0 — is held, never wiped. One clean retry of a fresh background
+        // range; if that's refused too, HOLD the item with its parts intact and resume when the app
+        // returns to the foreground.
         if code == NSURLErrorCannotCreateFile || code == NSURLErrorCannotWriteToFile {
             RemoteLog.shared.event("dl-bg-reject", [
                 ("item", itemID), ("code", code), ("engine", engine.rawValue),
                 ("attempt", fileRecoveryAttempts[itemID] ?? 0),
                 ("conns", item.connections.count), ("bytes", item.receivedBytes)])
-            if item.connections.count > 1 {
-                backgroundTasks[itemID] = nil
+            // Only the failed BACKGROUND task's reference is stale; a foreground -3003 must not orphan
+            // a live background range task (a later start would then double-write its part).
+            if engine == .background { backgroundTasks[itemID] = nil }
+            reconcileDurableParts(item)
+            if item.connections.count > 1 || item.receivedBytes > 0 {
                 if inBackground {
                     if (fileRecoveryAttempts[itemID] ?? 0) < 1 {
                         fileRecoveryAttempts[itemID, default: 0] += 1
                         startAdaptiveBackgroundConnection(item)   // one fresh attempt, progress intact
                     } else {
-                        item.state = .paused                      // parts intact; foreground resumes 8-way
+                        item.state = .paused                      // parts intact; foreground resume restores
                         resumeOnForeground.insert(itemID)
                         syncLiveActivity()
                     }
-                } else {
-                    // Foreground: the 8-way data-task engine doesn't need the daemon at all.
-                    reconcileDurableParts(item)
+                } else if item.connections.count > 1 {
+                    // Foreground multi: the 8-way data-task engine doesn't need the daemon at all.
                     startForegroundConnections(item)
+                } else if (fileRecoveryAttempts[itemID] ?? 0) < 3 {
+                    // Foreground single: park briefly and relaunch — launch(reset: false) re-enters the
+                    // durable range-append path with part 0 intact.
+                    fileRecoveryAttempts[itemID, default: 0] += 1
+                    item.state = .waitingForNetwork
+                    scheduleNetworkRetry(item)
+                    syncLiveActivity()
+                } else {
+                    item.state = .failed          // parts stay on disk; a manual Retry resumes from them
+                    item.error = message
+                    cancelTasks(item, produceResumeData: false)
+                    syncLiveActivity()
                 }
                 return
             }
-            // Single full-file mode has no parts to preserve — the old demote-and-restart is all there is.
+            // Nothing durable yet (zero bytes, or unknown size): a clean single-mode restart loses nothing.
             if (fileRecoveryAttempts[itemID] ?? 0) < 1 {
                 fileRecoveryAttempts[itemID, default: 0] += 1
                 item.multiThread = false
