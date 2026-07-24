@@ -30,16 +30,23 @@ struct JobsPanel: View {
 
             if showActions {
                 Divider().opacity(0.25)
-                VStack(spacing: 8) {
-                    actionButton("Scan Library", "arrow.clockwise") { await monitor.scanLibrary() }
-                    actionButton("Compute VMAF Map", "gauge.medium") {
-                        await monitor.runCompanionTask(.vmafMap, title: "VMAF map")
-                    }
-                    actionButton("Compute ThumbHash Map", "square.grid.3x3.fill") {
-                        await monitor.runCompanionTask(.thumbhashMap, title: "ThumbHash map")
-                    }
-                    actionButton("Compute Loudness Map", "speaker.wave.3.fill") {
-                        await monitor.runCompanionTask(.loudnessMap, title: "loudness map")
+                // Four tasks as compact chips (two tight rows) instead of four full-width buttons — the
+                // caption above keeps them obviously actions, the icon + short name keeps each obvious.
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Library tasks")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                    FlowLayout(spacing: 6) {
+                        taskChip("Scan Library", "arrow.clockwise") { await monitor.scanLibrary() }
+                        taskChip("VMAF Map", "gauge.medium") {
+                            await monitor.runCompanionTask(.vmafMap, title: "VMAF map")
+                        }
+                        taskChip("ThumbHash Map", "square.grid.3x3.fill") {
+                            await monitor.runCompanionTask(.thumbhashMap, title: "ThumbHash map")
+                        }
+                        taskChip("Loudness Map", "speaker.wave.3.fill") {
+                            await monitor.runCompanionTask(.loudnessMap, title: "loudness map")
+                        }
                     }
                 }
             }
@@ -133,22 +140,23 @@ struct JobsPanel: View {
 
     // MARK: Actions (Scenes only)
 
-    private func actionButton(_ title: String, _ icon: String, _ action: @escaping () async -> Void) -> some View {
+    /// A compact task chip: caption2 (the smallest text style) in a solid capsule, sized by its content so
+    /// `FlowLayout` packs all four into two short rows. Solid fill, never glass — the panel itself is
+    /// glass, and glass-on-glass reads flat. Matches the filter panel's tag-chip look.
+    private func taskChip(_ title: String, _ icon: String, _ action: @escaping () async -> Void) -> some View {
         Button {
             Task { await action() }
         } label: {
-            HStack(spacing: 9) {
-                Image(systemName: icon).frame(width: 20)
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 10, weight: .semibold))
                 Text(title)
-                Spacer(minLength: 0)
+                    .font(.caption2.weight(.semibold))
             }
-            .font(.subheadline.weight(.medium))
             .foregroundStyle(themeManager.current.foregroundColor)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            // Solid fill (never glass) — the panel itself is glass, and glass-on-glass reads flat.
-            .background(themeManager.current.foregroundColor.opacity(0.10),
-                        in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .padding(.horizontal, 11)
+            .padding(.vertical, 7)
+            .background(themeManager.current.foregroundColor.opacity(0.10), in: Capsule())
         }
         .buttonStyle(.plain)
     }
