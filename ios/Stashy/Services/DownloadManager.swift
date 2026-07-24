@@ -233,13 +233,13 @@ private final class TransferStore: @unchecked Sendable {
 private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     let store: TransferStore
     let onFinish: @Sendable (String, Int, TransferEngine) -> Void
-    let onError: @Sendable (String, Int, String, Int, TransferEngine) -> Void
+    let onError: @Sendable (String, Int, String, Int, TransferEngine, Data?) -> Void
     let onStopped: @Sendable (String, Int, TransferEngine) -> Void
     private var terminal: Set<TransferKey> = []
 
     init(store: TransferStore,
          onFinish: @escaping @Sendable (String, Int, TransferEngine) -> Void,
-         onError: @escaping @Sendable (String, Int, String, Int, TransferEngine) -> Void,
+         onError: @escaping @Sendable (String, Int, String, Int, TransferEngine, Data?) -> Void,
          onStopped: @escaping @Sendable (String, Int, TransferEngine) -> Void) {
         self.store = store
         self.onFinish = onFinish
@@ -280,7 +280,8 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unc
         store.drop(key: key)
         let nsError = error as NSError
         let code = nsError.domain == NSURLErrorDomain ? nsError.code : NSURLErrorCannotWriteToFile
-        onError(info.item, info.conn, nsError.localizedDescription, code, info.engine)
+        onError(info.item, info.conn, nsError.localizedDescription, code, info.engine,
+                nsError.userInfo[NSURLSessionDownloadTaskResumeData] as? Data)
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
@@ -316,7 +317,15 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unc
                 try output.close()
             }
             let size = ((try? fm.attributesOfItem(atPath: info.part.path))?[.size] as? NSNumber)?.int64Value ?? 0
-            guard info.expectedBytes == 0 || size == info.expectedBytes else { throw URLError(.cannotWriteToFile) }
+            // Only a RANGE request has an exact expected length. For a whole-file transfer the server's
+            // delivered bytes are the truth — Stash's recorded size can differ (a re-encode it hasn't
+            // rescanned), and rejecting on that discrepancy would throw away a complete, correct file
+            // and loop forever re-downloading it.
+            if info.rangeRequest {
+                guard info.expectedBytes == 0 || size == info.expectedBytes else { throw URLError(.cannotWriteToFile) }
+            } else {
+                guard size > 0 else { throw URLError(.cannotWriteToFile) }
+            }
             let key = key(for: session, task: downloadTask)
             terminal.insert(key)
             store.drop(key: key)
@@ -335,7 +344,11 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unc
             if (error as NSError).code == NSURLErrorCancelled {
                 onStopped(info.item, info.conn, info.engine)
             } else {
-                onError(info.item, info.conn, error.localizedDescription, (error as NSError).code, info.engine)
+                // A FAILED download task carries its resume blob in the error's userInfo — this is the
+                // documented way to continue one, and the only way that survives a dropped connection.
+                let nsError = error as NSError
+                onError(info.item, info.conn, nsError.localizedDescription, nsError.code, info.engine,
+                        nsError.userInfo[NSURLSessionDownloadTaskResumeData] as? Data)
             }
             return
         }
@@ -385,6 +398,10 @@ final class DownloadManager {
     /// True while the app is backgrounded. Transfers need no phase handoff; this only governs work such as
     /// on-device transcoding that must pause while the process is suspended.
     @ObservationIgnored private var inBackground = false
+    /// True until `reconnectTasks` has reported back. Restored items sit `.paused` until then, which
+    /// would otherwise read as "nothing is downloading" and end the Live Activity on every background
+    /// relaunch — precisely when the user most wants it.
+    @ObservationIgnored private var restoringTasks = true
     @ObservationIgnored private let downloadsDir: URL
     @ObservationIgnored private let partsDir: URL
     @ObservationIgnored private let metaDir: URL
@@ -428,9 +445,10 @@ final class DownloadManager {
             onFinish: { [weak self] item, conn, engine in
                 Task { @MainActor in self?.connectionFinished(itemID: item, conn: conn, engine: engine) }
             },
-            onError: { [weak self] item, conn, msg, code, engine in
+            onError: { [weak self] item, conn, msg, code, engine, resume in
                 Task { @MainActor in
-                    self?.connectionFailed(itemID: item, conn: conn, message: msg, code: code, engine: engine)
+                    self?.connectionFailed(itemID: item, conn: conn, message: msg, code: code,
+                                           engine: engine, resume: resume)
                 }
             },
             onStopped: { [weak self] item, conn, engine in
@@ -456,7 +474,16 @@ final class DownloadManager {
         resumeInterruptedTranscodes()   // continue a transcode the app was killed mid-way through
         sweepOrphanedMeta()    // reclaim sidecars left by stopped/abandoned/crashed downloads
         finalizeReadyItems()   // any item whose parts are all present already → assemble now
-        reconnectTasks()       // re-attach to still-running tasks on both sessions
+        sweepOrphanedParts()   // reclaim bytes left by abandoned transfers (see the function's note)
+        reconnectTasks()       // re-attach to still-running tasks, then auto-continue interrupted ones
+        // Safety net: if getAllTasks never reports back, don't leave the Live Activity un-endable.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(10))
+            guard let self, self.restoringTasks else { return }
+            self.restoringTasks = false
+            self.resumeInterruptedDownloads()
+            self.syncLiveActivity()
+        }
         observeAppPhase()
         startNetworkMonitor()
         startPolling()
@@ -986,7 +1013,10 @@ final class DownloadManager {
         var companionQuality: String? = nil
     }
 
-    func pause(_ item: DownloadItem) { suspend(item, auto: false) }
+    func pause(_ item: DownloadItem) {
+        FileManager.default.createFile(atPath: userPausedURL(item.id).path, contents: nil)
+        suspend(item, auto: false)
+    }
     func resume(_ item: DownloadItem) {
         guard item.state == .paused || item.state == .waitingForNetwork || item.state == .failed else { return }
         launch(item, reset: false)
@@ -1353,6 +1383,7 @@ final class DownloadManager {
     // MARK: - Launch / suspend
 
     private func launch(_ item: DownloadItem, reset: Bool) {
+        try? FileManager.default.removeItem(at: userPausedURL(item.id))
         // Always logged (not trace-gated): a reset is the only thing that legitimately destroys durable
         // bytes, so "how much progress did we just throw away, and who asked for it" must be visible in
         // any diagnostic session.
@@ -1374,6 +1405,23 @@ final class DownloadManager {
     private func startConnections(_ item: DownloadItem) {
         if item.totalBytes > 0, item.connections.first?.total != item.totalBytes {
             item.rebuildConnections(totalBytes: item.totalBytes)
+        }
+        // iOS delivers a finished background download by moving the daemon's copy into our container,
+        // which needs roughly the file's size free AT COMPLETION — not while it runs. A phone that is
+        // too full therefore transfers the whole thing at full speed and only then fails, with -3000
+        // "Cannot create file". Refuse up front instead, with a number the owner can act on.
+        if item.totalBytes > 0 {
+            let free = availableBytes()
+            let needed = item.totalBytes + (256 << 20)      // margin for the merge and the sidecars
+            if free > 0, free < needed {
+                item.state = .failed
+                item.error = "Not enough space — needs \(Self.bytesLabel(needed)), "
+                    + "\(Self.bytesLabel(free)) free."
+                RemoteLog.shared.event("dl-space", [
+                    ("item", item.id), ("need", needed), ("free", free)])
+                syncLiveActivity()
+                return
+            }
         }
         item.state = .downloading
         item.error = nil
@@ -1406,13 +1454,16 @@ final class DownloadManager {
         } else {
             task = bgSession.downloadTask(with: URLRequest(url: item.url))
         }
+        if let blob = resumeData[item.id]?[0] {
+            item.receivedBytes = max(item.receivedBytes, Self.resumedBytes(in: blob))
+        }
         register(task, item: item, conn: 0, engine: .background, base: 0,
                  expected: item.totalBytes, rangeRequest: false)
         backgroundTasks[item.id] = task
         clearResumeFiles(item.id)
         task.resume()
         trace("dl-start", [("item", item.id), ("resumed", resumed ? 1 : 0),
-                           ("total", item.totalBytes)])
+                           ("total", item.totalBytes), ("free", availableBytes())])
     }
 
     private func register(_ task: URLSessionTask, item: DownloadItem, conn: Int, engine: TransferEngine,
@@ -1430,6 +1481,51 @@ final class DownloadManager {
         guard let desc = task.taskDescription else { return nil }
         let parts = desc.components(separatedBy: "\u{1}")
         return parts.count >= 2 ? Int(parts[1]) : nil
+    }
+
+    /// Bytes already transferred, per an iOS resume blob (an archived property list). The key is
+    /// undocumented, so a nil result simply means "unknown" and the card shows 0 until the first live
+    /// byte callback — never a reason to discard the blob itself.
+    nonisolated private static func resumedBytes(in blob: Data) -> Int64 {
+        guard let plist = try? PropertyListSerialization.propertyList(from: blob, format: nil),
+              let dict = plist as? [String: Any],
+              let n = dict["NSURLSessionResumeBytesReceived"] as? NSNumber else { return 0 }
+        return n.int64Value
+    }
+
+    /// Space the system will actually let a download consume (excludes caches it can reclaim).
+    private func availableBytes() -> Int64 {
+        (try? downloadsDir.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            .volumeAvailableCapacityForImportantUsage) ?? 0
+    }
+
+    private static func bytesLabel(_ n: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: n, countStyle: .file)
+    }
+
+    /// Reclaim part files that belong to no known download.
+    ///
+    /// Parts moved out of `Caches` into Application Support in v1.0.307, because iOS was reaping them
+    /// mid-transfer. The cost of that fix: nothing reclaims them automatically any more, so every
+    /// abandoned multi-GB transfer now leaks its bytes forever. On a phone that fills up, iOS reports
+    /// the shortfall as a baffling -3000 "Cannot create file" at the END of an otherwise perfect
+    /// download — so this sweep is load-bearing, not tidiness.
+    private func sweepOrphanedParts() {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(at: partsDir, includingPropertiesForKeys: nil) else { return }
+        let live = Set(items.map(\.id))
+        var reclaimed: Int64 = 0
+        for url in files {
+            let name = url.deletingPathExtension().lastPathComponent      // "<itemID>-<conn>"
+            guard let dash = name.lastIndex(of: "-") else { continue }
+            let id = String(name[name.startIndex..<dash])
+            guard !live.contains(id) else { continue }
+            reclaimed += fileSize(url)
+            try? fm.removeItem(at: url)
+        }
+        if reclaimed > 0 {
+            RemoteLog.shared.event("dl-sweep", [("reclaimed", reclaimed), ("free", availableBytes())])
+        }
     }
 
     private func fileSize(_ url: URL) -> Int64 {
@@ -1566,6 +1662,7 @@ final class DownloadManager {
 
     private func syncLiveActivity() {
         let state = liveActivityState()
+        if state == nil, restoringTasks { return }
         logActivityPush(state)
         if let error = liveActivity.sync(state) {
             liveActivityError = error
@@ -1846,6 +1943,13 @@ final class DownloadManager {
             trace("dl-adopt", [("item", itemID), ("conn", conn), ("bytes", item.receivedBytes)])
         }
         finished[itemID, default: []].insert(conn)
+        // Adopt what actually arrived: unknown-size transfers (server transcodes) learn their size
+        // here, and a scanned-size mismatch resolves in favour of the delivered file.
+        let delivered = fileSize(partURL(itemID, conn))
+        if delivered > 0 {
+            item.totalBytes = delivered
+            if conn < item.connections.count { item.connections[conn].total = delivered }
+        }
         if conn < item.connections.count { item.connections[conn].received = item.connections[conn].total }
         finalizeIfComplete(item)
     }
@@ -1860,9 +1964,18 @@ final class DownloadManager {
         NSURLErrorResourceUnavailable, NSURLErrorSecureConnectionFailed
     ]
 
-    private func connectionFailed(itemID: String, conn: Int, message: String, code: Int, engine: TransferEngine) {
+    private func connectionFailed(itemID: String, conn: Int, message: String, code: Int,
+                                  engine: TransferEngine, resume: Data?) {
         guard let item = items.first(where: { $0.id == itemID }), item.state == .downloading else { return }
         backgroundTasks[itemID] = nil
+        // Bank the resume blob FIRST. Without it every dropped connection restarts the file from byte
+        // zero, which is exactly what a spotty cellular link produces over and over.
+        if let resume {
+            resumeData[itemID, default: [:]][0] = resume
+            try? resume.write(to: resumeDataURL(itemID, 0), options: .atomic)
+            item.receivedBytes = max(item.receivedBytes, Self.resumedBytes(in: resume))
+            trace("dl-blob", [("item", itemID), ("bytes", Self.resumedBytes(in: resume))])
+        }
         // Every non-cancellation transfer error, always (not trace-gated) — the code is what
         // distinguishes a daemon refusal from a server problem from a bad resume blob.
         RemoteLog.shared.event("dl-err", [
@@ -1871,6 +1984,24 @@ final class DownloadManager {
         partCensus(item, "err-\(code)")
         reconcileDurableParts(item)
 
+        // -3000 at the END of a complete transfer is almost always the device being out of room: iOS
+        // could not move the finished file into our container. Restarting from zero cannot fix that and
+        // costs another full download, so name the real problem instead.
+        if code == NSURLErrorCannotCreateFile {
+            let free = availableBytes()
+            RemoteLog.shared.event("dl-space", [
+                ("item", itemID), ("free", free), ("total", item.totalBytes),
+                ("got", item.receivedBytes), ("why", "err-3000")])
+            if item.totalBytes > 0, free > 0, free < item.totalBytes {
+                item.state = .failed
+                item.error = "Not enough space to save this download — "
+                    + "\(Self.bytesLabel(free)) free, needs \(Self.bytesLabel(item.totalBytes))."
+                cancelTasks(item, produceResumeData: false)
+                cleanupParts(itemID)
+                syncLiveActivity()
+                return
+            }
+        }
         // A stale or rejected resume blob is the one failure worth a targeted retry: drop the blob and
         // start the transfer clean rather than surfacing an error the user can do nothing with. Bounded,
         // because a server that always rejects would otherwise loop forever.
@@ -1895,7 +2026,7 @@ final class DownloadManager {
             // daemon's own offset, so resuming continues rather than restarting.
             item.state = .waitingForNetwork
             item.error = nil
-            cancelTasks(item, produceResumeData: true)
+            cancelTasks(item, produceResumeData: false)   // the blob came off the error above
             scheduleNetworkRetry(item)
         } else {
             item.state = .failed
@@ -2124,6 +2255,22 @@ final class DownloadManager {
             item.lastSampleTime = Date()
             item.lastSampleBytes = item.receivedBytes
         }
+        restoringTasks = false
+        resumeInterruptedDownloads()
+        syncLiveActivity()
+    }
+
+    /// Continue anything that was mid-transfer when the app died and has no live task to re-attach to.
+    /// Without this a download interrupted by a kill (or a connection drop the daemon gave up on) sits
+    /// `.paused` on the Downloads screen until the user notices and taps resume — the opposite of
+    /// "keeps going while the app is closed". A download the USER paused is left alone.
+    private func resumeInterruptedDownloads() {
+        for item in items where item.state == .paused && backgroundTasks[item.id] == nil {
+            guard FileManager.default.fileExists(atPath: activeURL(item.id).path),
+                  !FileManager.default.fileExists(atPath: userPausedURL(item.id).path) else { continue }
+            trace("dl-auto-resume", [("item", item.id), ("bytes", item.receivedBytes)])
+            launch(item, reset: false)
+        }
     }
 
     // MARK: - Files
@@ -2177,16 +2324,21 @@ final class DownloadManager {
         try? FileManager.default.removeItem(at: resumeDataURL(itemID, 0))
     }
     private func cleanupParts(_ itemID: String) {
-        // Legacy 8-part layouts can still be on disk from before the engine was single-connection.
-        for i in 0..<8 {
-            try? FileManager.default.removeItem(at: partURL(itemID, i))
-            try? FileManager.default.removeItem(at: resumeDataURL(itemID, i))
+        // Enumerate rather than guess at indices: earlier builds wrote eight segments plus a "999"
+        // shadow part, and anything missed here is stranded on disk forever now that parts live
+        // outside the purgeable Caches directory.
+        let fm = FileManager.default
+        if let files = try? fm.contentsOfDirectory(at: partsDir, includingPropertiesForKeys: nil) {
+            for url in files where url.lastPathComponent.hasPrefix("\(itemID)-") {
+                try? fm.removeItem(at: url)
+            }
         }
         finished[itemID] = nil
         resumeData[itemID] = nil
     }
     private func cleanupMeta(_ itemID: String) {
-        for name in ["\(itemID).json", "\(itemID)-thumb.jpg", "\(itemID)-sprite.jpg", "\(itemID).vtt", "\(itemID).active"] {
+        for name in ["\(itemID).json", "\(itemID)-thumb.jpg", "\(itemID)-sprite.jpg", "\(itemID).vtt",
+                     "\(itemID).active", "\(itemID).userpaused"] {
             try? FileManager.default.removeItem(at: metaDir.appendingPathComponent(name))
         }
     }
@@ -2215,6 +2367,8 @@ final class DownloadManager {
     /// A marker distinguishing an active (resumable) download from a completed/stopped one, so relaunch
     /// only resurrects transfers the user actually wants continued.
     private func activeURL(_ itemID: String) -> URL { metaDir.appendingPathComponent("\(itemID).active") }
+    /// Written only by an explicit user pause, so a relaunch can distinguish it from an interruption.
+    private func userPausedURL(_ itemID: String) -> URL { metaDir.appendingPathComponent("\(itemID).userpaused") }
     private func markActive(_ itemID: String) {
         FileManager.default.createFile(atPath: activeURL(itemID).path, contents: nil)
     }
