@@ -298,7 +298,7 @@ churns.** History on the filter/sort panel:
 - The four task buttons are compact caption2 icon+name chips in a `FlowLayout` (two short rows) under a
   "Library tasks" caption — solid fills on the glass panel, matching the filter panel's tag chips.
 
-### Metadata scrape/edit suite (v1.0.298)
+### Metadata scrape/edit suite (v1.0.298 foundation; v1.0.299 auto-merge rework)
 - **`Services/StashScraper.swift` is the ONE typed gateway** for scraping + metadata editing (wraps
   StashClient like StashCompanion does). Contracts verified against stashapp/stash master — do NOT
   guess: `ScraperSourceInput` takes **exactly one** of `scraper_id` / `stash_box_endpoint`;
@@ -311,18 +311,40 @@ churns.** History on the filter/sort panel:
   (query → re-scrape the picked result as `performer_input`, which accepts no images/tags) while
   stash-box results arrive complete; gender strings normalize case-insensitively to GenderEnum or are
   DROPPED (an invalid enum literal fails GraphQL validation).
+- **v1.0.299 auto multi-source (owner: only StashDB / ThePornDB / FansDB, query them all at once, no
+  picker):** `isAllowed(name:endpoint:)` keyword-filters sources to those three; `rank(_:)` gives the
+  StashDB→TPDB→FansDB priority used for conflict defaults + merge order. `scrapeSceneEverywhere` /
+  `searchPerformersEverywhere` fan out over every configured allowed source in a `withTaskGroup`
+  (capturing `self` — a `Sendable` struct — is fine) and return **`MultiSourceResult`** = `{ items,
+  failed }`, where `failed` = names of UNREACHABLE sources. This is the key resilience contract: a
+  source that ERRORS is recorded in `failed` (never blocks the others, never a false "no match"); a
+  source that simply had no hit is in neither list; `NoSourcesError` is thrown only when none of the
+  three are configured. `groupPerformers` collapses the same person (lowercased name + birthdate) into
+  one `MergedPerformerCandidate` tagged with its sources; `resolvePerformer` fetches full detail from
+  every contributor in parallel and merges by priority (apply `ordered.reversed()` so StashDB wins),
+  unions images (priority order), records one `stash_id` per stash-box.
 - **Sheets** (`SceneMetadataSheet`, `PerformerMetadataSheet`, `PerformerCreateSheet`; shared pieces in
   `Features/Shared/ScrapeUI.swift` + `Features/Performers/PerformerForm.swift`): medium-detent system
   sheets (`presentationDetents([.medium, .large])` +
   `presentationBackgroundInteraction(.enabled(upThrough: .medium))`) — the iOS 26 glass "mini window"
   over the still-playing video. System-composited, so the custom-glass-over-scroll landmine doesn't
-  apply. Merge rules mirror Stash's web UI: non-empty scalars win, entities join by `stored_id`,
-  unmatched ones render as dashed "+" chips (tap → `tagCreate`/`studioCreate`/`performerCreate` with
-  the full scraped profile, created id swapped in); anything left dashed is dropped on Save and a
-  caption says so. **Empty dates are OMITTED, never sent** ("" is an invalid Stash date; clearing a
-  date isn't supported in-app). Refresh-in-place after Save: SceneDetailView reads `shown =
-  fullScene ?? scene`, PerformerDetailView reads `current = refreshed ?? performer`, and the portrait
-  task keys on `image_path` (not id) so a changed photo reloads.
+  apply. **Scene merge:** per-field **`SourceConflictChips`** appear only where sources disagree
+  (title/date/details/studio/cover), each labeled with the contributing source(s), plus a "Current"
+  chip to keep the existing value; tags+performers UNION deduped (by stored_id then case-insensitive
+  name). **Performer merge:** the merged candidate list (`MergedPerformerRow` with source badges) →
+  pick → `resolvePerformer` fills the form + the photo picker. Unmatched scene entities render as
+  dashed "+" chips (tap → `tagCreate`/`studioCreate`/`performerCreate` with the full scraped profile,
+  created id swapped in); anything left dashed is dropped on Save and a caption says so.
+- **Photo upload:** `PerformerPhotoPicker` (PhotosUI `PhotosPicker`) sits in the performer photo strip
+  (add/manual/edit). A picked image is downscaled + JPEG-encoded to a base64 data URL **off-main**
+  (`ImageUpload.dataURL` in a `Task.detached`), prepended + auto-selected, and saved via the normal
+  `image` field. `.task(id: pickerItem)` does the load (PhotosPickerItem is Equatable/Sendable); it
+  resets `pickerItem = nil` at the end (the re-fire immediately no-ops).
+- **Empty dates are OMITTED, never sent** ("" is an invalid Stash date; clearing a date isn't supported
+  in-app). **Refresh-in-place after Save:** each sheet refetches the scene/performer INSIDE its own save
+  task and hands it back via `onSaved(fresh)` — SceneDetailView assigns `fullScene` (read as `shown =
+  fullScene ?? scene`), PerformerDetailView assigns `refreshed` (read as `current = refreshed ?? performer`),
+  and the portrait task keys on `image_path` (not id) so a changed/uploaded photo reloads.
 
 ### Stores and loaders
 - **`PaginatedLoader<T>`** (generic, `@Observable @MainActor`): dedups pages by id,

@@ -125,22 +125,30 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.298** (metadata scrape/edit suite, commit `f663111`, IPA 9,347,039 B);
-  **v1.0.297 restored the multiThread download default to ON** (owner decision 2026-07-24 — new
-  downloads start 8-way foreground again; staging picker still offers Background). Verify the newest
-  release/IPA size each push.
-- **v1.0.298 — metadata scrape/edit suite:** scene ••• menu → **Scrape Metadata / Edit Metadata**
-  (medium-detent glass sheet floating OVER the still-playing video); performer ••• menu → same pair
-  plus a photo picker over scraped images; Performers **“+” toolbar button** (left of the funnel) =
-  add-performer via scraper search (name → source → results → pre-filled form → pick photo → create,
-  or manual). `Services/StashScraper.swift` is the one typed gateway. Key contracts (verified against
-  Stash source): sources = `configuration.stashBoxes` first then capability-filtered `listScrapers`;
-  `ScraperSourceInput` takes **exactly ONE** of `scraper_id`/`stash_box_endpoint`; scraped images are
-  **base64 data URLs** passed straight into `cover_image`/`image`; update inputs are omit-to-keep and
-  list fields REPLACE; classic performer scrapers need a **two-step** query→`performer_input` re-scrape
-  (stash-boxes are one-step). Unmatched scraped entities = dashed “+” chips (tap = create with full
-  scraped profile; left dashed = skipped on save). All transient sheets — zero browse/player perf
-  impact. Details §6.
+- Latest release: **v1.0.299** (metadata scrape/edit rework — auto multi-source merge + photo upload,
+  commit `a51eaa7`, IPA 9,386,551 B); **v1.0.297 restored the multiThread download default to ON**
+  (owner decision 2026-07-24). Verify the newest release/IPA size each push.
+- **v1.0.299 — metadata scrape rework (auto multi-source; supersedes the v1.0.298 source-picker flow):**
+  “Scrape Metadata” now queries **StashDB / ThePornDB / FansDB in PARALLEL** — no scraper picker (only
+  those three are kept; `StashScraper.isAllowed` filters by name/endpoint keyword). **Scenes** merge all
+  sources into the edit form with **per-field source chips** where they disagree (title/date/details/
+  studio/cover; a “Current” chip preserves the existing value), tags+performers UNION deduped. **Performers**
+  (detail scrape + add-performer “+”) show a **merged candidate list** — same person (name+birthdate) across
+  sources collapses into one row with source badges, different people stay separate; picking resolves+merges
+  full detail across sources (priority StashDB→TPDB→FansDB), unions photos. **Native PhotosPicker “Upload”
+  tile** in the performer photo strip (add/manual/edit) → downscaled base64 data URL → saved via
+  performerCreate/Update. **Source-unavailable handled** (`MultiSourceResult` separates matches from
+  UNREACHABLE sources → “Couldn’t reach FansDB”, never a false “no match”; one source failing never blocks
+  the rest). **Instant refresh**: sheets refetch the scene/performer inside the save task and hand it back
+  (`onSaved(fresh)`) so detail header/tags/portrait update in place. Details §6.
+- **v1.0.298 — metadata scrape/edit suite (FOUNDATION; scene/perf ••• menus + “+” add-performer):**
+  `Services/StashScraper.swift` is the one typed gateway; medium-detent glass sheets float OVER the
+  playing video. Key GraphQL contracts (verified against Stash source, still current): sources =
+  `configuration.stashBoxes` first then capability-filtered `listScrapers`; `ScraperSourceInput` takes
+  **exactly ONE** of `scraper_id`/`stash_box_endpoint`; scraped images are **base64 data URLs** passed
+  straight into `cover_image`/`image`; update inputs are omit-to-keep and list fields REPLACE; classic
+  performer scrapers need a **two-step** query→`performer_input` re-scrape (stash-boxes one-step). Unmatched
+  scraped entities = dashed “+” chips. All transient sheets — zero browse/player perf impact. Details §6.
 - **v1.0.296 — jobs-panel scan bar FIXED (was broken since the panel shipped):** Stash's `jobQueue` is
   `null` (not `[]`) when EMPTY → the non-optional decode failed every idle poll, freezing the last
   snapshot ("stuck" bar) and silently killing the poll loop after ~60 s. Now: optional decode
