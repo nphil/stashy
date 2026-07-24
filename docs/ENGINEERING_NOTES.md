@@ -298,6 +298,32 @@ churns.** History on the filter/sort panel:
 - The four task buttons are compact caption2 icon+name chips in a `FlowLayout` (two short rows) under a
   "Library tasks" caption — solid fills on the glass panel, matching the filter panel's tag chips.
 
+### Metadata scrape/edit suite (v1.0.298)
+- **`Services/StashScraper.swift` is the ONE typed gateway** for scraping + metadata editing (wraps
+  StashClient like StashCompanion does). Contracts verified against stashapp/stash master — do NOT
+  guess: `ScraperSourceInput` takes **exactly one** of `scraper_id` / `stash_box_endpoint`;
+  `scrapeSingle*` return non-null lists (`[]` = no match); ALL `Scraped*` fields are nullable except
+  `ScrapedStudio.name`/`ScrapedTag.name`; `stored_id` = the matched LOCAL entity (nil = not in the
+  library); scraped `image`/`images[]` are **base64 data URLs** (the server already fetched them) and
+  the `cover_image`/`image` mutation fields accept "URL or base64 data URL" — pass through unchanged;
+  update inputs are **omit-to-keep** (nil optionals encode away) while list fields (`performer_ids` /
+  `tag_ids` / `urls` / `stash_ids`) REPLACE wholesale; classic performer scrapers are **two-step**
+  (query → re-scrape the picked result as `performer_input`, which accepts no images/tags) while
+  stash-box results arrive complete; gender strings normalize case-insensitively to GenderEnum or are
+  DROPPED (an invalid enum literal fails GraphQL validation).
+- **Sheets** (`SceneMetadataSheet`, `PerformerMetadataSheet`, `PerformerCreateSheet`; shared pieces in
+  `Features/Shared/ScrapeUI.swift` + `Features/Performers/PerformerForm.swift`): medium-detent system
+  sheets (`presentationDetents([.medium, .large])` +
+  `presentationBackgroundInteraction(.enabled(upThrough: .medium))`) — the iOS 26 glass "mini window"
+  over the still-playing video. System-composited, so the custom-glass-over-scroll landmine doesn't
+  apply. Merge rules mirror Stash's web UI: non-empty scalars win, entities join by `stored_id`,
+  unmatched ones render as dashed "+" chips (tap → `tagCreate`/`studioCreate`/`performerCreate` with
+  the full scraped profile, created id swapped in); anything left dashed is dropped on Save and a
+  caption says so. **Empty dates are OMITTED, never sent** ("" is an invalid Stash date; clearing a
+  date isn't supported in-app). Refresh-in-place after Save: SceneDetailView reads `shown =
+  fullScene ?? scene`, PerformerDetailView reads `current = refreshed ?? performer`, and the portrait
+  task keys on `image_path` (not id) so a changed photo reloads.
+
 ### Stores and loaders
 - **`PaginatedLoader<T>`** (generic, `@Observable @MainActor`): dedups pages by id,
   infinite-scrolls, and has a **generation token** so a superseded in-flight load discards its
@@ -532,3 +558,10 @@ magnifier is tapped. Applied to Scenes & Performers.
   refcounted attach/detach, a never-self-stopping poll loop with a visible reconnecting state, inline
   action errors, and an optimistic "Starting …" line. The four task buttons shrank to caption2 flow
   chips under a "Library tasks" caption.
+- **v1.0.297 — multiThread download default restored ON** (owner decision; the v1.0.284–295 rework had
+  defaulted it OFF). Staging still offers Background per download; the bad-server-response and -3000
+  fallbacks still demote an item permanently; pre-field sidecars restore as multi-thread.
+- **v1.0.298 — metadata scrape/edit suite:** scene + performer ••• menus gained Scrape/Edit Metadata
+  (medium-detent glass sheets over the playing video), and Performers gained a + add-performer flow
+  (scraper search → pick match → pick photo → create). New `StashScraper` gateway; contracts + sheet
+  patterns in §6 "Metadata scrape/edit suite".

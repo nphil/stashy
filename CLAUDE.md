@@ -125,8 +125,22 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.296** (jobs-panel scan-progress fix + compact task chips, commit `77b8647`,
-  IPA 8,903,275 B). Verify the newest release/IPA size each push.
+- Latest release: **v1.0.298** (metadata scrape/edit suite, commit `f663111`, IPA 9,347,039 B);
+  **v1.0.297 restored the multiThread download default to ON** (owner decision 2026-07-24 — new
+  downloads start 8-way foreground again; staging picker still offers Background). Verify the newest
+  release/IPA size each push.
+- **v1.0.298 — metadata scrape/edit suite:** scene ••• menu → **Scrape Metadata / Edit Metadata**
+  (medium-detent glass sheet floating OVER the still-playing video); performer ••• menu → same pair
+  plus a photo picker over scraped images; Performers **“+” toolbar button** (left of the funnel) =
+  add-performer via scraper search (name → source → results → pre-filled form → pick photo → create,
+  or manual). `Services/StashScraper.swift` is the one typed gateway. Key contracts (verified against
+  Stash source): sources = `configuration.stashBoxes` first then capability-filtered `listScrapers`;
+  `ScraperSourceInput` takes **exactly ONE** of `scraper_id`/`stash_box_endpoint`; scraped images are
+  **base64 data URLs** passed straight into `cover_image`/`image`; update inputs are omit-to-keep and
+  list fields REPLACE; classic performer scrapers need a **two-step** query→`performer_input` re-scrape
+  (stash-boxes are one-step). Unmatched scraped entities = dashed “+” chips (tap = create with full
+  scraped profile; left dashed = skipped on save). All transient sheets — zero browse/player perf
+  impact. Details §6.
 - **v1.0.296 — jobs-panel scan bar FIXED (was broken since the panel shipped):** Stash's `jobQueue` is
   `null` (not `[]`) when EMPTY → the non-optional decode failed every idle poll, freezing the last
   snapshot ("stuck" bar) and silently killing the poll loop after ~60 s. Now: optional decode
@@ -143,8 +157,8 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   transitions REMOVED** (plain push/pop; `ZoomReturnScrollGate` deleted — don't re-add zoom without §6).
   **Downloads reworked to an adaptive engine** (foreground 8 range data-tasks appending to durable
   parts ⇄ ONE background range task, no resume-blob handoff) with a staging "Transfer:
-  Background | Multi-thread" picker — **`multiThread` now defaults OFF** (new downloads = one background
-  connection unless toggled; flagged to owner 2026-07-24). Download **Live Activity / Dynamic Island**
+  Background | Multi-thread" picker — that series defaulted `multiThread` OFF, **reverted to ON in
+  v1.0.297** (owner decision 2026-07-24). Download **Live Activity / Dynamic Island**
   shipped (new `StashyLiveActivity` extension target; 2 s equality-gated sync; ActivityKit failures
   surface on the Downloads screen for sideload-signing diagnosis).
 - **Jobs panel shipped (v1.0.280–283)** — Scenes & Performers have a **jobs status dropdown** off the title,
