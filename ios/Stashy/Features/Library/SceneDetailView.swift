@@ -18,6 +18,12 @@ struct SceneDetailView: View {
     @State private var fullScene: StashScene?
     /// Metadata scrape/edit mini-sheet (••• menu). Item-driven so each mode opens in the right stage.
     @State private var metadataMode: SceneMetadataMode?
+    /// Device (window) bounds + safe-area insets, independent of the nav bar. The screen's layout is
+    /// derived from THESE, not the SwiftUI safe area — a visible nav bar shrinks the safe area, which
+    /// shoved the whole video box down by the bar height (the v1.0.301 regression). Same proven reader
+    /// the fullscreen player uses.
+    @State private var windowBounds: CGRect = .zero
+    @State private var windowSafeArea = EdgeInsets()
 
     /// Full performers if the detail fetch has landed, otherwise the slim (id+name) list.
     private var performers: [Performer] { (fullScene ?? scene).performers }
@@ -48,16 +54,22 @@ struct SceneDetailView: View {
 
     var body: some View {
         GeometryReader { geo in
-            let topInset = geo.safeAreaInsets.top
+            // The reader ignores the TOP safe area (below), so its origin is the screen top and the nav
+            // bar cannot shift this layout. The status-bar strip is derived from the WINDOW insets
+            // instead (nav-bar-independent). Zero for at most the first frame or two of the push
+            // animation, before the window probe reports — visually covered by the transition.
+            let topInset = windowSafeArea.top
             // Inline player box is sized for 16:9 (full width), so a 16:9 video fills it exactly with
             // no top/bottom blur. Other aspect ratios fit inside this box (blur fills the gaps). The
             // player also extends up behind the status bar, where the blurred backdrop blends in.
             let boxHeight = geo.size.width * 9 / 16
 
             ZStack(alignment: .top) {
-                // Fixed (no-scroll) layout: player up top, compact metadata fills the rest.
+                // Fixed (no-scroll) layout: player up top, compact metadata fills the rest. The clear
+                // spacer spans the status-bar strip + the 16:9 box because the reader starts at the
+                // screen top (not the safe-area top).
                 VStack(spacing: 0) {
-                    Color.clear.frame(height: boxHeight)
+                    Color.clear.frame(height: topInset + boxHeight)
                     metadata
                 }
                 .opacity(isFullscreen ? 0 : 1)
@@ -72,7 +84,10 @@ struct SceneDetailView: View {
                                 scene: scene,
                                 apiKey: apiKey,
                                 route: route,
-                                safeArea: geo.safeAreaInsets,
+                                // Device insets, NOT geo's: the reader ignores the top safe area (its
+                                // top inset reads 0) and a visible nav bar would otherwise inflate the
+                                // value the player pads its inline controls with.
+                                safeArea: windowSafeArea,
                                 isFullscreen: $isFullscreen,
                                 quality: $quality,
                                 resumeTime: $resumeAt,
@@ -90,8 +105,10 @@ struct SceneDetailView: View {
                             .overlay { ProgressView().tint(.white) }
                     }
                 }
+                // The reader already starts at the screen top (it ignores the top safe area), so inline
+                // needs no extra ignore; fullscreen still bleeds under the remaining edges.
                 .frame(maxWidth: .infinity, maxHeight: isFullscreen ? .infinity : boxHeight + topInset, alignment: .top)
-                .ignoresSafeArea(edges: isFullscreen ? .all : .top)
+                .ignoresSafeArea(edges: isFullscreen ? .all : [])
             }
             // Smooth fullscreen flip: animate the player box + metadata fade with the rotation. The
             // embedded ZoomablePlayerSurface opts OUT of this animation via `.transaction { $0.animation
@@ -99,26 +116,45 @@ struct SceneDetailView: View {
             // working — the box glides while the scroll internals commit instantly.
             .animation(.easeInOut(duration: 0.3), value: isFullscreen)
         }
+        // Device metrics probe (zero-impact UIKit view) feeding `windowSafeArea` above.
+        .background(WindowMetricsReader(bounds: $windowBounds, safeArea: $windowSafeArea))
+        // The nav bar must never shift this screen: ignore the top safe area entirely (layout is
+        // rebuilt from the window insets above), so the geometry is pixel-identical whether the bar is
+        // shown or hidden.
+        .ignoresSafeArea(edges: .top)
         .themedBackground()
-        // Keep the nav bar PRESENT (mini/inline) in portrait rather than hiding it — hiding it made the
-        // return to the grid a jarring hide→show pop (owner disliked both that and a masking fade). With
-        // the bar present, list⇄scene is a normal nav-bar item cross-fade (smooth, no custom animation).
-        // The video still bleeds up behind it (`.ignoresSafeArea(.top)`), and the metadata stays aligned
-        // because the layout is driven by `geo.safeAreaInsets.top`, which simply grows by the bar height.
-        // Fullscreen (landscape/immersive) still hides it entirely.
+        // Keep the nav bar PRESENT but WEIGHTLESS: visible so list⇄scene is a native toolbar-item
+        // cross-fade (hiding it made the return a jarring pop; a masking fade was disliked too) — but
+        // with a hidden background (no bar strip over the video), no title (the metadata header owns
+        // it), and a single floating mini back chevron. Fullscreen hides the bar; even if the in-place
+        // visibility toggle lags (the tab-bar landmine's cousin), a background-less bar whose only
+        // item's content is gated on !isFullscreen shows nothing.
         .toolbar(isFullscreen ? .hidden : .visible, for: .navigationBar)
-        .navigationTitle(shown.title ?? "Scene")
+        .toolbarBackground(.hidden, for: .navigationBar)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                if !isFullscreen {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "chevron.backward")
+                    }
+                    .accessibilityLabel("Back")
+                }
+            }
+        }
         // Hide the tab bar for the whole scene screen, not just in fullscreen. Toggling tab-bar
         // visibility *in place* is unreliable: SwiftUI only re-applies it on a navigation push/pop or an
         // orientation change, so landscape fullscreen (which rotates) hid it but portrait fullscreen
         // (button-triggered, no rotation) left it showing. Hiding unconditionally binds the change to
         // push/pop, which always works — and a dedicated player/detail screen doesn't need the tab bar.
         .toolbar(.hidden, for: .tabBar)
-        // Owner preference: no top-left back button (edge-swipe, kept alive by EnableSwipeBack, goes back).
+        // Suppress the SYSTEM back button (its label/behavior isn't ours); the mini chevron above is the
+        // one visible control, and edge-swipe back stays alive via EnableSwipeBack.
         .navigationBarBackButtonHidden(true)
         .statusBarHidden(isFullscreen)
-        .background(EnableSwipeBack()) // keep edge-swipe back even with the nav bar hidden
+        .background(EnableSwipeBack()) // keep edge-swipe back with the system back button suppressed
         // Restore portrait when the whole detail screen goes away (back / swipe-back / open performer).
         // This lives here — not in ScenePlayerView — because the player is rebuilt on every quality
         // switch (`.id(route.url)`); resetting orientation there would kick fullscreen back to portrait.
