@@ -361,11 +361,18 @@ struct SettingsView: View {
                         Button {
                             downloads.reclaimTransferStorage()
                             reclaimed = true
+                            // The sweep finishes asynchronously (it waits on the session's task list);
+                            // re-read the figure shortly after so the row shows the result.
+                            Task { @MainActor in
+                                try? await Task.sleep(for: .seconds(2))
+                                reclaimed = false
+                            }
                         } label: {
                             Label(reclaimed ? "Reclaiming…" : "Reclaim Download Storage",
                                   systemImage: "internaldrive")
                         }
-                        Text("A failed download leaves its partial file with the system, where it counts as \"System Data\" and can't be seen or removed from Stashy's own storage. This hands those back so iOS releases them.")
+                        .disabled(reclaimed)
+                        Text("A failed download leaves its partial file staged by the system, where it counts as \"System Data\" rather than Stashy's storage. This releases them — it only runs when no download is in flight.")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                         Toggle("Trace downloads", isOn: $downloadTrace)

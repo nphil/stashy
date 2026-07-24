@@ -2525,13 +2525,20 @@ final class DownloadManager {
         trace("dl-blob-release", [("item", itemID), ("bytes", Self.resumedBytes(in: blob))])
     }
 
-    /// Reclaim everything a run of failed transfers can strand: partial files the daemon is still
-    /// holding for abandoned resume blobs, part files with no owning download, and any background task
-    /// that no longer belongs to anything. Reports the real free space either side.
+    /// Reclaim everything a run of failed transfers can strand.
+    ///
+    /// Releasing resume blobs only works while we still HOLD the blob — once discarded, the partial
+    /// file it pointed at is orphaned and no API can name it. Fortunately those files are not beyond
+    /// reach: the background daemon stages them inside OUR OWN container, under
+    /// `Library/Caches/com.apple.nsurlsessiond/`. iOS treats that as purgeable (which is exactly why
+    /// `…ForImportantUsage` counts it as free and reads 40 GB on a 4 GB-free phone) but only actually
+    /// reclaims it under pressure, so a run of failed multi-GB downloads sits there indefinitely as
+    /// "System Data". With no live tasks it is safe for us to delete directly.
     func reclaimTransferStorage() {
         let before = availableBytesStrict()
         let fm = FileManager.default
         let live = Set(items.filter { $0.state != .completed && $0.state != .stopped }.map(\.id))
+        var blobs = 0
         if let files = try? fm.contentsOfDirectory(at: partsDir, includingPropertiesForKeys: nil) {
             for url in files where url.pathExtension == "resume" {
                 let name = url.deletingPathExtension().lastPathComponent   // "<itemID>-<conn>"
@@ -2539,22 +2546,52 @@ final class DownloadManager {
                 let id = String(name[name.startIndex..<dash])
                 guard !live.contains(id) else { continue }
                 releaseResumeBlob(id)
+                blobs += 1
             }
         }
         sweepOrphanedParts()
+        let busy = items.contains { $0.state == .downloading || $0.state == .waitingForNetwork }
         let handler: @Sendable ([URLSessionTask]) -> Void = { [weak self] tasks in
             let box = UncheckedSendableBox(tasks)
             Task { @MainActor in
                 guard let self else { return }
-                for task in box.value where self.taskConnection(task) == nil
-                    || !live.contains(task.taskDescription?.components(separatedBy: "\u{1}").first ?? "") {
+                var cancelled = 0
+                for task in box.value {
+                    let owner = task.taskDescription?.components(separatedBy: "\u{1}").first ?? ""
+                    guard !live.contains(owner) else { continue }
                     task.cancel()
+                    cancelled += 1
                 }
+                // Only sweep the daemon's staging area when nothing is in flight — deleting a file it
+                // is actively writing would break a live download.
+                let staged = (busy || !box.value.isEmpty) ? 0 : self.purgeSessionStagingArea()
                 RemoteLog.shared.event("dl-reclaim", [
-                    ("before", before), ("after", self.availableBytesStrict())])
+                    ("before", before), ("after", self.availableBytesStrict()),
+                    ("blobs", blobs), ("tasks", cancelled), ("staged", staged),
+                    ("skipped", (busy || !box.value.isEmpty) ? 1 : nil)])
             }
         }
         bgSession.getAllTasks(completionHandler: handler)
+    }
+
+    /// Delete the background daemon's staging directory inside our container and return the bytes
+    /// recovered. Caller must have established that no transfer is in flight.
+    private func purgeSessionStagingArea() -> Int64 {
+        let fm = FileManager.default
+        guard let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask).first else { return 0 }
+        let staging = caches.appendingPathComponent("com.apple.nsurlsessiond", isDirectory: true)
+        guard let walker = fm.enumerator(at: staging, includingPropertiesForKeys: [.fileSizeKey],
+                                         options: [], errorHandler: nil) else { return 0 }
+        var found: Int64 = 0
+        var victims: [URL] = []
+        for case let url as URL in walker {
+            let size = Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+            if size > 0 { found += size; victims.append(url) }
+        }
+        guard found > 0 else { return 0 }
+        for url in victims { try? fm.removeItem(at: url) }
+        RemoteLog.shared.event("dl-staging-purge", [("bytes", found), ("files", victims.count)])
+        return found
     }
 
     /// Real free space, for the Diagnostics readout — iOS's own Settings figure counts purgeable
