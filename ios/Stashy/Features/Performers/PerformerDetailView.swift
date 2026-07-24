@@ -13,11 +13,18 @@ struct PerformerDetailView: View {
     @State private var previewPresenter = ScenePreviewPresenter()
     @State private var showImageViewer = false
     @State private var confirmDelete = false
+    /// Metadata scrape/edit mini-sheet (••• menu).
+    @State private var metadataMode: PerformerMetadataMode?
+    /// Refetched after a metadata save so the header shows the new values without leaving the screen.
+    @State private var refreshed: Performer?
     @Environment(\.dismiss) private var dismiss
 
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
     private var apiKey: String { appState.client?.apiKey ?? "" }
+
+    /// The freshest performer we have — the pushed value until a metadata save refetches.
+    private var current: Performer { refreshed ?? performer }
 
     /// Reload this performer's scenes for the current filter.
     private func reload() async {
@@ -83,7 +90,7 @@ struct PerformerDetailView: View {
         .themedBackground()
         .environment(\.scenePreviewPresenter, previewPresenter)
         .overlay { ScenePreviewOverlay(presenter: previewPresenter, onOpen: { path.openScene($0) }) }
-        .navigationTitle(performer.name)
+        .navigationTitle(current.name)
         .navigationBarTitleDisplayMode(.inline)
         // No top-left back button (owner preference); rely on the edge-swipe, kept working via
         // EnableSwipeBack. Harmless in the Downloads fullScreenCover context — there it's the stack root
@@ -95,6 +102,15 @@ struct PerformerDetailView: View {
                 FullScreenImageViewer(image: portrait)
             }
         }
+        // Metadata mini-window (scrape/edit). On save, refetch so the header + portrait update in place.
+        .sheet(item: $metadataMode) { mode in
+            PerformerMetadataSheet(performerID: performer.id, mode: mode) {
+                Task {
+                    guard let client = appState.client else { return }
+                    refreshed = try? await StashScraper(client: client).findPerformer(id: performer.id)
+                }
+            }
+        }
         .task {
             guard query.performerID == nil else { return }
             query.performerID = performer.id // triggers the initial load via onChange
@@ -102,8 +118,10 @@ struct PerformerDetailView: View {
         .onChange(of: query) { _, _ in
             Task { await reload() }
         }
-        .task(id: performer.id) {
-            guard let url = performer.imageURL(apiKey: apiKey) else { return }
+        // Keyed on image_path (not id) so a portrait changed by a metadata save reloads in place —
+        // Stash stamps the path with a fresh cache-buster, and the refetch delivers the new path.
+        .task(id: current.image_path) {
+            guard let url = current.imageURL(apiKey: apiKey) else { return }
             portrait = try? await imageCache.image(for: url, priority: true)
         }
         .onDisappear { setBrowseScrolling(false) }
@@ -160,15 +178,21 @@ struct PerformerDetailView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text(performer.name)
+                Text(current.name)
                     .font(.title2.weight(.bold))
                     .foregroundStyle(themeManager.current.foregroundColor)
                     .privacyTitleBlur()
                 Spacer(minLength: 8)
-                FavoriteHeart(isFavorite: edits.isFavorite(performer), size: 22, offColor: .secondary) { new in
+                FavoriteHeart(isFavorite: edits.isFavorite(current), size: 22, offColor: .secondary) { new in
                     edits.setPerformerFavorite(new, id: performer.id, client: appState.client)
                 }
                 PopupMenu(vertical: true, actions: [
+                    PopupMenuAction(title: "Scrape Metadata", systemImage: "sparkle.magnifyingglass") {
+                        metadataMode = .scrape
+                    },
+                    PopupMenuAction(title: "Edit Metadata", systemImage: "square.and.pencil") {
+                        metadataMode = .edit
+                    },
                     PopupMenuAction(title: "Delete Performer", systemImage: "trash", isDestructive: true) {
                         confirmDelete = true
                     }
@@ -209,7 +233,7 @@ struct PerformerDetailView: View {
                     .padding(.horizontal, 12)
             }
 
-            if let tags = performer.tags, !tags.isEmpty {
+            if let tags = current.tags, !tags.isEmpty {
                 TagsCard(tags: tags)
                     .frame(height: 150)
                     .padding(.horizontal, 12)
@@ -219,22 +243,22 @@ struct PerformerDetailView: View {
 
     private var statItems: [(symbol: String, label: String, value: String)] {
         var out: [(String, String, String)] = []
-        if let c = performer.scene_count { out.append(("film.stack", "Scenes", "\(c)")) }
-        if let age = performer.age { out.append(("calendar", "Age", "\(age)")) }
-        if let country = performer.country, !country.isEmpty {
+        if let c = current.scene_count { out.append(("film.stack", "Scenes", "\(c)")) }
+        if let age = current.age { out.append(("calendar", "Age", "\(age)")) }
+        if let country = current.country, !country.isEmpty {
             out.append(("globe", "Country", "\(country.countryFlag) \(country)"))
         }
-        if let gender = performer.gender, !gender.isEmpty {
+        if let gender = current.gender, !gender.isEmpty {
             out.append(("person.fill", "Gender", gender.capitalized))
         }
-        if let birthdate = performer.birthdate, !birthdate.isEmpty {
+        if let birthdate = current.birthdate, !birthdate.isEmpty {
             out.append(("gift", "Born", birthdate))
         }
         return out.map { (symbol: $0.0, label: $0.1, value: $0.2) }
     }
 
     private var socialLinks: [SocialLink]? {
-        let links = SocialLink.list(from: performer.urls ?? [])
+        let links = SocialLink.list(from: current.urls ?? [])
         return links.isEmpty ? nil : links
     }
 }

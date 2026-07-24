@@ -13,6 +13,8 @@ struct PerformersView: View {
     @State private var filterExpanded = false
     // The jobs status dropdown (title button, top-leading). Mutually exclusive with the filter dropdown.
     @State private var jobsExpanded = false
+    // Add-performer sheet (the + toolbar button): scraper-backed search → pick match → pick photo → create.
+    @State private var createSheet = false
     @State private var path: [Route] = []
     @State private var reloadDebounce: Task<Void, Never>?
     private let columns = [GridItem(.adaptive(minimum: 110), spacing: 12)]
@@ -77,10 +79,27 @@ struct PerformersView: View {
             .toolbar {
                 // Title (top-left) = the jobs dropdown button.
                 ToolbarItem(placement: .topBarLeading) { titleJobsButton }
-                // Search magnifier (top-right), then the funnel.
+                // Search magnifier (top-right), then add-performer (+), then the funnel — declaration
+                // order places + left of the funnel.
                 DefaultToolbarItem(kind: .search, placement: .topBarTrailing)
                 ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        // Close any open dropdown first so the sheet doesn't stack over glass panels.
+                        filterExpanded = false
+                        jobsExpanded = false
+                        createSheet = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .accessibilityLabel("Add performer")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
+                }
+            }
+            .sheet(isPresented: $createSheet) {
+                PerformerCreateSheet {
+                    Task { await reload() }   // show the new performer in the grid right away
                 }
             }
             .navigationDestination(for: Route.self) { route in
