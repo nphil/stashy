@@ -128,8 +128,9 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.30x** (durable ranged single engine + LA % clamp + tab-bar auto-collapse —
-  3 commits `e313b71`/`0820e1f`/`459b971`; verify tag + IPA size vs v1.0.305's 9,421,417 B);
+- Latest release: **v1.0.306** (durable ranged single engine + LA % clamp + tab-bar auto-collapse —
+  `e313b71`/`0820e1f`/`459b971` + concurrency fix `8e64661`, IPA 9,430,213 B; that fix: a stored
+  `UIScrollView()` default value needs a `@MainActor` coordinator class under strict concurrency);
   **v1.0.297 restored the multiThread download default to ON** (owner decision 2026-07-24).
 - **Latest push — backgrounded-downloads robustness round 2 + auto-collapse:**
   (1) **Ranged single engine**: known-size single downloads now run the SAME durable engine as multi
