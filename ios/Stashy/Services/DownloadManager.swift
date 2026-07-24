@@ -249,13 +249,13 @@ private final class TransferStore: @unchecked Sendable {
 private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, URLSessionDataDelegate, @unchecked Sendable {
     let store: TransferStore
     let onFinish: @Sendable (String, Int, TransferEngine) -> Void
-    let onError: @Sendable (String, String, Int, TransferEngine) -> Void
+    let onError: @Sendable (String, Int, String, Int, TransferEngine) -> Void
     let onStopped: @Sendable (String, Int, TransferEngine) -> Void
     private var terminal: Set<TransferKey> = []
 
     init(store: TransferStore,
          onFinish: @escaping @Sendable (String, Int, TransferEngine) -> Void,
-         onError: @escaping @Sendable (String, String, Int, TransferEngine) -> Void,
+         onError: @escaping @Sendable (String, Int, String, Int, TransferEngine) -> Void,
          onStopped: @escaping @Sendable (String, Int, TransferEngine) -> Void) {
         self.store = store
         self.onFinish = onFinish
@@ -296,7 +296,7 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, URLS
         store.drop(key: key)
         let nsError = error as NSError
         let code = nsError.domain == NSURLErrorDomain ? nsError.code : NSURLErrorCannotWriteToFile
-        onError(info.item, nsError.localizedDescription, code, info.engine)
+        onError(info.item, info.conn, nsError.localizedDescription, code, info.engine)
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
@@ -386,7 +386,7 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, URLS
             if (error as NSError).code == NSURLErrorCancelled {
                 onStopped(info.item, info.conn, info.engine)
             } else {
-                onError(info.item, error.localizedDescription, (error as NSError).code, info.engine)
+                onError(info.item, info.conn, error.localizedDescription, (error as NSError).code, info.engine)
             }
             return
         }
@@ -396,7 +396,7 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, URLS
         if info.expectedBytes == 0 || size == info.expectedBytes {
             onFinish(info.item, info.conn, info.engine)
         } else {
-            onError(info.item, "The downloaded segment was incomplete.", NSURLErrorCannotWriteToFile, info.engine)
+            onError(info.item, info.conn, "The downloaded segment was incomplete.", NSURLErrorCannotWriteToFile, info.engine)
         }
     }
 
@@ -432,7 +432,13 @@ final class DownloadManager {
     @ObservationIgnored private var foregroundTasks: [String: [URLSessionDataTask]] = [:]
     @ObservationIgnored private var backgroundTasks: [String: URLSessionDownloadTask] = [:]
     /// Foreground cancellations must drain before the background range reads the durable part sizes.
-    @ObservationIgnored private var pendingForegroundStops: [String: Int] = [:]
+    /// Connection indices of foreground writers that have been cancelled but whose buffered file appends
+    /// may still be landing. Tracked as a SET, not a count: the count was only ever decremented by the
+    /// cancellation callback, but a cancelled writer can just as easily finish successfully, error, or be
+    /// consumed by the delegate's own failure path — none of which retired it. The barrier then stuck
+    /// above zero forever, and since `startConnections` refuses to start any engine while it is set, the
+    /// item made ZERO progress for the rest of the process lifetime and reopening the app didn't help.
+    @ObservationIgnored private var pendingForegroundStops: [String: Set<Int>] = [:]
     @ObservationIgnored private var handoffAssertion: UIBackgroundTaskIdentifier = .invalid
     @ObservationIgnored private var resumeData: [String: [Int: Data]] = [:]
     @ObservationIgnored private var finished: [String: Set<Int>] = [:]
@@ -506,8 +512,10 @@ final class DownloadManager {
             onFinish: { [weak self] item, conn, engine in
                 Task { @MainActor in self?.connectionFinished(itemID: item, conn: conn, engine: engine) }
             },
-            onError: { [weak self] item, msg, code, engine in
-                Task { @MainActor in self?.connectionFailed(itemID: item, message: msg, code: code, engine: engine) }
+            onError: { [weak self] item, conn, msg, code, engine in
+                Task { @MainActor in
+                    self?.connectionFailed(itemID: item, conn: conn, message: msg, code: code, engine: engine)
+                }
             },
             onStopped: { [weak self] item, conn, engine in
                 Task { @MainActor in self?.connectionStopped(itemID: item, conn: conn, engine: engine) }
@@ -1690,8 +1698,7 @@ final class DownloadManager {
         // used to skip this barrier (collapseToBackground had it, suspend didn't), so the 3 s relaunch
         // could snapshot a part size mid-drain — the replacement range task then started at a stale
         // offset and its append guard tripped (-3003), cascading into the wipe-and-restart fallback.
-        let writers = foregroundTasks[item.id]?.count ?? 0
-        if writers > 0 { pendingForegroundStops[item.id] = writers }
+        registerDrainBarrier(item)
         cancelTasks(item, produceResumeData: true)
         syncLiveActivity()
     }
@@ -1968,12 +1975,13 @@ final class DownloadManager {
     }
 
     private func collapseToBackground(_ item: DownloadItem) {
-        let active = foregroundTasks.removeValue(forKey: item.id) ?? []
+        let active = foregroundTasks[item.id] ?? []
         guard !active.isEmpty else {
             startAdaptiveBackgroundConnection(item)
             return
         }
-        pendingForegroundStops[item.id] = active.count
+        registerDrainBarrier(item)
+        foregroundTasks[item.id] = nil
         active.forEach { $0.cancel() }
         if handoffAssertion == .invalid {
             handoffAssertion = UIApplication.shared.beginBackgroundTask(withName: "adaptive-download-handoff") { [weak self] in
@@ -1982,15 +1990,57 @@ final class DownloadManager {
         }
     }
 
-    private func expireAdaptiveHandoff() {
-        let itemIDs = Array(pendingForegroundStops.keys)
-        pendingForegroundStops.removeAll()
-        for itemID in itemIDs {
-            guard let item = items.first(where: { $0.id == itemID }), item.state == .downloading else { continue }
+    /// Record which foreground writers are draining, so no engine reads a part size mid-append. Paired
+    /// with a WATCHDOG: every terminal foreground callback retires its entry, but a callback that never
+    /// arrives (or arrives through a path we don't see) must not be able to wedge the item forever, so
+    /// the barrier is force-drained shortly after the cancellations were issued.
+    private func registerDrainBarrier(_ item: DownloadItem) {
+        let conns = Set((foregroundTasks[item.id] ?? []).compactMap { taskConnection($0) })
+        guard !conns.isEmpty else { return }
+        pendingForegroundStops[item.id] = conns
+        trace("dl-drain", [("item", item.id), ("writers", conns.count)])
+        let id = item.id
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            guard let self, let stuck = self.pendingForegroundStops[id], !stuck.isEmpty else { return }
+            RemoteLog.shared.event("dl-drain-timeout", [("item", id), ("writers", stuck.count)])
+            self.pendingForegroundStops[id] = nil
+            self.drainCompleted(id)
+        }
+    }
+
+    /// Retire one ended foreground writer from the drain barrier. EVERY terminal foreground callback
+    /// routes here — finished, failed and cancelled alike — because only the cancellation path used to,
+    /// and any other outcome left the barrier permanently set.
+    private func foregroundWriterEnded(_ itemID: String, conn: Int) {
+        guard var pending = pendingForegroundStops[itemID] else { return }
+        pending.remove(conn)
+        guard pending.isEmpty else { pendingForegroundStops[itemID] = pending; return }
+        pendingForegroundStops[itemID] = nil
+        drainCompleted(itemID)
+    }
+
+    /// All cancelled writers have finished appending: it is now safe to read part sizes and restart.
+    ///
+    /// Only `.downloading` items restart here — that's the engine handoff, which must continue
+    /// immediately. An item parked `.waitingForNetwork` is deliberately backing off and owns its own
+    /// `scheduleNetworkRetry`; restarting it the moment the drain finishes would skip the backoff and,
+    /// on a genuinely unreachable server, spin fail → drain → restart without ever spending the retry
+    /// budget that eventually surfaces the failure.
+    private func drainCompleted(_ itemID: String) {
+        if let item = items.first(where: { $0.id == itemID }), item.state == .downloading {
             reconcileDurableParts(item)
+            partCensus(item, "drained")
             if inBackground { startAdaptiveBackgroundConnection(item) }
             else { startForegroundConnections(item) }
         }
+        endAdaptiveHandoffAssertionIfNeeded()
+    }
+
+    private func expireAdaptiveHandoff() {
+        let itemIDs = Array(pendingForegroundStops.keys)
+        pendingForegroundStops.removeAll()
+        for itemID in itemIDs { drainCompleted(itemID) }
         endAdaptiveHandoffAssertionIfNeeded()
     }
 
@@ -2001,18 +2051,8 @@ final class DownloadManager {
     }
 
     private func connectionStopped(itemID: String, conn: Int, engine: TransferEngine) {
-        guard engine == .foreground, let remaining = pendingForegroundStops[itemID] else { return }
-        if remaining > 1 {
-            pendingForegroundStops[itemID] = remaining - 1
-            return
-        }
-        pendingForegroundStops[itemID] = nil
-        if let item = items.first(where: { $0.id == itemID }), item.state == .downloading {
-            reconcileDurableParts(item)
-            if inBackground { startAdaptiveBackgroundConnection(item) }
-            else { startForegroundConnections(item) }
-        }
-        endAdaptiveHandoffAssertionIfNeeded()
+        guard engine == .foreground else { return }
+        foregroundWriterEnded(itemID, conn: conn)
     }
 
     // MARK: - Completion / merge
@@ -2109,6 +2149,18 @@ final class DownloadManager {
             backgroundTasks[itemID] = nil
         } else {
             foregroundTasks[itemID]?.removeAll { taskConnection($0) == conn }
+            foregroundWriterEnded(itemID, conn: conn)   // a cancelled writer can still finish cleanly
+        }
+        // A cold background relaunch rebuilds items as .paused before `reconnectTasks` can flip them,
+        // and the app is relaunched precisely BECAUSE a task reached a terminal state — so that task is
+        // already gone from `getAllTasks` and the state never flips. Every "continue" branch below is
+        // gated on .downloading, so the transfer committed one slice per relaunch and then stopped dead
+        // (and the Live Activity, seeing nothing active, ended itself). A delegate callback arriving for
+        // a paused item proves the transfer is live: a user pause cancels its tasks, which routes to
+        // connectionStopped instead. Adopt it.
+        if item.state == .paused, engine == .background, resumeOnForeground.contains(itemID) == false {
+            item.state = .downloading
+            trace("dl-adopt", [("item", itemID), ("conn", conn), ("bytes", item.receivedBytes)])
         }
         // A finished BACKGROUND task means one bounded slice is now durable — not that the whole
         // connection is done. Only a part that reached its full segment size closes the connection;
@@ -2148,7 +2200,14 @@ final class DownloadManager {
         NSURLErrorResourceUnavailable, NSURLErrorSecureConnectionFailed
     ]
 
-    private func connectionFailed(itemID: String, message: String, code: Int, engine: TransferEngine) {
+    private func connectionFailed(itemID: String, conn: Int, message: String, code: Int, engine: TransferEngine) {
+        // Retire the writer from the drain barrier FIRST — before any state guard can return early.
+        // A cancelled writer that reports a real error (rather than -999) still has to release the
+        // barrier, or the item never starts another engine.
+        if engine == .foreground {
+            foregroundTasks[itemID]?.removeAll { taskConnection($0) == conn }
+            foregroundWriterEnded(itemID, conn: conn)
+        }
         guard let item = items.first(where: { $0.id == itemID }), item.state == .downloading else { return }
         // Every non-cancellation transfer error, always (not trace-gated) — the code + engine pair is
         // what distinguishes a daemon range refusal from a server problem from an append-guard trip.
@@ -2259,8 +2318,15 @@ final class DownloadManager {
         if Self.transientNetworkCodes.contains(code) && retries < maxNetworkRetries {
             // Pause the *whole* item with resume data and wait — resuming when connectivity is back keeps
             // the partial progress of every connection instead of restarting from zero.
+            //
+            // This path cancels the other seven writers, so it needs the drain barrier too: the v1.0.305
+            // note lives in suspend(), but suspend(auto:) is only reachable from pause() — this branch
+            // never went through it. Without the barrier, NWPathMonitor reporting .satisfied milliseconds
+            // later (a Wi-Fi flap, not a 3 s wait) restarted writers against part sizes still being
+            // appended to, so two writers held handles on one part and both seekToEnd().write().
             item.state = .waitingForNetwork
             item.error = nil
+            registerDrainBarrier(item)
             cancelTasks(item, produceResumeData: true)
             scheduleNetworkRetry(item)
         } else {
@@ -2339,6 +2405,9 @@ final class DownloadManager {
         pathSatisfied = satisfied
         guard satisfied else { return }
         for item in items where item.state == .waitingForNetwork {
+            // Never relaunch across a live drain: the barrier's completion restarts the engine itself,
+            // with part sizes that are settled. A path flap can fire milliseconds after the cancellations.
+            guard pendingForegroundStops[item.id] == nil else { continue }
             networkRetries[item.id, default: 0] += 1
             launch(item, reset: false)
         }
