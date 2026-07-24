@@ -89,15 +89,6 @@ final class DownloadItem: Identifiable {
     /// Target resolution for a server transcode. Defaults to Original (keep source resolution) — the user
     /// picks 1080p/720p/480p only when they want to downscale.
     var serverResolution: ServerQuality = .original
-    /// Fast segmented transfer while foregrounded, collapsing to one durable connection in the background.
-    /// False uses one full-file background task for the entire transfer. Defaults ON (owner decision
-    /// 2026-07-24): the daily flow is start-and-watch on home Wi-Fi, where the 8-way engine matters; the
-    /// adaptive engine still collapses to one background connection on suspension either way.
-    var multiThread = true
-    /// Bytes moved by the parallel full-file daemon leg (the "shadow" — see `startShadowDownload`).
-    /// Display-only: durable truth stays in the part files. Never reset mid-transfer, so the shown
-    /// progress (`max(receivedBytes, shadowBytes)`) can't move backwards when the shadow pauses.
-    var shadowBytes: Int64 = 0
     // MARK: Companion (server-side plugin) transcode staging
     /// When set, Start routes through the Stashy Companion plugin to produce an iPhone-native HEVC/AV1
     /// file, then downloads that. nil = not a companion transcode (original or built-in server H.264).
@@ -167,7 +158,7 @@ final class DownloadItem: Identifiable {
     }
 
     init(id: String, title: String, url: URL, fileName: String, ext: String,
-         codec: String?, width: Int?, height: Int?, bitRate: Int?, totalBytes: Int64, connectionCount: Int,
+         codec: String?, width: Int?, height: Int?, bitRate: Int?, totalBytes: Int64,
          scene: StashScene? = nil, apiKey: String = "", localThumb: URL? = nil) {
         self.id = id
         self.title = title
@@ -182,26 +173,15 @@ final class DownloadItem: Identifiable {
         self.scene = scene
         self.apiKey = apiKey
         self.localThumb = localThumb
-        let n = max(1, connectionCount)
-        let chunk = totalBytes / Int64(n)
-        self.connections = (0..<n).map { i in
-            let isLast = i == n - 1
-            let total = totalBytes > 0 ? (isLast ? totalBytes - chunk * Int64(n - 1) : chunk) : 0
-            return DownloadConnection(id: i, color: DownloadConnection.palette[i % DownloadConnection.palette.count], total: total)
-        }
+        self.connections = [DownloadConnection(id: 0, color: DownloadConnection.palette[0],
+                                               total: totalBytes)]
     }
 
-    /// Rebuild the connection segments for the source/thread-count chosen at Start (a staged item's real
-    /// URL, total size, and connection count aren't known until then). Mirrors the `init` split.
-    func rebuildConnections(count: Int, totalBytes: Int64) {
+    /// Set the real size once Start resolves the source (a staged item's URL and size aren't known
+    /// until then). One connection, so this is just the single segment's total.
+    func rebuildConnections(totalBytes: Int64) {
         self.totalBytes = totalBytes
-        let n = max(1, count)
-        let chunk = totalBytes / Int64(n)
-        connections = (0..<n).map { i in
-            let isLast = i == n - 1
-            let total = totalBytes > 0 ? (isLast ? totalBytes - chunk * Int64(n - 1) : chunk) : 0
-            return DownloadConnection(id: i, color: DownloadConnection.palette[i % DownloadConnection.palette.count], total: total)
-        }
+        connections = [DownloadConnection(id: 0, color: DownloadConnection.palette[0], total: totalBytes)]
     }
 }
 
@@ -250,7 +230,7 @@ private final class TransferStore: @unchecked Sendable {
 /// A task's identity (item id, connection, part path) is also encoded in its `taskDescription`, so after
 /// the app is relaunched to finish a background transfer — when the in-memory store is empty — the
 /// delegate can still route the finished file to the right part and item.
-private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, URLSessionDataDelegate, @unchecked Sendable {
+private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     let store: TransferStore
     let onFinish: @Sendable (String, Int, TransferEngine) -> Void
     let onError: @Sendable (String, Int, String, Int, TransferEngine) -> Void
@@ -301,41 +281,6 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, URLS
         let nsError = error as NSError
         let code = nsError.domain == NSURLErrorDomain ? nsError.code : NSURLErrorCannotWriteToFile
         onError(info.item, info.conn, nsError.localizedDescription, code, info.engine)
-    }
-
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
-                    didReceive response: URLResponse,
-                    completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void) {
-        guard let info = info(for: session, task: dataTask), let http = response as? HTTPURLResponse else {
-            completionHandler(.cancel); return
-        }
-        let valid = info.rangeRequest ? http.statusCode == 206 : (200..<300).contains(http.statusCode)
-        guard valid else {
-            fail(URLError(.badServerResponse), session: session, task: dataTask, info: info)
-            completionHandler(.cancel)
-            return
-        }
-        completionHandler(.allow)
-    }
-
-    /// Foreground multi-thread tasks append each network chunk directly to durable part files. No opaque
-    /// URLSession temporary file or cross-session resume blob is needed when the app backgrounds.
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        guard let info = info(for: session, task: dataTask) else { return }
-        let fm = FileManager.default
-        do {
-            try fm.createDirectory(at: info.part.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if !fm.fileExists(atPath: info.part.path) { fm.createFile(atPath: info.part.path, contents: nil) }
-            let handle = try FileHandle(forWritingTo: info.part)
-            try handle.seekToEnd()
-            try handle.write(contentsOf: data)
-            try handle.close()
-            let size = ((try? fm.attributesOfItem(atPath: info.part.path))?[.size] as? NSNumber)?.int64Value ?? 0
-            store.setReceived(key: key(for: session, task: dataTask), size)
-        } catch {
-            fail(error, session: session, task: dataTask, info: info)
-            dataTask.cancel()
-        }
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
@@ -394,14 +339,8 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, URLS
             }
             return
         }
-        // Download-task success is handled by didFinishDownloadingTo. A foreground data task completes here.
-        guard info.engine == .foreground else { return }
-        let size = ((try? FileManager.default.attributesOfItem(atPath: info.part.path))?[.size] as? NSNumber)?.int64Value ?? 0
-        if info.expectedBytes == 0 || size == info.expectedBytes {
-            onFinish(info.item, info.conn, info.engine)
-        } else {
-            onError(info.item, info.conn, "The downloaded segment was incomplete.", NSURLErrorCannotWriteToFile, info.engine)
-        }
+        // Success is handled by didFinishDownloadingTo — the only tasks this delegate serves are
+        // background download tasks.
     }
 
     /// The background session has delivered every event queued while the app was suspended — release the
@@ -422,30 +361,12 @@ final class DownloadManager {
     /// silently indistinguishable from a lifecycle bug. Cleared after a successful activity starts.
     var liveActivityError: String?
 
-    @ObservationIgnored private let connectionCount = 8
-    /// Connection index reserved for the shadow full-file daemon leg — outside 0..<connectionCount, so
-    /// its task/part ("<id>-999.part") can never collide with a real segment's bookkeeping.
-    private static let shadowConn = 999
     @ObservationIgnored private let store = TransferStore()
-    /// Multi-thread mode writes range data directly into durable parts on this in-process session.
-    @ObservationIgnored private var fgSession: URLSession!
     /// Single/full downloads and the one adaptive connection that survives suspension use this session.
     @ObservationIgnored private var bgSession: URLSession!
     @ObservationIgnored private var delegate: DownloadDelegate!
-    @ObservationIgnored private var foregroundTasks: [String: [URLSessionDataTask]] = [:]
     @ObservationIgnored private var backgroundTasks: [String: URLSessionDownloadTask] = [:]
     /// Foreground cancellations must drain before the background range reads the durable part sizes.
-    /// Connection indices of foreground writers that have been cancelled but whose buffered file appends
-    /// may still be landing. Tracked as a SET, not a count: the count was only ever decremented by the
-    /// cancellation callback, but a cancelled writer can just as easily finish successfully, error, or be
-    /// consumed by the delegate's own failure path — none of which retired it. The barrier then stuck
-    /// above zero forever, and since `startConnections` refuses to start any engine while it is set, the
-    /// item made ZERO progress for the rest of the process lifetime and reopening the app didn't help.
-    @ObservationIgnored private var pendingForegroundStops: [String: Set<Int>] = [:]
-    /// Keeps the 8-way foreground writers streaming durable bytes for the ~30 s of background runtime
-    /// iOS grants after minimizing. When it expires, the writers drain and the item HOLDS; when the
-    /// user comes back sooner, the assertion just ends — the transfer never even blipped.
-    @ObservationIgnored private var graceAssertion: UIBackgroundTaskIdentifier = .invalid
     @ObservationIgnored private var resumeData: [String: [Int: Data]] = [:]
     @ObservationIgnored private var finished: [String: Set<Int>] = [:]
     @ObservationIgnored private var pollTask: Task<Void, Never>?
@@ -461,17 +382,6 @@ final class DownloadManager {
     /// One automatic clean restart for a legacy background range task that returns -3000 after updating.
     /// Kept separate from network retries so byte progress can't accidentally create an infinite loop.
     @ObservationIgnored private var fileRecoveryAttempts: [String: Int] = [:]
-    /// Items whose background range transfers the daemon refused — held (parts intact) until the app
-    /// returns to the foreground, where the 8-way engine resumes from the durable parts with zero loss.
-    /// The pre-v1.0.304 behavior wiped every part and restarted single-threaded from byte 0 in the
-    /// background, which read as "the download stalled/slowed to a crawl" after minimizing.
-    @ObservationIgnored private var resumeOnForeground: Set<String> = []
-    /// Items whose server refused a range request (no 206). Only these — plus unknown-size transfers —
-    /// use the legacy full-file download task; every known-size single download runs on the durable
-    /// range engine (one foreground data task streaming into part 0 ⇄ one background range task), so a
-    /// network blip or backgrounding never loses bytes to an unresumable full-file restart. In-memory
-    /// only: after a relaunch the ranged attempt self-heals (206 check refuses → lands back here).
-    @ObservationIgnored private var rangeUnsupported: Set<String> = []
     /// True while the app is backgrounded. Transfers need no phase handoff; this only governs work such as
     /// on-device transcoding that must pause while the process is suspended.
     @ObservationIgnored private var inBackground = false
@@ -533,10 +443,6 @@ final class DownloadManager {
         delegateQueue.maxConcurrentOperationCount = 1
         delegateQueue.qualityOfService = .utility
 
-        let fgConfig = URLSessionConfiguration.default
-        fgConfig.waitsForConnectivity = true
-        fgSession = URLSession(configuration: fgConfig, delegate: delegate, delegateQueue: delegateQueue)
-
         let bgConfig = URLSessionConfiguration.background(withIdentifier: BackgroundDownloadSession.identifier)
         bgConfig.sessionSendsLaunchEvents = true
         bgConfig.isDiscretionary = false
@@ -572,7 +478,7 @@ final class DownloadManager {
             id: scene.id, title: scene.title ?? base, url: url,
             fileName: base, ext: ext, codec: file?.video_codec,
             width: file?.width, height: file?.height, bitRate: file?.bit_rate,
-            totalBytes: total, connectionCount: total > 0 ? connectionCount : 1, scene: scene, apiKey: apiKey
+            totalBytes: total, scene: scene, apiKey: apiKey
         )
         items.insert(item, at: 0)
         startConnections(item)
@@ -593,7 +499,7 @@ final class DownloadManager {
             id: scene.id, title: scene.title ?? base, url: url,
             fileName: base, ext: ext, codec: file?.video_codec,
             width: file?.width, height: file?.height, bitRate: file?.bit_rate,
-            totalBytes: Int64(file?.size ?? 0), connectionCount: 1, scene: scene, apiKey: apiKey
+            totalBytes: Int64(file?.size ?? 0), scene: scene, apiKey: apiKey
         )
         item.state = .staged
         items.insert(item, at: 0)
@@ -616,7 +522,7 @@ final class DownloadManager {
             }
             item.url = url
             item.ext = "mp4"                                    // Stash server transcode is H.264/AAC MP4
-            item.rebuildConnections(count: 1, totalBytes: 0)    // unknown size → single connection, plain GET
+            item.rebuildConnections(totalBytes: 0)              // unknown size → plain GET, no Range
         } else {
             guard let url = scene.directFileURL(apiKey: apiKey) else {
                 item.error = "This scene has no direct file URL"; return
@@ -624,8 +530,7 @@ final class DownloadManager {
             item.url = url
             item.ext = scene.fileContainer.isEmpty ? "mp4" : scene.fileContainer
             let total = Int64(scene.files.first?.size ?? 0)
-            item.rebuildConnections(count: item.multiThread && total > 0 ? connectionCount : 1,
-                                    totalBytes: total)
+            item.rebuildConnections(                                    totalBytes: total)
         }
         item.error = nil
         startConnections(item)
@@ -915,8 +820,7 @@ final class DownloadManager {
             container: item.ext, codec: item.codec, width: item.width, height: item.height,
             bitRate: item.bitRate, size: size > 0 ? Int(size) : nil)
         item.scene = transcodedScene
-        item.rebuildConnections(count: item.multiThread && size > 0 ? connectionCount : 1,
-                                totalBytes: size)
+        item.rebuildConnections(                                totalBytes: size)
         item.error = nil
         startConnections(item)                       // preserves the transfer mode selected before transcoding
         fetchSidecar(item, scene: transcodedScene, apiKey: item.apiKey, transcoded: true)
@@ -986,7 +890,7 @@ final class DownloadManager {
     private func persistServerSidecar(_ item: DownloadItem, scene: StashScene, codec: StashCompanion.Codec) {
         guard let data = try? JSONEncoder().encode(Sidecar(
             scene: scene, apiKey: item.apiKey, transcoded: false,
-            multiThread: item.multiThread,
+            multiThread: false,
             serverProcessing: true, companionJobID: item.companionJobID,
             companionCodec: codec.rawValue, companionResolution: item.serverResolution.rawValue,
             companionQuality: item.companionQuality.rawValue)) else { return }
@@ -1040,8 +944,8 @@ final class DownloadManager {
         // Sidecar JSON (scene + apiKey + the exact download source) written synchronously — it's tiny.
         if let data = try? JSONEncoder().encode(Sidecar(
             scene: scene, apiKey: apiKey, transcoded: transcoded,
-            downloadURL: item.url.absoluteString, connectionCount: item.connections.count,
-            multiThread: item.multiThread,
+            downloadURL: item.url.absoluteString, connectionCount: 1,
+            multiThread: false,
             serverTranscode: item.useServerTranscode, downloadExt: item.ext)) {
             try? data.write(to: meta.appendingPathComponent("\(id).json"), options: .atomic)
         }
@@ -1058,18 +962,6 @@ final class DownloadManager {
         }
     }
 
-    /// Rewrite only the small transfer sidecar after adaptive mode falls back to a full-file task. Avoids
-    /// re-fetching poster/sprite assets and ensures a relaunch doesn't restore the rejected multi mode.
-    private func persistTransferPreference(_ item: DownloadItem) {
-        guard let scene = item.scene,
-              let data = try? JSONEncoder().encode(Sidecar(
-                scene: scene, apiKey: item.apiKey, transcoded: item.wasTranscoded,
-                downloadURL: item.url.absoluteString, connectionCount: item.connections.count,
-                multiThread: item.multiThread, serverTranscode: item.useServerTranscode,
-                downloadExt: item.ext)) else { return }
-        try? data.write(to: metaDir.appendingPathComponent("\(item.id).json"), options: .atomic)
-    }
-
     // `transcoded` is optional so sidecars written before this field existed still decode (absent → nil).
     // The download-source fields are persisted so an interrupted download reconstructs with the EXACT URL +
     // connection count (critical for a server-transcode download — re-deriving the original file URL would
@@ -1080,6 +972,8 @@ final class DownloadManager {
         let transcoded: Bool?
         var downloadURL: String? = nil
         var connectionCount: Int? = nil
+        /// Legacy: the transfer used to be switchable between one and eight connections. Kept so older
+        /// sidecars still decode; the engine is single-connection now and ignores it.
         var multiThread: Bool? = nil
         var serverTranscode: Bool? = nil
         var downloadExt: String? = nil
@@ -1464,8 +1358,7 @@ final class DownloadManager {
         // any diagnostic session.
         if reset, item.receivedBytes > 0 {
             RemoteLog.shared.event("dl-wipe", [
-                ("item", item.id), ("lost", item.receivedBytes), ("total", item.totalBytes),
-                ("conns", item.connections.count), ("multi", item.multiThread)])
+                ("item", item.id), ("lost", item.receivedBytes), ("total", item.totalBytes)])
         }
         if reset {
             cancelTasks(item, produceResumeData: false)
@@ -1479,32 +1372,8 @@ final class DownloadManager {
     }
 
     private func startConnections(_ item: DownloadItem) {
-        // Never start an engine while cancelled writers are still draining their buffered file appends —
-        // a part-size snapshot taken mid-drain is stale and poisons the next range request. Park the item
-        // as waiting; the retry loop re-fires in 3 s, by which time the drain callbacks have long landed.
-        if pendingForegroundStops[item.id] != nil {
-            item.state = .waitingForNetwork
-            scheduleNetworkRetry(item)
-            return
-        }
-        let desiredCount = item.multiThread && item.totalBytes > 0 ? connectionCount : 1
-        // A mode change changes the part geometry, so it is only applied before starting or on an explicit
-        // retry. Normal foreground/background transitions keep the same durable eight-part layout.
-        //
-        // Guarded on having NO durable bytes: rebuilding deletes every part, so a demote arriving
-        // mid-transfer (e.g. a late range refusal on an item that is already 15% downloaded) would
-        // silently restart from zero. The paths that legitimately change geometry all come through
-        // launch(reset: true), which zeroes the item first — so they still rebuild as intended.
-        if item.connections.count != desiredCount, item.receivedBytes == 0 {
-            cancelTasks(item, produceResumeData: false)
-            cleanupParts(item.id)
-            item.rebuildConnections(count: desiredCount, totalBytes: item.totalBytes)
-            item.receivedBytes = 0
-            item.lastSampleBytes = 0
-            trace("dl-geometry", [("item", item.id), ("conns", desiredCount), ("multi", item.multiThread)])
-            if let scene = item.scene {
-                fetchSidecar(item, scene: scene, apiKey: item.apiKey, transcoded: item.wasTranscoded)
-            }
+        if item.totalBytes > 0, item.connections.first?.total != item.totalBytes {
+            item.rebuildConnections(totalBytes: item.totalBytes)
         }
         item.state = .downloading
         item.error = nil
@@ -1512,45 +1381,25 @@ final class DownloadManager {
         item.lastSampleBytes = item.receivedBytes
         markActive(item.id)
         reconcileDurableParts(item)
-        // Two engines with honest contracts, split by the user's Transfer choice (device-verified on
-        // iOS 26.5.2, see the -3000 landmine: a background-session download task CANNOT deliver a
-        // Range/206 response — it transfers the whole body then fails with -3000 "Cannot create file"
-        // at the delivery step, in background AND foreground alike — so there is no daemon-supported
-        // way to continue a multi-part item unattended):
-        //  • Single ("Background" mode) = ONE full-file (200) task on the background session — the
-        //    transport the daemon fully supports; it keeps downloading and completes unattended.
-        //  • Multi ("Multi-thread") = the fast durable 8-way foreground engine; minimizing keeps the
-        //    writers alive for the ~30 s background grace, then HOLDS with parts intact.
-        if usesLegacySingle(item) {
-            startFullBackgroundDownload(item)
-        } else if inBackground {
-            startShadowDownload(item)
-        } else {
-            startForegroundConnections(item)
-        }
+        startFullBackgroundDownload(item)
         syncLiveActivity()
     }
 
-    /// Whether this item runs on the full-file background-session task (every single-connection item:
-    /// it is the only transport that can continue unattended) instead of the ranged foreground engine.
-    private func usesLegacySingle(_ item: DownloadItem) -> Bool {
-        item.connections.count == 1
-    }
-
-    /// Park a multi-part item with its durable parts intact until the app returns to the foreground.
-    /// The Live Activity stays alive in the "Progress saved" state via the `resumeOnForeground` branch.
-    private func holdForForeground(_ item: DownloadItem) {
-        guard item.state == .downloading || item.state == .waitingForNetwork else { return }
-        item.state = .paused
-        resumeOnForeground.insert(item.id)
-        partCensus(item, "hold")
-        syncLiveActivity()
-    }
-
+    /// THE engine: one full-file (200) download task on the background session, whether or not the app
+    /// is in the foreground.
+    ///
+    /// This is deliberately the ONLY transfer path. Two device-verified facts pin it there: a
+    /// background-session task cannot deliver a Range/206 response at all (it transfers the whole body
+    /// then fails -3000 "Cannot create file" at delivery — see the -3000 landmine), and benchmarking
+    /// against the owner's own server showed parallel range connections buy nothing over LAN or
+    /// cellular. So the segmented foreground engine bought complexity and no speed, while being the one
+    /// thing that could NOT continue with the app suspended. A single daemon task keeps running while
+    /// the app is minimized, survives the app being killed, and relaunches the app to finalise.
     private func startFullBackgroundDownload(_ item: DownloadItem) {
         guard backgroundTasks[item.id] == nil else { return }
         if (finished[item.id] ?? []).contains(0) { finalizeIfComplete(item); return }
         let task: URLSessionDownloadTask
+        let resumed = resumeData[item.id]?[0] != nil
         if let data = resumeData[item.id]?[0] {
             task = bgSession.downloadTask(withResumeData: data)
             resumeData[item.id]?[0] = nil
@@ -1562,152 +1411,8 @@ final class DownloadManager {
         backgroundTasks[item.id] = task
         clearResumeFiles(item.id)
         task.resume()
-    }
-
-    /// Open durable foreground range writers for every unfinished segment that doesn't already have a
-    /// live writer, skipping the one the background daemon still owns — so returning to the app expands
-    /// back to eight connections without cancelling or duplicating the background connection. This TOPS
-    /// UP rather than being all-or-nothing: when a background slice completes while the app is in the
-    /// foreground, its segment would otherwise sit idle until every other connection had finished.
-    private func startForegroundConnections(_ item: DownloadItem) {
-        reconcileDurableParts(item)
-        let backgroundConn = backgroundTasks[item.id].flatMap { taskConnection($0) }
-        let done = finished[item.id] ?? []
-        // Drop writers that have already ended (finished, failed or cancelled) so their segments are
-        // eligible again; a live task's segment must never get a second writer appending to the part.
-        var live = (foregroundTasks[item.id] ?? []).filter { $0.state == .running || $0.state == .suspended }
-        let busy = Set(live.compactMap { taskConnection($0) })
-        for i in item.connections.indices
-        where !done.contains(i) && i != backgroundConn && !busy.contains(i) {
-            let part = partURL(item.id, i)
-            let base = fileSize(part)
-            let (lo, hi) = chunkRange(item, i)
-            guard lo + base <= hi else { continue }
-            var request = URLRequest(url: item.url)
-            request.setValue("bytes=\(lo + base)-\(hi)", forHTTPHeaderField: "Range")
-            let task = fgSession.dataTask(with: request)
-            register(task, item: item, conn: i, engine: .foreground, base: base,
-                     expected: item.connections[i].total, rangeRequest: true)
-            live.append(task)
-            task.resume()
-        }
-        foregroundTasks[item.id] = live
-        trace("dl-fg-start", [("item", item.id), ("live", live.count),
-                              ("bg_conn", backgroundConn), ("done", done.count),
-                              ("bytes", item.receivedBytes)])
-        if live.isEmpty, backgroundTasks[item.id] == nil { finalizeIfComplete(item) }
-    }
-
-    // NOTE deliberately absent: there is NO background range engine. Device logs (iOS 26.5.2, item
-    // 2761/2767, 2026-07-24) proved a background-session download task with a Range header transfers
-    // its whole body and then always fails with -3000 "Cannot create file" at delivery — backgrounded
-    // or foregrounded, one task or eight. Do not reintroduce bg range tasks. Unattended continuation
-    // for multi-part items is the SHADOW below; `holdForForeground` is the fallback if it fails.
-
-    /// Start (or resume from its iOS blob) the parallel full-file daemon leg for a multi-part item —
-    /// the owner's "switch to single-thread when I leave, back to multi-thread when I return".
-    ///
-    /// The daemon can't continue the eight partial segments (full-file 200 is its only working
-    /// transport, and it always starts at byte 0 or at its OWN blob's offset), so the shadow is a
-    /// second, independent transfer of the same file into "<id>-999.part". The durable parts are
-    /// untouched: foregrounding pauses the shadow (keeping its blob for the next minimize) and resumes
-    /// the 8-way engine; whichever leg finishes first produces the file. The price is re-downloading
-    /// bytes the other leg already has — bounded, self-hosted-server-cheap, and the only public-API
-    /// path to a multi-thread download that completes with the app suspended.
-    private func startShadowDownload(_ item: DownloadItem) {
-        guard backgroundTasks[item.id] == nil, item.state == .downloading else { return }
-        let resumed = resumeData[item.id]?[Self.shadowConn] != nil
-        let task: URLSessionDownloadTask
-        if let data = resumeData[item.id]?[Self.shadowConn] {
-            task = bgSession.downloadTask(withResumeData: data)
-            resumeData[item.id]?[Self.shadowConn] = nil
-        } else {
-            task = bgSession.downloadTask(with: URLRequest(url: item.url))
-        }
-        register(task, item: item, conn: Self.shadowConn, engine: .background, base: 0,
-                 expected: item.totalBytes, rangeRequest: false)
-        backgroundTasks[item.id] = task
-        try? FileManager.default.removeItem(at: resumeDataURL(item.id, Self.shadowConn))
-        task.resume()
-        RemoteLog.shared.event("dl-shadow", [
-            ("item", item.id), ("ev", "start"), ("resumed", resumed ? 1 : 0),
-            ("parts", item.receivedBytes), ("shadow", item.shadowBytes)])
-    }
-
-    /// Foreground return: park the shadow with `cancel(byProducingResumeData:)` so its next start
-    /// continues from the daemon's own offset instead of byte 0. `shadowBytes` deliberately keeps its
-    /// last value — the displayed max() must not drop when the leg pauses.
-    private func pauseShadow(_ item: DownloadItem) {
-        guard let task = backgroundTasks[item.id], taskConnection(task) == Self.shadowConn else { return }
-        backgroundTasks[item.id] = nil
-        let id = item.id
-        task.cancel(byProducingResumeData: { [weak self] data in
-            guard let data else { return }
-            Task { @MainActor in
-                guard let self else { return }
-                self.resumeData[id, default: [:]][Self.shadowConn] = data
-                try? data.write(to: self.resumeDataURL(id, Self.shadowConn), options: .atomic)
-            }
-        })
-        RemoteLog.shared.event("dl-shadow", [("item", id), ("ev", "pause"), ("shadow", item.shadowBytes)])
-    }
-
-    /// The shadow finished the WHOLE file: it wins. Promote its output to the completed download and
-    /// retire the parts leg. Mirrors `finalizeIfComplete`'s success tail via `merge(parts:into:)`'s
-    /// single-file move.
-    private func finalizeFromShadow(_ item: DownloadItem) {
-        guard item.state != .merging, item.state != .completed else { return }
-        let src = partURL(item.id, Self.shadowConn)
-        let size = fileSize(src)
-        guard item.totalBytes > 0, size == item.totalBytes else {
-            // Truncated/short delivery: discard this leg; the durable parts leg is unaffected and a
-            // fresh shadow starts on the next grace expiry.
-            try? FileManager.default.removeItem(at: src)
-            RemoteLog.shared.event("dl-shadow", [
-                ("item", item.id), ("ev", "size-mismatch"), ("size", size), ("total", item.totalBytes)])
-            return
-        }
-        registerDrainBarrier(item)                       // any live writers drain into parts we no longer need
-        cancelTasks(item, produceResumeData: false)
-        item.state = .merging
-        let dest = downloadsDir.appendingPathComponent("\(item.id).\(item.ext)")
-        var bg: UIBackgroundTaskIdentifier = .invalid
-        bg = UIApplication.shared.beginBackgroundTask(withName: "shadow-finalize-\(item.id)") {
-            if bg != .invalid { UIApplication.shared.endBackgroundTask(bg) }
-        }
-        Task.detached(priority: .userInitiated) {
-            let ok = Self.merge(parts: [src], into: dest)
-            await MainActor.run {
-                if ok {
-                    item.localURL = dest
-                    item.receivedBytes = item.totalBytes
-                    item.shadowBytes = item.totalBytes
-                    for i in item.connections.indices { item.connections[i].received = item.connections[i].total }
-                    item.state = .completed
-                    self.fileRecoveryAttempts[item.id] = nil
-                    self.resumeOnForeground.remove(item.id)
-                    self.clearActive(item.id)
-                    if item.companionCodec != nil { self.deleteServerProxy(sceneID: item.id, apiKey: item.apiKey) }
-                    self.cleanupParts(item.id)
-                    RemoteLog.shared.event("dl-shadow", [("item", item.id), ("ev", "done"), ("bytes", size)])
-                    // A drained writer's already-queued append can recreate a part file after the
-                    // cleanup above; sweep once more when those callbacks have certainly landed.
-                    let id = item.id
-                    Task { @MainActor [weak self] in
-                        try? await Task.sleep(for: .seconds(2))
-                        self?.cleanupParts(id)
-                    }
-                } else {
-                    // Keep the durable parts; drop the shadow output. The item resumes on the parts leg.
-                    try? FileManager.default.removeItem(at: src)
-                    item.state = .paused
-                    self.resumeOnForeground.insert(item.id)
-                    RemoteLog.shared.event("dl-shadow", [("item", item.id), ("ev", "finalize-fail")])
-                }
-                self.syncLiveActivity()
-                if bg != .invalid { UIApplication.shared.endBackgroundTask(bg) }
-            }
-        }
+        trace("dl-start", [("item", item.id), ("resumed", resumed ? 1 : 0),
+                           ("total", item.totalBytes)])
     }
 
     private func register(_ task: URLSessionTask, item: DownloadItem, conn: Int, engine: TransferEngine,
@@ -1719,13 +1424,6 @@ final class DownloadManager {
         task.taskDescription = [item.id, String(conn), part.path, engine.rawValue, String(base),
                                 String(expected), rangeRequest ? "1" : "0"].joined(separator: "\u{1}")
         store.register(key: TransferKey(session: sessionKey, task: task.taskIdentifier), info: info)
-    }
-
-    private func chunkRange(_ item: DownloadItem, _ i: Int) -> (Int64, Int64) {
-        let chunk = item.totalBytes / Int64(item.connections.count)
-        let lo = Int64(i) * chunk
-        let hi = i == item.connections.count - 1 ? item.totalBytes - 1 : Int64(i + 1) * chunk - 1
-        return (lo, hi)
     }
 
     private func taskConnection(_ task: URLSessionTask) -> Int? {
@@ -1757,29 +1455,28 @@ final class DownloadManager {
             .joined(separator: ",")
         let pct: Int? = item.totalBytes > 0
             ? Int(Double(item.receivedBytes) / Double(item.totalBytes) * 100) : nil
-        let shadow: Int64? = item.shadowBytes > 0 ? item.shadowBytes : nil
         RemoteLog.shared.event("dl-parts", [
             ("item", item.id), ("why", why), ("kb", sizes),
             ("sum", item.receivedBytes), ("total", item.totalBytes), ("pct", pct),
-            ("fg", foregroundTasks[item.id]?.count ?? 0),
             ("bg", backgroundTasks[item.id] != nil ? 1 : 0),
-            ("shadow", shadow),
             ("done", (finished[item.id] ?? []).count),
             ("state", String(describing: item.state))])
     }
 
+    /// The daemon streams into ITS OWN temp file and only hands us the result at completion, so part 0
+    /// is empty for the whole transfer and then suddenly whole. This can therefore only ever CONFIRM
+    /// completion — it must never lower `receivedBytes`, which the delegate's byte callbacks own.
+    /// (The old segmented engine appended to parts continuously, which is why this used to recompute
+    /// the total from disk; doing that now would zero a live download's progress on every call.)
     private func reconcileDurableParts(_ item: DownloadItem) {
-        var sum: Int64 = 0
-        for i in item.connections.indices {
-            let size = min(item.connections[i].total > 0 ? item.connections[i].total : Int64.max,
-                           fileSize(partURL(item.id, i)))
-            item.connections[i].received = size
-            sum += size
-            if item.connections[i].total > 0, size >= item.connections[i].total {
-                finished[item.id, default: []].insert(i)
-            }
+        guard let first = item.connections.indices.first else { return }
+        let size = fileSize(partURL(item.id, first))
+        guard size > 0 else { return }
+        item.connections[first].received = size
+        item.receivedBytes = max(item.receivedBytes, size)
+        if item.connections[first].total > 0, size >= item.connections[first].total {
+            finished[item.id, default: []].insert(first)
         }
-        item.receivedBytes = sum
     }
 
     private func suspend(_ item: DownloadItem, auto: Bool) {
@@ -1788,19 +1485,15 @@ final class DownloadManager {
         // Register the drain barrier BEFORE cancelling: a cancelled data task's buffered chunks still
         // append to its durable part until its completion callback lands. Any relaunch that snapshots
         // a part size mid-drain starts a writer at a stale offset — the append guard then trips (-3003).
-        registerDrainBarrier(item)
         cancelTasks(item, produceResumeData: true)
         syncLiveActivity()
     }
 
     private func cancelTasks(_ item: DownloadItem, produceResumeData: Bool) {
-        let foreground = foregroundTasks.removeValue(forKey: item.id) ?? []
-        foreground.forEach { $0.cancel() }
         guard let background = backgroundTasks.removeValue(forKey: item.id) else { return }
-        // Both full-file legs — the legacy single (conn 0) and the multi item's shadow (conn 999) —
-        // are worth an iOS resume blob; a range task never is (blobs don't apply).
+        // The one transfer is a full-file task, so an iOS resume blob is always worth asking for.
         let conn = taskConnection(background) ?? 0
-        if produceResumeData, item.connections.count == 1 || conn == Self.shadowConn {
+        if produceResumeData {
             let id = item.id
             background.cancel(byProducingResumeData: { [weak self] data in
                 guard let data else { return }
@@ -1917,21 +1610,6 @@ final class DownloadManager {
             $0.state == .downloading || $0.state == .waitingForNetwork ||
             $0.state == .merging || $0.state == .serverProcessing
         }
-        // Items HELD after the daemon refused background ranges (parts intact, resumes on foreground)
-        // must keep the Live Activity alive — ending it mid-background read as "the download vanished".
-        let held = items.filter { $0.state == .paused && resumeOnForeground.contains($0.id) }
-        if active.isEmpty, let firstHeld = held.first {
-            let heldBytes = max(firstHeld.receivedBytes, firstHeld.shadowBytes)
-            let progress = firstHeld.totalBytes > 0
-                ? min(1, max(0, Double(heldBytes) / Double(firstHeld.totalBytes)))
-                : nil
-            return .init(
-                phase: .waitingForNetwork, progress: progress,
-                estimatedStart: nil, estimatedEnd: nil, updatedAt: Date.now,
-                status: "Progress saved — resumes when you reopen Stashy",
-                activeJobCount: held.count
-            )
-        }
         guard !active.isEmpty else { return nil }
 
         // Prefer bytes actively moving, then recoverable waits/finalization, then a server preparing the
@@ -1945,9 +1623,7 @@ final class DownloadManager {
 
         switch item.state {
         case .downloading:
-            // Progress the island shows = the furthest of the two legs (durable parts vs shadow), so
-            // it never moves backwards when one leg pauses and the other carries on.
-            let shownBytes = max(item.receivedBytes, item.shadowBytes)
+            let shownBytes = item.receivedBytes
             let progress = item.totalBytes > 0
                 ? min(1, max(0, Double(shownBytes) / Double(item.totalBytes)))
                 : nil
@@ -2026,46 +1702,14 @@ final class DownloadManager {
             cancelTranscode(item, preserveResume: true)   // keep committed chunks so it resumes, not restarts
             item.transcodeStatus = "Paused — resumes automatically when you reopen Stashy"
         }
+        // Transfers need NOTHING here: they run on the background session, which the system keeps
+        // going while we're suspended and which relaunches us to deliver the finished file. The Live
+        // Activity carries on from its measured ETA until we run again and can push real bytes.
         let live = items.filter { $0.state == .downloading }
         RemoteLog.shared.event("dl-phase", [("to", "background"), ("active", live.count)])
         for item in live { partCensus(item, "enter-bg") }
-        // Multi-part items: keep the foreground writers STREAMING through the ~30 s of background
-        // runtime iOS grants — real durable progress, live Live Activity — then hold when it expires.
-        // (There is no daemon engine to hand off to: bg-session range tasks always fail at delivery,
-        // see the -3000 note above holdForForeground.) Legacy full-file singles need nothing — the
-        // daemon continues them unattended, which is the entire point of that mode.
-        if live.contains(where: { !usesLegacySingle($0) }), graceAssertion == .invalid {
-            graceAssertion = UIApplication.shared.beginBackgroundTask(withName: "download-grace") { [weak self] in
-                MainActor.assumeIsolated { self?.graceExpired() }
-            }
-            RemoteLog.shared.event("dl-grace", [
-                ("remaining_s", Int(min(UIApplication.shared.backgroundTimeRemaining, 3600)))])
-        }
         syncLiveActivity()
         RemoteLog.shared.flushNow()   // the periodic timer stops once we're suspended
-    }
-
-    /// iOS is about to suspend us: drain the writers and hand each multi-part transfer to its SHADOW —
-    /// the parallel full-file daemon leg that keeps downloading unattended (the parts stay durable and
-    /// untouched; the shadow writes its own file). Runs inside the assertion's expiration handler, so
-    /// it must finish quickly. If a shadow fails, the -3000 path falls back to holdForForeground.
-    private func graceExpired() {
-        for item in items where item.state == .downloading && !usesLegacySingle(item) {
-            registerDrainBarrier(item)
-            cancelTasks(item, produceResumeData: false)
-            startShadowDownload(item)
-            partCensus(item, "grace-shadow")
-        }
-        syncLiveActivity()
-        RemoteLog.shared.event("dl-grace", [("expired", 1)])
-        RemoteLog.shared.flushNow()
-        endGraceAssertion()
-    }
-
-    private func endGraceAssertion() {
-        guard graceAssertion != .invalid else { return }
-        UIApplication.shared.endBackgroundTask(graceAssertion)
-        graceAssertion = .invalid
     }
 
     private func enterForeground() {
@@ -2085,78 +1729,20 @@ final class DownloadManager {
             item.error = nil
             transcode(item, settings: settings)
         }
-        // A return inside the grace window means the writers never stopped — just release the
-        // assertion and the transfer continues as if the app was never minimized.
-        endGraceAssertion()
-        for item in items where item.state == .downloading && !usesLegacySingle(item) {
-            // Back to multi-thread: park the shadow leg (its blob keeps the daemon's offset for the
-            // next minimize), then top up any missing writers (no-op when all eight survived the
-            // grace). If writers are still draining their cancellation callbacks, the drain
-            // completion restarts them instead.
-            pauseShadow(item)
-            if pendingForegroundStops[item.id] == nil { startForegroundConnections(item) }
-        }
-        // Items held when the grace expired: resume them on the 8-way foreground engine now, and
-        // refresh every item's retry budget — a fresh foreground session deserves fresh attempts.
-        let held = resumeOnForeground
-        resumeOnForeground.removeAll()
+        // A download marked `.downloading` with no live daemon task lost its task while we were away
+        // (a rare daemon-side failure, or a relaunch that raced reconnectTasks). Restart it from
+        // whatever the resume blob holds; a fresh foreground session also deserves fresh retries.
         fileRecoveryAttempts.removeAll()
-        for id in held {
-            guard let item = items.first(where: { $0.id == id }), item.state == .paused else { continue }
-            launch(item, reset: false)
+        for item in items where item.state == .downloading && backgroundTasks[item.id] == nil {
+            trace("dl-revive", [("item", item.id), ("bytes", item.receivedBytes)])
+            startFullBackgroundDownload(item)
         }
         syncLiveActivity()
     }
 
-    /// Record which foreground writers are draining, so no engine reads a part size mid-append. Paired
-    /// with a WATCHDOG: every terminal foreground callback retires its entry, but a callback that never
-    /// arrives (or arrives through a path we don't see) must not be able to wedge the item forever, so
-    /// the barrier is force-drained shortly after the cancellations were issued.
-    private func registerDrainBarrier(_ item: DownloadItem) {
-        let conns = Set((foregroundTasks[item.id] ?? []).compactMap { taskConnection($0) })
-        guard !conns.isEmpty else { return }
-        pendingForegroundStops[item.id] = conns
-        trace("dl-drain", [("item", item.id), ("writers", conns.count)])
-        let id = item.id
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(4))
-            guard let self, let stuck = self.pendingForegroundStops[id], !stuck.isEmpty else { return }
-            RemoteLog.shared.event("dl-drain-timeout", [("item", id), ("writers", stuck.count)])
-            self.pendingForegroundStops[id] = nil
-            self.drainCompleted(id)
-        }
-    }
-
-    /// Retire one ended foreground writer from the drain barrier. EVERY terminal foreground callback
-    /// routes here — finished, failed and cancelled alike — because only the cancellation path used to,
-    /// and any other outcome left the barrier permanently set.
-    private func foregroundWriterEnded(_ itemID: String, conn: Int) {
-        guard var pending = pendingForegroundStops[itemID] else { return }
-        pending.remove(conn)
-        guard pending.isEmpty else { pendingForegroundStops[itemID] = pending; return }
-        pendingForegroundStops[itemID] = nil
-        drainCompleted(itemID)
-    }
-
-    /// All cancelled writers have finished appending: it is now safe to read part sizes and restart.
-    ///
-    /// Only `.downloading` items restart here — that's the engine handoff, which must continue
-    /// immediately. An item parked `.waitingForNetwork` is deliberately backing off and owns its own
-    /// `scheduleNetworkRetry`; restarting it the moment the drain finishes would skip the backoff and,
-    /// on a genuinely unreachable server, spin fail → drain → restart without ever spending the retry
-    /// budget that eventually surfaces the failure.
-    private func drainCompleted(_ itemID: String) {
-        guard let item = items.first(where: { $0.id == itemID }), item.state == .downloading else { return }
-        reconcileDurableParts(item)
-        partCensus(item, "drained")
-        if inBackground { startShadowDownload(item) }   // idempotent: no-op when the shadow already runs
-        else { startForegroundConnections(item) }
-    }
-
-    private func connectionStopped(itemID: String, conn: Int, engine: TransferEngine) {
-        guard engine == .foreground else { return }
-        foregroundWriterEnded(itemID, conn: conn)
-    }
+    /// A task we cancelled ourselves (pause, stop, reset). Nothing to do — the resume blob, if iOS
+    /// produced one, was already captured in `cancelTasks`.
+    private func connectionStopped(itemID: String, conn: Int, engine: TransferEngine) {}
 
     // MARK: - Completion / merge
 
@@ -2192,9 +1778,6 @@ final class DownloadManager {
                     // so transcodes don't pile up on the server. (companionCodec is nil for original /
                     // built-in-H.264 / on-device-transcoded downloads, so only true server proxies are freed.)
                     if item.companionCodec != nil { self.deleteServerProxy(sceneID: item.id, apiKey: item.apiKey) }
-                    // The parts leg won: retire a still-running shadow leg (its file and blob go with
-                    // cleanupParts below).
-                    self.backgroundTasks.removeValue(forKey: item.id)?.cancel()
                     self.cleanupParts(item.id)   // success: the parts are consumed, reclaim them
                 } else {
                     item.error = "Couldn't assemble the file"
@@ -2251,38 +1834,20 @@ final class DownloadManager {
 
     private func connectionFinished(itemID: String, conn: Int, engine: TransferEngine) {
         guard let item = items.first(where: { $0.id == itemID }) else { return }
-        if engine == .background {
-            backgroundTasks[itemID] = nil
-        } else {
-            foregroundTasks[itemID]?.removeAll { taskConnection($0) == conn }
-            foregroundWriterEnded(itemID, conn: conn)   // a cancelled writer can still finish cleanly
-        }
+        backgroundTasks[itemID] = nil
         // A cold background relaunch rebuilds items as .paused before `reconnectTasks` can flip them,
         // and the app is relaunched precisely BECAUSE a task reached a terminal state — so that task is
         // already gone from `getAllTasks` and the state never flips. Without adoption the finished
         // full-file transfer would sit paused instead of finalizing, and the Live Activity, seeing
         // nothing active, ended itself. A delegate callback arriving for a paused item proves the
         // transfer is live: a user pause cancels its tasks, which routes to connectionStopped instead.
-        if item.state == .paused, engine == .background, resumeOnForeground.contains(itemID) == false {
+        if item.state == .paused, engine == .background {
             item.state = .downloading
             trace("dl-adopt", [("item", itemID), ("conn", conn), ("bytes", item.receivedBytes)])
         }
-        // The shadow leg finishing means the WHOLE file arrived — it must not touch the segment
-        // bookkeeping (inserting conn 999 into `finished` would corrupt the all-parts-done count).
-        if conn == Self.shadowConn {
-            finalizeFromShadow(item)
-            return
-        }
         finished[itemID, default: []].insert(conn)
         if conn < item.connections.count { item.connections[conn].received = item.connections[conn].total }
-        if (finished[itemID] ?? []).count == item.connections.count {
-            finalizeIfComplete(item)
-        } else if item.state == .downloading {
-            // While the grace assertion holds, the process is fully alive: refill the finished
-            // segment's writer slot. Past it, ensure the shadow leg is carrying the transfer.
-            if !inBackground || graceAssertion != .invalid { startForegroundConnections(item) }
-            else { startShadowDownload(item) }
-        }
+        finalizeIfComplete(item)
     }
 
     /// Connection lost / not connected / timed out / host unreachable — transient, so we wait and
@@ -2296,120 +1861,40 @@ final class DownloadManager {
     ]
 
     private func connectionFailed(itemID: String, conn: Int, message: String, code: Int, engine: TransferEngine) {
-        // Retire the writer from the drain barrier FIRST — before any state guard can return early.
-        // A cancelled writer that reports a real error (rather than -999) still has to release the
-        // barrier, or the item never starts another engine.
-        if engine == .foreground {
-            foregroundTasks[itemID]?.removeAll { taskConnection($0) == conn }
-            foregroundWriterEnded(itemID, conn: conn)
-        }
         guard let item = items.first(where: { $0.id == itemID }), item.state == .downloading else { return }
-        // Every non-cancellation transfer error, always (not trace-gated) — the code + engine pair is
-        // what distinguishes a daemon range refusal from a server problem from an append-guard trip.
+        backgroundTasks[itemID] = nil
+        // Every non-cancellation transfer error, always (not trace-gated) — the code is what
+        // distinguishes a daemon refusal from a server problem from a bad resume blob.
         RemoteLog.shared.event("dl-err", [
-            ("item", itemID), ("code", code), ("engine", engine.rawValue),
-            ("bytes", item.receivedBytes), ("conns", item.connections.count),
+            ("item", itemID), ("code", code), ("bytes", item.receivedBytes),
             ("bg", inBackground ? 1 : 0), ("msg", String(message.prefix(60)))])
         partCensus(item, "err-\(code)")
-        // A server output that doesn't honor byte ranges cannot use the range engines at all. Collapse
-        // once to the universally supported full-file background task and keep the download moving —
-        // from multi (demote to single) or from the ranged-single engine alike.
-        //
-        // ONLY with zero durable bytes. A server that can't do ranges refuses the very FIRST request, so
-        // a refusal arriving mid-transfer means something else: a proxy collapsing one Range into a 200,
-        // a 416 because Stash's recorded size overshoots the file on disk, a transient 5xx/auth page.
-        // Demoting there ran launch(reset: true) — deleting all eight parts and restarting from byte 0,
-        // permanently (the demote is persisted) — which is one of the ways the owner's download "restarts".
-        // With progress on disk, treat it as a transient error and let the retry path below preserve it.
-        if code == NSURLErrorBadServerResponse, !rangeUnsupported.contains(itemID),
-           item.receivedBytes == 0, item.multiThread || !usesLegacySingle(item) {
-            rangeUnsupported.insert(itemID)
-            if item.multiThread {
-                item.multiThread = false
-                persistTransferPreference(item)
-            }
-            launch(item, reset: true)
-            return
-        }
-        // Mid-transfer range refusal: keep every durable byte, back off, and try again. A genuinely
-        // range-hostile server that somehow got this far still converges — repeated failures exhaust
-        // maxNetworkRetries and land in .failed with the parts intact for a resuming Retry.
-        if code == NSURLErrorBadServerResponse, item.receivedBytes > 0 {
-            RemoteLog.shared.event("dl-range-refused", [
-                ("item", itemID), ("engine", engine.rawValue), ("bytes", item.receivedBytes),
-                ("retries", networkRetries[itemID] ?? 0)])
-            if engine == .background { backgroundTasks[itemID] = nil }
-            if (networkRetries[itemID] ?? 0) < maxNetworkRetries {
-                item.state = .waitingForNetwork
-                item.error = nil
-                cancelTasks(item, produceResumeData: false)
-                scheduleNetworkRetry(item)
-            } else {
-                item.state = .failed
-                item.error = message
-                cancelTasks(item, produceResumeData: false)
-            }
+        reconcileDurableParts(item)
+
+        // A stale or rejected resume blob is the one failure worth a targeted retry: drop the blob and
+        // start the transfer clean rather than surfacing an error the user can do nothing with. Bounded,
+        // because a server that always rejects would otherwise loop forever.
+        let blobFailure = code == NSURLErrorCannotCreateFile || code == NSURLErrorCannotWriteToFile
+            || code == NSURLErrorBadServerResponse
+        if blobFailure, (fileRecoveryAttempts[itemID] ?? 0) < 2 {
+            fileRecoveryAttempts[itemID, default: 0] += 1
+            resumeData[itemID] = nil
+            clearResumeFiles(itemID)
+            cleanupParts(itemID)
+            item.receivedBytes = 0
+            for i in item.connections.indices { item.connections[i].received = 0 }
+            trace("dl-blob-reset", [("item", itemID), ("code", code)])
+            startFullBackgroundDownload(item)
             syncLiveActivity()
             return
         }
-        // Ignore late error callbacks from foreground range tasks that a demote just replaced with the
-        // full-file engine — scoped to items the demote actually marked, so real foreground errors on
-        // healthy multi items are never swallowed.
-        if engine == .foreground, rangeUnsupported.contains(itemID) { return }
-        // The daemon refused a file operation (-3000 family). With the bg range engine gone this should
-        // only reach a legacy full-file task (a real daemon error) or our own -3003 append/size guards.
-        // The rule is unchanged: ANY durable progress is held, never wiped.
-        if code == NSURLErrorCannotCreateFile || code == NSURLErrorCannotWriteToFile {
-            RemoteLog.shared.event("dl-bg-reject", [
-                ("item", itemID), ("code", code), ("engine", engine.rawValue),
-                ("attempt", fileRecoveryAttempts[itemID] ?? 0),
-                ("conns", item.connections.count), ("bytes", item.receivedBytes)])
-            // Only the failed BACKGROUND task's reference is stale; a foreground -3003 must not orphan
-            // a live background task (a later start would then double-write its part).
-            if engine == .background { backgroundTasks[itemID] = nil }
-            reconcileDurableParts(item)
-            if item.connections.count > 1 || item.receivedBytes > 0 {
-                if inBackground {
-                    holdForForeground(item)                       // parts intact; foreground resumes
-                } else if item.connections.count > 1 {
-                    // Foreground multi: the 8-way data-task engine doesn't need the daemon at all.
-                    startForegroundConnections(item)
-                } else if (fileRecoveryAttempts[itemID] ?? 0) < 3 {
-                    // Foreground single: park briefly and relaunch with the durable bytes intact.
-                    fileRecoveryAttempts[itemID, default: 0] += 1
-                    item.state = .waitingForNetwork
-                    scheduleNetworkRetry(item)
-                    syncLiveActivity()
-                } else {
-                    item.state = .failed          // parts stay on disk; a manual Retry resumes from them
-                    item.error = message
-                    cancelTasks(item, produceResumeData: false)
-                    syncLiveActivity()
-                }
-                return
-            }
-            // Nothing durable yet (zero bytes, or unknown size): a clean single-mode restart loses nothing.
-            if (fileRecoveryAttempts[itemID] ?? 0) < 1 {
-                fileRecoveryAttempts[itemID, default: 0] += 1
-                item.multiThread = false
-                launch(item, reset: true)
-                persistTransferPreference(item)
-                return
-            }
-        }
+
         let retries = networkRetries[itemID] ?? 0
         if Self.transientNetworkCodes.contains(code) && retries < maxNetworkRetries {
-            // Pause the *whole* item with resume data and wait — resuming when connectivity is back keeps
-            // the partial progress of every connection instead of restarting from zero.
-            //
-            // This path cancels the other seven writers, so it needs the drain barrier too: the v1.0.305
-            // note lives in suspend(), but suspend(auto:) is only reachable from pause() — this branch
-            // never went through it. Without the barrier, NWPathMonitor reporting .satisfied milliseconds
-            // later (a Wi-Fi flap, not a 3 s wait) restarted writers against part sizes still being
-            // appended to, so two writers held handles on one part and both seekToEnd().write().
+            // Wait for the connection to come back. The iOS resume blob captured on cancel carries the
+            // daemon's own offset, so resuming continues rather than restarting.
             item.state = .waitingForNetwork
             item.error = nil
-            registerDrainBarrier(item)
             cancelTasks(item, produceResumeData: true)
             scheduleNetworkRetry(item)
         } else {
@@ -2454,16 +1939,10 @@ final class DownloadManager {
         for item in items where item.state == .downloading || item.state == .waitingForNetwork {
             for (taskID, bytes) in snap.received {
                 guard let inf = snap.info[taskID], inf.item == item.id else { continue }
-                if inf.conn < item.connections.count {
-                    item.connections[inf.conn].received = bytes
-                } else if inf.conn == Self.shadowConn {
-                    item.shadowBytes = max(item.shadowBytes, bytes)
-                }
+                if inf.conn < item.connections.count { item.connections[inf.conn].received = bytes }
             }
             let sum = item.connections.reduce(Int64(0)) { $0 + $1.received }
-            // Speed is the transfer rate across BOTH legs (parts + shadow) — it feeds the ETA the
-            // island glides on while the app is suspended, when the shadow is the only mover.
-            let combined = sum + item.shadowBytes
+            let combined = sum
             let now = Date()
             let dt = now.timeIntervalSince(item.lastSampleTime)
             if dt > 0.3 {
@@ -2496,7 +1975,6 @@ final class DownloadManager {
         for item in items where item.state == .waitingForNetwork {
             // Never relaunch across a live drain: the barrier's completion restarts the engine itself,
             // with part sizes that are settled. A path flap can fire milliseconds after the cancellations.
-            guard pendingForegroundStops[item.id] == nil else { continue }
             networkRetries[item.id, default: 0] += 1
             launch(item, reset: false)
         }
@@ -2525,13 +2003,12 @@ final class DownloadManager {
                 let item = DownloadItem(
                     id: id, title: scene.title ?? base, url: scene.directFileURL(apiKey: sidecar.apiKey) ?? url,
                     fileName: base, ext: "mp4", codec: f?.video_codec, width: f?.width, height: f?.height,
-                    bitRate: f?.bit_rate, totalBytes: 0, connectionCount: 1, scene: scene, apiKey: sidecar.apiKey,
+                    bitRate: f?.bit_rate, totalBytes: 0, scene: scene, apiKey: sidecar.apiKey,
                     localThumb: {
                         let t = metaDir.appendingPathComponent("\(id)-thumb.jpg")
                         return FileManager.default.fileExists(atPath: t.path) ? t : nil
                     }())
                 item.companionCodec = codec
-                item.multiThread = sidecar.multiThread ?? true   // pre-field sidecars = default-ON era
                 item.serverResolution = ServerQuality(rawValue: sidecar.companionResolution ?? "p1080") ?? .p1080
                 item.companionQuality = CompanionQuality(rawValue: sidecar.companionQuality ?? "medium") ?? .medium
                 item.state = .serverProcessing
@@ -2550,13 +2027,12 @@ final class DownloadManager {
                 let item = DownloadItem(
                     id: id, title: scene.title ?? base, url: scene.directFileURL(apiKey: sidecar.apiKey) ?? url,
                     fileName: base, ext: "mp4", codec: f?.video_codec, width: f?.width, height: f?.height,
-                    bitRate: f?.bit_rate, totalBytes: 0, connectionCount: 1, scene: scene, apiKey: sidecar.apiKey,
+                    bitRate: f?.bit_rate, totalBytes: 0, scene: scene, apiKey: sidecar.apiKey,
                     localThumb: {
                         let t = metaDir.appendingPathComponent("\(id)-thumb.jpg")
                         return FileManager.default.fileExists(atPath: t.path) ? t : nil
                     }())
                 item.companionCodec = codec
-                item.multiThread = sidecar.multiThread ?? true   // pre-field sidecars = default-ON era
                 item.serverResolution = ServerQuality(rawValue: sidecar.companionResolution ?? "p1080") ?? .p1080
                 item.companionQuality = CompanionQuality(rawValue: sidecar.companionQuality ?? "medium") ?? .medium
                 items.append(item)
@@ -2573,7 +2049,6 @@ final class DownloadManager {
             else { continue }
             let isServer = sidecar.serverTranscode ?? false
             let total = isServer ? 0 : Int64(file?.size ?? 0)     // server transcode has no known size
-            let n = sidecar.connectionCount ?? (total > 0 ? connectionCount : 1)
             let base = ((file?.basename ?? scene.title ?? "video") as NSString).deletingPathExtension
             let ext = sidecar.downloadExt ?? (scene.fileContainer.isEmpty ? "mp4" : scene.fileContainer)
             let thumb = metaDir.appendingPathComponent("\(id)-thumb.jpg")
@@ -2581,40 +2056,29 @@ final class DownloadManager {
                 id: id, title: scene.title ?? base, url: fileURL,
                 fileName: base, ext: ext, codec: file?.video_codec,
                 width: file?.width, height: file?.height, bitRate: file?.bit_rate,
-                totalBytes: total, connectionCount: n, scene: scene, apiKey: sidecar.apiKey,
+                totalBytes: total, scene: scene, apiKey: sidecar.apiKey,
                 localThumb: FileManager.default.fileExists(atPath: thumb.path) ? thumb : nil
             )
-            item.multiThread = sidecar.multiThread ?? (n > 1)
-            var sum: Int64 = 0
-            for i in 0..<n {
-                let received = Int64((try? partURL(id, i).resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
-                item.connections[i].received = received
-                sum += received
-                if item.connections[i].total > 0, received >= item.connections[i].total {
-                    finished[id, default: []].insert(i)
-                }
-                if let data = try? Data(contentsOf: resumeDataURL(id, i)) {
-                    resumeData[id, default: [:]][i] = data
-                }
+            // A delivered part means the transfer finished while we were dead; otherwise the daemon
+            // holds the bytes in its own temp file and the resume blob is what carries them forward.
+            let sum = Int64((try? partURL(id, 0).resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+            item.connections[0].received = sum
+            if item.connections[0].total > 0, sum >= item.connections[0].total {
+                finished[id, default: []].insert(0)
             }
-            // The shadow leg's blob survives relaunches too, so the daemon continues from ITS offset
-            // on the next minimize instead of byte 0.
-            if let data = try? Data(contentsOf: resumeDataURL(id, Self.shadowConn)) {
-                resumeData[id, default: [:]][Self.shadowConn] = data
+            if let data = try? Data(contentsOf: resumeDataURL(id, 0)) {
+                resumeData[id, default: [:]][0] = data
             }
             item.receivedBytes = sum
             item.state = .paused   // reconnectTasks() flips this to .downloading if a live task is found
-            // Multi-part items have no daemon task to reconnect (their engine is foreground-only), so a
-            // restored one was necessarily held mid-transfer — queue it for the automatic foreground
-            // resume, which also keeps any surviving Live Activity in the honest "Progress saved" state.
-            if n > 1 { resumeOnForeground.insert(id) }
             items.append(item)
             // Always logged: what actually survived to this launch is the ground truth a "it restarted"
             // report has to be checked against.
             let pct: Int? = total > 0 ? Int(Double(sum) / Double(total) * 100) : nil
             RemoteLog.shared.event("dl-restore", [
-                ("item", id), ("conns", n), ("bytes", sum), ("total", total), ("pct", pct),
-                ("multi", item.multiThread), ("done", (finished[id] ?? []).count)])
+                ("item", id), ("bytes", sum), ("total", total), ("pct", pct),
+                ("blob", resumeData[id]?[0] != nil ? 1 : 0),
+                ("done", (finished[id] ?? []).count)])
         }
         pumpCompanionQueue()   // resume any restored bulk-transcode queue (serial; waits if a job reconnected)
     }
@@ -2645,11 +2109,10 @@ final class DownloadManager {
             let parts = desc.components(separatedBy: "\u{1}")
             guard parts.count >= 3, let conn = Int(parts[1]),
                   let item = items.first(where: { $0.id == parts[0] }),
-                  conn < item.connections.count || conn == Self.shadowConn else { task.cancel(); continue }
+                  conn < item.connections.count else { task.cancel(); continue }
             let base = parts.count >= 5 ? (Int64(parts[4]) ?? 0) : 0
-            // conn == shadowConn is out of the connections array — never subscript with it.
-            let fallbackTotal = conn < item.connections.count ? item.connections[conn].total : item.totalBytes
-            let expected = parts.count >= 6 ? (Int64(parts[5]) ?? fallbackTotal) : fallbackTotal
+            let expected = parts.count >= 6
+                ? (Int64(parts[5]) ?? item.connections[conn].total) : item.connections[conn].total
             let range = parts.count >= 7 ? parts[6] == "1" : false
             let info = TransferInfo(item: item.id, conn: conn, part: URL(fileURLWithPath: parts[2]),
                                     engine: .background, baseReceived: base,
@@ -2660,10 +2123,6 @@ final class DownloadManager {
             item.state = .downloading
             item.lastSampleTime = Date()
             item.lastSampleBytes = item.receivedBytes
-            if !inBackground, item.connections.count > 1 {
-                pauseShadow(item)   // foreground is the 8-way engine's turf; the blob keeps the offset
-                startForegroundConnections(item)
-            }
         }
     }
 
@@ -2715,16 +2174,14 @@ final class DownloadManager {
         partsDir.appendingPathComponent("\(itemID)-\(conn).resume")
     }
     private func clearResumeFiles(_ itemID: String) {
-        for i in 0..<connectionCount { try? FileManager.default.removeItem(at: resumeDataURL(itemID, i)) }
-        try? FileManager.default.removeItem(at: resumeDataURL(itemID, Self.shadowConn))
+        try? FileManager.default.removeItem(at: resumeDataURL(itemID, 0))
     }
     private func cleanupParts(_ itemID: String) {
-        for i in 0..<connectionCount {
+        // Legacy 8-part layouts can still be on disk from before the engine was single-connection.
+        for i in 0..<8 {
             try? FileManager.default.removeItem(at: partURL(itemID, i))
             try? FileManager.default.removeItem(at: resumeDataURL(itemID, i))
         }
-        try? FileManager.default.removeItem(at: partURL(itemID, Self.shadowConn))
-        try? FileManager.default.removeItem(at: resumeDataURL(itemID, Self.shadowConn))
         finished[itemID] = nil
         resumeData[itemID] = nil
     }
@@ -2786,7 +2243,7 @@ final class DownloadManager {
                 id: id, title: sidecar?.scene.title ?? url.lastPathComponent, url: url,
                 fileName: url.deletingPathExtension().lastPathComponent, ext: url.pathExtension,
                 codec: file?.video_codec, width: file?.width, height: file?.height, bitRate: file?.bit_rate,
-                totalBytes: size, connectionCount: 1,
+                totalBytes: size,
                 scene: sidecar?.scene, apiKey: sidecar?.apiKey ?? "",
                 localThumb: FileManager.default.fileExists(atPath: thumb.path) ? thumb : nil
             )

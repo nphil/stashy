@@ -395,17 +395,9 @@ private struct DownloadCard: View {
             }
             .pickerStyle(.segmented)
 
-            Picker("Transfer", selection: $item.multiThread) {
-                Text("Background").tag(false)
-                Text("Multi-thread").tag(true)
-            }
-            .pickerStyle(.segmented)
-
             switch stageSource.wrappedValue {
             case .original:
-                Label(item.multiThread
-                      ? "8 connections in app · 1 continues after you leave"
-                      : "1 connection · keeps downloading after you leave the app",
+                Label("Keeps downloading after you leave the app",
                       systemImage: "arrow.down.circle")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
@@ -432,9 +424,7 @@ private struct DownloadCard: View {
                 Text("→ \(companionCodecBinding.wrappedValue.label) · \(item.serverResolution.label)")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .lineLimit(1)
-                Text(item.multiThread
-                     ? "Output downloads multi-threaded (in-app)"
-                     : "Output downloads in the background")
+                Text("Output downloads in the background")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .lineLimit(1)
             }
