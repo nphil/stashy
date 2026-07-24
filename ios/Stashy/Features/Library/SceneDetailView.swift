@@ -123,35 +123,24 @@ struct SceneDetailView: View {
         // shown or hidden.
         .ignoresSafeArea(edges: .top)
         .themedBackground()
-        // Keep the nav bar PRESENT but WEIGHTLESS: visible so list⇄scene is a native toolbar-item
+        // Keep the TOP nav bar PRESENT but WEIGHTLESS: visible so list⇄scene is a native toolbar-item
         // cross-fade (hiding it made the return a jarring pop; a masking fade was disliked too) — but
-        // with a hidden background (no bar strip over the video), no title (the metadata header owns
-        // it), and a single floating mini back chevron. Fullscreen hides the bar; even if the in-place
-        // visibility toggle lags (the tab-bar landmine's cousin), a background-less bar whose only
-        // item's content is gated on !isFullscreen shows nothing.
+        // with a hidden background, no title, and NO items (owner: nothing over the video; back is
+        // edge-swipe or the player's own control). Even if the in-place visibility toggle lags in
+        // fullscreen, an item-less background-less bar shows nothing.
         .toolbar(isFullscreen ? .hidden : .visible, for: .navigationBar)
         .toolbarBackground(.hidden, for: .navigationBar)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                if !isFullscreen {
-                    Button {
-                        dismiss()
-                    } label: {
-                        Image(systemName: "chevron.backward")
-                    }
-                    .accessibilityLabel("Back")
-                }
-            }
-        }
-        // Hide the tab bar for the whole scene screen, not just in fullscreen. Toggling tab-bar
-        // visibility *in place* is unreliable: SwiftUI only re-applies it on a navigation push/pop or an
-        // orientation change, so landscape fullscreen (which rotates) hid it but portrait fullscreen
-        // (button-triggered, no rotation) left it showing. Hiding unconditionally binds the change to
-        // push/pop, which always works — and a dedicated player/detail screen doesn't need the tab bar.
-        .toolbar(.hidden, for: .tabBar)
-        // Suppress the SYSTEM back button (its label/behavior isn't ours); the mini chevron above is the
-        // one visible control, and edge-swipe back stays alive via EnableSwipeBack.
+        // BOTTOM tab bar: visible on this screen too (owner: the collapsible bottom bar shows
+        // everywhere; it arrives in whatever minimized state the grid left it in and expands on tap).
+        // Fullscreen is the one exception. Two mechanisms that always agree in value, so they can't
+        // fight: the SwiftUI preference (authoritative when it applies) plus the UIKit
+        // `setTabBarHidden` probe — because in-place preference application historically missed the
+        // portrait (no-rotation) fullscreen toggle, and the imperative call applies deterministically.
+        .toolbar(isFullscreen ? .hidden : .visible, for: .tabBar)
+        .background(TabBarHiddenSetter(hidden: isFullscreen))
+        // Suppress the system back button (owner: no back button over the video); edge-swipe back stays
+        // alive via EnableSwipeBack, and the player's controls have their own back action.
         .navigationBarBackButtonHidden(true)
         .statusBarHidden(isFullscreen)
         .background(EnableSwipeBack()) // keep edge-swipe back with the system back button suppressed
