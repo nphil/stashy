@@ -2,23 +2,36 @@ import SwiftUI
 
 /// Medium-detent sheet that runs `TransferBenchmark` against the current scene and shows the result.
 /// Reached from the scene ••• menu; transient, so it costs the browse/player paths nothing.
+///
+/// Dismissal cancels the run — an abandoned benchmark would otherwise keep pulling hundreds of
+/// megabytes with no UI attached.
 struct TransferBenchmarkSheet: View {
     let scene: StashScene
     let apiKey: String
     @Environment(\.dismiss) private var dismiss
     @Environment(ThemeManager.self) private var themeManager
     @State private var benchmark = TransferBenchmark()
+    @State private var runTask: Task<Void, Never>?
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    Text("Times six reads of this scene — one connection, eight connections, and eight "
-                         + "with the per-host limit lifted — each twice, in A B C C B A order so a warm "
-                         + "server cache can't favour whichever ran last. Nothing is saved; the bytes are "
-                         + "counted and discarded.")
+                    // The player behind this sheet keeps streaming the same file from the same server,
+                    // which would compete with the measurement. Pausing is the user's call — the player
+                    // is load-bearing and not worth reaching into for a diagnostic.
+                    Label("Pause the video first — it streams from the same server and will skew the result.",
+                          systemImage: "pause.circle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+
+                    Text("Times six reads of this scene — one connection, eight requests, and eight with "
+                         + "the per-host limit lifted — each twice, in A B C C B A order so a warm server "
+                         + "cache can't favour whichever ran last. Nothing is saved; the bytes are counted "
+                         + "and discarded.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+
                     Text(benchmark.totalMegabytes > 0
                          ? "Transferred about \(benchmark.totalMegabytes) MB."
                          : "Transfers up to about 580 MB on Wi-Fi, about 145 MB on cellular.")
@@ -49,6 +62,12 @@ struct TransferBenchmarkSheet: View {
                         }
                     }
 
+                    if let transport = benchmark.transportNote {
+                        Text("Transport: \(transport)")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                    }
+
                     if let verdict = benchmark.verdict {
                         Text(verdict)
                             .font(.callout)
@@ -69,7 +88,8 @@ struct TransferBenchmarkSheet: View {
                     }
 
                     Button {
-                        Task { await benchmark.run(scene: scene, apiKey: apiKey) }
+                        runTask?.cancel()
+                        runTask = Task { await benchmark.run(scene: scene, apiKey: apiKey) }
                     } label: {
                         Label(benchmark.summary.isEmpty ? "Run Benchmark" : "Run Again",
                               systemImage: "speedometer")
@@ -82,7 +102,6 @@ struct TransferBenchmarkSheet: View {
                 .padding(16)
             }
             .scrollIndicators(.hidden)
-            .themedBackground()
             .navigationTitle("Transfer Benchmark")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -91,6 +110,10 @@ struct TransferBenchmarkSheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationBackground(.thinMaterial)
+        .onDisappear {
+            runTask?.cancel()
+            benchmark.cancel()
+        }
     }
 
     private func resultRow(_ label: String, _ rate: Double, emphasised: Bool) -> some View {

@@ -158,13 +158,15 @@ struct SceneDetailView: View {
         }
         // Metadata mini-window: a medium-detent glass sheet floating over the (still playing) video.
         // The sheet refetches the scene after saving and hands it back, so the header/tags update in place.
-        .sheet(isPresented: $benchmarking) {
-            TransferBenchmarkSheet(scene: fullScene ?? scene, apiKey: apiKey)
-        }
         .sheet(item: $metadataMode) { mode in
             SceneMetadataSheet(sceneID: scene.id, mode: mode) { fresh in
                 if let fresh { fullScene = fresh }
             }
+        }
+        // Transfer benchmark: a transient diagnostic. It changes nothing about the scene, and it
+        // cancels its own transfers on dismissal.
+        .sheet(isPresented: $benchmarking) {
+            TransferBenchmarkSheet(scene: fullScene ?? scene, apiKey: apiKey)
         }
         .libraryEditErrorToast(edits)
         .confirmationDialog(
