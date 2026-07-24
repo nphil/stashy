@@ -106,6 +106,39 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   self-inflicted browse-grid judder we shipped then fixed. If you only need the value later (e.g. a
   long-press source rect), store it in a reference box, NOT `@State` (since v1.0.285 `ScenePreview`
   tracks size-only and derives the origin from the touch point). (§6)
+- **A background `URLSessionDownloadTask` commits NOTHING until its range completes.** It streams into
+  URLSession's private temp file and only lands in our part at `didFinishDownloadingTo`, so an
+  interrupted range discards every byte it transferred. Requesting a whole segment (totalBytes/8, or the
+  whole file for a single download) meant a minimized transfer could run for minutes and commit zero —
+  and each retry re-read a SMALLER durable size, which is a Dynamic Island percentage going BACKWARDS
+  (owner: 15→12→8). Background ranges must be bounded slices (`backgroundSliceBytes`, 16 MB) chained by
+  `connectionFinished`. Corollary: a completed background range ≠ a completed connection. (§3)
+- **Part files must NOT live in `Caches`** (they did until v1.0.307): iOS purges Caches under disk
+  pressure and preferentially while the app is NOT running — exactly a big download left minimized. Every
+  progress number derives from part FILE SIZES, so a reaped part reads as silent progress loss then a
+  restart. They live in Application Support beside the downloads now. (§3)
+- **Never destroy durable bytes on a recoverable error.** Three shipped paths did: a mid-transfer range
+  refusal (`badServerResponse` → `launch(reset: true)`, now gated on zero bytes — a server that can't do
+  ranges refuses the FIRST request, so a later refusal is a proxy/416/transient), `retry()` (called
+  `launch(reset: true)` unconditionally, destroying the very parts that merge-failure and the -3000 hold
+  preserve *for* it — now resumes, and re-merges when all parts are complete), and the geometry rebuild
+  in `startConnections` (now requires `receivedBytes == 0`). (§3)
+- **The foreground-drain barrier must be retired by EVERY terminal callback, not just cancellation.**
+  `pendingForegroundStops` was a count decremented only on `NSURLErrorCancelled`; a cancelled writer that
+  finished cleanly, errored, or went through the delegate's `fail()` never retired it, so the barrier
+  stuck forever — and `startConnections` refuses to start ANY engine while it's set, so the item made
+  zero progress for the rest of the process (surviving even a foreground return). It's a `Set<Int>` of
+  conns now, retired from finished/failed/stopped alike, plus a 4 s watchdog (`dl-drain-timeout`). (§3)
+- **A cold background relaunch restores items as `.paused`** and `reconnectTasks` can't flip them (the
+  app was relaunched *because* the task went terminal, so `getAllTasks` no longer returns it) — while
+  every continue-branch is gated on `.downloading`. Result: one slice committed per relaunch, then dead,
+  and the Live Activity ends itself. A background callback for a paused item now adopts it (a user pause
+  cancels its tasks → `connectionStopped`, so the two stay distinguishable). (§3)
+- **Download diagnostics:** Settings → Diagnostics → **Trace downloads** (off by default, separate gate
+  from log streaming) emits `dl-slice`/`dl-slice-done`, `dl-parts` (per-part size census — the line that
+  makes progress loss obvious), `dl-err`, `dl-wipe`, `dl-drain*`, `dl-restore`, `dl-la` (what the Live
+  Activity was handed; a DECREASE is always logged). RemoteLog's flush timer is frozen while suspended,
+  so the engine calls `flushNow()` on both lifecycle transitions.
 - **Stash's `jobQueue` returns `null`, not `[]`, for an EMPTY queue** (nullable list + Go nil slice) —
   decode it optionally. The non-optional decode broke the jobs panel's scan bar (frozen snapshot, poll
   loop silently self-killed; fixed v1.0.296). General rule: a poll loop behind visible UI must never
@@ -128,10 +161,17 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.306** (durable ranged single engine + LA % clamp + tab-bar auto-collapse —
-  `e313b71`/`0820e1f`/`459b971` + concurrency fix `8e64661`, IPA 9,430,213 B; that fix: a stored
-  `UIScrollView()` default value needs a `@MainActor` coordinator class under strict concurrency);
+- Latest release: **v1.0.307** (`22cc493`, IPA 9,442,019 B) — durable background slices + parts moved out
+  of Caches + non-destructive range-refusal/retry; **v1.0.308 pending** (`16026a7` drain-barrier deadlock
+  + cold-relaunch adoption). v1.0.306 = ranged single engine + LA % clamp + tab-bar auto-collapse.
   **v1.0.297 restored the multiThread download default to ON** (owner decision 2026-07-24).
+- **Backgrounded-downloads round 3 (v1.0.307–308) — SIX defects, all "durable bytes thrown away or
+  never committed"**: the owner's "% went 15→12→8, froze, restarted on reopen" was NOT one bug. See the
+  new Landmines entries + ENGINEERING_NOTES §3 "Durability rules" for the full list; the headline is that
+  a background download task commits nothing until its whole range finishes, so whole-segment background
+  ranges were structurally unable to make durable progress while minimized. Also shipped: **download
+  tracing** (Settings → Diagnostics → Trace downloads) — `dl-parts` census, `dl-slice`, `dl-err`,
+  `dl-wipe`, `dl-drain-timeout`, `dl-la`. UNVERIFIED on device; if it recurs, the trace names the part.
 - **Latest push — backgrounded-downloads robustness round 2 + auto-collapse:**
   (1) **Ranged single engine**: known-size single downloads now run the SAME durable engine as multi
   with one segment (fg data task streaming into part 0 ⇄ one bg range task from the durable offset);

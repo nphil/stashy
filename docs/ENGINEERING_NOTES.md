@@ -150,6 +150,45 @@ predates this discovery and asserts the opposite — this file is the correction
   and the whole suspend→continue→relaunch flow. If single-bg -3000s, fall back to leaving downloads
   paused-on-background (foreground still works).
 
+### Durability rules (v1.0.307–308 — read before touching the background path)
+The engine's ONE invariant: **a byte that reached disk is never thrown away by a recoverable error.**
+Six shipped defects violated it; the owner experienced them as "minimized a multi-thread download, the
+island went 15% → 12% → 8%, froze, and the download restarted on reopening".
+
+1. **Background ranges weren't durable.** A background `URLSessionDownloadTask` writes into URLSession's
+   private temp file and only lands in our part at `didFinishDownloadingTo` — so an interruption
+   discards everything since the range began. We requested a WHOLE segment per task (totalBytes/8, or
+   the entire file for a single download). A minimized transfer could work for minutes, commit nothing,
+   and the next attempt re-read a smaller on-disk size → a percentage that decreases. Fix:
+   `backgroundSliceBytes` (16 MB) slices, chained in `connectionFinished`, which now closes a connection
+   only when the part reaches `connections[conn].total` (that value equals `chunkRange`'s span exactly —
+   verified for the remainder-absorbing last segment).
+2. **Parts lived in `Caches`** → OS-purgeable while suspended. Moved to Application Support
+   (`migrateLegacyParts` carries in-flight ones across).
+3. **Mid-transfer range refusal wiped everything.** `badServerResponse` demoted and `launch(reset: true)`
+   at any progress level, persisting the demote. A range-hostile server refuses the FIRST request, so a
+   later refusal means a proxy collapsing the Range, a 416 from stale size metadata, or a transient
+   error. Gated on `receivedBytes == 0`; with progress it backs off through the normal retry budget.
+4. **`retry()` was destructive**, contradicting the comments in the merge-failure and -3000 hold paths
+   that promise Retry resumes from the preserved parts. Now resumes; re-merges when all parts are done.
+5. **The drain barrier could never clear.** `pendingForegroundStops` counted cancelled writers and was
+   decremented ONLY by `NSURLErrorCancelled`; a cancelled writer that finished cleanly, reported a real
+   error, or went through the delegate's `fail()` (which consumes the completion callback via `terminal`)
+   never retired it. Stuck barrier ⇒ `startConnections` refuses every engine ⇒ zero progress for the rest
+   of the process, and `enterForeground` skips it too. Now a `Set<Int>` retired from finished/failed/
+   stopped, with a 4 s watchdog. `cancelTasks` callers that cancel en masse must call
+   `registerDrainBarrier` first — the transient-network branch didn't (the v1.0.305 note lives in
+   `suspend()`, which only `pause()` reaches), letting an NWPath flap open a second writer on a part
+   still being appended to.
+6. **Cold background relaunch stalls.** `loadInterrupted` restores `.paused`; `reconnectTasks` can't flip
+   it because the app was relaunched *because* the task went terminal. Every continue-branch gates on
+   `.downloading` ⇒ one slice per relaunch, then dead, plus the Live Activity ends itself. A background
+   callback for a paused item adopts it.
+
+Diagnostics for all of the above: Settings → Diagnostics → **Trace downloads** (`dl-parts` census is the
+key line). `RemoteLog.flushNow()` on both lifecycle transitions, because the flush timer is frozen while
+the app is suspended.
+
 ### Ranged single engine (post-v1.0.305 — "single" is no longer full-file by default)
 Known-size **single-connection** downloads now run the SAME durable range engine as multi, with one
 segment: a foreground data task streams appends into `part 0`; backgrounding hands off (drain barrier
