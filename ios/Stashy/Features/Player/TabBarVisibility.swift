@@ -57,7 +57,9 @@ struct TabBarHiddenSetter: UIViewRepresentable {
 /// with the system's own animation. One-shot per appearance; the association dies with the screen's
 /// controller on pop, so grids behind are untouched.
 struct TabBarMinimizer: UIViewRepresentable {
-    final class Coordinator {
+    // MainActor: the stored UIScrollView's default-value initializer is main-actor-isolated, and every
+    // Coordinator touchpoint (makeCoordinator/updateUIView) already runs on the main actor.
+    @MainActor final class Coordinator {
         let scrollView = UIScrollView()
         var applied = false
     }
