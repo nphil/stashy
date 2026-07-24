@@ -101,7 +101,12 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
 - **`onGeometryChange` on a per-frame value is a scroll-perf TRAP:** tracking `.frame(in: .global)` (which
   changes every scroll frame) and writing it to `@State` re-renders EVERY visible cell at 120 Hz — a
   self-inflicted browse-grid judder we shipped then fixed. If you only need the value later (e.g. a
-  long-press source rect), store it in a reference box, NOT `@State` (`ScenePreview.FrameBox`). (§6)
+  long-press source rect), store it in a reference box, NOT `@State` (since v1.0.285 `ScenePreview`
+  tracks size-only and derives the origin from the touch point). (§6)
+- **Stash's `jobQueue` returns `null`, not `[]`, for an EMPTY queue** (nullable list + Go nil slice) —
+  decode it optionally. The non-optional decode broke the jobs panel's scan bar (frozen snapshot, poll
+  loop silently self-killed; fixed v1.0.296). General rule: a poll loop behind visible UI must never
+  self-terminate — clear stale state, show a reconnecting line, back off, keep trying. (§6)
 
 ## Docs map — what to read when
 - **`docs/ENGINEERING_NOTES.md`** — deep reference: CI detail, Swift 6 concurrency patterns,
@@ -120,8 +125,28 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.283** (jobs panel v2 — system nav bar restored + native dropdowns + job cancel,
-  commit `8472e4d`, IPA 8,760,456 B). Verify the newest release/IPA size each push.
+- Latest release: **v1.0.296** (jobs-panel scan-progress fix + compact task chips, commit `77b8647`,
+  IPA 8,903,275 B). Verify the newest release/IPA size each push.
+- **v1.0.296 — jobs-panel scan bar FIXED (was broken since the panel shipped):** Stash's `jobQueue` is
+  `null` (not `[]`) when EMPTY → the non-optional decode failed every idle poll, freezing the last
+  snapshot ("stuck" bar) and silently killing the poll loop after ~60 s. Now: optional decode
+  (`StashClient.jobQueue`), refcounted `JobMonitor.attach/detach` (rapid reopen delivers the old panel's
+  onDisappear AFTER the new onAppear), a never-self-stopping loop (≥3 fails → clear snapshot, show
+  "Can't reach Stash — retrying…", 4 s cadence), inline `actionError`, optimistic "Starting …" line.
+  Task buttons shrank to caption2 flow chips under "Library tasks". Details §6.
+- **v1.0.284–295 (owner + GPT-5 Codex, 2026-07-20):** library scroll-perf pass v2 — card shadow →
+  hairline `cardContour`; `ScenePreview` tracks size only (preview origin from the touch point);
+  pagination invisible + earlier (`contentRevision` page prefetch); ImageCache bounded 2-worker
+  prefetch queue + RAM-adaptive memory budget; served-map stores decode off-main;
+  `BrowseScrollCoordinator` (non-observable `isScrolling`; DownloadManager skips its 120 ms UI progress
+  poll while scrolling) + opt-in ntfy frame telemetry (`BrowseScrollPerformanceMonitor`). **Hero zoom
+  transitions REMOVED** (plain push/pop; `ZoomReturnScrollGate` deleted — don't re-add zoom without §6).
+  **Downloads reworked to an adaptive engine** (foreground 8 range data-tasks appending to durable
+  parts ⇄ ONE background range task, no resume-blob handoff) with a staging "Transfer:
+  Background | Multi-thread" picker — **`multiThread` now defaults OFF** (new downloads = one background
+  connection unless toggled; flagged to owner 2026-07-24). Download **Live Activity / Dynamic Island**
+  shipped (new `StashyLiveActivity` extension target; 2 s equality-gated sync; ActivityKit failures
+  surface on the Downloads screen for sideload-signing diagnosis).
 - **Jobs panel shipped (v1.0.280–283)** — Scenes & Performers have a **jobs status dropdown** off the title,
   plus job-queue actions. **The v1.0.282 custom-glass-overlay approach was REVERTED at v1.0.283** after owner
   on-device testing: a custom glass top bar floating over the scrolling grid re-sampled the moving content

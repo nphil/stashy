@@ -278,6 +278,26 @@ churns.** History on the filter/sort panel:
    suppresses duplicate centered title chrome. Do not move the trigger back into `.principal`; it makes
    Scenes feel unlike Performers. This is toolbar-only and does not wrap or invalidate the grid.
 
+### Jobs panel (`JobsPanel` + `JobMonitor`) — the scan-progress bug (fixed v1.0.296)
+- **Stash's `jobQueue` is a nullable list (`[Job!]`) and its Go resolver returns a nil slice for an
+  EMPTY queue — the wire value for "no jobs" is `null`, NOT `[]`.** `StashClient.jobQueue()` decodes the
+  field optionally and maps nil → `[]`. The original non-optional decode made every idle-queue poll a
+  decode failure: the panel froze its last snapshot on screen (a scan "stuck" at its last %) and after
+  ~60 s of failures the monitor silently killed its own poll loop (tapping Scan then painted the bar
+  once via `refreshNow` and it never moved again). On the `Job` type only `id`/`status`/`description`/
+  `addTime` are non-null — keep any newly-queried field optional in `JobInfo`.
+- `JobMonitor.attach()/detach()` is **refcounted**: a rapid dropdown close→reopen can deliver the dying
+  panel instance's `onDisappear` AFTER the replacement's `onAppear`, and a plain start/stop pair let
+  that late stop kill polling for the panel still on screen. The poll loop also **never self-stops**:
+  ≥3 consecutive failures clear the stale snapshot (a frozen bar reads as a stuck job), flip
+  `pollFailing` (panel shows "Can't reach Stash — retrying…"), and slow the cadence 1.5 s → 4 s until
+  the last panel detaches. A cancellation mid-request (detach) is not counted as a failure, so the
+  kept-for-instant-reopen snapshot survives.
+- Queue actions surface `actionError` inline (plugin missing / auth / network) and show an optimistic
+  "Starting …" line with a 3-poll grace instead of `try?`-swallowing failures.
+- The four task buttons are compact caption2 icon+name chips in a `FlowLayout` (two short rows) under a
+  "Library tasks" caption — solid fills on the glass panel, matching the filter panel's tag chips.
+
 ### Stores and loaders
 - **`PaginatedLoader<T>`** (generic, `@Observable @MainActor`): dedups pages by id,
   infinite-scrolls, and has a **generation token** so a superseded in-flight load discards its
@@ -507,3 +527,8 @@ magnifier is tapped. Applied to Scenes & Performers.
   across 4,137 thumbnail publications. The perceived hard stops were 25/30-item content boundaries caused
   by `loadNextIfNeeded` waiting for `.idle`. Pagination now fetches early during motion, hides next-page
   loading state, appends atomically, and prefetches every new page's images once via `contentRevision`.
+- **v1.0.296 — jobs-panel scan-progress fix + compact task chips:** the null-vs-empty `jobQueue` decode
+  bug (see §6 "Jobs panel") froze/hid the scan progress bar since the panel shipped; JobMonitor gained
+  refcounted attach/detach, a never-self-stopping poll loop with a visible reconnecting state, inline
+  action errors, and an optimistic "Starting …" line. The four task buttons shrank to caption2 flow
+  chips under a "Library tasks" caption.
