@@ -404,7 +404,7 @@ private struct DownloadCard: View {
             switch stageSource.wrappedValue {
             case .original:
                 Label(item.multiThread
-                      ? "8 connections · fastest · pauses ~30 s after you leave, resumes on return"
+                      ? "8 connections in app · 1 continues after you leave"
                       : "1 connection · keeps downloading after you leave the app",
                       systemImage: "arrow.down.circle")
                     .font(.caption2)

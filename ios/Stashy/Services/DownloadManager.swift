@@ -94,6 +94,10 @@ final class DownloadItem: Identifiable {
     /// 2026-07-24): the daily flow is start-and-watch on home Wi-Fi, where the 8-way engine matters; the
     /// adaptive engine still collapses to one background connection on suspension either way.
     var multiThread = true
+    /// Bytes moved by the parallel full-file daemon leg (the "shadow" — see `startShadowDownload`).
+    /// Display-only: durable truth stays in the part files. Never reset mid-transfer, so the shown
+    /// progress (`max(receivedBytes, shadowBytes)`) can't move backwards when the shadow pauses.
+    var shadowBytes: Int64 = 0
     // MARK: Companion (server-side plugin) transcode staging
     /// When set, Start routes through the Stashy Companion plugin to produce an iPhone-native HEVC/AV1
     /// file, then downloads that. nil = not a companion transcode (original or built-in server H.264).
@@ -419,6 +423,9 @@ final class DownloadManager {
     var liveActivityError: String?
 
     @ObservationIgnored private let connectionCount = 8
+    /// Connection index reserved for the shadow full-file daemon leg — outside 0..<connectionCount, so
+    /// its task/part ("<id>-999.part") can never collide with a real segment's bookkeeping.
+    private static let shadowConn = 999
     @ObservationIgnored private let store = TransferStore()
     /// Multi-thread mode writes range data directly into durable parts on this in-process session.
     @ObservationIgnored private var fgSession: URLSession!
@@ -1517,7 +1524,7 @@ final class DownloadManager {
         if usesLegacySingle(item) {
             startFullBackgroundDownload(item)
         } else if inBackground {
-            holdForForeground(item)
+            startShadowDownload(item)
         } else {
             startForegroundConnections(item)
         }
@@ -1594,8 +1601,114 @@ final class DownloadManager {
     // NOTE deliberately absent: there is NO background range engine. Device logs (iOS 26.5.2, item
     // 2761/2767, 2026-07-24) proved a background-session download task with a Range header transfers
     // its whole body and then always fails with -3000 "Cannot create file" at delivery — backgrounded
-    // or foregrounded, one task or eight. Multi-part items therefore hold (`holdForForeground`) when
-    // the process can't keep foreground writers alive; do not reintroduce bg range tasks.
+    // or foregrounded, one task or eight. Do not reintroduce bg range tasks. Unattended continuation
+    // for multi-part items is the SHADOW below; `holdForForeground` is the fallback if it fails.
+
+    /// Start (or resume from its iOS blob) the parallel full-file daemon leg for a multi-part item —
+    /// the owner's "switch to single-thread when I leave, back to multi-thread when I return".
+    ///
+    /// The daemon can't continue the eight partial segments (full-file 200 is its only working
+    /// transport, and it always starts at byte 0 or at its OWN blob's offset), so the shadow is a
+    /// second, independent transfer of the same file into "<id>-999.part". The durable parts are
+    /// untouched: foregrounding pauses the shadow (keeping its blob for the next minimize) and resumes
+    /// the 8-way engine; whichever leg finishes first produces the file. The price is re-downloading
+    /// bytes the other leg already has — bounded, self-hosted-server-cheap, and the only public-API
+    /// path to a multi-thread download that completes with the app suspended.
+    private func startShadowDownload(_ item: DownloadItem) {
+        guard backgroundTasks[item.id] == nil, item.state == .downloading else { return }
+        let resumed = resumeData[item.id]?[Self.shadowConn] != nil
+        let task: URLSessionDownloadTask
+        if let data = resumeData[item.id]?[Self.shadowConn] {
+            task = bgSession.downloadTask(withResumeData: data)
+            resumeData[item.id]?[Self.shadowConn] = nil
+        } else {
+            task = bgSession.downloadTask(with: URLRequest(url: item.url))
+        }
+        register(task, item: item, conn: Self.shadowConn, engine: .background, base: 0,
+                 expected: item.totalBytes, rangeRequest: false)
+        backgroundTasks[item.id] = task
+        try? FileManager.default.removeItem(at: resumeDataURL(item.id, Self.shadowConn))
+        task.resume()
+        RemoteLog.shared.event("dl-shadow", [
+            ("item", item.id), ("ev", "start"), ("resumed", resumed ? 1 : 0),
+            ("parts", item.receivedBytes), ("shadow", item.shadowBytes)])
+    }
+
+    /// Foreground return: park the shadow with `cancel(byProducingResumeData:)` so its next start
+    /// continues from the daemon's own offset instead of byte 0. `shadowBytes` deliberately keeps its
+    /// last value — the displayed max() must not drop when the leg pauses.
+    private func pauseShadow(_ item: DownloadItem) {
+        guard let task = backgroundTasks[item.id], taskConnection(task) == Self.shadowConn else { return }
+        backgroundTasks[item.id] = nil
+        let id = item.id
+        task.cancel(byProducingResumeData: { [weak self] data in
+            guard let data else { return }
+            Task { @MainActor in
+                guard let self else { return }
+                self.resumeData[id, default: [:]][Self.shadowConn] = data
+                try? data.write(to: self.resumeDataURL(id, Self.shadowConn), options: .atomic)
+            }
+        })
+        RemoteLog.shared.event("dl-shadow", [("item", id), ("ev", "pause"), ("shadow", item.shadowBytes)])
+    }
+
+    /// The shadow finished the WHOLE file: it wins. Promote its output to the completed download and
+    /// retire the parts leg. Mirrors `finalizeIfComplete`'s success tail via `merge(parts:into:)`'s
+    /// single-file move.
+    private func finalizeFromShadow(_ item: DownloadItem) {
+        guard item.state != .merging, item.state != .completed else { return }
+        let src = partURL(item.id, Self.shadowConn)
+        let size = fileSize(src)
+        guard item.totalBytes > 0, size == item.totalBytes else {
+            // Truncated/short delivery: discard this leg; the durable parts leg is unaffected and a
+            // fresh shadow starts on the next grace expiry.
+            try? FileManager.default.removeItem(at: src)
+            RemoteLog.shared.event("dl-shadow", [
+                ("item", item.id), ("ev", "size-mismatch"), ("size", size), ("total", item.totalBytes)])
+            return
+        }
+        registerDrainBarrier(item)                       // any live writers drain into parts we no longer need
+        cancelTasks(item, produceResumeData: false)
+        item.state = .merging
+        let dest = downloadsDir.appendingPathComponent("\(item.id).\(item.ext)")
+        var bg: UIBackgroundTaskIdentifier = .invalid
+        bg = UIApplication.shared.beginBackgroundTask(withName: "shadow-finalize-\(item.id)") {
+            if bg != .invalid { UIApplication.shared.endBackgroundTask(bg) }
+        }
+        Task.detached(priority: .userInitiated) {
+            let ok = Self.merge(parts: [src], into: dest)
+            await MainActor.run {
+                if ok {
+                    item.localURL = dest
+                    item.receivedBytes = item.totalBytes
+                    item.shadowBytes = item.totalBytes
+                    for i in item.connections.indices { item.connections[i].received = item.connections[i].total }
+                    item.state = .completed
+                    self.fileRecoveryAttempts[item.id] = nil
+                    self.resumeOnForeground.remove(item.id)
+                    self.clearActive(item.id)
+                    if item.companionCodec != nil { self.deleteServerProxy(sceneID: item.id, apiKey: item.apiKey) }
+                    self.cleanupParts(item.id)
+                    RemoteLog.shared.event("dl-shadow", [("item", item.id), ("ev", "done"), ("bytes", size)])
+                    // A drained writer's already-queued append can recreate a part file after the
+                    // cleanup above; sweep once more when those callbacks have certainly landed.
+                    let id = item.id
+                    Task { @MainActor [weak self] in
+                        try? await Task.sleep(for: .seconds(2))
+                        self?.cleanupParts(id)
+                    }
+                } else {
+                    // Keep the durable parts; drop the shadow output. The item resumes on the parts leg.
+                    try? FileManager.default.removeItem(at: src)
+                    item.state = .paused
+                    self.resumeOnForeground.insert(item.id)
+                    RemoteLog.shared.event("dl-shadow", [("item", item.id), ("ev", "finalize-fail")])
+                }
+                self.syncLiveActivity()
+                if bg != .invalid { UIApplication.shared.endBackgroundTask(bg) }
+            }
+        }
+    }
 
     private func register(_ task: URLSessionTask, item: DownloadItem, conn: Int, engine: TransferEngine,
                           base: Int64, expected: Int64, rangeRequest: Bool) {
@@ -1644,11 +1757,13 @@ final class DownloadManager {
             .joined(separator: ",")
         let pct: Int? = item.totalBytes > 0
             ? Int(Double(item.receivedBytes) / Double(item.totalBytes) * 100) : nil
+        let shadow: Int64? = item.shadowBytes > 0 ? item.shadowBytes : nil
         RemoteLog.shared.event("dl-parts", [
             ("item", item.id), ("why", why), ("kb", sizes),
             ("sum", item.receivedBytes), ("total", item.totalBytes), ("pct", pct),
             ("fg", foregroundTasks[item.id]?.count ?? 0),
             ("bg", backgroundTasks[item.id] != nil ? 1 : 0),
+            ("shadow", shadow),
             ("done", (finished[item.id] ?? []).count),
             ("state", String(describing: item.state))])
     }
@@ -1682,13 +1797,17 @@ final class DownloadManager {
         let foreground = foregroundTasks.removeValue(forKey: item.id) ?? []
         foreground.forEach { $0.cancel() }
         guard let background = backgroundTasks.removeValue(forKey: item.id) else { return }
-        if produceResumeData, item.connections.count == 1 {
+        // Both full-file legs — the legacy single (conn 0) and the multi item's shadow (conn 999) —
+        // are worth an iOS resume blob; a range task never is (blobs don't apply).
+        let conn = taskConnection(background) ?? 0
+        if produceResumeData, item.connections.count == 1 || conn == Self.shadowConn {
+            let id = item.id
             background.cancel(byProducingResumeData: { [weak self] data in
                 guard let data else { return }
                 Task { @MainActor in
                     guard let self else { return }
-                    self.resumeData[item.id, default: [:]][0] = data
-                    try? data.write(to: self.resumeDataURL(item.id, 0), options: .atomic)
+                    self.resumeData[id, default: [:]][conn] = data
+                    try? data.write(to: self.resumeDataURL(id, conn), options: .atomic)
                 }
             })
         } else {
@@ -1802,8 +1921,9 @@ final class DownloadManager {
         // must keep the Live Activity alive — ending it mid-background read as "the download vanished".
         let held = items.filter { $0.state == .paused && resumeOnForeground.contains($0.id) }
         if active.isEmpty, let firstHeld = held.first {
+            let heldBytes = max(firstHeld.receivedBytes, firstHeld.shadowBytes)
             let progress = firstHeld.totalBytes > 0
-                ? min(1, max(0, Double(firstHeld.receivedBytes) / Double(firstHeld.totalBytes)))
+                ? min(1, max(0, Double(heldBytes) / Double(firstHeld.totalBytes)))
                 : nil
             return .init(
                 phase: .waitingForNetwork, progress: progress,
@@ -1825,8 +1945,11 @@ final class DownloadManager {
 
         switch item.state {
         case .downloading:
+            // Progress the island shows = the furthest of the two legs (durable parts vs shadow), so
+            // it never moves backwards when one leg pauses and the other carries on.
+            let shownBytes = max(item.receivedBytes, item.shadowBytes)
             let progress = item.totalBytes > 0
-                ? min(1, max(0, Double(item.receivedBytes) / Double(item.totalBytes)))
+                ? min(1, max(0, Double(shownBytes) / Double(item.totalBytes)))
                 : nil
             let statusParts = [item.speedLabel, item.etaLabel].filter { !$0.isEmpty }
             let status = statusParts.isEmpty ? "Receiving data" : statusParts.joined(separator: " · ")
@@ -1835,9 +1958,9 @@ final class DownloadManager {
             // advances inside the system-owned Live Activity even while Stashy's process is suspended.
             var estimatedStart: Date?
             var estimatedEnd: Date?
-            if item.speed > 100, item.totalBytes > item.receivedBytes, item.totalBytes > 0 {
-                estimatedStart = now.addingTimeInterval(-Double(item.receivedBytes) / item.speed)
-                estimatedEnd = now.addingTimeInterval(Double(item.totalBytes - item.receivedBytes) / item.speed)
+            if item.speed > 100, item.totalBytes > shownBytes, item.totalBytes > 0 {
+                estimatedStart = now.addingTimeInterval(-Double(shownBytes) / item.speed)
+                estimatedEnd = now.addingTimeInterval(Double(item.totalBytes - shownBytes) / item.speed)
             }
             return .init(
                 phase: .downloading, progress: progress,
@@ -1922,13 +2045,16 @@ final class DownloadManager {
         RemoteLog.shared.flushNow()   // the periodic timer stops once we're suspended
     }
 
-    /// iOS is about to suspend us: drain the writers and hold every multi-part transfer with its parts
-    /// intact. Runs inside the assertion's expiration handler, so it must finish quickly.
+    /// iOS is about to suspend us: drain the writers and hand each multi-part transfer to its SHADOW —
+    /// the parallel full-file daemon leg that keeps downloading unattended (the parts stay durable and
+    /// untouched; the shadow writes its own file). Runs inside the assertion's expiration handler, so
+    /// it must finish quickly. If a shadow fails, the -3000 path falls back to holdForForeground.
     private func graceExpired() {
         for item in items where item.state == .downloading && !usesLegacySingle(item) {
             registerDrainBarrier(item)
             cancelTasks(item, produceResumeData: false)
-            holdForForeground(item)
+            startShadowDownload(item)
+            partCensus(item, "grace-shadow")
         }
         syncLiveActivity()
         RemoteLog.shared.event("dl-grace", [("expired", 1)])
@@ -1963,8 +2089,11 @@ final class DownloadManager {
         // assertion and the transfer continues as if the app was never minimized.
         endGraceAssertion()
         for item in items where item.state == .downloading && !usesLegacySingle(item) {
-            // Top up any missing writers (no-op when all eight survived the grace). If writers are
-            // still draining their cancellation callbacks, the drain completion restarts them instead.
+            // Back to multi-thread: park the shadow leg (its blob keeps the daemon's offset for the
+            // next minimize), then top up any missing writers (no-op when all eight survived the
+            // grace). If writers are still draining their cancellation callbacks, the drain
+            // completion restarts them instead.
+            pauseShadow(item)
             if pendingForegroundStops[item.id] == nil { startForegroundConnections(item) }
         }
         // Items held when the grace expired: resume them on the 8-way foreground engine now, and
@@ -2020,7 +2149,7 @@ final class DownloadManager {
         guard let item = items.first(where: { $0.id == itemID }), item.state == .downloading else { return }
         reconcileDurableParts(item)
         partCensus(item, "drained")
-        if inBackground { holdForForeground(item) }
+        if inBackground { startShadowDownload(item) }   // idempotent: no-op when the shadow already runs
         else { startForegroundConnections(item) }
     }
 
@@ -2063,6 +2192,9 @@ final class DownloadManager {
                     // so transcodes don't pile up on the server. (companionCodec is nil for original /
                     // built-in-H.264 / on-device-transcoded downloads, so only true server proxies are freed.)
                     if item.companionCodec != nil { self.deleteServerProxy(sceneID: item.id, apiKey: item.apiKey) }
+                    // The parts leg won: retire a still-running shadow leg (its file and blob go with
+                    // cleanupParts below).
+                    self.backgroundTasks.removeValue(forKey: item.id)?.cancel()
                     self.cleanupParts(item.id)   // success: the parts are consumed, reclaim them
                 } else {
                     item.error = "Couldn't assemble the file"
@@ -2135,13 +2267,21 @@ final class DownloadManager {
             item.state = .downloading
             trace("dl-adopt", [("item", itemID), ("conn", conn), ("bytes", item.receivedBytes)])
         }
+        // The shadow leg finishing means the WHOLE file arrived — it must not touch the segment
+        // bookkeeping (inserting conn 999 into `finished` would corrupt the all-parts-done count).
+        if conn == Self.shadowConn {
+            finalizeFromShadow(item)
+            return
+        }
         finished[itemID, default: []].insert(conn)
         if conn < item.connections.count { item.connections[conn].received = item.connections[conn].total }
         if (finished[itemID] ?? []).count == item.connections.count {
             finalizeIfComplete(item)
         } else if item.state == .downloading {
-            if inBackground { holdForForeground(item) }
-            else { startForegroundConnections(item) }
+            // While the grace assertion holds, the process is fully alive: refill the finished
+            // segment's writer slot. Past it, ensure the shadow leg is carrying the transfer.
+            if !inBackground || graceAssertion != .invalid { startForegroundConnections(item) }
+            else { startShadowDownload(item) }
         }
     }
 
@@ -2313,16 +2453,22 @@ final class DownloadManager {
         let snap = store.snapshot()
         for item in items where item.state == .downloading || item.state == .waitingForNetwork {
             for (taskID, bytes) in snap.received {
-                if let inf = snap.info[taskID], inf.item == item.id, inf.conn < item.connections.count {
+                guard let inf = snap.info[taskID], inf.item == item.id else { continue }
+                if inf.conn < item.connections.count {
                     item.connections[inf.conn].received = bytes
+                } else if inf.conn == Self.shadowConn {
+                    item.shadowBytes = max(item.shadowBytes, bytes)
                 }
             }
             let sum = item.connections.reduce(Int64(0)) { $0 + $1.received }
+            // Speed is the transfer rate across BOTH legs (parts + shadow) — it feeds the ETA the
+            // island glides on while the app is suspended, when the shadow is the only mover.
+            let combined = sum + item.shadowBytes
             let now = Date()
             let dt = now.timeIntervalSince(item.lastSampleTime)
             if dt > 0.3 {
-                item.speed = max(0, Double(sum - item.lastSampleBytes) / dt)
-                item.lastSampleBytes = sum
+                item.speed = max(0, Double(combined - item.lastSampleBytes) / dt)
+                item.lastSampleBytes = combined
                 item.lastSampleTime = now
             }
             if sum > item.receivedBytes { networkRetries[item.id] = 0 }   // real progress → clear retry count
@@ -2451,6 +2597,11 @@ final class DownloadManager {
                     resumeData[id, default: [:]][i] = data
                 }
             }
+            // The shadow leg's blob survives relaunches too, so the daemon continues from ITS offset
+            // on the next minimize instead of byte 0.
+            if let data = try? Data(contentsOf: resumeDataURL(id, Self.shadowConn)) {
+                resumeData[id, default: [:]][Self.shadowConn] = data
+            }
             item.receivedBytes = sum
             item.state = .paused   // reconnectTasks() flips this to .downloading if a live task is found
             // Multi-part items have no daemon task to reconnect (their engine is foreground-only), so a
@@ -2494,9 +2645,11 @@ final class DownloadManager {
             let parts = desc.components(separatedBy: "\u{1}")
             guard parts.count >= 3, let conn = Int(parts[1]),
                   let item = items.first(where: { $0.id == parts[0] }),
-                  conn < item.connections.count else { task.cancel(); continue }
+                  conn < item.connections.count || conn == Self.shadowConn else { task.cancel(); continue }
             let base = parts.count >= 5 ? (Int64(parts[4]) ?? 0) : 0
-            let expected = parts.count >= 6 ? (Int64(parts[5]) ?? item.connections[conn].total) : item.connections[conn].total
+            // conn == shadowConn is out of the connections array — never subscript with it.
+            let fallbackTotal = conn < item.connections.count ? item.connections[conn].total : item.totalBytes
+            let expected = parts.count >= 6 ? (Int64(parts[5]) ?? fallbackTotal) : fallbackTotal
             let range = parts.count >= 7 ? parts[6] == "1" : false
             let info = TransferInfo(item: item.id, conn: conn, part: URL(fileURLWithPath: parts[2]),
                                     engine: .background, baseReceived: base,
@@ -2507,7 +2660,10 @@ final class DownloadManager {
             item.state = .downloading
             item.lastSampleTime = Date()
             item.lastSampleBytes = item.receivedBytes
-            if !inBackground, item.connections.count > 1 { startForegroundConnections(item) }
+            if !inBackground, item.connections.count > 1 {
+                pauseShadow(item)   // foreground is the 8-way engine's turf; the blob keeps the offset
+                startForegroundConnections(item)
+            }
         }
     }
 
@@ -2560,12 +2716,15 @@ final class DownloadManager {
     }
     private func clearResumeFiles(_ itemID: String) {
         for i in 0..<connectionCount { try? FileManager.default.removeItem(at: resumeDataURL(itemID, i)) }
+        try? FileManager.default.removeItem(at: resumeDataURL(itemID, Self.shadowConn))
     }
     private func cleanupParts(_ itemID: String) {
         for i in 0..<connectionCount {
             try? FileManager.default.removeItem(at: partURL(itemID, i))
             try? FileManager.default.removeItem(at: resumeDataURL(itemID, i))
         }
+        try? FileManager.default.removeItem(at: partURL(itemID, Self.shadowConn))
+        try? FileManager.default.removeItem(at: resumeDataURL(itemID, Self.shadowConn))
         finished[itemID] = nil
         resumeData[itemID] = nil
     }
