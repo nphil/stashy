@@ -119,13 +119,10 @@ struct SceneDetailView: View {
             fullScene = try? await client.findScene(id: scene.id)
         }
         // Metadata mini-window: a medium-detent glass sheet floating over the (still playing) video.
-        // On save, refetch so the header/tags reflect the new metadata immediately.
+        // The sheet refetches the scene after saving and hands it back, so the header/tags update in place.
         .sheet(item: $metadataMode) { mode in
-            SceneMetadataSheet(sceneID: scene.id, mode: mode) {
-                Task {
-                    guard let client = appState.client else { return }
-                    fullScene = try? await client.findScene(id: scene.id)
-                }
+            SceneMetadataSheet(sceneID: scene.id, mode: mode) { fresh in
+                if let fresh { fullScene = fresh }
             }
         }
         .libraryEditErrorToast(edits)

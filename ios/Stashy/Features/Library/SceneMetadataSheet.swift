@@ -1,31 +1,31 @@
 import SwiftUI
 
-/// How the scene metadata sheet opens from the ••• menu: straight into the edit form, or straight
-/// into the scraper picker (results then land in the same form for review before saving).
+/// How the scene metadata sheet opens from the ••• menu: straight into the edit form, or auto-scrape
+/// all sources first and land on the merged form.
 enum SceneMetadataMode: String, Identifiable {
     case edit, scrape
     var id: String { rawValue }
 }
 
 /// The scene metadata "mini window": a medium-detent glass sheet floating over the playing video.
-/// One sheet, three stages — the EDIT FORM (title / date / details / studio / performers / tags /
-/// cover), the SOURCE picker (stash-boxes + fragment scrapers, compact + scrollable), and the scraped
-/// RESULTS list. A scrape result is never applied blind: it merges into the form (Stash's own rules —
-/// non-empty scalars win, entities match by `stored_id`, unmatched ones become dashed "+" chips you
-/// can tap to create) and nothing touches the server until Save.
+/// A single EDIT FORM (title / date / details / studio / performers / tags / cover). "Scrape Metadata"
+/// queries **all three configured sources (StashDB / ThePornDB / FansDB) in parallel** and merges the
+/// results straight into this form — where the sources agree, the value just fills in; where they
+/// disagree (e.g. a different title or studio), a row of source chips appears so you pick the right one.
+/// Tags and performers union across sources (deduplicated); unmatched entities become dashed "+" chips
+/// you can create on tap. Nothing touches the server until Save.
 struct SceneMetadataSheet: View {
     let sceneID: String
     let mode: SceneMetadataMode
-    var onSaved: () -> Void
+    /// Handed the freshly-refetched scene after a successful save so the detail screen updates in place.
+    var onSaved: (StashScene?) -> Void
 
     @Environment(AppState.self) private var appState
     @Environment(ThemeManager.self) private var themeManager
     @Environment(\.dismiss) private var dismiss
 
-    private enum Stage { case edit, sources, results }
-
-    /// A studio/performer/tag reference in the form. `id` nil = scraped entity not in the library yet
-    /// (rendered dashed; tap-to-create fills the id in). Uncreated entries are skipped on Save.
+    /// A studio/performer/tag reference in the form. `storedID` nil = scraped entity not in the library
+    /// yet (rendered dashed; tap-to-create fills the id in). Uncreated entries are skipped on Save.
     private struct EntityRef: Identifiable, Hashable {
         var storedID: String?
         let name: String
@@ -40,7 +40,14 @@ struct SceneMetadataSheet: View {
         var id: String { storedID ?? "new:\(name)" }
     }
 
-    @State private var stage: Stage = .edit
+    /// One studio candidate for the conflict chips (carries the local id when a source matched one).
+    private struct StudioOption: Identifiable, Hashable {
+        let source: String
+        let storedID: String?
+        let name: String
+        var id: String { source + "\u{1}" + name }
+    }
+
     @State private var loaded = false
     @State private var loadError: String?
 
@@ -57,11 +64,14 @@ struct SceneMetadataSheet: View {
     @State private var existingStashIDs: [StashScraper.StashIDPair] = []
     @State private var pendingStashIDs: [StashScraper.StashIDPair]?
 
-    // Scrape state.
-    @State private var sources: [StashScraper.Source] = []
-    @State private var busySourceID: String?
-    @State private var results: [StashScraper.ScrapedSceneData] = []
-    @State private var resultsSource: StashScraper.Source?
+    // Per-field conflict options (populated by a scrape; empty = nothing to choose).
+    @State private var titleOptions: [SourcedValue] = []
+    @State private var dateOptions: [SourcedValue] = []
+    @State private var detailsOptions: [SourcedValue] = []
+    @State private var studioOptions: [StudioOption] = []
+    @State private var coverOptions: [SourcedValue] = []   // value = image string; "Current" = keep
+
+    @State private var scraping = false
     @State private var scrapeError: String?
 
     // Tag add-search.
@@ -78,9 +88,9 @@ struct SceneMetadataSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             SheetHeader(
-                title: headerTitle,
-                actionTitle: stage == .edit ? "Save" : nil,
-                actionDisabled: !loaded || saving,
+                title: "Scene Metadata",
+                actionTitle: "Save",
+                actionDisabled: !loaded || saving || scraping,
                 busy: saving,
                 onCancel: { dismiss() },
                 onAction: { save() }
@@ -90,11 +100,7 @@ struct SceneMetadataSheet: View {
                 SheetErrorLine(message: loadError)
             }
 
-            switch stage {
-            case .edit: editStage
-            case .sources: sourcesStage
-            case .results: resultsStage
-            }
+            editStage
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -102,14 +108,6 @@ struct SceneMetadataSheet: View {
         .presentationDragIndicator(.visible)
         .presentationBackgroundInteraction(.enabled(upThrough: .medium))
         .task { await load() }
-    }
-
-    private var headerTitle: String {
-        switch stage {
-        case .edit: return "Edit Scene"
-        case .sources: return "Scrape From"
-        case .results: return "Results"
-        }
     }
 
     // MARK: - Load / seed
@@ -131,7 +129,7 @@ struct SceneMetadataSheet: View {
             existingStashIDs = data.stash_ids ?? []
             screenshotPath = data.paths?.screenshot
             loaded = true
-            if mode == .scrape { openSources() }
+            if mode == .scrape { scrapeAll() }
         } catch {
             loadError = message(error)
         }
@@ -161,39 +159,21 @@ struct SceneMetadataSheet: View {
     @ViewBuilder private var editStage: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                HStack(alignment: .top, spacing: 12) {
-                    ScrapedImageView(source: coverSource)
-                        .frame(width: 118, height: 66)
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        .overlay(alignment: .bottomTrailing) {
-                            if coverOverride != nil {
-                                Text("new")
-                                    .font(.system(size: 9, weight: .bold))
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 2)
-                                    .background(themeManager.current.accentColor, in: Capsule())
-                                    .padding(3)
-                            }
-                        }
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("Title")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        TextField("Title", text: $title, axis: .vertical)
-                            .font(.subheadline)
-                            .lineLimit(1...3)
-                            .capsuleField(foreground: themeManager.current.foregroundColor)
-                    }
-                }
-
-                EditFieldRow(label: "Date", placeholder: "YYYY-MM-DD", text: $date,
-                             keyboard: .numbersAndPunctuation)
+                coverAndTitle
 
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("Details")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                    Text("Date").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                    SourceConflictChips(options: dateOptions, text: $date)
+                    TextField("YYYY-MM-DD", text: $date)
+                        .font(.subheadline)
+                        .keyboardType(.numbersAndPunctuation)
+                        .autocorrectionDisabled()
+                        .capsuleField(foreground: themeManager.current.foregroundColor)
+                }
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Details").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                    SourceConflictChips(options: detailsOptions, text: $details)
                     TextEditor(text: $details)
                         .font(.subheadline)
                         .frame(minHeight: 64, maxHeight: 120)
@@ -204,15 +184,9 @@ struct SceneMetadataSheet: View {
                                     in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
 
-                entitySection("Studio", refs: studio.map { [$0] } ?? [],
-                              emptyText: "No studio") { _ in
-                    studio = nil
-                } onCreate: { ref in
-                    createStudio(ref)
-                }
+                studioSection
 
-                entitySection("Performers", refs: performers,
-                              emptyText: "No performers") { ref in
+                entitySection("Performers", refs: performers, emptyText: "No performers") { ref in
                     performers.removeAll { $0.id == ref.id }
                 } onCreate: { ref in
                     createPerformer(ref)
@@ -227,22 +201,9 @@ struct SceneMetadataSheet: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                Button {
-                    openSources()
-                } label: {
-                    Label("Scrape Metadata…", systemImage: "sparkle.magnifyingglass")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(themeManager.current.accentColor)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(themeManager.current.accentColor.opacity(0.12),
-                                    in: Capsule())
-                }
-                .buttonStyle(.plain)
+                scrapeButton
 
-                if let saveError {
-                    SheetErrorLine(message: saveError)
-                }
+                if let saveError { SheetErrorLine(message: saveError) }
             }
             .padding(.bottom, 12)
         }
@@ -250,18 +211,113 @@ struct SceneMetadataSheet: View {
         .scrollDismissesKeyboard(.interactively)
     }
 
-    /// Chips row for studio/performers. Unmatched (dashed, +) chips create the entity when tapped.
+    private var coverAndTitle: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 12) {
+                ScrapedImageView(source: coverSource)
+                    .frame(width: 118, height: 66)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(alignment: .bottomTrailing) {
+                        if coverOverride != nil {
+                            Text("new")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(themeManager.current.accentColor, in: Capsule())
+                                .padding(3)
+                        }
+                    }
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Title").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                    SourceConflictChips(options: titleOptions, text: $title)
+                    TextField("Title", text: $title, axis: .vertical)
+                        .font(.subheadline)
+                        .lineLimit(1...3)
+                        .capsuleField(foreground: themeManager.current.foregroundColor)
+                }
+            }
+            // Cover chooser: pick which source's poster (or keep the current one). Only after a scrape.
+            if !coverOptions.isEmpty {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 6) {
+                        coverChip(label: "Current", value: nil)
+                        ForEach(coverOptions) { option in
+                            coverChip(label: option.source, value: option.value)
+                        }
+                    }
+                }
+                .scrollIndicators(.hidden)
+            }
+        }
+    }
+
+    private func coverChip(label: String, value: String?) -> some View {
+        let active = coverOverride == value
+        return Button {
+            coverOverride = value
+        } label: {
+            Text(label)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(active ? .white : themeManager.current.foregroundColor)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(active ? themeManager.current.accentColor
+                                   : themeManager.current.foregroundColor.opacity(0.10),
+                            in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder private var studioSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Studio").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+            if studioOptions.count > 1 {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 6) {
+                        ForEach(studioOptions) { option in
+                            let active = studio?.name.caseInsensitiveCompare(option.name) == .orderedSame
+                            Button {
+                                studio = EntityRef(storedID: option.storedID, name: option.name)
+                            } label: {
+                                Text(option.source)
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(active ? .white : themeManager.current.foregroundColor)
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 4)
+                                    .background(active ? themeManager.current.accentColor
+                                                       : themeManager.current.foregroundColor.opacity(0.10),
+                                                in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .scrollIndicators(.hidden)
+            }
+            if let studio {
+                FlowLayout(spacing: 6) {
+                    MetaChip(
+                        name: studio.name,
+                        matched: studio.storedID != nil,
+                        onCreate: { createStudio(studio) },
+                        onRemove: { self.studio = nil }
+                    )
+                }
+            } else {
+                Text("No studio").font(.caption).foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    /// Chips row for an entity list (performers). Unmatched (dashed, +) chips create the entity when tapped.
     private func entitySection(_ label: String, refs: [EntityRef], emptyText: String,
                                onRemove: @escaping (EntityRef) -> Void,
                                onCreate: @escaping (EntityRef) -> Void) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(label)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
+            Text(label).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
             if refs.isEmpty {
-                Text(emptyText)
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+                Text(emptyText).font(.caption).foregroundStyle(.tertiary)
             } else {
                 FlowLayout(spacing: 6) {
                     ForEach(refs) { ref in
@@ -279,9 +335,7 @@ struct SceneMetadataSheet: View {
 
     @ViewBuilder private var tagSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Tags")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
+            Text("Tags").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
             if !tags.isEmpty {
                 FlowLayout(spacing: 6) {
                     ForEach(tags) { ref in
@@ -327,177 +381,148 @@ struct SceneMetadataSheet: View {
         }
     }
 
-    // MARK: - Sources stage
-
-    @ViewBuilder private var sourcesStage: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Stash-box accounts first, then installed scrapers. Tap one to scrape this scene.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            if let scrapeError {
-                SheetErrorLine(message: scrapeError)
-            }
-            if sources.isEmpty && scrapeError == nil {
+    private var scrapeButton: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                scrapeAll()
+            } label: {
                 HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Loading sources…").font(.subheadline).foregroundStyle(.secondary)
+                    if scraping { ProgressView().controlSize(.small) }
+                    Label(scraping ? "Scraping StashDB · ThePornDB · FansDB…" : "Scrape Metadata",
+                          systemImage: "sparkle.magnifyingglass")
+                        .font(.subheadline.weight(.semibold))
                 }
-            } else {
-                ScrapeSourceList(sources: sources, busySourceID: busySourceID) { source in
-                    scrape(with: source)
-                }
+                .foregroundStyle(themeManager.current.accentColor)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(themeManager.current.accentColor.opacity(0.12), in: Capsule())
             }
-            backToEditButton
+            .buttonStyle(.plain)
+            .disabled(scraping)
+
+            if let scrapeError { SheetErrorLine(message: scrapeError) }
         }
     }
 
-    private var backToEditButton: some View {
-        Button {
-            stage = .edit
-        } label: {
-            Label("Back to editing", systemImage: "chevron.left")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-        }
-        .buttonStyle(.plain)
-        .padding(.top, 2)
-    }
+    // MARK: - Scrape all sources + merge
 
-    private func openSources() {
-        stage = .sources
-        scrapeError = nil
-        guard sources.isEmpty, let scraper else { return }
-        Task {
-            do {
-                sources = try await scraper.sceneSources()
-                if sources.isEmpty { scrapeError = "No scene scrapers or stash-box accounts are configured on the server." }
-            } catch {
-                scrapeError = message(error)
-            }
-        }
-    }
-
-    private func scrape(with source: StashScraper.Source) {
-        guard let scraper, busySourceID == nil else { return }
-        busySourceID = source.id
+    private func scrapeAll() {
+        guard let scraper, !scraping else { return }
+        scraping = true
         scrapeError = nil
         Task {
-            defer { busySourceID = nil }
+            defer { scraping = false }
             do {
-                let found = try await scraper.scrapeScene(source: source, sceneID: sceneID)
-                if found.isEmpty {
-                    scrapeError = "\(source.name) found no match for this scene."
+                let result = try await scraper.scrapeSceneEverywhere(sceneID: sceneID)
+                guard !result.items.isEmpty else {
+                    // Distinguish "sources reached, nothing matched" from "sources unreachable".
+                    scrapeError = result.failed.isEmpty
+                        ? "No match found on StashDB, ThePornDB or FansDB for this scene."
+                        : "Couldn't reach \(StashScraper.sourceList(result.failed)) — check they're online and try again."
                     return
                 }
-                results = found
-                resultsSource = source
-                if found.count == 1 {
-                    apply(found[0], from: source)   // single candidate → straight into the form
-                } else {
-                    stage = .results
-                }
+                applyMerged(result.items)
+                // Partial failure: we still merged what answered, but say which source was down.
+                scrapeError = result.failed.isEmpty ? nil
+                    : "Merged what was found — \(StashScraper.sourceList(result.failed)) \(result.failed.count == 1 ? "was" : "were") unreachable."
             } catch {
                 scrapeError = message(error)
             }
         }
     }
 
-    // MARK: - Results stage
+    /// Build per-field conflict options and union entities from every source's result. Sources arrive
+    /// priority-ordered, so the first distinct value (the default) is the highest-priority source's.
+    private func applyMerged(_ sourced: [StashScraper.SourcedScene]) {
+        // Scalars: distinct source-labeled values, plus the current value as a "Current" fallback so
+        // scraping never silently discards what was there.
+        titleOptions = SourcedValue.distinct(
+            sourced.map { ($0.source.name, $0.scene.title) } + [("Current", title.isEmpty ? nil : title)])
+        if let first = titleOptions.first { title = first.value }
 
-    @ViewBuilder private var resultsStage: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("\(results.count) matches from \(resultsSource?.name ?? "scraper") — tap one to review it in the form.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            ScrollView {
-                VStack(spacing: 8) {
-                    ForEach(Array(results.enumerated()), id: \.offset) { _, result in
-                        Button {
-                            if let resultsSource { apply(result, from: resultsSource) }
-                        } label: {
-                            resultRow(result)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
+        dateOptions = SourcedValue.distinct(
+            sourced.map { ($0.source.name, $0.scene.date) } + [("Current", date.isEmpty ? nil : date)])
+        if let first = dateOptions.first { date = first.value }
+
+        detailsOptions = SourcedValue.distinct(
+            sourced.map { ($0.source.name, $0.scene.details) } + [("Current", details.isEmpty ? nil : details)])
+        if let first = detailsOptions.first { details = first.value }
+
+        // Cover: scraped posters only (default to the top source's); "Current" chip keeps the existing one.
+        coverOptions = SourcedValue.distinct(sourced.map { ($0.source.name, $0.scene.image) })
+        coverOverride = coverOptions.first?.value
+
+        // Studio: distinct by name, priority-first, carrying a matched local id when any source had one.
+        studioOptions = mergedStudios(sourced)
+        if let first = studioOptions.first {
+            studio = EntityRef(storedID: first.storedID, name: first.name)
+        }
+
+        // Tags + performers: union across ALL sources (deduped), added onto whatever was already there.
+        for item in sourced { mergeEntities(from: item.scene) }
+
+        // Stash-box linkages: one per stash-box source that matched.
+        var stashIDs = existingStashIDs
+        for item in sourced {
+            if case .stashBox(let endpoint) = item.source.kind,
+               let remoteID = item.scene.remote_site_id, !remoteID.isEmpty {
+                stashIDs.removeAll { $0.endpoint.caseInsensitiveCompare(endpoint) == .orderedSame }
+                stashIDs.append(StashScraper.StashIDPair(endpoint: endpoint, stash_id: remoteID))
             }
-            .scrollIndicators(.hidden)
-            backToEditButton
+        }
+        pendingStashIDs = stashIDs == existingStashIDs ? nil : stashIDs
+    }
+
+    /// Distinct studios across sources (+ the current studio), priority-first, sources that agree joined.
+    private func mergedStudios(_ sourced: [StashScraper.SourcedScene]) -> [StudioOption] {
+        struct Acc { var sources: [String]; var storedID: String?; let display: String }
+        var order: [String] = []
+        var accs: [String: Acc] = [:]
+        func add(source: String, name: String?, id: String?) {
+            let clean = (name ?? "").trimmingCharacters(in: .whitespaces)
+            guard !clean.isEmpty else { return }
+            let key = clean.lowercased()
+            if var existing = accs[key] {
+                existing.sources.append(source)
+                if existing.storedID == nil { existing.storedID = id }   // prefer a matched local id
+                accs[key] = existing
+            } else {
+                accs[key] = Acc(sources: [source], storedID: id, display: clean)
+                order.append(key)
+            }
+        }
+        for item in sourced {
+            add(source: item.source.name, name: item.scene.studio?.name, id: item.scene.studio?.stored_id)
+        }
+        if let studio { add(source: "Current", name: studio.name, id: studio.storedID) }
+        return order.map { key in
+            let acc = accs[key]!
+            return StudioOption(source: acc.sources.joined(separator: " · "), storedID: acc.storedID, name: acc.display)
         }
     }
 
-    private func resultRow(_ result: StashScraper.ScrapedSceneData) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            ScrapedImageView(source: result.image)
-                .frame(width: 96, height: 54)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(result.title ?? "Untitled")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(themeManager.current.foregroundColor)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                HStack(spacing: 6) {
-                    if let date = result.date { Text(date) }
-                    if let studio = result.studio?.name { Text("· \(studio)").lineLimit(1) }
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                if let names = result.performers?.compactMap(\.name), !names.isEmpty {
-                    Text(names.joined(separator: ", "))
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(themeManager.current.foregroundColor.opacity(0.07),
-                    in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-
-    // MARK: - Apply scraped result (Stash's merge rules)
-
-    private func apply(_ result: StashScraper.ScrapedSceneData, from source: StashScraper.Source) {
-        // Non-empty scalars overwrite; empty scraped fields never clear what's there.
-        if let t = result.title, !t.isEmpty { title = t }
-        if let d = result.date, !d.isEmpty { date = d }
-        if let d = result.details, !d.isEmpty { details = d }
-        if let u = result.urls, !u.isEmpty { urls = Array(Set(urls).union(u)).sorted() }
-        if let image = result.image, !image.isEmpty { coverOverride = image }
-        if let s = result.studio {
-            studio = EntityRef(storedID: s.stored_id, name: s.name)
-        }
-        // Performers: matched ones join by stored_id; unmatched become dashed create-chips carrying
-        // their full scraped record (so tap-to-create fills every field, like Stash's dialog).
-        for scraped in result.performers ?? [] {
+    /// Union a scraped scene's tags + performers onto the form (matched by stored_id, then by name).
+    private func mergeEntities(from scene: StashScraper.ScrapedSceneData) {
+        for scraped in scene.performers ?? [] {
             guard let name = scraped.name, !name.isEmpty else { continue }
             if let sid = scraped.stored_id {
                 if !performers.contains(where: { $0.storedID == sid }) {
                     performers.append(EntityRef(storedID: sid, name: name))
                 }
-            } else if !performers.contains(where: { $0.storedID == nil && $0.name == name }) {
+            } else if !performers.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
                 performers.append(EntityRef(storedID: nil, name: name, scrapedPerformer: scraped))
             }
         }
-        for scraped in result.tags ?? [] {
+        for scraped in scene.tags ?? [] {
             if let sid = scraped.stored_id {
                 if !tags.contains(where: { $0.storedID == sid }) {
                     tags.append(EntityRef(storedID: sid, name: scraped.name))
                 }
-            } else if !tags.contains(where: { $0.storedID == nil && $0.name == scraped.name }) {
+            } else if !tags.contains(where: { $0.name.caseInsensitiveCompare(scraped.name) == .orderedSame }) {
                 tags.append(EntityRef(storedID: nil, name: scraped.name))
             }
         }
-        // A stash-box match records its linkage (replacing any older link to the same endpoint).
-        if case .stashBox(let endpoint) = source.kind {
-            pendingStashIDs = StashScraper.mergedStashIDs(
-                existing: existingStashIDs, endpoint: endpoint, remoteID: result.remote_site_id)
-        }
-        stage = .edit
+        if let u = scene.urls, !u.isEmpty { urls = Array(Set(urls).union(u)).sorted() }
     }
 
     // MARK: - Create-missing entities (tap on a dashed chip)
@@ -508,9 +533,7 @@ struct SceneMetadataSheet: View {
             do {
                 let id = try await scraper.createTag(name: ref.name)
                 if let i = tags.firstIndex(where: { $0.id == ref.id }) { tags[i].storedID = id }
-            } catch {
-                saveError = message(error)
-            }
+            } catch { saveError = message(error) }
         }
     }
 
@@ -520,9 +543,7 @@ struct SceneMetadataSheet: View {
             do {
                 let id = try await scraper.createStudio(name: ref.name)
                 if studio?.id == ref.id { studio?.storedID = id }
-            } catch {
-                saveError = message(error)
-            }
+            } catch { saveError = message(error) }
         }
     }
 
@@ -538,9 +559,7 @@ struct SceneMetadataSheet: View {
                     id = try await scraper.createPerformer(StashScraper.PerformerCreate(name: ref.name))
                 }
                 if let i = performers.firstIndex(where: { $0.id == ref.id }) { performers[i].storedID = id }
-            } catch {
-                saveError = message(error)
-            }
+            } catch { saveError = message(error) }
         }
     }
 
@@ -556,7 +575,6 @@ struct SceneMetadataSheet: View {
             edit.title = title
             edit.details = details
             // An empty date is OMITTED (= unchanged), not sent: Stash rejects "" as an invalid date.
-            // Clearing a date isn't supported here — set it in Stash's UI if ever needed.
             let trimmedDate = date.trimmingCharacters(in: .whitespaces)
             edit.date = trimmedDate.isEmpty ? nil : trimmedDate
             edit.urls = urls
@@ -567,12 +585,20 @@ struct SceneMetadataSheet: View {
             edit.stash_ids = pendingStashIDs
             do {
                 try await scraper.updateScene(edit)
-                onSaved()
+                // Refetch here (inside the same task that just saved) and hand the fresh scene back so the
+                // detail screen updates instantly, with no dependence on a parent-side round trip.
+                let fresh = await refetchScene()
+                onSaved(fresh)
                 dismiss()
             } catch {
                 saveError = message(error)
             }
         }
+    }
+
+    private func refetchScene() async -> StashScene? {
+        guard let client = appState.client else { return nil }
+        return try? await client.findScene(id: sceneID)
     }
 
     private func message(_ error: Error) -> String {
