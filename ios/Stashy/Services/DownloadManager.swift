@@ -90,8 +90,10 @@ final class DownloadItem: Identifiable {
     /// picks 1080p/720p/480p only when they want to downscale.
     var serverResolution: ServerQuality = .original
     /// Fast segmented transfer while foregrounded, collapsing to one durable connection in the background.
-    /// False uses one full-file background task for the entire transfer.
-    var multiThread = false
+    /// False uses one full-file background task for the entire transfer. Defaults ON (owner decision
+    /// 2026-07-24): the daily flow is start-and-watch on home Wi-Fi, where the 8-way engine matters; the
+    /// adaptive engine still collapses to one background connection on suspension either way.
+    var multiThread = true
     // MARK: Companion (server-side plugin) transcode staging
     /// When set, Start routes through the Stashy Companion plugin to produce an iPhone-native HEVC/AV1
     /// file, then downloads that. nil = not a companion transcode (original or built-in server H.264).
@@ -532,7 +534,7 @@ final class DownloadManager {
             id: scene.id, title: scene.title ?? base, url: url,
             fileName: base, ext: ext, codec: file?.video_codec,
             width: file?.width, height: file?.height, bitRate: file?.bit_rate,
-            totalBytes: total, connectionCount: 1, scene: scene, apiKey: apiKey
+            totalBytes: total, connectionCount: total > 0 ? connectionCount : 1, scene: scene, apiKey: apiKey
         )
         items.insert(item, at: 0)
         startConnections(item)
@@ -1995,7 +1997,7 @@ final class DownloadManager {
                         return FileManager.default.fileExists(atPath: t.path) ? t : nil
                     }())
                 item.companionCodec = codec
-                item.multiThread = sidecar.multiThread ?? false
+                item.multiThread = sidecar.multiThread ?? true   // pre-field sidecars = default-ON era
                 item.serverResolution = ServerQuality(rawValue: sidecar.companionResolution ?? "p1080") ?? .p1080
                 item.companionQuality = CompanionQuality(rawValue: sidecar.companionQuality ?? "medium") ?? .medium
                 item.state = .serverProcessing
@@ -2020,7 +2022,7 @@ final class DownloadManager {
                         return FileManager.default.fileExists(atPath: t.path) ? t : nil
                     }())
                 item.companionCodec = codec
-                item.multiThread = sidecar.multiThread ?? false
+                item.multiThread = sidecar.multiThread ?? true   // pre-field sidecars = default-ON era
                 item.serverResolution = ServerQuality(rawValue: sidecar.companionResolution ?? "p1080") ?? .p1080
                 item.companionQuality = CompanionQuality(rawValue: sidecar.companionQuality ?? "medium") ?? .medium
                 items.append(item)
