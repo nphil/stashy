@@ -73,6 +73,19 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   `startForegroundFallback`, an in-process data task that appends every chunk into our own part file,
   so there is no hand-over step to fail and progress is durable + Range-resumable. It only advances
   while the app is open, hence fallback-only. (§3)
+- **A discarded resume blob LEAKS the partial file into "System Data" (owner hit 71.85 GB).** The blob
+  is a pointer to a partially-downloaded file the daemon holds in ITS cache, outside the app sandbox —
+  invisible to Stashy's storage listing and unreachable by it. Setting `resumeData[id] = nil` orphans
+  that file forever. To release it you must materialise a task from the blob and `cancel()` it WITHOUT
+  requesting new resume data (`releaseResumeBlob`). This fed a vicious cycle: stranded partials ate the
+  REAL free space, which caused the next download's hand-over to fail, which stranded another. Settings
+  → Diagnostics → **Reclaim Download Storage** does the sweep on demand. (§3)
+- **Test free space with `volumeAvailableCapacity`, NEVER `…ForImportantUsage`.** The latter counts
+  purgeable caches iOS may never reclaim in time: it read **40 GB** on a device with **4.1 GB** genuinely
+  free, which is how a 5.5 GB download was waved through a preflight check and then died at 99%. And a
+  BACKGROUND download costs **2× the file** (the system streams into its own container, then needs a
+  second copy's worth to hand it over) while the in-process fallback costs 1× — so an item that fits one
+  copy but not two is routed to the fallback up front. (§3)
 - **iOS hands you resume data for a FAILED download in the error's `userInfo`**
   (`NSURLSessionDownloadTaskResumeData`) — `cancel(byProducingResumeData:)` does nothing for a task
   that already ended. Not reading it meant every dropped connection restarted a multi-GB file from
@@ -180,8 +193,8 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.316** (`dee2513`, IPA 9,490,265 B) — single-engine downloads + delivery-failure
-  fallback + resume-blob capture. **v1.0.313** removed multi-threading entirely.
+- Latest release: **v1.0.319** (`6ac3824`, IPA 9,494,750 B) — resume-blob storage leak fixed + Reclaim
+  Download Storage. v1.0.317 = strict free-space accounting; **v1.0.313** removed multi-threading.
 - **Backgrounded-downloads round 3 (v1.0.307–308) — SIX defects, all "durable bytes thrown away or
   never committed"**: the owner's "% went 15→12→8, froze, restarted on reopen" was NOT one bug. See the
   new Landmines entries + ENGINEERING_NOTES §3 "Durability rules" for the full list; the headline is that
