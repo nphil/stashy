@@ -125,21 +125,24 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.301** (nav bar stays present on the scene player, commit `d715092`, IPA
-  9,390,437 B); **v1.0.297 restored the multiThread download default to ON** (owner decision 2026-07-24).
-  Verify the newest release/IPA size each push.
-- **v1.0.301 — nav-bar reappearance fixed the right way (superseded the v1.0.300 fade):** hiding the nav
-  bar on the scene player made the return to the grid a jarring hide→show pop; the v1.0.300 fade masked it
-  but the owner disliked the delay. **Now the scene player KEEPS a mini inline nav bar** (`.toolbar(
-  isFullscreen ? .hidden : .visible, for: .navigationBar)` + inline `shown.title`), so list⇄scene is a
-  normal nav-bar item cross-fade (smooth, no custom animation). The video still bleeds behind it
-  (`.ignoresSafeArea(.top)`); layout stays aligned because it’s driven by `geo.safeAreaInsets.top` (grows
-  by the bar height, visible 16:9 area unchanged). This also removes the old hidden-bar preference
-  ScenesView had to counteract. **`DownloadsView(compact:)`** = mini empty-title bar when pushed from a
-  scene (RouteDestination), full “Downloads” title from the tab. **To verify on device:** the mini glass
-  bar over the video (title redundant with the metadata heading? can blank it), and that PORTRAIT
-  fullscreen (button, no rotation) hides the bar — the in-place toolbar-visibility toggle is the tab-bar
-  landmine’s cousin.
+- Latest release: **v1.0.302** (scene player nav bar made WEIGHTLESS — v1.0.301 layout regression fixed,
+  commit `105b69d`, IPA 9,395,359 B); **v1.0.297 restored the multiThread download default to ON** (owner
+  decision 2026-07-24). Verify the newest release/IPA size each push.
+- **v1.0.301→302 — nav bar on the scene player (LANDMINE: this screen’s layout keys off the safe area):**
+  goal (owner): the bar stays visible across screens so list⇄scene pops are native item cross-fades (the
+  old hide→show pop was jarring; a masking fade was disliked). v1.0.301 naively made the bar visible —
+  but a visible bar SHRINKS the SwiftUI safe area, and SceneDetailView derives its whole layout from
+  `safeAreaInsets.top`: the 16:9 box slid down by the bar height, the blur bleed grew, the bar drew the
+  title over the video (duplicating the metadata header), a suppressed system back button left the bar
+  EMPTY, and the inflated inset polluted the player’s inline control padding. **v1.0.302 fix — the bar is
+  present but weightless:** the screen `.ignoresSafeArea(.top)` and derives the status-bar strip from the
+  WINDOW’s device insets via `WindowMetricsReader` (the fullscreen player’s proven probe; zero for ≤1–2
+  frames mid-push) → geometry pixel-identical to the bar-hidden days; `toolbarBackground(.hidden)` + no
+  `navigationTitle` (metadata header owns the title); ONE floating mini back chevron (topBarLeading,
+  content gated on `!isFullscreen`; system back stays suppressed, edge-swipe alive); player gets
+  `windowSafeArea`, not geo’s. Fullscreen still hides the bar — and even if the in-place toggle lags, a
+  background-less bar with gated-out content shows nothing. **`DownloadsView(compact:)`** = empty-title
+  bar when pushed from a scene (RouteDestination), full “Downloads” title from the tab.
 - **v1.0.300 — scene delete options simplified:** the delete dialog no longer offers “remove from Stash
   but keep the file” (**owner standing rule: NEVER delete a scene from Stash while keeping its disk
   file**). Downloaded scene → **“Delete Download from Phone”** (local copy only, scene stays;
