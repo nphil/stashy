@@ -14,6 +14,8 @@ struct StashyDownloadLiveActivity: Widget {
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
+                    // Fit within the leading pocket: the label column may only get ~70 pt beside the
+                    // ring, so both lines scale down before they'd ever clip at the island's edge.
                     HStack(spacing: 7) {
                         LiveSegmentRing(state: context.state)
                             .frame(width: 25, height: 25)
@@ -24,23 +26,33 @@ struct StashyDownloadLiveActivity: Widget {
                             Text(context.isStale ? "Updating" : context.state.phase.shortTitle)
                                 .font(.caption.weight(.semibold))
                                 .lineLimit(1)
+                                .minimumScaleFactor(0.7)
                         }
                     }
+                    .padding(.leading, 2)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
+                    // "100%" at title3 can clip against the trailing curve — let it shrink instead.
                     LiveTransferPercent(state: context.state)
                         .font(.title3.weight(.semibold).monospacedDigit())
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                        .padding(.trailing, 2)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(spacing: 6) {
                         LiveSegmentBar(state: context.state)
                             .frame(height: 5)
-                        HStack(spacing: 8) {
+                        HStack(alignment: .top, spacing: 8) {
+                            // Status lines (speed · ETA, or a server-transcode stage) can be long; wrap
+                            // to two lines and scale slightly rather than clipping at the screen edge.
                             Text(context.isStale ? "Open Stashy to refresh" : context.state.status)
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                            Spacer(minLength: 4)
+                                .lineLimit(2)
+                                .minimumScaleFactor(0.85)
+                                .multilineTextAlignment(.leading)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                             if context.state.activeJobCount > 1 {
                                 Text("+\(context.state.activeJobCount - 1)")
                                     .font(.caption2.weight(.semibold).monospacedDigit())
@@ -48,6 +60,7 @@ struct StashyDownloadLiveActivity: Widget {
                             }
                         }
                     }
+                    .padding(.horizontal, 2)
                 }
             } compactLeading: {
                 LiveSegmentRing(state: context.state)
