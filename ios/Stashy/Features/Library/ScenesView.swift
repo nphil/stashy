@@ -31,9 +31,6 @@ struct ScenesView: View {
     @State private var selectedIDs: Set<String> = []
     // The jobs status dropdown (title button, top-leading). Mutually exclusive with the filter dropdown.
     @State private var jobsExpanded = false
-    // Softens the nav-bar chrome (title button + funnel) reappearing after a detail pop: instead of the
-    // custom toolbar content snapping in at the end of the swipe-back, it fades in. Driven by path→empty.
-    @State private var chromeOpacity: Double = 1
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
     // Sort (field + direction) persists across launches; filters (tags) always start cleared.
@@ -279,14 +276,6 @@ struct ScenesView: View {
             // Only one dropdown open at a time.
             .onChange(of: filterExpanded) { _, open in if open { jobsExpanded = false } }
             .onChange(of: jobsExpanded) { _, open in if open { filterExpanded = false } }
-            // Returned to the grid (a detail popped) → fade the custom nav chrome in instead of a hard pop.
-            .onChange(of: path) { old, new in
-                guard new.isEmpty, !old.isEmpty else { return }
-                chromeOpacity = 0
-                Task { @MainActor in
-                    withAnimation(.easeOut(duration: 0.35)) { chromeOpacity = 1 }
-                }
-            }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .themedBackground()
             // Scene detail deliberately hides the navigation bar. The root must explicitly own a visible bar
@@ -312,10 +301,8 @@ struct ScenesView: View {
                 ToolbarItem(placement: .topBarLeading) {
                     if selectionMode {
                         Button("Cancel") { exitSelection() }
-                            .opacity(chromeOpacity)
                     } else {
                         titleJobsButton
-                            .opacity(chromeOpacity)
                     }
                 }
                 // A stable zero-size principal suppresses the duplicate centered navigationTitle chrome
@@ -336,10 +323,8 @@ struct ScenesView: View {
                         }
                         .disabled(selectedIDs.isEmpty)
                         .animation(.snappy, value: selectedIDs.count)
-                        .opacity(chromeOpacity)
                     } else {
                         FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
-                            .opacity(chromeOpacity)
                     }
                 }
             }

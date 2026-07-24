@@ -15,8 +15,6 @@ struct PerformersView: View {
     @State private var jobsExpanded = false
     // Add-performer sheet (the + toolbar button): scraper-backed search → pick match → pick photo → create.
     @State private var createSheet = false
-    // Fades the custom nav chrome back in after a detail pop (see ScenesView) instead of a hard snap.
-    @State private var chromeOpacity: Double = 1
     @State private var path: [Route] = []
     @State private var reloadDebounce: Task<Void, Never>?
     private let columns = [GridItem(.adaptive(minimum: 110), spacing: 12)]
@@ -66,14 +64,6 @@ struct PerformersView: View {
             // Only one dropdown open at a time.
             .onChange(of: filterExpanded) { _, open in if open { jobsExpanded = false } }
             .onChange(of: jobsExpanded) { _, open in if open { filterExpanded = false } }
-            // Returned to the grid (a detail popped) → fade the custom nav chrome in instead of a hard pop.
-            .onChange(of: path) { old, new in
-                guard new.isEmpty, !old.isEmpty else { return }
-                chromeOpacity = 0
-                Task { @MainActor in
-                    withAnimation(.easeOut(duration: 0.35)) { chromeOpacity = 1 }
-                }
-            }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .themedBackground()
             .navigationBarTitleDisplayMode(.inline)
@@ -88,7 +78,7 @@ struct PerformersView: View {
             }
             .toolbar {
                 // Title (top-left) = the jobs dropdown button.
-                ToolbarItem(placement: .topBarLeading) { titleJobsButton.opacity(chromeOpacity) }
+                ToolbarItem(placement: .topBarLeading) { titleJobsButton }
                 // Search magnifier (top-right), then add-performer (+), then the funnel — declaration
                 // order places + left of the funnel.
                 DefaultToolbarItem(kind: .search, placement: .topBarTrailing)
@@ -102,11 +92,9 @@ struct PerformersView: View {
                         Image(systemName: "plus")
                     }
                     .accessibilityLabel("Add performer")
-                    .opacity(chromeOpacity)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     FilterFunnelButton(expanded: $filterExpanded, isActive: filterActive)
-                        .opacity(chromeOpacity)
                 }
             }
             .sheet(isPresented: $createSheet) {
