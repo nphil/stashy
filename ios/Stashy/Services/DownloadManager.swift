@@ -445,6 +445,11 @@ final class DownloadManager {
     /// One automatic clean restart for a legacy background range task that returns -3000 after updating.
     /// Kept separate from network retries so byte progress can't accidentally create an infinite loop.
     @ObservationIgnored private var fileRecoveryAttempts: [String: Int] = [:]
+    /// Items whose background range transfers the daemon refused — held (parts intact) until the app
+    /// returns to the foreground, where the 8-way engine resumes from the durable parts with zero loss.
+    /// The pre-v1.0.304 behavior wiped every part and restarted single-threaded from byte 0 in the
+    /// background, which read as "the download stalled/slowed to a crawl" after minimizing.
+    @ObservationIgnored private var resumeOnForeground: Set<String> = []
     /// True while the app is backgrounded. Transfers need no phase handoff; this only governs work such as
     /// on-device transcoding that must pause while the process is suspended.
     @ObservationIgnored private var inBackground = false
@@ -1421,6 +1426,14 @@ final class DownloadManager {
     }
 
     private func startConnections(_ item: DownloadItem) {
+        // Never start an engine while cancelled writers are still draining their buffered file appends —
+        // a part-size snapshot taken mid-drain is stale and poisons the next range request. Park the item
+        // as waiting; the retry loop re-fires in 3 s, by which time the drain callbacks have long landed.
+        if pendingForegroundStops[item.id] != nil {
+            item.state = .waitingForNetwork
+            scheduleNetworkRetry(item)
+            return
+        }
         let desiredCount = item.multiThread && item.totalBytes > 0 ? connectionCount : 1
         // A mode change changes the part geometry, so it is only applied before starting or on an explicit
         // retry. Normal foreground/background transitions keep the same durable eight-part layout.
@@ -1564,6 +1577,13 @@ final class DownloadManager {
     private func suspend(_ item: DownloadItem, auto: Bool) {
         guard item.state == .downloading else { return }
         item.state = auto ? .waitingForNetwork : .paused
+        // Register the drain barrier BEFORE cancelling: a cancelled data task's buffered chunks still
+        // append to its durable part until its completion callback lands. The network-blip retry path
+        // used to skip this barrier (collapseToBackground had it, suspend didn't), so the 3 s relaunch
+        // could snapshot a part size mid-drain — the replacement range task then started at a stale
+        // offset and its append guard tripped (-3003), cascading into the wipe-and-restart fallback.
+        let writers = foregroundTasks[item.id]?.count ?? 0
+        if writers > 0 { pendingForegroundStops[item.id] = writers }
         cancelTasks(item, produceResumeData: true)
         syncLiveActivity()
     }
@@ -1598,6 +1618,34 @@ final class DownloadManager {
     /// Keep the screen awake when the user is watching Downloads, or whenever work is happening — an
     /// idle-sleep backgrounds the app, which would pause a foreground-only transcode.
     var keepScreenAwake: Bool { downloadsScreenVisible || hasActiveWork }
+
+    /// Aggregate live progress for the floating status button: the mean fraction across every active
+    /// item (bytes for transfers, job % for server transcodes, frames for on-device transcodes; a merge
+    /// counts as full), or nil when nothing is active — the button hides. Rides the same observable
+    /// fields the Downloads screen renders, so it updates with the existing 120 ms poll (which already
+    /// pauses while a grid is scrolling — zero scroll-perf cost).
+    var floatingStatus: (progress: Double, count: Int)? {
+        var fractions: [Double] = []
+        for item in items {
+            if item.transcoding {
+                fractions.append(min(1, max(0, item.transcodeProgress)))
+                continue
+            }
+            switch item.state {
+            case .downloading, .waitingForNetwork:
+                fractions.append(item.totalBytes > 0
+                                 ? min(1, Double(item.receivedBytes) / Double(item.totalBytes)) : 0)
+            case .serverProcessing:
+                fractions.append(min(1, max(0, item.serverJobProgress)))
+            case .merging:
+                fractions.append(1)
+            default:
+                break
+            }
+        }
+        guard !fractions.isEmpty else { return nil }
+        return (fractions.reduce(0, +) / Double(fractions.count), fractions.count)
+    }
 
     // MARK: - Live Activity
 
@@ -1744,6 +1792,16 @@ final class DownloadManager {
             // delegate queue to finish those file writes before opening replacement writers.
             if pendingForegroundStops[item.id] == nil { startForegroundConnections(item) }
         }
+        // Items the background daemon refused (bg range rejected → held with parts intact): resume them
+        // on the 8-way foreground engine now, and refresh every item's retry budget — a fresh foreground
+        // session deserves fresh background attempts on the next minimize.
+        let held = resumeOnForeground
+        resumeOnForeground.removeAll()
+        fileRecoveryAttempts.removeAll()
+        for id in held {
+            guard let item = items.first(where: { $0.id == id }), item.state == .paused else { continue }
+            launch(item, reset: false)
+        }
         syncLiveActivity()
     }
 
@@ -1829,11 +1887,20 @@ final class DownloadManager {
                     // so transcodes don't pile up on the server. (companionCodec is nil for original /
                     // built-in-H.264 / on-device-transcoded downloads, so only true server proxies are freed.)
                     if item.companionCodec != nil { self.deleteServerProxy(sceneID: item.id, apiKey: item.apiKey) }
+                    self.cleanupParts(item.id)   // success: the parts are consumed, reclaim them
                 } else {
                     item.error = "Couldn't assemble the file"
                     item.state = .failed
+                    // KEEP the durable parts on failure — Retry resumes from them instead of re-downloading
+                    // everything (the old cleanup here forced a from-zero restart) — and log the evidence
+                    // (per-part size vs expected) so the failing chain is identifiable from the owner's ntfy.
+                    let sizes = item.connections.indices.map { i in
+                        "\(i):\(self.fileSize(self.partURL(item.id, i)))/\(item.connections[i].total)"
+                    }
+                    RemoteLog.shared.event("dl-merge-fail", [
+                        ("item", item.id), ("conns", item.connections.count),
+                        ("total", item.totalBytes), ("parts", sizes.joined(separator: " "))])
                 }
-                self.cleanupParts(item.id)
                 self.syncLiveActivity()
                 if bg != .invalid { UIApplication.shared.endBackgroundTask(bg) }
             }
@@ -1913,14 +1980,42 @@ final class DownloadManager {
         }
         // Ignore late cancellation/error callbacks from foreground tasks that the fallback just replaced.
         if engine == .foreground, !item.multiThread { return }
-        if code == NSURLErrorCannotCreateFile, (fileRecoveryAttempts[itemID] ?? 0) < 1 {
-            // A device/daemon that rejects even one fresh background range falls back to a 200 full-file
-            // task. This also heals a v1.0.293 range task still registered at upgrade.
-            fileRecoveryAttempts[itemID, default: 0] += 1
-            item.multiThread = false
-            launch(item, reset: true)
-            persistTransferPreference(item)
-            return
+        // The daemon refused a background range/file operation (-3000 family). For a MULTI download this
+        // used to demote to single-thread with launch(reset:) — wiping every durable part and restarting
+        // from byte 0 in the background, which the owner experienced as "minimize → download stalls or
+        // crawls". Now: one clean retry of a fresh background range; if that's refused too, HOLD the item
+        // with its parts intact and resume the full 8-way engine when the app returns to the foreground.
+        if code == NSURLErrorCannotCreateFile || code == NSURLErrorCannotWriteToFile {
+            RemoteLog.shared.event("dl-bg-reject", [
+                ("item", itemID), ("code", code), ("engine", engine.rawValue),
+                ("attempt", fileRecoveryAttempts[itemID] ?? 0),
+                ("conns", item.connections.count), ("bytes", item.receivedBytes)])
+            if item.connections.count > 1 {
+                backgroundTasks[itemID] = nil
+                if inBackground {
+                    if (fileRecoveryAttempts[itemID] ?? 0) < 1 {
+                        fileRecoveryAttempts[itemID, default: 0] += 1
+                        startAdaptiveBackgroundConnection(item)   // one fresh attempt, progress intact
+                    } else {
+                        item.state = .paused                      // parts intact; foreground resumes 8-way
+                        resumeOnForeground.insert(itemID)
+                        syncLiveActivity()
+                    }
+                } else {
+                    // Foreground: the 8-way data-task engine doesn't need the daemon at all.
+                    reconcileDurableParts(item)
+                    startForegroundConnections(item)
+                }
+                return
+            }
+            // Single full-file mode has no parts to preserve — the old demote-and-restart is all there is.
+            if (fileRecoveryAttempts[itemID] ?? 0) < 1 {
+                fileRecoveryAttempts[itemID, default: 0] += 1
+                item.multiThread = false
+                launch(item, reset: true)
+                persistTransferPreference(item)
+                return
+            }
         }
         let retries = networkRetries[itemID] ?? 0
         if Self.transientNetworkCodes.contains(code) && retries < maxNetworkRetries {
