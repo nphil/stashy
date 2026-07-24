@@ -100,13 +100,22 @@ struct SceneDetailView: View {
             .animation(.easeInOut(duration: 0.3), value: isFullscreen)
         }
         .themedBackground()
-        .toolbar(.hidden, for: .navigationBar)
+        // Keep the nav bar PRESENT (mini/inline) in portrait rather than hiding it — hiding it made the
+        // return to the grid a jarring hide→show pop (owner disliked both that and a masking fade). With
+        // the bar present, list⇄scene is a normal nav-bar item cross-fade (smooth, no custom animation).
+        // The video still bleeds up behind it (`.ignoresSafeArea(.top)`), and the metadata stays aligned
+        // because the layout is driven by `geo.safeAreaInsets.top`, which simply grows by the bar height.
+        // Fullscreen (landscape/immersive) still hides it entirely.
+        .toolbar(isFullscreen ? .hidden : .visible, for: .navigationBar)
+        .navigationTitle(shown.title ?? "Scene")
+        .navigationBarTitleDisplayMode(.inline)
         // Hide the tab bar for the whole scene screen, not just in fullscreen. Toggling tab-bar
         // visibility *in place* is unreliable: SwiftUI only re-applies it on a navigation push/pop or an
         // orientation change, so landscape fullscreen (which rotates) hid it but portrait fullscreen
         // (button-triggered, no rotation) left it showing. Hiding unconditionally binds the change to
         // push/pop, which always works — and a dedicated player/detail screen doesn't need the tab bar.
         .toolbar(.hidden, for: .tabBar)
+        // Owner preference: no top-left back button (edge-swipe, kept alive by EnableSwipeBack, goes back).
         .navigationBarBackButtonHidden(true)
         .statusBarHidden(isFullscreen)
         .background(EnableSwipeBack()) // keep edge-swipe back even with the nav bar hidden

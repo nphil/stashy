@@ -27,7 +27,9 @@ struct RouteDestination: View {
         case .performer(let performer):
             PerformerDetailView(performer: performer, path: $path)
         case .downloads:
-            DownloadsView()
+            // Reached by pushing from a scene's ••• → mini bar matching the scene player (the Downloads
+            // TAB uses the default full-title bar).
+            DownloadsView(compact: true)
         }
     }
 }

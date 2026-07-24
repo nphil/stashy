@@ -4,6 +4,10 @@ import SwiftUI
 /// + stats) and finished offline videos. Reached from a scene's 3-dot menu and from Settings. Tapping a
 /// card opens the scene player (playing the local file once downloaded).
 struct DownloadsView: View {
+    /// Pushed from a scene → mini (empty-title) bar matching the scene player, so the whole
+    /// scene→downloads→back flow keeps one consistent nav bar. The Downloads TAB root passes false and
+    /// shows the full "Downloads" title.
+    var compact = false
     @Environment(DownloadManager.self) private var downloads
     @Environment(ThemeManager.self) private var themeManager
     @State private var playing: DownloadItem?
@@ -31,7 +35,7 @@ struct DownloadsView: View {
             }
         }
         .themedBackground()
-        .navigationTitle("Downloads")
+        .navigationTitle(compact ? "" : "Downloads")
         .navigationBarTitleDisplayMode(.inline)
         // No top-left back button (owner preference); the edge-swipe (kept alive by EnableSwipeBack) goes back.
         .navigationBarBackButtonHidden(true)
