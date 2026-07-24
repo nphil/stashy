@@ -12,6 +12,7 @@ struct SceneDetailView: View {
     @State private var quality: ServerQuality = .auto   // gear-menu manual server-transcode override
     @State private var resumeAt: Double = 0             // position carried across a quality switch
     @State private var confirmDelete = false
+    @State private var benchmarking = false
     /// The scene list query slims performers to id+name to keep the payload small. Once the detail
     /// screen appears we re-fetch this one scene's full performer profiles (rating, urls, tags…) for
     /// the performer card and social links. Nil until the fetch lands; falls back to the slim scene.
@@ -157,6 +158,9 @@ struct SceneDetailView: View {
         }
         // Metadata mini-window: a medium-detent glass sheet floating over the (still playing) video.
         // The sheet refetches the scene after saving and hands it back, so the header/tags update in place.
+        .sheet(isPresented: $benchmarking) {
+            TransferBenchmarkSheet(scene: fullScene ?? scene, apiKey: apiKey)
+        }
         .sheet(item: $metadataMode) { mode in
             SceneMetadataSheet(sceneID: scene.id, mode: mode) { fresh in
                 if let fresh { fullScene = fresh }
@@ -229,6 +233,9 @@ struct SceneDetailView: View {
                         },
                         PopupMenuAction(title: "Edit Metadata", systemImage: "square.and.pencil") {
                             metadataMode = .edit
+                        },
+                        PopupMenuAction(title: "Benchmark Transfer", systemImage: "speedometer") {
+                            benchmarking = true
                         },
                         PopupMenuAction(title: "Delete Scene", systemImage: "trash", isDestructive: true) {
                             confirmDelete = true
