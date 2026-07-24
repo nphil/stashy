@@ -64,10 +64,14 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   one task or eight (the old "8 parallel = -3000" landmine was this same bug ×8; "a single bg range task
   is the supported case" was flagged UNVERIFIED for months and is now verified FALSE — the adaptive
   bg-range engine never worked once). **Do not reintroduce background range tasks.** Design since
-  v1.0.309: multi = 8-way foreground engine + ~30 s `beginBackgroundTask` grace (writers keep streaming
-  durable bytes) → HOLD with parts intact ("Progress saved" Live Activity), resume 8-way on return;
-  single/"Background" mode = ONE full-file (200) daemon task — the only transport that completes
-  unattended. Still true: -3000/-3003 must HOLD durable parts, never wipe; NO engine may start while
+  v1.0.310: multi = 8-way foreground engine + ~30 s `beginBackgroundTask` grace (writers keep streaming
+  durable bytes) → drain → **SHADOW leg**: a parallel full-file daemon task (conn 999, own part file,
+  own iOS resume blob persisted to disk) downloads the same file unattended; foreground return parks it
+  (`pauseShadow`, blob keeps the daemon's offset) and resumes 8-way from the untouched parts — whichever
+  leg finishes first wins (island shows `max(parts, shadow)`, so % never regresses; speed counts both
+  legs). Cost: up to one extra pass of the file, amortized by the blob — accepted for finish-unattended.
+  Single/"Background" mode = ONE full-file (200) daemon task. `holdForForeground` = shadow-failure
+  fallback. Still true: -3000/-3003 must HOLD durable parts, never wipe; NO engine may start while
   cancelled writers drain (`pendingForegroundStops` barrier). (§3)
 - **Popovers:** never host from a conditional/churning view — use a stable ZStack sibling
   (`FilterPopoverAnchor` pattern). Bit us three times. (§6)
@@ -165,12 +169,12 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.309 pending** — THE TRANSPORT VERDICT (see Landmines: bg-session download tasks
-  can never deliver 206; device-verified via dl-trace): bg range engine fully removed; multi = fg engine
-  + ~30 s grace → hold; single/"Background" = full-file daemon task (completes unattended); LA projection
-  cap widened to +35% for suspended glide; staging captions updated. v1.0.308 (`4dea9a4`, 9,444,230 B) =
-  drain-barrier deadlock + cold-relaunch adoption; v1.0.307 (`22cc493`, 9,442,019 B) = durability fixes +
-  parts out of Caches. **v1.0.297 restored the multiThread download default to ON** (owner 2026-07-24).
+- Latest release: **v1.0.310 pending** (`ee8c694` shadow leg — multi-thread downloads finish unattended
+  via a parallel full-file daemon task; see the -3000 landmine for the full design). **v1.0.309**
+  (`043ecd0`) = THE TRANSPORT VERDICT (bg-session download tasks can never deliver 206, device-verified
+  via dl-trace; bg range engine removed; grace window; LA projection cap +35%). v1.0.308 (`4dea9a4`,
+  9,444,230 B) = drain-barrier deadlock + cold-relaunch adoption; v1.0.307 (`22cc493`, 9,442,019 B) =
+  durability fixes + parts out of Caches. **v1.0.297: multiThread default ON** (owner 2026-07-24).
 - **Backgrounded-downloads round 3 (v1.0.307–308) — SIX defects, all "durable bytes thrown away or
   never committed"**: the owner's "% went 15→12→8, froze, restarted on reopen" was NOT one bug. See the
   new Landmines entries + ENGINEERING_NOTES §3 "Durability rules" for the full list; the headline is that

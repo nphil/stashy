@@ -158,10 +158,18 @@ Range/206 response, full stop. The v1.0.107 note "a single bg range task is the 
 (marked UNVERIFIED below) is FALSE — the adaptive bg-range engine never worked once; the 16 MB slice
 design (v1.0.307) treated a symptom. Current design: **multi** = 8-way fg engine + ~30 s
 `beginBackgroundTask` grace (writers keep streaming durable bytes; quick app-switches never blip) →
-drain + HOLD (paused, `resumeOnForeground`, LA "Progress saved") → auto-resume 8-way on foreground;
-**single/"Background" mode** = ONE full-file (200) daemon task — completes unattended, iOS resume blobs
-on pause, cold-relaunch completion adopted (`connectionFinished` paused-adoption). The durability rules
-below all still hold.
+drain → **SHADOW leg** (v1.0.310): a parallel full-file daemon task (conn 999 → `<id>-999.part`, own
+iOS resume blob persisted beside the parts) downloads the same file unattended. Foreground return
+parks it (`pauseShadow` — blob keeps the daemon's offset) and resumes 8-way from the untouched parts;
+whichever leg finishes first wins (`finalizeFromShadow` promotes the whole file via the single-part
+merge; an all-parts merge retires a live shadow). The island shows `max(receivedBytes, shadowBytes)`
+(never regresses when one leg pauses) and `item.speed` counts both legs so the suspended ETA glide is
+honest. Shadow hard-failure falls back to `holdForForeground` (paused + `resumeOnForeground`, LA
+"Progress saved"). Cost accepted: up to one extra pass of the file, amortized across cycles by the
+blob. **single/"Background" mode** = ONE full-file (200) daemon task — completes unattended, iOS
+resume blobs on pause, cold-relaunch completion adopted (`connectionFinished` paused-adoption; the
+shadow's completion finalizes from a cold relaunch the same way). The durability rules below all
+still hold.
 
 ### Durability rules (v1.0.307–308 — read before touching the background path)
 The engine's ONE invariant: **a byte that reached disk is never thrown away by a recoverable error.**
