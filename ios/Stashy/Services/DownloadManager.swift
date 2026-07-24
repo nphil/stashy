@@ -1501,21 +1501,37 @@ final class DownloadManager {
         if item.totalBytes > 0, item.connections.first?.total != item.totalBytes {
             item.rebuildConnections(totalBytes: item.totalBytes)
         }
-        // iOS delivers a finished background download by moving the daemon's copy into our container,
-        // which needs roughly the file's size free AT COMPLETION — not while it runs. A phone that is
-        // too full therefore transfers the whole thing at full speed and only then fails, with -3000
-        // "Cannot create file". Refuse up front instead, with a number the owner can act on.
+        // Space, measured properly — this is what -3000 "Cannot create file" actually was.
+        //
+        // A background download costs TWICE the file: the system streams into its own container and
+        // needs a second copy's worth to hand the result to us at the end. And the free-space figure
+        // to test against is `volumeAvailableCapacity`, NOT `…ForImportantUsage` — the latter counts
+        // purgeable caches iOS merely *might* reclaim and read 40 GB on a phone with 4 GB genuinely
+        // free, which is exactly how a 5.5 GB download got waved through and then failed at 99%.
+        //
+        // The in-process transport writes straight into our own part file, so it costs ONE copy. A
+        // phone that can fit one but not two is therefore routed there deliberately, up front, rather
+        // than after burning two full downloads discovering it.
         if item.totalBytes > 0 {
-            let free = availableBytes()
-            let needed = item.totalBytes + (256 << 20)      // margin for the merge and the sidecars
-            if free > 0, free < needed {
+            let free = availableBytesStrict()
+            let margin: Int64 = 512 << 20
+            let directNeed = item.totalBytes + margin
+            let daemonNeed = item.totalBytes * 2 + margin
+            if free > 0, free < directNeed {
                 item.state = .failed
-                item.error = "Not enough space — needs \(Self.bytesLabel(needed)), "
-                    + "\(Self.bytesLabel(free)) free."
+                item.error = "Not enough space for this download — needs "
+                    + "\(Self.bytesLabel(directNeed)), \(Self.bytesLabel(free)) free."
                 RemoteLog.shared.event("dl-space", [
-                    ("item", item.id), ("need", needed), ("free", free)])
+                    ("item", item.id), ("why", "refuse"), ("need", directNeed),
+                    ("strict", free), ("lenient", availableBytes())])
                 syncLiveActivity()
                 return
+            }
+            if free > 0, free < daemonNeed, !foregroundFallback.contains(item.id) {
+                foregroundFallback.insert(item.id)
+                RemoteLog.shared.event("dl-space", [
+                    ("item", item.id), ("why", "route-direct"), ("need", daemonNeed),
+                    ("strict", free), ("lenient", availableBytes())])
             }
         }
         item.state = .downloading
@@ -1574,6 +1590,9 @@ final class DownloadManager {
         guard foregroundTasks[item.id] == nil else { return }
         cancelTasks(item, produceResumeData: false)
         let base = fileSize(partURL(item.id, 0))
+        // Unlike the daemon path, these bytes are ours and on disk — report them as progress.
+        item.receivedBytes = base
+        if let first = item.connections.indices.first { item.connections[first].received = base }
         var request = URLRequest(url: item.url)
         if base > 0 { request.setValue("bytes=\(base)-", forHTTPHeaderField: "Range") }
         let task = fgSession.dataTask(with: request)
@@ -2131,10 +2150,12 @@ final class DownloadManager {
         // could not move the finished file into our container. Restarting from zero cannot fix that and
         // costs another full download, so name the real problem instead.
         if code == NSURLErrorCannotCreateFile {
-            let free = availableBytes()
+            let free = availableBytesStrict()
             RemoteLog.shared.event("dl-space", [
-                ("item", itemID), ("free", free), ("strict", availableBytesStrict()),
+                ("item", itemID), ("strict", free), ("lenient", availableBytes()),
                 ("total", item.totalBytes), ("got", item.receivedBytes), ("why", "err-3000")])
+            // Not even one copy fits: the in-process fallback would fail too, so say so and stop
+            // rather than spending another few gigabytes proving it.
             if item.totalBytes > 0, free > 0, free < item.totalBytes {
                 item.state = .failed
                 item.error = "Not enough space to save this download — "
