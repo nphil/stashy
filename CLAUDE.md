@@ -60,7 +60,10 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
 ## Landmines (one-liners — full stories in ENGINEERING_NOTES)
 - **-3000:** a background `URLSession` cannot run 8 parallel range tasks (shipped regression,
   reverted). Current design = dual-engine handoff: foreground 8-way (**sacred**) ⇄ background
-  single-connection. (§3)
+  single-connection. Since v1.0.305: a daemon range-refusal (-3000/-3003) must **HOLD the durable
+  parts** (one fresh retry, then pause + resume 8-way on foreground) — never wipe-and-restart; and NO
+  engine may start while cancelled writers drain (`pendingForegroundStops` barrier — suspend AND
+  collapse both register it; startConnections refuses to run past it). (§3)
 - **Popovers:** never host from a conditional/churning view — use a stable ZStack sibling
   (`FilterPopoverAnchor` pattern). Bit us three times. (§6)
 - Most CI failures ever hit were **Swift 6 strict-concurrency** — read the patterns before writing
@@ -125,9 +128,38 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.302** (scene player nav bar made WEIGHTLESS — v1.0.301 layout regression fixed,
-  commit `105b69d`, IPA 9,395,359 B); **v1.0.297 restored the multiThread download default to ON** (owner
-  decision 2026-07-24). Verify the newest release/IPA size each push.
+- Latest release: **v1.0.305** (background-download engine fixes + floating status button + Live
+  Activity clipping, commit `645c69a`, IPA 9,421,417 B); **v1.0.297 restored the multiThread download
+  default to ON** (owner decision 2026-07-24). Verify the newest release/IPA size each push.
+- **v1.0.305 — background-download audit fixes (the "minimize → stall/crawl → fail to build" report):**
+  (1) the transient-network suspend path now registers the SAME `pendingForegroundStops` drain barrier
+  as collapseToBackground, and `startConnections` refuses to start any engine mid-drain (a stale
+  part-size snapshot poisoned the next range request → -3003 append-guard trips); (2) the -3000/-3003
+  background fallback no longer wipes parts — multi items retry ONE fresh bg range then HOLD (paused,
+  `resumeOnForeground`) and resume 8-way with zero loss on foreground (retry budgets reset per
+  foregrounding); (3) merge failure keeps the durable parts (Retry re-merges instead of re-downloading)
+  and emits `dl-merge-fail` (per-part sizes) + `dl-bg-reject` RemoteLog events for residual diagnosis.
+  Also: **floating download-status button** (`Features/Downloads/DownloadStatusButton.swift`,
+  `.downloadStatusOverlay()` on Scenes/Performers/Settings roots) — ~52 pt glass circle, accent progress
+  ring + live % + ×N badge, tap → Downloads tab, hidden when idle, rides the existing 120 ms poll (paused
+  during scrolls). **Live Activity expanded-island text no longer clips** (minimumScaleFactor / 2-line
+  wrap / edge padding). The app→island collapse morph is SYSTEM-owned; its precondition (activity
+  requested at download start) was already met — the perceived failure was the engine stall above.
+- **v1.0.304 — VMAF-map provenance in transcode logs** (+ **Companion v0.3.8** — owner must update the
+  plugin): the plugin stamps `crf_source` ("map"/"live"/"preset"), `map_res` (the vmaf-map res key
+  consumed) and `vmaf_expected` into every served progress write + the terminal result; the app logs
+  "Quality: cq N from VMAF map (1080p entry, ≈VMAF 94, target 94) — live analysis skipped" once at
+  encode start and tags the finish VMAF line "from map (…)"/"live analysis". Honest across engine
+  fallbacks (fallback engine ⇒ "preset"). Old plugin = no fields = no line.
+- **v1.0.303 — bottom tab bar everywhere** (owner: the collapsible bottom bar shows on every screen,
+  incl. the scene player + downloads-via-scene; it arrives in whatever minimized state the grid left it
+  and expands on tap — **no public API exists to force the minimized state**, verified against SwiftUI
+  TabBarMinimizeBehavior + UIKit UITabBarController docs). The player's top bar lost its back chevron
+  (bar stays weightless with ZERO items; back = edge-swipe / player control). Fullscreen hides the tab
+  bar via BOTH the SwiftUI preference and the deterministic UIKit `setTabBarHidden` probe
+  (`Features/Player/TabBarVisibility.swift`, responder-chain lookup, restores on dismantle) — the two
+  always agree in value, and the imperative call covers the documented portrait-fullscreen
+  in-place-toggle failure.
 - **v1.0.301→302 — nav bar on the scene player (LANDMINE: this screen’s layout keys off the safe area):**
   goal (owner): the bar stays visible across screens so list⇄scene pops are native item cross-fades (the
   old hide→show pop was jarring; a masking fade was disliked). v1.0.301 naively made the bar visible —
