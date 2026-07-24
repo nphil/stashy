@@ -404,8 +404,8 @@ private struct DownloadCard: View {
             switch stageSource.wrappedValue {
             case .original:
                 Label(item.multiThread
-                      ? "8 connections open · 1 continues in background"
-                      : "1 connection continues in background",
+                      ? "8 connections · fastest · pauses ~30 s after you leave, resumes on return"
+                      : "1 connection · keeps downloading after you leave the app",
                       systemImage: "arrow.down.circle")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
@@ -433,8 +433,8 @@ private struct DownloadCard: View {
                     .font(.caption2).foregroundStyle(.tertiary)
                     .lineLimit(1)
                 Text(item.multiThread
-                     ? "Output downloads with adaptive multi-threading"
-                     : "Output downloads with one background connection")
+                     ? "Output downloads multi-threaded (in-app)"
+                     : "Output downloads in the background")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .lineLimit(1)
             }

@@ -224,16 +224,17 @@ private extension DownloadActivityAttributes.ContentState {
     /// Project the last byte snapshot along its measured ETA so the system-owned Live Activity keeps moving
     /// while Stashy's process is suspended. Real delegate updates replace this estimate whenever available.
     ///
-    /// The projection is CLAMPED to a small window above the last real byte snapshot: an optimistic ETA
-    /// (throughput drops after the snapshot — typical once the app suspends) otherwise races far ahead,
-    /// and the next real update yanks the shown % back DOWN. Capping the overshoot keeps any correction
-    /// within a barely-noticeable band while the ring still visibly moves between updates.
+    /// The projection is CLAMPED to a window above the last real byte snapshot, and never falls below
+    /// it. While the app is alive, real pushes land every ~2 s, so the projection barely deviates and
+    /// any correction is invisible. The wide cap matters when the app is SUSPENDED with a full-file
+    /// background download still running in the daemon: no pushes can arrive, and the ETA glide is the
+    /// only thing keeping the island moving — a tight cap would freeze it a few points in.
     func projectedProgress(at date: Date) -> Double? {
         let real = progress.map { min(1, max(0, $0)) }
         if let start = estimatedStart, let end = estimatedEnd, start < end {
             let projected = min(1, max(0, date.timeIntervalSince(start) / end.timeIntervalSince(start)))
             guard let real else { return projected }
-            return min(1, max(real, min(projected, real + 0.08)))
+            return min(1, max(real, min(projected, real + 0.35)))
         }
         return real
     }

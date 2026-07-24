@@ -419,10 +419,6 @@ final class DownloadManager {
     var liveActivityError: String?
 
     @ObservationIgnored private let connectionCount = 8
-    /// Ceiling on a single background range request — see `startAdaptiveBackgroundConnection`. Bounds
-    /// how much transferred-but-uncommitted data one interruption can throw away. Small enough that a
-    /// regression is invisible, large enough that a multi-GB file doesn't need thousands of wakeups.
-    @ObservationIgnored private let backgroundSliceBytes: Int64 = 16 << 20
     @ObservationIgnored private let store = TransferStore()
     /// Multi-thread mode writes range data directly into durable parts on this in-process session.
     @ObservationIgnored private var fgSession: URLSession!
@@ -439,7 +435,10 @@ final class DownloadManager {
     /// above zero forever, and since `startConnections` refuses to start any engine while it is set, the
     /// item made ZERO progress for the rest of the process lifetime and reopening the app didn't help.
     @ObservationIgnored private var pendingForegroundStops: [String: Set<Int>] = [:]
-    @ObservationIgnored private var handoffAssertion: UIBackgroundTaskIdentifier = .invalid
+    /// Keeps the 8-way foreground writers streaming durable bytes for the ~30 s of background runtime
+    /// iOS grants after minimizing. When it expires, the writers drain and the item HOLDS; when the
+    /// user comes back sooner, the assertion just ends — the transfer never even blipped.
+    @ObservationIgnored private var graceAssertion: UIBackgroundTaskIdentifier = .invalid
     @ObservationIgnored private var resumeData: [String: [Int: Data]] = [:]
     @ObservationIgnored private var finished: [String: Set<Int>] = [:]
     @ObservationIgnored private var pollTask: Task<Void, Never>?
@@ -1506,25 +1505,39 @@ final class DownloadManager {
         item.lastSampleBytes = item.receivedBytes
         markActive(item.id)
         reconcileDurableParts(item)
-        // Known-size single downloads run on the SAME durable engine as multi, with one segment: a
-        // foreground data task streams appends into part 0 (a blip loses nothing), backgrounding hands
-        // off to one background range task from the durable offset. The legacy full-file task — whose
-        // only mid-flight recovery is an iOS resume BLOB needing validator headers the server may not
-        // send, silently restarting from byte 0 when absent (the owner's "backgrounded single download
-        // restarts" report) — is kept ONLY for unknown sizes and servers that refused a range (no 206).
+        // Two engines with honest contracts, split by the user's Transfer choice (device-verified on
+        // iOS 26.5.2, see the -3000 landmine: a background-session download task CANNOT deliver a
+        // Range/206 response — it transfers the whole body then fails with -3000 "Cannot create file"
+        // at the delivery step, in background AND foreground alike — so there is no daemon-supported
+        // way to continue a multi-part item unattended):
+        //  • Single ("Background" mode) = ONE full-file (200) task on the background session — the
+        //    transport the daemon fully supports; it keeps downloading and completes unattended.
+        //  • Multi ("Multi-thread") = the fast durable 8-way foreground engine; minimizing keeps the
+        //    writers alive for the ~30 s background grace, then HOLDS with parts intact.
         if usesLegacySingle(item) {
             startFullBackgroundDownload(item)
         } else if inBackground {
-            startAdaptiveBackgroundConnection(item)
+            holdForForeground(item)
         } else {
             startForegroundConnections(item)
         }
         syncLiveActivity()
     }
 
-    /// Whether this item must use the legacy full-file background task instead of the durable range engine.
+    /// Whether this item runs on the full-file background-session task (every single-connection item:
+    /// it is the only transport that can continue unattended) instead of the ranged foreground engine.
     private func usesLegacySingle(_ item: DownloadItem) -> Bool {
-        item.connections.count == 1 && (item.totalBytes == 0 || rangeUnsupported.contains(item.id))
+        item.connections.count == 1
+    }
+
+    /// Park a multi-part item with its durable parts intact until the app returns to the foreground.
+    /// The Live Activity stays alive in the "Progress saved" state via the `resumeOnForeground` branch.
+    private func holdForForeground(_ item: DownloadItem) {
+        guard item.state == .downloading || item.state == .waitingForNetwork else { return }
+        item.state = .paused
+        resumeOnForeground.insert(item.id)
+        partCensus(item, "hold")
+        syncLiveActivity()
     }
 
     private func startFullBackgroundDownload(_ item: DownloadItem) {
@@ -1578,47 +1591,11 @@ final class DownloadManager {
         if live.isEmpty, backgroundTasks[item.id] == nil { finalizeIfComplete(item) }
     }
 
-    /// Run exactly one fresh range request in the background. It appends to the durable bytes written by
-    /// foreground data tasks; no resume blob ever crosses session boundaries.
-    ///
-    /// **The range is a bounded SLICE, not the whole remaining segment.** A background *download task*
-    /// streams into URLSession's private temp file and only lands in our durable part at
-    /// `didFinishDownloadingTo` — so an interrupted range discards EVERY byte it had transferred. With
-    /// one task per whole segment (up to totalBytes/8, or the entire file for a single download) a
-    /// minimized transfer could work for minutes and commit nothing: each retry re-read the smaller
-    /// durable size, so the Dynamic Island percentage visibly went BACKWARDS (the owner's 15 → 12 → 8),
-    /// and foregrounding resumed from a long-stale offset, i.e. "the download restarts". Slicing caps
-    /// the loss from any single interruption at `backgroundSliceBytes` and makes background progress
-    /// monotonic, because every completed slice is durable.
-    private func startAdaptiveBackgroundConnection(_ item: DownloadItem) {
-        guard backgroundTasks[item.id] == nil else { return }
-        reconcileDurableParts(item)
-        let done = finished[item.id] ?? []
-        guard let i = item.connections.indices.first(where: { !done.contains($0) }) else {
-            finalizeIfComplete(item); return
-        }
-        let part = partURL(item.id, i)
-        let base = fileSize(part)
-        let (lo, hi) = chunkRange(item, i)
-        guard lo + base <= hi else {
-            finished[item.id, default: []].insert(i)
-            startAdaptiveBackgroundConnection(item)
-            return
-        }
-        let from = lo + base
-        let to = min(hi, from + backgroundSliceBytes - 1)
-        var request = URLRequest(url: item.url)
-        request.setValue("bytes=\(from)-\(to)", forHTTPHeaderField: "Range")
-        let task = bgSession.downloadTask(with: request)
-        // `expected` is the part's size AFTER this slice appends — exactly what the delegate's
-        // post-append size check validates.
-        register(task, item: item, conn: i, engine: .background, base: base,
-                 expected: base + (to - from + 1), rangeRequest: true)
-        backgroundTasks[item.id] = task
-        trace("dl-slice", [("item", item.id), ("conn", i), ("from", from), ("to", to),
-                           ("base", base), ("part_total", item.connections[i].total)])
-        task.resume()
-    }
+    // NOTE deliberately absent: there is NO background range engine. Device logs (iOS 26.5.2, item
+    // 2761/2767, 2026-07-24) proved a background-session download task with a Range header transfers
+    // its whole body and then always fails with -3000 "Cannot create file" at delivery — backgrounded
+    // or foregrounded, one task or eight. Multi-part items therefore hold (`holdForForeground`) when
+    // the process can't keep foreground writers alive; do not reintroduce bg range tasks.
 
     private func register(_ task: URLSessionTask, item: DownloadItem, conn: Int, engine: TransferEngine,
                           base: Int64, expected: Int64, rangeRequest: Bool) {
@@ -1694,10 +1671,8 @@ final class DownloadManager {
         guard item.state == .downloading else { return }
         item.state = auto ? .waitingForNetwork : .paused
         // Register the drain barrier BEFORE cancelling: a cancelled data task's buffered chunks still
-        // append to its durable part until its completion callback lands. The network-blip retry path
-        // used to skip this barrier (collapseToBackground had it, suspend didn't), so the 3 s relaunch
-        // could snapshot a part size mid-drain — the replacement range task then started at a stale
-        // offset and its append guard tripped (-3003), cascading into the wipe-and-restart fallback.
+        // append to its durable part until its completion callback lands. Any relaunch that snapshots
+        // a part size mid-drain starts a writer at a stale offset — the append guard then trips (-3003).
         registerDrainBarrier(item)
         cancelTasks(item, produceResumeData: true)
         syncLiveActivity()
@@ -1931,11 +1906,40 @@ final class DownloadManager {
         let live = items.filter { $0.state == .downloading }
         RemoteLog.shared.event("dl-phase", [("to", "background"), ("active", live.count)])
         for item in live { partCensus(item, "enter-bg") }
-        for item in items where item.state == .downloading && !usesLegacySingle(item) {
-            collapseToBackground(item)
+        // Multi-part items: keep the foreground writers STREAMING through the ~30 s of background
+        // runtime iOS grants — real durable progress, live Live Activity — then hold when it expires.
+        // (There is no daemon engine to hand off to: bg-session range tasks always fail at delivery,
+        // see the -3000 note above holdForForeground.) Legacy full-file singles need nothing — the
+        // daemon continues them unattended, which is the entire point of that mode.
+        if live.contains(where: { !usesLegacySingle($0) }), graceAssertion == .invalid {
+            graceAssertion = UIApplication.shared.beginBackgroundTask(withName: "download-grace") { [weak self] in
+                MainActor.assumeIsolated { self?.graceExpired() }
+            }
+            RemoteLog.shared.event("dl-grace", [
+                ("remaining_s", Int(min(UIApplication.shared.backgroundTimeRemaining, 3600)))])
         }
         syncLiveActivity()
         RemoteLog.shared.flushNow()   // the periodic timer stops once we're suspended
+    }
+
+    /// iOS is about to suspend us: drain the writers and hold every multi-part transfer with its parts
+    /// intact. Runs inside the assertion's expiration handler, so it must finish quickly.
+    private func graceExpired() {
+        for item in items where item.state == .downloading && !usesLegacySingle(item) {
+            registerDrainBarrier(item)
+            cancelTasks(item, produceResumeData: false)
+            holdForForeground(item)
+        }
+        syncLiveActivity()
+        RemoteLog.shared.event("dl-grace", [("expired", 1)])
+        RemoteLog.shared.flushNow()
+        endGraceAssertion()
+    }
+
+    private func endGraceAssertion() {
+        guard graceAssertion != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(graceAssertion)
+        graceAssertion = .invalid
     }
 
     private func enterForeground() {
@@ -1955,15 +1959,16 @@ final class DownloadManager {
             item.error = nil
             transcode(item, settings: settings)
         }
+        // A return inside the grace window means the writers never stopped — just release the
+        // assertion and the transfer continues as if the app was never minimized.
+        endGraceAssertion()
         for item in items where item.state == .downloading && !usesLegacySingle(item) {
-            // Keep any in-flight background range; fill the other unfinished segments in parallel.
-            // If foreground writers are still draining their cancellation callbacks, wait for the shared
-            // delegate queue to finish those file writes before opening replacement writers.
+            // Top up any missing writers (no-op when all eight survived the grace). If writers are
+            // still draining their cancellation callbacks, the drain completion restarts them instead.
             if pendingForegroundStops[item.id] == nil { startForegroundConnections(item) }
         }
-        // Items the background daemon refused (bg range rejected → held with parts intact): resume them
-        // on the 8-way foreground engine now, and refresh every item's retry budget — a fresh foreground
-        // session deserves fresh background attempts on the next minimize.
+        // Items held when the grace expired: resume them on the 8-way foreground engine now, and
+        // refresh every item's retry budget — a fresh foreground session deserves fresh attempts.
         let held = resumeOnForeground
         resumeOnForeground.removeAll()
         fileRecoveryAttempts.removeAll()
@@ -1972,22 +1977,6 @@ final class DownloadManager {
             launch(item, reset: false)
         }
         syncLiveActivity()
-    }
-
-    private func collapseToBackground(_ item: DownloadItem) {
-        let active = foregroundTasks[item.id] ?? []
-        guard !active.isEmpty else {
-            startAdaptiveBackgroundConnection(item)
-            return
-        }
-        registerDrainBarrier(item)
-        foregroundTasks[item.id] = nil
-        active.forEach { $0.cancel() }
-        if handoffAssertion == .invalid {
-            handoffAssertion = UIApplication.shared.beginBackgroundTask(withName: "adaptive-download-handoff") { [weak self] in
-                Task { @MainActor in self?.expireAdaptiveHandoff() }
-            }
-        }
     }
 
     /// Record which foreground writers are draining, so no engine reads a part size mid-append. Paired
@@ -2028,26 +2017,11 @@ final class DownloadManager {
     /// on a genuinely unreachable server, spin fail → drain → restart without ever spending the retry
     /// budget that eventually surfaces the failure.
     private func drainCompleted(_ itemID: String) {
-        if let item = items.first(where: { $0.id == itemID }), item.state == .downloading {
-            reconcileDurableParts(item)
-            partCensus(item, "drained")
-            if inBackground { startAdaptiveBackgroundConnection(item) }
-            else { startForegroundConnections(item) }
-        }
-        endAdaptiveHandoffAssertionIfNeeded()
-    }
-
-    private func expireAdaptiveHandoff() {
-        let itemIDs = Array(pendingForegroundStops.keys)
-        pendingForegroundStops.removeAll()
-        for itemID in itemIDs { drainCompleted(itemID) }
-        endAdaptiveHandoffAssertionIfNeeded()
-    }
-
-    private func endAdaptiveHandoffAssertionIfNeeded() {
-        guard pendingForegroundStops.isEmpty, handoffAssertion != .invalid else { return }
-        UIApplication.shared.endBackgroundTask(handoffAssertion)
-        handoffAssertion = .invalid
+        guard let item = items.first(where: { $0.id == itemID }), item.state == .downloading else { return }
+        reconcileDurableParts(item)
+        partCensus(item, "drained")
+        if inBackground { holdForForeground(item) }
+        else { startForegroundConnections(item) }
     }
 
     private func connectionStopped(itemID: String, conn: Int, engine: TransferEngine) {
@@ -2153,39 +2127,20 @@ final class DownloadManager {
         }
         // A cold background relaunch rebuilds items as .paused before `reconnectTasks` can flip them,
         // and the app is relaunched precisely BECAUSE a task reached a terminal state — so that task is
-        // already gone from `getAllTasks` and the state never flips. Every "continue" branch below is
-        // gated on .downloading, so the transfer committed one slice per relaunch and then stopped dead
-        // (and the Live Activity, seeing nothing active, ended itself). A delegate callback arriving for
-        // a paused item proves the transfer is live: a user pause cancels its tasks, which routes to
-        // connectionStopped instead. Adopt it.
+        // already gone from `getAllTasks` and the state never flips. Without adoption the finished
+        // full-file transfer would sit paused instead of finalizing, and the Live Activity, seeing
+        // nothing active, ended itself. A delegate callback arriving for a paused item proves the
+        // transfer is live: a user pause cancels its tasks, which routes to connectionStopped instead.
         if item.state == .paused, engine == .background, resumeOnForeground.contains(itemID) == false {
             item.state = .downloading
             trace("dl-adopt", [("item", itemID), ("conn", conn), ("bytes", item.receivedBytes)])
-        }
-        // A finished BACKGROUND task means one bounded slice is now durable — not that the whole
-        // connection is done. Only a part that reached its full segment size closes the connection;
-        // otherwise keep slicing (or hand the segment back to the foreground engine if we returned).
-        if engine == .background, conn < item.connections.count {
-            let size = fileSize(partURL(itemID, conn))
-            let total = item.connections[conn].total
-            trace("dl-slice-done", [("item", itemID), ("conn", conn), ("size", size), ("total", total)])
-            if total > 0, size < total {
-                item.connections[conn].received = size
-                item.receivedBytes = item.connections.reduce(Int64(0)) { $0 + $1.received }
-                if item.state == .downloading {
-                    if inBackground { startAdaptiveBackgroundConnection(item) }
-                    else { startForegroundConnections(item) }
-                }
-                syncLiveActivity()
-                return
-            }
         }
         finished[itemID, default: []].insert(conn)
         if conn < item.connections.count { item.connections[conn].received = item.connections[conn].total }
         if (finished[itemID] ?? []).count == item.connections.count {
             finalizeIfComplete(item)
         } else if item.state == .downloading {
-            if inBackground { startAdaptiveBackgroundConnection(item) }
+            if inBackground { holdForForeground(item) }
             else { startForegroundConnections(item) }
         }
     }
@@ -2257,42 +2212,30 @@ final class DownloadManager {
             syncLiveActivity()
             return
         }
-        // Ignore late error callbacks from foreground range tasks that the full-file fallback just
-        // replaced. Scoped to items KNOWN range-refusing: the ranged-single engine legitimately runs
-        // foreground data tasks with multiThread off, and their errors must be handled normally.
+        // Ignore late error callbacks from foreground range tasks that a demote just replaced with the
+        // full-file engine — scoped to items the demote actually marked, so real foreground errors on
+        // healthy multi items are never swallowed.
         if engine == .foreground, rangeUnsupported.contains(itemID) { return }
-        // The daemon refused a background range/file operation (-3000 family). This used to demote with
-        // launch(reset:) — wiping every durable part and restarting from byte 0 in the background, which
-        // the owner experienced as "minimize → download stalls or crawls" (multi) and "backgrounded single
-        // downloads never finish, restart on return" (single). Now: ANY durable progress — eight parts or
-        // the single-connection part 0 — is held, never wiped. One clean retry of a fresh background
-        // range; if that's refused too, HOLD the item with its parts intact and resume when the app
-        // returns to the foreground.
+        // The daemon refused a file operation (-3000 family). With the bg range engine gone this should
+        // only reach a legacy full-file task (a real daemon error) or our own -3003 append/size guards.
+        // The rule is unchanged: ANY durable progress is held, never wiped.
         if code == NSURLErrorCannotCreateFile || code == NSURLErrorCannotWriteToFile {
             RemoteLog.shared.event("dl-bg-reject", [
                 ("item", itemID), ("code", code), ("engine", engine.rawValue),
                 ("attempt", fileRecoveryAttempts[itemID] ?? 0),
                 ("conns", item.connections.count), ("bytes", item.receivedBytes)])
             // Only the failed BACKGROUND task's reference is stale; a foreground -3003 must not orphan
-            // a live background range task (a later start would then double-write its part).
+            // a live background task (a later start would then double-write its part).
             if engine == .background { backgroundTasks[itemID] = nil }
             reconcileDurableParts(item)
             if item.connections.count > 1 || item.receivedBytes > 0 {
                 if inBackground {
-                    if (fileRecoveryAttempts[itemID] ?? 0) < 1 {
-                        fileRecoveryAttempts[itemID, default: 0] += 1
-                        startAdaptiveBackgroundConnection(item)   // one fresh attempt, progress intact
-                    } else {
-                        item.state = .paused                      // parts intact; foreground resume restores
-                        resumeOnForeground.insert(itemID)
-                        syncLiveActivity()
-                    }
+                    holdForForeground(item)                       // parts intact; foreground resumes
                 } else if item.connections.count > 1 {
                     // Foreground multi: the 8-way data-task engine doesn't need the daemon at all.
                     startForegroundConnections(item)
                 } else if (fileRecoveryAttempts[itemID] ?? 0) < 3 {
-                    // Foreground single: park briefly and relaunch — launch(reset: false) re-enters the
-                    // durable range-append path with part 0 intact.
+                    // Foreground single: park briefly and relaunch with the durable bytes intact.
                     fileRecoveryAttempts[itemID, default: 0] += 1
                     item.state = .waitingForNetwork
                     scheduleNetworkRetry(item)
@@ -2510,6 +2453,10 @@ final class DownloadManager {
             }
             item.receivedBytes = sum
             item.state = .paused   // reconnectTasks() flips this to .downloading if a live task is found
+            // Multi-part items have no daemon task to reconnect (their engine is foreground-only), so a
+            // restored one was necessarily held mid-transfer — queue it for the automatic foreground
+            // resume, which also keeps any surviving Live Activity in the honest "Progress saved" state.
+            if n > 1 { resumeOnForeground.insert(id) }
             items.append(item)
             // Always logged: what actually survived to this launch is the ground truth a "it restarted"
             // report has to be checked against.
