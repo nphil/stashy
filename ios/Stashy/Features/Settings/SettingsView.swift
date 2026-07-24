@@ -22,6 +22,7 @@ struct SettingsView: View {
     @State private var debugLogging = RemoteLog.isLoggingEnabled
     @State private var debugServer = RemoteLog.server
     @State private var debugTopic = RemoteLog.topic
+    @State private var downloadTrace = RemoteLog.isDownloadTracingEnabled
 
     private let swatchColumns = [GridItem(.adaptive(minimum: 64), spacing: 12)]
 
@@ -353,6 +354,13 @@ struct SettingsView: View {
                                 .onSubmit { debugTopic = RemoteLog.topic }
                         }
                         .padding(.vertical, 2)
+                        Toggle("Trace downloads", isOn: $downloadTrace)
+                            .onChange(of: downloadTrace) { _, on in
+                                RemoteLog.isDownloadTracingEnabled = on
+                            }
+                        Text("Adds every background range slice, part-file size census, engine start and Live Activity update to the log — what's needed to diagnose a transfer that stalls or loses progress while the app is minimized. Verbose: leave off unless you're chasing a download bug.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                 } header: {
                     Text("Diagnostics")

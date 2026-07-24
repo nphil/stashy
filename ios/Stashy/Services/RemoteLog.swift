@@ -18,11 +18,22 @@ final class RemoteLog: @unchecked Sendable {
     private static let settingKey = "stashy.debugLogging"
     private static let serverKey = "stashy.debug.server"
     private static let topicKey = "stashy.debug.topic"
+    private static let downloadTraceKey = "stashy.debug.downloadTrace"
 
     /// Whether debug log streaming is enabled (off by default — it broadcasts to a public ntfy topic).
     static var isLoggingEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: settingKey) }
         set { UserDefaults.standard.set(newValue, forKey: settingKey) }
+    }
+
+    /// Verbose per-slice / per-part download tracing. Structural download events (errors, holds,
+    /// geometry wipes, lifecycle transitions) always log when logging is on; this gate adds the
+    /// high-frequency ones — every background slice, every part-size census — which are what make a
+    /// "the percentage went backwards while minimized" report diagnosable, but which would otherwise
+    /// spend the ntfy daily message budget on a single large transfer. Off by default.
+    static var isDownloadTracingEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: downloadTraceKey) }
+        set { UserDefaults.standard.set(newValue, forKey: downloadTraceKey) }
     }
     /// ntfy base URL. Point this at a self-hosted ntfy (e.g. an Unraid container) to keep the stream off
     /// the public server; defaults to `https://ntfy.sh`. Empty/whitespace resets to the default.
@@ -245,6 +256,15 @@ final class RemoteLog: @unchecked Sendable {
         var bytes = Array(s.utf8.prefix(max))
         while let last = bytes.last, last & 0xC0 == 0x80 { bytes.removeLast() }   // back off continuation bytes
         return String(decoding: bytes, as: UTF8.self)
+    }
+
+    /// Non-blocking "send what's buffered now". The periodic flush runs on a `DispatchSourceTimer`,
+    /// which does NOT fire while the app is suspended — so everything logged during a background
+    /// transfer sits in the buffer until the app runs again. Call this on the background/foreground
+    /// transitions so a minimized download's trace actually leaves the device at the first opportunity
+    /// instead of aging out of the 400-line ring buffer.
+    func flushNow() {
+        queue.async { [weak self] in self?.flushLocked() }
     }
 
     /// Best-effort synchronous flush — for the memory-warning / uncaught-exception paths, where the
