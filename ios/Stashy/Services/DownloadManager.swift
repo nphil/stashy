@@ -2156,14 +2156,19 @@ final class DownloadManager {
         if deliveryFailure {
             let attempt = fileRecoveryAttempts[itemID] ?? 0
             fileRecoveryAttempts[itemID, default: 0] += 1
-            if attempt == 0 {
+            // Failing at ~100% IS the hand-over step: the bytes all arrived and only the final move
+            // failed, so retrying the daemon is guaranteed to repeat it — at the cost of the whole
+            // file again. Skip straight to the transport that has no hand-over step.
+            let transferredEverything = item.totalBytes > 0
+                && item.receivedBytes >= Int64(Double(item.totalBytes) * 0.9)
+            if attempt == 0, !transferredEverything {
                 trace("dl-retry", [("item", itemID), ("code", code),
                                    ("blob", resumeData[itemID]?[0] != nil ? 1 : 0)])
                 startFullBackgroundDownload(item)      // reuses the blob when one was banked above
                 syncLiveActivity()
                 return
             }
-            if attempt == 1 {
+            if attempt <= 1 {
                 RemoteLog.shared.event("dl-fallback", [
                     ("item", itemID), ("code", code), ("bytes", item.receivedBytes)])
                 foregroundFallback.insert(itemID)

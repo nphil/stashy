@@ -150,28 +150,41 @@ predates this discovery and asserts the opposite — this file is the correction
   and the whole suspend→continue→relaunch flow. If single-bg -3000s, fall back to leaving downloads
   paused-on-background (foreground still works).
 
-### THE TRANSPORT VERDICT (v1.0.309, device logs 2026-07-24 — supersedes everything below about bg ranges)
-Owner ran the dl-trace on iOS 26.5.2: **six background-session range download tasks in a row (multi AND
-single; one while foregrounded+unlocked) each transferred their whole body then failed with -3000
-"Cannot create file" at delivery.** A background-session `URLSessionDownloadTask` cannot deliver a
-Range/206 response, full stop. The v1.0.107 note "a single bg range task is the normal supported case"
-(marked UNVERIFIED below) is FALSE — the adaptive bg-range engine never worked once; the 16 MB slice
-design (v1.0.307) treated a symptom. Current design: **multi** = 8-way fg engine + ~30 s
-`beginBackgroundTask` grace (writers keep streaming durable bytes; quick app-switches never blip) →
-drain → **SHADOW leg** (v1.0.310): a parallel full-file daemon task (conn 999 → `<id>-999.part`, own
-iOS resume blob persisted beside the parts) downloads the same file unattended. Foreground return
-parks it (`pauseShadow` — blob keeps the daemon's offset) and resumes 8-way from the untouched parts;
-whichever leg finishes first wins (`finalizeFromShadow` promotes the whole file via the single-part
-merge; an all-parts merge retires a live shadow). The island shows `max(receivedBytes, shadowBytes)`
-(never regresses when one leg pauses) and `item.speed` counts both legs so the suspended ETA glide is
-honest. Shadow hard-failure falls back to `holdForForeground` (paused + `resumeOnForeground`, LA
-"Progress saved"). Cost accepted: up to one extra pass of the file, amortized across cycles by the
-blob. **single/"Background" mode** = ONE full-file (200) daemon task — completes unattended, iOS
-resume blobs on pause, cold-relaunch completion adopted (`connectionFinished` paused-adoption; the
-shadow's completion finalizes from a cold relaunch the same way). The durability rules below all
-still hold.
+### THE TRANSPORT VERDICT — corrected (v1.0.316, device logs 2026-07-24)
+Two earlier conclusions in this file were wrong. The truth, from `dl-trace` on iOS 26.5.2:
 
-### Durability rules (v1.0.307–308 — read before touching the background path)
+**`NSURLErrorCannotCreateFile` (-3000) is the system's HAND-OVER step failing.** A background
+`URLSessionDownloadTask` streams into its own temp file and moves it into our container only at the
+end. On the owner's device that final move fails for large files: item 2761 (1.6 GB) reached
+**exactly** `bytes == total` and then -3000, four consecutive times, **with 47 GB free**
+(`dl-space free=47830060505 strict=…`). So it is neither of the things this file previously claimed:
+not "a background session can't run 8 parallel range tasks" (that was this same failure ×8) and not
+"a background session can't deliver a 206" (plain 200 full-file transfers fail identically). **Root
+cause is still unknown** — v1.0.316 added `dl-err-detail` (NSUnderlyingError domain/code, the
+offending path, whether a resume blob came with it) plus `volumeAvailableCapacity` alongside
+`…ForImportantUsage`, because the latter counts purgeable space iOS may not release in time.
+
+**Never retry the same transport on a delivery failure.** Every byte already arrived, so the retry
+replays the whole file and fails identically — the owner watched 1.6 GB re-download four times.
+Escalate: `startForegroundFallback` runs an in-process data task that appends each chunk into our own
+part file. No hand-over step exists on that path, so this failure cannot occur; progress is durable
+and Range-resumable. It only advances while the app is open, so it is a fallback (sticky per item,
+entered on a failure at ≥90% or on the second failure of any size).
+
+**Resume data for a FAILED task lives in the error's `userInfo[NSURLSessionDownloadTaskResumeData]`.**
+`cancel(byProducingResumeData:)` returns nothing for a task that already ended, so not reading the
+error meant every daemon-surfaced drop restarted from byte 0. Bank it before any recovery branch;
+a reset path that clears it (shipped for one build) turns a resumable failure into a full
+re-download. Blobs are epoch-guarded — one belonging to a superseded task will be rejected by iOS —
+and since the blob arrives an async hop after `pause()`, Resume waits for it.
+
+**Multi-threading is gone (v1.0.313).** Benchmarked against the owner's server: 1 connection
+~32 MB/s vs ~14 MB/s for 8-way, and the single background transfer runs at 85–100 MB/s. Parallel
+connections only help where one TCP stream can't fill the pipe (high RTT, loss, per-flow shaping);
+on a LAN they just make the array seek. `Services/TransferBenchmark.swift` re-measures this on demand
+(counterbalanced A B C C B A, disjoint slices, slow-start excluded per connection).
+
+### Durability rules### Durability rules (v1.0.307–308 — read before touching the background path)
 The engine's ONE invariant: **a byte that reached disk is never thrown away by a recoverable error.**
 Six shipped defects violated it; the owner experienced them as "minimized a multi-thread download, the
 island went 15% → 12% → 8%, froze, and the download restarted on reopening".

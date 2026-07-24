@@ -58,21 +58,32 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   a visible indicator; add `.scrollIndicators(.hidden)` as reinforcement on any new `ScrollView`/`List`.
 
 ## Landmines (one-liners — full stories in ENGINEERING_NOTES)
-- **-3000, the REAL story (device-verified 2026-07-24, iOS 26.5.2, dl-trace logs): a background-session
-  `URLSessionDownloadTask` can NEVER deliver a Range/206 response.** It transfers the whole body at full
-  speed, then fails with -3000 "Cannot create file" at the delivery step — backgrounded or foregrounded,
-  one task or eight (the old "8 parallel = -3000" landmine was this same bug ×8; "a single bg range task
-  is the supported case" was flagged UNVERIFIED for months and is now verified FALSE — the adaptive
-  bg-range engine never worked once). **Do not reintroduce background range tasks.** Design since
-  v1.0.310: multi = 8-way foreground engine + ~30 s `beginBackgroundTask` grace (writers keep streaming
-  durable bytes) → drain → **SHADOW leg**: a parallel full-file daemon task (conn 999, own part file,
-  own iOS resume blob persisted to disk) downloads the same file unattended; foreground return parks it
-  (`pauseShadow`, blob keeps the daemon's offset) and resumes 8-way from the untouched parts — whichever
-  leg finishes first wins (island shows `max(parts, shadow)`, so % never regresses; speed counts both
-  legs). Cost: up to one extra pass of the file, amortized by the blob — accepted for finish-unattended.
-  Single/"Background" mode = ONE full-file (200) daemon task. `holdForForeground` = shadow-failure
-  fallback. Still true: -3000/-3003 must HOLD durable parts, never wipe; NO engine may start while
-  cancelled writers drain (`pendingForegroundStops` barrier). (§3)
+- **-3000 "Cannot create file" is the system's HAND-OVER step failing, not Range and not disk space
+  (device-verified 2026-07-24, iOS 26.5.2, dl-trace).** A background `URLSessionDownloadTask` transfers
+  into ITS OWN temp file and only moves that into our container at the end; that final move is the one
+  part of the transfer the app doesn't control, and on the owner's device it fails for large files —
+  a 1.6 GB download reached **exactly** `bytes == total` and then -3000, four times running, **with
+  47 GB free** (`dl-space free=47830060505`). Earlier conclusions in this file were WRONG twice over:
+  it is not "8 parallel range tasks" (that was this same bug ×8) and not "bg sessions can't deliver
+  206" (plain 200 full-file downloads fail identically). Root cause still UNKNOWN — v1.0.316 ships
+  `dl-err-detail` (underlying POSIX/Cocoa error + path) and a strict free-space figure to name it.
+  **Do not "fix" this by retrying the same transport**: the bytes all arrived, so a retry just repeats
+  it and costs another full file. Current design: daemon task first (the only transport that runs
+  unattended); on a delivery failure at ≥90% — or a second failure — the item switches permanently to
+  `startForegroundFallback`, an in-process data task that appends every chunk into our own part file,
+  so there is no hand-over step to fail and progress is durable + Range-resumable. It only advances
+  while the app is open, hence fallback-only. (§3)
+- **iOS hands you resume data for a FAILED download in the error's `userInfo`**
+  (`NSURLSessionDownloadTaskResumeData`) — `cancel(byProducingResumeData:)` does nothing for a task
+  that already ended. Not reading it meant every dropped connection restarted a multi-GB file from
+  byte 0. Bank the blob BEFORE any recovery branch, and never let a reset path wipe it (shipped that
+  bug for one build). Blobs are epoch-guarded: one from a superseded task must never be handed back,
+  and `cancel(byProducingResumeData:)` delivers a hop late, so Resume waits for it. (§3)
+- **Multi-threaded downloading is GONE (v1.0.313) — do not reintroduce it.** Benchmarked on the
+  owner's own server: one connection sustained ~32 MB/s vs ~14 for 8-way, and the single background
+  transfer runs at **85–100 MB/s**. Parallelism only pays where one TCP stream can't fill the pipe
+  (high RTT, loss, per-flow shaping); on a LAN it just makes an array seek. `TransferBenchmark`
+  (scene ••• → Benchmark Transfer) re-measures it, counterbalanced A B C C B A. (§3)
 - **Popovers:** never host from a conditional/churning view — use a stable ZStack sibling
   (`FilterPopoverAnchor` pattern). Bit us three times. (§6)
 - Most CI failures ever hit were **Swift 6 strict-concurrency** — read the patterns before writing
@@ -169,15 +180,8 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.310** (`2f84ce4`, IPA 9,450,618 B) — shadow leg: multi-thread downloads finish
-  unattended via a parallel full-file daemon task; see the -3000 landmine for the full design.
-  **UNVERIFIED ON DEVICE**, and it rests on v1.0.309's plain full-file bg task working (also untested) —
-  owner's decisive test = a "Background"-mode download minimized with the phone locked. Known cosmetic
-  consequence: the island number sits at the parts % until the shadow leg catches up to it (the ring
-  still glides on the ETA). **v1.0.309** (`043ecd0`) = THE TRANSPORT VERDICT (bg-session download tasks can never deliver 206, device-verified
-  via dl-trace; bg range engine removed; grace window; LA projection cap +35%). v1.0.308 (`4dea9a4`,
-  9,444,230 B) = drain-barrier deadlock + cold-relaunch adoption; v1.0.307 (`22cc493`, 9,442,019 B) =
-  durability fixes + parts out of Caches. **v1.0.297: multiThread default ON** (owner 2026-07-24).
+- Latest release: **v1.0.316** (`dee2513`, IPA 9,490,265 B) — single-engine downloads + delivery-failure
+  fallback + resume-blob capture. **v1.0.313** removed multi-threading entirely.
 - **Backgrounded-downloads round 3 (v1.0.307–308) — SIX defects, all "durable bytes thrown away or
   never committed"**: the owner's "% went 15→12→8, froze, restarted on reopen" was NOT one bug. See the
   new Landmines entries + ENGINEERING_NOTES §3 "Durability rules" for the full list; the headline is that
