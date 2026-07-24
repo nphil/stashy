@@ -40,6 +40,8 @@ struct DownloadsView: View {
         // No top-left back button (owner preference); the edge-swipe (kept alive by EnableSwipeBack) goes back.
         .navigationBarBackButtonHidden(true)
         .background(EnableSwipeBack())
+        // Scene-pushed Downloads arrives with the tab bar auto-collapsed (Downloads TAB root keeps it full).
+        .background(compact ? TabBarMinimizer() : nil)
         .onAppear { downloads.pruneStopped(); downloads.downloadsScreenVisible = true }
         // Leaving the screen wipes finished transcode diagnostics, so returning shows a clean card. An
         // in-flight transcode keeps its box.

@@ -47,13 +47,74 @@ struct TabBarHiddenSetter: UIViewRepresentable {
     }
 }
 
+/// Auto-MINIMIZES the bottom tab bar when the screen appears (owner: entering the player or the
+/// scene-pushed Downloads screen must collapse the bar even when it was fully expanded on the grid).
+///
+/// There is no public "set minimized" API — `tabBarMinimizeBehavior(.onScrollDown)` only reacts to
+/// scrolling. The public escape hatch is `UIViewController.setContentScrollView(_:for:)` (iOS 15+):
+/// bars observe the registered bottom-edge scroll view, so registering a hidden, non-interactive
+/// scroll view we own and nudging it downward minimizes the bar exactly as a user scroll would —
+/// with the system's own animation. One-shot per appearance; the association dies with the screen's
+/// controller on pop, so grids behind are untouched.
+struct TabBarMinimizer: UIViewRepresentable {
+    final class Coordinator {
+        let scrollView = UIScrollView()
+        var applied = false
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> TabBarProbeView {
+        let probe = TabBarProbeView()
+        let scroll = context.coordinator.scrollView
+        scroll.isUserInteractionEnabled = false
+        scroll.isHidden = true
+        scroll.frame = .zero
+        scroll.contentSize = CGSize(width: 1, height: 4000)
+        probe.addSubview(scroll)
+        return probe
+    }
+
+    func updateUIView(_ uiView: TabBarProbeView, context: Context) {
+        let coordinator = context.coordinator
+        guard !coordinator.applied else { return }
+        coordinator.applied = true
+        // Defer past the SwiftUI update AND the push transition: registering mid-transition can be
+        // clobbered when the system re-resolves the tracked scroll view as the new screen settles
+        // (screens with their own List/ScrollView — compact Downloads — register theirs on appear).
+        Task { @MainActor in
+            for _ in 0..<10 {   // wait until the probe is installed in a window (~max 1 s)
+                if uiView.window != nil { break }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            guard uiView.window != nil, let host = uiView.findViewController() else { return }
+            try? await Task.sleep(for: .milliseconds(400))   // outlast the ~0.35 s push animation
+            let scroll = coordinator.scrollView
+            host.setContentScrollView(scroll, for: .bottom)
+            scroll.setContentOffset(.zero, animated: false)
+            try? await Task.sleep(for: .milliseconds(80))
+            // A continuous animated downward scroll — the gesture the minimize behavior listens for.
+            scroll.setContentOffset(CGPoint(x: 0, y: 600), animated: true)
+        }
+    }
+}
+
 /// Zero-impact probe: walks the responder chain (view → hosting controller → container controllers)
-/// to the nearest tab bar controller.
+/// to the nearest tab bar controller / owning view controller.
 final class TabBarProbeView: UIView {
     func findTabBarController() -> UITabBarController? {
         var responder: UIResponder? = next
         while let current = responder {
             if let tab = current as? UITabBarController { return tab }
+            responder = current.next
+        }
+        return nil
+    }
+
+    func findViewController() -> UIViewController? {
+        var responder: UIResponder? = next
+        while let current = responder {
+            if let vc = current as? UIViewController { return vc }
             responder = current.next
         }
         return nil

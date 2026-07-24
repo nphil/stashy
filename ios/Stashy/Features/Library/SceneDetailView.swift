@@ -139,6 +139,9 @@ struct SceneDetailView: View {
         // portrait (no-rotation) fullscreen toggle, and the imperative call applies deterministically.
         .toolbar(isFullscreen ? .hidden : .visible, for: .tabBar)
         .background(TabBarHiddenSetter(hidden: isFullscreen))
+        // …and it AUTO-COLLAPSES on entry (owner: a non-distracting player even when the grid's bar was
+        // fully expanded): a registered hidden scroll view nudged downward drives the system minimize.
+        .background(TabBarMinimizer())
         // Suppress the system back button (owner: no back button over the video); edge-swipe back stays
         // alive via EnableSwipeBack, and the player's controls have their own back action.
         .navigationBarBackButtonHidden(true)
