@@ -169,9 +169,12 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.310 pending** (`ee8c694` shadow leg — multi-thread downloads finish unattended
-  via a parallel full-file daemon task; see the -3000 landmine for the full design). **v1.0.309**
-  (`043ecd0`) = THE TRANSPORT VERDICT (bg-session download tasks can never deliver 206, device-verified
+- Latest release: **v1.0.310** (`2f84ce4`, IPA 9,450,618 B) — shadow leg: multi-thread downloads finish
+  unattended via a parallel full-file daemon task; see the -3000 landmine for the full design.
+  **UNVERIFIED ON DEVICE**, and it rests on v1.0.309's plain full-file bg task working (also untested) —
+  owner's decisive test = a "Background"-mode download minimized with the phone locked. Known cosmetic
+  consequence: the island number sits at the parts % until the shadow leg catches up to it (the ring
+  still glides on the ETA). **v1.0.309** (`043ecd0`) = THE TRANSPORT VERDICT (bg-session download tasks can never deliver 206, device-verified
   via dl-trace; bg range engine removed; grace window; LA projection cap +35%). v1.0.308 (`4dea9a4`,
   9,444,230 B) = drain-barrier deadlock + cold-relaunch adoption; v1.0.307 (`22cc493`, 9,442,019 B) =
   durability fixes + parts out of Caches. **v1.0.297: multiThread default ON** (owner 2026-07-24).
