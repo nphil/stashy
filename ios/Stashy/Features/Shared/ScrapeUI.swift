@@ -51,51 +51,87 @@ struct ScrapedImageView: View {
     }
 }
 
-/// Compact, scrollable source picker — stash-boxes first, then scrapers (the list Stash's own UI
-/// shows). Bounded height so a long scraper list never swallows the sheet; tap = choose and go.
-struct ScrapeSourceList: View {
-    let sources: [StashScraper.Source]
-    let busySourceID: String?
-    var onPick: (StashScraper.Source) -> Void
+/// One distinct field value contributed by one or more sources (the sources that agreed on it are joined
+/// in `source`). Drives the per-field conflict chips.
+struct SourcedValue: Identifiable, Hashable, Sendable {
+    let source: String   // e.g. "StashDB" or "StashDB · ThePornDB" when they agree
+    let value: String
+    var id: String { source + "\u{1}" + value }
+
+    /// Collapse (source, value) pairs into the DISTINCT non-empty values, each labeled with every source
+    /// that reported it, preserving first-seen (priority) order. One value → no conflict; several → chips.
+    static func distinct(_ pairs: [(String, String?)]) -> [SourcedValue] {
+        var order: [String] = []                 // normalized value order
+        var sources: [String: [String]] = [:]    // normalized value → contributing sources
+        var display: [String: String] = [:]      // normalized value → first display spelling
+        for (source, raw) in pairs {
+            let value = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else { continue }
+            let key = value.lowercased()
+            if display[key] == nil { display[key] = value; order.append(key) }
+            sources[key, default: []].append(source)
+        }
+        return order.map { SourcedValue(source: sources[$0]!.joined(separator: " · "), value: display[$0]!) }
+    }
+}
+
+/// A row of source chips shown ABOVE a field only when the sources disagreed (more than one distinct
+/// value). Tapping a chip sets the bound field to that source's value; the chip matching the current
+/// text is highlighted. Agreed / single-source fields show nothing here (silent).
+struct SourceConflictChips: View {
+    let options: [SourcedValue]
+    @Binding var text: String
     @Environment(ThemeManager.self) private var themeManager
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 4) {
-                ForEach(sources) { source in
-                    Button {
-                        onPick(source)
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: source.isStashBox ? "shippingbox.fill" : "puzzlepiece.extension.fill")
-                                .font(.caption)
-                                .foregroundStyle(source.isStashBox ? themeManager.current.accentColor : .secondary)
-                                .frame(width: 20)
-                            Text(source.name)
-                                .font(.subheadline.weight(.medium))
-                                .foregroundStyle(themeManager.current.foregroundColor)
-                                .lineLimit(1)
-                            Spacer(minLength: 0)
-                            if busySourceID == source.id {
-                                ProgressView().controlSize(.small)
-                            } else {
-                                Image(systemName: "chevron.right")
-                                    .font(.caption2.weight(.semibold))
-                                    .foregroundStyle(.tertiary)
-                            }
+        if options.count > 1 {
+            ScrollView(.horizontal) {
+                HStack(spacing: 6) {
+                    ForEach(options) { option in
+                        let active = option.value.caseInsensitiveCompare(text) == .orderedSame
+                        Button {
+                            text = option.value
+                        } label: {
+                            Text(option.source)
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(active ? .white : themeManager.current.foregroundColor)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 4)
+                                .background(active ? themeManager.current.accentColor
+                                                   : themeManager.current.foregroundColor.opacity(0.10),
+                                            in: Capsule())
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 9)
-                        .background(themeManager.current.foregroundColor.opacity(0.07),
-                                    in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
-                    .disabled(busySourceID != nil)
                 }
             }
+            .scrollIndicators(.hidden)
         }
-        .frame(maxHeight: 230)
-        .scrollIndicators(.hidden)
+    }
+}
+
+/// Encode a picked photo as the base64 data URL Stash's `image` field accepts. Downscaled + JPEG-
+/// compressed OFF the main actor so a large HEIC/PNG never janks the sheet.
+enum ImageUpload {
+    static func dataURL(from data: Data, maxDimension: CGFloat = 1200) async -> String? {
+        await Task.detached(priority: .userInitiated) { () -> String? in
+            guard let image = UIImage(data: data) else { return nil }
+            let scaled = image.downscaled(maxDimension: maxDimension)
+            guard let jpeg = scaled.jpegData(compressionQuality: 0.85) else { return nil }
+            return "data:image/jpeg;base64," + jpeg.base64EncodedString()
+        }.value
+    }
+}
+
+extension UIImage {
+    /// Aspect-fit downscale so the longest edge is at most `maxDimension` (no upscaling).
+    func downscaled(maxDimension: CGFloat) -> UIImage {
+        let longest = max(size.width, size.height)
+        guard longest > maxDimension, longest > 0 else { return self }
+        let scale = maxDimension / longest
+        let target = CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
+        let renderer = UIGraphicsImageRenderer(size: target)
+        return renderer.image { _ in self.draw(in: CGRect(origin: .zero, size: target)) }
     }
 }
 

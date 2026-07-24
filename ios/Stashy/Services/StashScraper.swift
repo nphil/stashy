@@ -94,16 +94,37 @@ struct StashScraper: Sendable {
 
     private func merge(_ resp: ScrapersAndBoxes,
                        capability: (ScrapersAndBoxes.Scraper) -> Bool) -> [Source] {
-        // Stash-box accounts first (Stash's own ordering), then capable scrapers by name.
-        var out: [Source] = (resp.configuration.general.stashBoxes ?? []).enumerated().map { i, box in
-            Source(kind: .stashBox(endpoint: box.endpoint),
-                   name: box.name.isEmpty ? "Stash-Box #\(i + 1)" : box.name)
+        // Owner decision (2026-07-24): only StashDB / ThePornDB / FansDB are useful — everything else is
+        // dropped. Match on name OR endpoint so a box named "Stash" pointed at stashdb.org still qualifies.
+        var out: [Source] = (resp.configuration.general.stashBoxes ?? []).enumerated().compactMap { i, box in
+            guard Self.isAllowed(name: box.name, endpoint: box.endpoint) else { return nil }
+            return Source(kind: .stashBox(endpoint: box.endpoint),
+                          name: box.name.isEmpty ? "Stash-Box #\(i + 1)" : box.name)
         }
         out += (resp.listScrapers ?? [])
-            .filter(capability)
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            .filter { capability($0) && Self.isAllowed(name: $0.name, endpoint: nil) }
             .map { Source(kind: .scraper(id: $0.id), name: $0.name) }
-        return out
+        // Priority order for conflict defaults + display: StashDB, then ThePornDB, then FansDB.
+        return out.sorted { Self.rank($0) < Self.rank($1) }
+    }
+
+    /// The only three sources the owner keeps. Keyword-matched against name + endpoint (case-insensitive).
+    private static let allowedKeywords = ["stashdb", "theporndb", "porndb", "tpdb", "fansdb"]
+
+    static func isAllowed(name: String, endpoint: String?) -> Bool {
+        let hay = (name + " " + (endpoint ?? "")).lowercased()
+        return allowedKeywords.contains { hay.contains($0) }
+    }
+
+    /// Conflict-resolution + display priority: StashDB (0) → ThePornDB (1) → FansDB (2). When two sources
+    /// disagree on a field, the lower rank wins the default.
+    static func rank(_ source: Source) -> Int {
+        var hay = source.name.lowercased()
+        if case .stashBox(let endpoint) = source.kind { hay += " " + endpoint.lowercased() }
+        if hay.contains("stashdb") { return 0 }
+        if hay.contains("theporndb") || hay.contains("porndb") || hay.contains("tpdb") { return 1 }
+        if hay.contains("fansdb") { return 2 }
+        return 3
     }
 
     // MARK: - Scraped wire models
@@ -232,6 +253,155 @@ struct StashScraper: Sendable {
         let resp: Resp = try await client.query(
             gql, variables: Vars(source: SourceInput(source), input: Input(performer_input: fragment)))
         return resp.scrapeSinglePerformer?.first ?? candidate
+    }
+
+    // MARK: - Auto multi-source scrape (query all 3 configured sources at once)
+
+    struct SourcedScene: Sendable { let source: Source; let scene: ScrapedSceneData }
+    struct SourcedPerformer: Sendable, Identifiable {
+        let source: Source
+        let candidate: ScrapedPerformerData
+        var id: String { "\(source.id)|\(candidate.id)" }
+    }
+
+    /// No allowed sources are configured on the server — surfaced so the sheet can tell the user to add a
+    /// stash-box in Stash rather than showing a bare "no match".
+    struct NoSourcesError: LocalizedError { var errorDescription: String? {
+        "No StashDB / ThePornDB / FansDB source is configured on your Stash server."
+    } }
+
+    /// The outcome of querying every allowed source: what came back, and which sources were UNREACHABLE
+    /// (errored / timed out). A source that simply had no match is neither in `items` nor in `failed`.
+    /// This lets the sheet tell "nothing matched" apart from "the source is down", and note a partial
+    /// failure ("merged what was found; FansDB was unreachable") when only some sources answered.
+    struct MultiSourceResult<Item: Sendable>: Sendable {
+        let items: [Item]
+        let failed: [String]     // display names of sources that errored
+    }
+
+    /// Scrape a stored scene against EVERY allowed source in parallel, one best match per source (scene
+    /// fingerprint matches are unique). A source that ERRORS is recorded in `failed` (so "unreachable" is
+    /// distinguishable from "no match") but never blocks the others. Matches are priority-ordered. Throws
+    /// only when the source list itself can't be read or no allowed source exists.
+    func scrapeSceneEverywhere(sceneID: String) async throws -> MultiSourceResult<SourcedScene> {
+        let sources = try await sceneSources()
+        guard !sources.isEmpty else { throw NoSourcesError() }
+        let outcomes = await withTaskGroup(of: (SourcedScene?, String?).self) { group in
+            for source in sources {
+                group.addTask {
+                    do {
+                        if let first = try await self.scrapeScene(source: source, sceneID: sceneID).first {
+                            return (SourcedScene(source: source, scene: first), nil)
+                        }
+                        return (nil, nil)                    // reached, no match
+                    } catch {
+                        return (nil, source.name)            // unreachable / errored
+                    }
+                }
+            }
+            var acc: [(SourcedScene?, String?)] = []
+            for await outcome in group { acc.append(outcome) }
+            return acc
+        }
+        let matches = outcomes.compactMap { $0.0 }.sorted { Self.rank($0.source) < Self.rank($1.source) }
+        return MultiSourceResult(items: matches, failed: outcomes.compactMap { $0.1 })
+    }
+
+    /// Search performers by name against EVERY allowed source in parallel; returns every candidate tagged
+    /// with its source, plus the names of any sources that errored. Group `items` with `groupPerformers`.
+    func searchPerformersEverywhere(name: String) async throws -> MultiSourceResult<SourcedPerformer> {
+        let sources = try await performerSources()
+        guard !sources.isEmpty else { throw NoSourcesError() }
+        let outcomes = await withTaskGroup(of: ([SourcedPerformer], String?).self) { group in
+            for source in sources {
+                group.addTask {
+                    do {
+                        let found = try await self.searchPerformers(source: source, name: name)
+                        return (found.map { SourcedPerformer(source: source, candidate: $0) }, nil)
+                    } catch {
+                        return ([], source.name)             // unreachable / errored
+                    }
+                }
+            }
+            var acc: [([SourcedPerformer], String?)] = []
+            for await outcome in group { acc.append(outcome) }
+            return acc
+        }
+        return MultiSourceResult(items: outcomes.flatMap { $0.0 }, failed: outcomes.compactMap { $0.1 })
+    }
+
+    /// One merged candidate the picker shows: the same person as reported by one or more sources. Same
+    /// name + birthdate collapses into one row; a different name or birthdate stays separate so the user
+    /// picks manually. Contributors are priority-ordered.
+    struct MergedPerformerCandidate: Identifiable, Sendable {
+        let id: String
+        let name: String
+        let disambiguation: String?
+        let birthdate: String?
+        let country: String?
+        let previewImage: String?
+        let contributors: [SourcedPerformer]
+        var sourceNames: [String] { contributors.map(\.source.name) }
+    }
+
+    /// Group flat candidates by likely-same-person (lowercased name + birthdate), preserving first-seen
+    /// order; contributors within a group are priority-ordered. Candidates with no name are dropped.
+    static func groupPerformers(_ items: [SourcedPerformer]) -> [MergedPerformerCandidate] {
+        var order: [String] = []
+        var groups: [String: [SourcedPerformer]] = [:]
+        for item in items {
+            guard let name = item.candidate.name?.trimmingCharacters(in: .whitespaces), !name.isEmpty else { continue }
+            let key = name.lowercased() + "|" + (item.candidate.birthdate ?? "")
+            if groups[key] == nil { order.append(key) }
+            groups[key, default: []].append(item)
+        }
+        return order.map { key in
+            let contributors = groups[key]!.sorted { rank($0.source) < rank($1.source) }
+            let primary = contributors.first!.candidate
+            let preview = contributors.compactMap { $0.candidate.images?.first }.first
+            return MergedPerformerCandidate(
+                id: key, name: primary.name ?? "Unknown", disambiguation: primary.disambiguation,
+                birthdate: primary.birthdate, country: primary.country, previewImage: preview,
+                contributors: contributors)
+        }
+    }
+
+    /// Full detail merged across every source that reported this person. Fields resolve in priority order
+    /// (StashDB wins), images union (priority-ordered, deduped), and one stash_id per stash-box source.
+    struct ResolvedPerformer: Sendable {
+        /// Priority-ordered full records (index 0 = highest priority). Apply reversed into a draft so the
+        /// highest-priority non-empty value wins.
+        let ordered: [ScrapedPerformerData]
+        let images: [String]
+        let stashIDs: [StashIDPair]
+    }
+
+    func resolvePerformer(_ candidate: MergedPerformerCandidate) async -> ResolvedPerformer {
+        let sorted = candidate.contributors.sorted { Self.rank($0.source) < Self.rank($1.source) }
+        let details: [ScrapedPerformerData] = await withTaskGroup(of: (Int, ScrapedPerformerData).self) { group in
+            for (index, contributor) in sorted.enumerated() {
+                group.addTask {
+                    let full = (try? await self.performerDetail(source: contributor.source, candidate: contributor.candidate))
+                        ?? contributor.candidate
+                    return (index, full)
+                }
+            }
+            var acc: [(Int, ScrapedPerformerData)] = []
+            for await result in group { acc.append(result) }
+            return acc.sorted { $0.0 < $1.0 }.map { $0.1 }
+        }
+        var images: [String] = []
+        for record in details {
+            for image in record.images ?? [] where !images.contains(image) { images.append(image) }
+        }
+        var stashIDs: [StashIDPair] = []
+        for contributor in sorted {
+            guard case .stashBox(let endpoint) = contributor.source.kind,
+                  let remoteID = contributor.candidate.remote_site_id, !remoteID.isEmpty else { continue }
+            stashIDs.removeAll { $0.endpoint.caseInsensitiveCompare(endpoint) == .orderedSame }
+            stashIDs.append(StashIDPair(endpoint: endpoint, stash_id: remoteID))
+        }
+        return ResolvedPerformer(ordered: details, images: images, stashIDs: stashIDs)
     }
 
     // MARK: - Editable snapshots (fetched fresh by the sheets; richer than the app's list models)
@@ -460,12 +630,14 @@ struct StashScraper: Sendable {
         return valid.contains(normalized) ? normalized : nil
     }
 
-    /// Merge a stash-box linkage into an existing list, replacing any entry for the same endpoint —
-    /// how Stash's UI maintains `stash_ids` after a scrape.
-    static func mergedStashIDs(existing: [StashIDPair]?, endpoint: String?, remoteID: String?) -> [StashIDPair]? {
-        guard let endpoint, let remoteID, !remoteID.isEmpty else { return nil }
-        var out = (existing ?? []).filter { $0.endpoint.caseInsensitiveCompare(endpoint) != .orderedSame }
-        out.append(StashIDPair(endpoint: endpoint, stash_id: remoteID))
-        return out
+    /// Human-readable join of source names for an error/note ("StashDB", "StashDB and FansDB",
+    /// "StashDB, ThePornDB, and FansDB").
+    static func sourceList(_ names: [String]) -> String {
+        switch names.count {
+        case 0: return ""
+        case 1: return names[0]
+        case 2: return "\(names[0]) and \(names[1])"
+        default: return names.dropLast().joined(separator: ", ") + ", and " + (names.last ?? "")
+        }
     }
 }
