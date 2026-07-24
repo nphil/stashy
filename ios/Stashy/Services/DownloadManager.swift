@@ -1061,6 +1061,13 @@ final class DownloadManager {
         Task { try? await companion.stopJob(jobID) }
     }
 
+    /// Delete ONLY the on-phone download for a scene (keeps the Stash scene). No-op if not downloaded.
+    /// Used by the scene screen's "Delete Download from Phone" action.
+    func deleteDownload(sceneID: String) {
+        guard let item = items.first(where: { $0.id == sceneID }) else { return }
+        delete(item)
+    }
+
     func delete(_ item: DownloadItem) {
         item.state = .stopped   // makes any in-flight companion poll loop exit before we drop the item
         cancelTasks(item, produceResumeData: false)

@@ -131,19 +131,25 @@ struct SceneDetailView: View {
             isPresented: $confirmDelete,
             titleVisibility: .visible
         ) {
-            Button("Delete Scene & File", role: .destructive) {
-                Task {
-                    if await edits.deleteScene(id: scene.id, deleteFile: true, client: appState.client) { dismiss() }
+            // Only offered when a copy exists on this phone: removes just the offline file, scene stays.
+            if isDownloaded {
+                Button("Delete Download from Phone") {
+                    downloads.deleteDownload(sceneID: scene.id)
                 }
             }
-            Button("Remove from Stash Only", role: .destructive) {
+            // The one server-side action (never "remove from Stash but keep the file" — owner decision):
+            // deletes the scene AND its file from Stash, and cleans up any copy on this phone too.
+            Button("Delete from Stash & Disk", role: .destructive) {
                 Task {
-                    if await edits.deleteScene(id: scene.id, deleteFile: false, client: appState.client) { dismiss() }
+                    downloads.deleteDownload(sceneID: scene.id)
+                    if await edits.deleteScene(id: scene.id, deleteFile: true, client: appState.client) { dismiss() }
                 }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("“Delete Scene & File” permanently deletes the video file from disk — this can't be undone. “Remove from Stash Only” keeps the file and just removes the scene from your library.")
+            Text(isDownloaded
+                 ? "“Delete Download from Phone” removes only the offline copy on this device — the scene stays in Stash. “Delete from Stash & Disk” permanently deletes the scene and its video file from the server (and any copy on this phone). This can't be undone."
+                 : "“Delete from Stash & Disk” permanently deletes the scene and its video file from the server. This can't be undone.")
         }
     }
 
@@ -259,6 +265,10 @@ struct SceneDetailView: View {
     }
 
     private var apiKey: String { appState.client?.apiKey ?? "" }
+
+    /// True when a completed offline copy of this scene exists on the phone — gates the extra
+    /// "Delete Download from Phone" action in the delete dialog.
+    private var isDownloaded: Bool { downloads.localFile(sceneID: scene.id) != nil }
 }
 
 /// Enlarged, left-aligned performer card for the scene screen: a large portrait of the primary
