@@ -150,6 +150,19 @@ predates this discovery and asserts the opposite — this file is the correction
   and the whole suspend→continue→relaunch flow. If single-bg -3000s, fall back to leaving downloads
   paused-on-background (foreground still works).
 
+### THE TRANSPORT VERDICT (v1.0.309, device logs 2026-07-24 — supersedes everything below about bg ranges)
+Owner ran the dl-trace on iOS 26.5.2: **six background-session range download tasks in a row (multi AND
+single; one while foregrounded+unlocked) each transferred their whole body then failed with -3000
+"Cannot create file" at delivery.** A background-session `URLSessionDownloadTask` cannot deliver a
+Range/206 response, full stop. The v1.0.107 note "a single bg range task is the normal supported case"
+(marked UNVERIFIED below) is FALSE — the adaptive bg-range engine never worked once; the 16 MB slice
+design (v1.0.307) treated a symptom. Current design: **multi** = 8-way fg engine + ~30 s
+`beginBackgroundTask` grace (writers keep streaming durable bytes; quick app-switches never blip) →
+drain + HOLD (paused, `resumeOnForeground`, LA "Progress saved") → auto-resume 8-way on foreground;
+**single/"Background" mode** = ONE full-file (200) daemon task — completes unattended, iOS resume blobs
+on pause, cold-relaunch completion adopted (`connectionFinished` paused-adoption). The durability rules
+below all still hold.
+
 ### Durability rules (v1.0.307–308 — read before touching the background path)
 The engine's ONE invariant: **a byte that reached disk is never thrown away by a recoverable error.**
 Six shipped defects violated it; the owner experienced them as "minimized a multi-thread download, the

@@ -58,12 +58,17 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   a visible indicator; add `.scrollIndicators(.hidden)` as reinforcement on any new `ScrollView`/`List`.
 
 ## Landmines (one-liners — full stories in ENGINEERING_NOTES)
-- **-3000:** a background `URLSession` cannot run 8 parallel range tasks (shipped regression,
-  reverted). Current design = dual-engine handoff: foreground 8-way (**sacred**) ⇄ background
-  single-connection. Since v1.0.305: a daemon range-refusal (-3000/-3003) must **HOLD the durable
-  parts** (one fresh retry, then pause + resume 8-way on foreground) — never wipe-and-restart; and NO
-  engine may start while cancelled writers drain (`pendingForegroundStops` barrier — suspend AND
-  collapse both register it; startConnections refuses to run past it). (§3)
+- **-3000, the REAL story (device-verified 2026-07-24, iOS 26.5.2, dl-trace logs): a background-session
+  `URLSessionDownloadTask` can NEVER deliver a Range/206 response.** It transfers the whole body at full
+  speed, then fails with -3000 "Cannot create file" at the delivery step — backgrounded or foregrounded,
+  one task or eight (the old "8 parallel = -3000" landmine was this same bug ×8; "a single bg range task
+  is the supported case" was flagged UNVERIFIED for months and is now verified FALSE — the adaptive
+  bg-range engine never worked once). **Do not reintroduce background range tasks.** Design since
+  v1.0.309: multi = 8-way foreground engine + ~30 s `beginBackgroundTask` grace (writers keep streaming
+  durable bytes) → HOLD with parts intact ("Progress saved" Live Activity), resume 8-way on return;
+  single/"Background" mode = ONE full-file (200) daemon task — the only transport that completes
+  unattended. Still true: -3000/-3003 must HOLD durable parts, never wipe; NO engine may start while
+  cancelled writers drain (`pendingForegroundStops` barrier). (§3)
 - **Popovers:** never host from a conditional/churning view — use a stable ZStack sibling
   (`FilterPopoverAnchor` pattern). Bit us three times. (§6)
 - Most CI failures ever hit were **Swift 6 strict-concurrency** — read the patterns before writing
@@ -106,13 +111,12 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   self-inflicted browse-grid judder we shipped then fixed. If you only need the value later (e.g. a
   long-press source rect), store it in a reference box, NOT `@State` (since v1.0.285 `ScenePreview`
   tracks size-only and derives the origin from the touch point). (§6)
-- **A background `URLSessionDownloadTask` commits NOTHING until its range completes.** It streams into
-  URLSession's private temp file and only lands in our part at `didFinishDownloadingTo`, so an
-  interrupted range discards every byte it transferred. Requesting a whole segment (totalBytes/8, or the
-  whole file for a single download) meant a minimized transfer could run for minutes and commit zero —
-  and each retry re-read a SMALLER durable size, which is a Dynamic Island percentage going BACKWARDS
-  (owner: 15→12→8). Background ranges must be bounded slices (`backgroundSliceBytes`, 16 MB) chained by
-  `connectionFinished`. Corollary: a completed background range ≠ a completed connection. (§3)
+- **A background `URLSessionDownloadTask` commits NOTHING until it completes** (streams into URLSession's
+  private temp, lands in our file only at `didFinishDownloadingTo`) — and per the -3000 landmine above it
+  can never complete a RANGE request, so every byte a bg range task moved was guaranteed lost: retries
+  re-read a SMALLER durable size = the island % going BACKWARDS (owner: 15→12→8). The 16 MB slice
+  approach (v1.0.307–308) treated the symptom and is REMOVED; only full-file (200) daemon tasks run on
+  the background session now. (§3)
 - **Part files must NOT live in `Caches`** (they did until v1.0.307): iOS purges Caches under disk
   pressure and preferentially while the app is NOT running — exactly a big download left minimized. Every
   progress number derives from part FILE SIZES, so a reaped part reads as silent progress loss then a
@@ -161,10 +165,12 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.308** (`4dea9a4`, IPA 9,444,230 B) — drain-barrier deadlock + cold-relaunch
-  adoption; **v1.0.307** (`22cc493`, 9,442,019 B) = durable background slices + parts moved out of Caches
-  + non-destructive range-refusal/retry. v1.0.306 = ranged single engine + LA % clamp + tab-bar collapse.
-  **v1.0.297 restored the multiThread download default to ON** (owner decision 2026-07-24).
+- Latest release: **v1.0.309 pending** — THE TRANSPORT VERDICT (see Landmines: bg-session download tasks
+  can never deliver 206; device-verified via dl-trace): bg range engine fully removed; multi = fg engine
+  + ~30 s grace → hold; single/"Background" = full-file daemon task (completes unattended); LA projection
+  cap widened to +35% for suspended glide; staging captions updated. v1.0.308 (`4dea9a4`, 9,444,230 B) =
+  drain-barrier deadlock + cold-relaunch adoption; v1.0.307 (`22cc493`, 9,442,019 B) = durability fixes +
+  parts out of Caches. **v1.0.297 restored the multiThread download default to ON** (owner 2026-07-24).
 - **Backgrounded-downloads round 3 (v1.0.307–308) — SIX defects, all "durable bytes thrown away or
   never committed"**: the owner's "% went 15→12→8, froze, restarted on reopen" was NOT one bug. See the
   new Landmines entries + ENGINEERING_NOTES §3 "Durability rules" for the full list; the headline is that
