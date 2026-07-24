@@ -280,8 +280,52 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unc
         store.drop(key: key)
         let nsError = error as NSError
         let code = nsError.domain == NSURLErrorDomain ? nsError.code : NSURLErrorCannotWriteToFile
+        // The URL-layer code ("Cannot create file") says nothing about WHY. The underlying error
+        // carries the real cause — a POSIX errno, a Cocoa file error, the offending path.
+        let under = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
+        RemoteLog.shared.event("dl-err-detail", [
+            ("item", info.item), ("domain", nsError.domain), ("code", nsError.code),
+            ("under", under.map { "\($0.domain):\($0.code)" }),
+            ("reason", nsError.localizedFailureReason),
+            ("path", nsError.userInfo[NSFilePathErrorKey] as? String),
+            ("blob", nsError.userInfo[NSURLSessionDownloadTaskResumeData] != nil ? 1 : 0)])
         onError(info.item, info.conn, nsError.localizedDescription, code, info.engine,
                 nsError.userInfo[NSURLSessionDownloadTaskResumeData] as? Data)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void) {
+        guard let info = info(for: session, task: dataTask), let http = response as? HTTPURLResponse else {
+            completionHandler(.cancel); return
+        }
+        let valid = info.rangeRequest ? http.statusCode == 206 : (200..<300).contains(http.statusCode)
+        guard valid else {
+            fail(URLError(.badServerResponse), session: session, task: dataTask, info: info)
+            completionHandler(.cancel)
+            return
+        }
+        completionHandler(.allow)
+    }
+
+    /// The fallback path writes every chunk straight into the durable part file, so progress survives
+    /// a failure and a retry resumes with a Range header from exactly where it stopped.
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard let info = info(for: session, task: dataTask) else { return }
+        let fm = FileManager.default
+        do {
+            try fm.createDirectory(at: info.part.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if !fm.fileExists(atPath: info.part.path) { fm.createFile(atPath: info.part.path, contents: nil) }
+            let handle = try FileHandle(forWritingTo: info.part)
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+            try handle.close()
+            let size = ((try? fm.attributesOfItem(atPath: info.part.path))?[.size] as? NSNumber)?.int64Value ?? 0
+            store.setReceived(key: key(for: session, task: dataTask), size)
+        } catch {
+            fail(error, session: session, task: dataTask, info: info)
+            dataTask.cancel()
+        }
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
@@ -347,13 +391,28 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unc
                 // A FAILED download task carries its resume blob in the error's userInfo — this is the
                 // documented way to continue one, and the only way that survives a dropped connection.
                 let nsError = error as NSError
+                let under = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
+                RemoteLog.shared.event("dl-err-detail", [
+                    ("item", info.item), ("domain", nsError.domain), ("code", nsError.code),
+                    ("under", under.map { "\($0.domain):\($0.code)" }),
+                    ("reason", nsError.localizedFailureReason),
+                    ("path", nsError.userInfo[NSFilePathErrorKey] as? String),
+                    ("blob", nsError.userInfo[NSURLSessionDownloadTaskResumeData] != nil ? 1 : 0)])
                 onError(info.item, info.conn, nsError.localizedDescription, nsError.code, info.engine,
                         nsError.userInfo[NSURLSessionDownloadTaskResumeData] as? Data)
             }
             return
         }
-        // Success is handled by didFinishDownloadingTo — the only tasks this delegate serves are
-        // background download tasks.
+        // A background download task's success arrives via didFinishDownloadingTo; a foreground data
+        // task has already written every byte itself and completes here.
+        guard info.engine == .foreground else { return }
+        let size = ((try? FileManager.default.attributesOfItem(atPath: info.part.path))?[.size] as? NSNumber)?.int64Value ?? 0
+        if info.expectedBytes == 0 || size >= info.expectedBytes {
+            onFinish(info.item, info.conn, info.engine)
+        } else {
+            onError(info.item, info.conn, "The transfer ended early.", NSURLErrorNetworkConnectionLost,
+                    info.engine, nil)
+        }
     }
 
     /// The background session has delivered every event queued while the app was suspended — release the
@@ -376,7 +435,15 @@ final class DownloadManager {
 
     @ObservationIgnored private let store = TransferStore()
     /// Single/full downloads and the one adaptive connection that survives suspension use this session.
+    /// Fallback transport: an in-process data task that appends to our own file. It never involves
+    /// the system's hand-the-file-over step, which is the one that fails with -3000.
+    @ObservationIgnored private var fgSession: URLSession!
     @ObservationIgnored private var bgSession: URLSession!
+    @ObservationIgnored private var foregroundTasks: [String: URLSessionDataTask] = [:]
+    /// Items the daemon refused to deliver, now transferring through the in-process fallback. Sticky
+    /// for the item's lifetime: once the system has failed to hand this file over twice, sending it
+    /// back to the same transport just repeats the failure.
+    @ObservationIgnored private var foregroundFallback: Set<String> = []
     @ObservationIgnored private var delegate: DownloadDelegate!
     @ObservationIgnored private var backgroundTasks: [String: URLSessionDownloadTask] = [:]
     /// Foreground cancellations must drain before the background range reads the durable part sizes.
@@ -467,6 +534,10 @@ final class DownloadManager {
         let delegateQueue = OperationQueue()
         delegateQueue.maxConcurrentOperationCount = 1
         delegateQueue.qualityOfService = .utility
+
+        let fgConfig = URLSessionConfiguration.default
+        fgConfig.waitsForConnectivity = true
+        fgSession = URLSession(configuration: fgConfig, delegate: delegate, delegateQueue: delegateQueue)
 
         let bgConfig = URLSessionConfiguration.background(withIdentifier: BackgroundDownloadSession.identifier)
         bgConfig.sessionSendsLaunchEvents = true
@@ -1453,7 +1524,8 @@ final class DownloadManager {
         item.lastSampleBytes = item.receivedBytes
         markActive(item.id)
         reconcileDurableParts(item)
-        startFullBackgroundDownload(item)
+        if foregroundFallback.contains(item.id) { startForegroundFallback(item) }
+        else { startFullBackgroundDownload(item) }
         syncLiveActivity()
     }
 
@@ -1491,6 +1563,29 @@ final class DownloadManager {
                            ("total", item.totalBytes), ("free", availableBytes())])
     }
 
+    /// Transfer the file with an in-process data task that appends straight into our own part file.
+    ///
+    /// This exists because the system's background download task can transfer a file perfectly and
+    /// then fail to deliver it (-3000 "Cannot create file", with 47 GB free — so not space). That
+    /// hand-over step is the only part we don't control, and this path doesn't have one: every chunk
+    /// is written by us, so progress is durable and a retry resumes with a Range header. The trade is
+    /// that it only advances while Stashy is open, so it is a fallback, never the default.
+    private func startForegroundFallback(_ item: DownloadItem) {
+        guard foregroundTasks[item.id] == nil else { return }
+        cancelTasks(item, produceResumeData: false)
+        let base = fileSize(partURL(item.id, 0))
+        var request = URLRequest(url: item.url)
+        if base > 0 { request.setValue("bytes=\(base)-", forHTTPHeaderField: "Range") }
+        let task = fgSession.dataTask(with: request)
+        register(task, item: item, conn: 0, engine: .foreground, base: base,
+                 expected: item.totalBytes, rangeRequest: base > 0)
+        foregroundTasks[item.id] = task
+        item.state = .downloading
+        item.error = nil
+        task.resume()
+        trace("dl-fg-fallback", [("item", item.id), ("from", base), ("total", item.totalBytes)])
+    }
+
     private func register(_ task: URLSessionTask, item: DownloadItem, conn: Int, engine: TransferEngine,
                           base: Int64, expected: Int64, rangeRequest: Bool) {
         let part = partURL(item.id, conn)
@@ -1522,6 +1617,14 @@ final class DownloadManager {
     private func availableBytes() -> Int64 {
         (try? downloadsDir.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
             .volumeAvailableCapacityForImportantUsage) ?? 0
+    }
+
+    /// Free space WITHOUT counting what iOS merely considers purgeable. `ForImportantUsage` can report
+    /// tens of gigabytes on a phone that cannot actually absorb a 2 GB burst, so the two are logged
+    /// side by side whenever a transfer fails to land.
+    private func availableBytesStrict() -> Int64 {
+        Int64((try? downloadsDir.resourceValues(forKeys: [.volumeAvailableCapacityKey])
+            .volumeAvailableCapacity) ?? 0)
     }
 
     private static func bytesLabel(_ n: Int64) -> String {
@@ -1611,6 +1714,7 @@ final class DownloadManager {
     }
 
     private func cancelTasks(_ item: DownloadItem, produceResumeData: Bool) {
+        foregroundTasks.removeValue(forKey: item.id)?.cancel()
         guard let background = backgroundTasks.removeValue(forKey: item.id) else { return }
         // The one transfer is a full-file task, so an iOS resume blob is always worth asking for.
         let conn = taskConnection(background) ?? 0
@@ -1864,8 +1968,12 @@ final class DownloadManager {
         // whatever the resume blob holds; a fresh foreground session also deserves fresh retries.
         fileRecoveryAttempts.removeAll()
         for item in items where item.state == .downloading && backgroundTasks[item.id] == nil {
+            guard foregroundTasks[item.id] == nil else { continue }
             trace("dl-revive", [("item", item.id), ("bytes", item.receivedBytes)])
-            startFullBackgroundDownload(item)
+            // A fallback item resumes on the fallback — its bytes are in OUR part file, and the
+            // daemon would start over from zero and overwrite them.
+            if foregroundFallback.contains(item.id) { startForegroundFallback(item) }
+            else { startFullBackgroundDownload(item) }
         }
         syncLiveActivity()
     }
@@ -1965,6 +2073,7 @@ final class DownloadManager {
     private func connectionFinished(itemID: String, conn: Int, engine: TransferEngine) {
         guard let item = items.first(where: { $0.id == itemID }) else { return }
         backgroundTasks[itemID] = nil
+        foregroundTasks[itemID] = nil
         // A cold background relaunch rebuilds items as .paused before `reconnectTasks` can flip them,
         // and the app is relaunched precisely BECAUSE a task reached a terminal state — so that task is
         // already gone from `getAllTasks` and the state never flips. Without adoption the finished
@@ -2001,6 +2110,7 @@ final class DownloadManager {
                                   engine: TransferEngine, resume: Data?) {
         guard let item = items.first(where: { $0.id == itemID }), item.state == .downloading else { return }
         backgroundTasks[itemID] = nil
+        foregroundTasks[itemID] = nil
         // Bank the resume blob FIRST. Without it every dropped connection restarts the file from byte
         // zero, which is exactly what a spotty cellular link produces over and over.
         if let resume {
@@ -2023,8 +2133,8 @@ final class DownloadManager {
         if code == NSURLErrorCannotCreateFile {
             let free = availableBytes()
             RemoteLog.shared.event("dl-space", [
-                ("item", itemID), ("free", free), ("total", item.totalBytes),
-                ("got", item.receivedBytes), ("why", "err-3000")])
+                ("item", itemID), ("free", free), ("strict", availableBytesStrict()),
+                ("total", item.totalBytes), ("got", item.receivedBytes), ("why", "err-3000")])
             if item.totalBytes > 0, free > 0, free < item.totalBytes {
                 item.state = .failed
                 item.error = "Not enough space to save this download — "
@@ -2035,22 +2145,38 @@ final class DownloadManager {
                 return
             }
         }
-        // A stale or rejected resume blob is the one failure worth a targeted retry: drop the blob and
-        // start the transfer clean rather than surfacing an error the user can do nothing with. Bounded,
-        // because a server that always rejects would otherwise loop forever.
-        let blobFailure = code == NSURLErrorCannotCreateFile || code == NSURLErrorCannotWriteToFile
+        // The system refused to hand over the file. Retrying the SAME transport just repeats it — the
+        // owner watched a 1.6 GB download reach 100% and restart four times. Escalate instead:
+        //   1st: retry the daemon, reusing the resume blob if the error carried one (never wipe it —
+        //        that is what turned a resumable failure into a full re-download).
+        //   2nd: switch to the foreground transport, which writes each chunk into our own file and so
+        //        never performs the hand-over step that is failing.
+        let deliveryFailure = code == NSURLErrorCannotCreateFile || code == NSURLErrorCannotWriteToFile
             || code == NSURLErrorBadServerResponse
-        if blobFailure, (fileRecoveryAttempts[itemID] ?? 0) < 2 {
+        if deliveryFailure {
+            let attempt = fileRecoveryAttempts[itemID] ?? 0
             fileRecoveryAttempts[itemID, default: 0] += 1
-            resumeData[itemID] = nil
-            clearResumeFiles(itemID)
-            cleanupParts(itemID)
-            item.receivedBytes = 0
-            for i in item.connections.indices { item.connections[i].received = 0 }
-            trace("dl-blob-reset", [("item", itemID), ("code", code)])
-            startFullBackgroundDownload(item)
-            syncLiveActivity()
-            return
+            if attempt == 0 {
+                trace("dl-retry", [("item", itemID), ("code", code),
+                                   ("blob", resumeData[itemID]?[0] != nil ? 1 : 0)])
+                startFullBackgroundDownload(item)      // reuses the blob when one was banked above
+                syncLiveActivity()
+                return
+            }
+            if attempt == 1 {
+                RemoteLog.shared.event("dl-fallback", [
+                    ("item", itemID), ("code", code), ("bytes", item.receivedBytes)])
+                foregroundFallback.insert(itemID)
+                item.transcodeStatus = ""
+                // Start clean on our own file: the daemon's bytes live in a temp file we can't reach.
+                resumeData[itemID] = nil
+                cleanupParts(itemID)
+                item.receivedBytes = 0
+                for i in item.connections.indices { item.connections[i].received = 0 }
+                startForegroundFallback(item)
+                syncLiveActivity()
+                return
+            }
         }
 
         let retries = networkRetries[itemID] ?? 0
