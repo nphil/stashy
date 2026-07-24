@@ -230,7 +230,14 @@ private final class TransferStore: @unchecked Sendable {
 /// A task's identity (item id, connection, part path) is also encoded in its `taskDescription`, so after
 /// the app is relaunched to finish a background transfer — when the in-memory store is empty — the
 /// delegate can still route the finished file to the right part and item.
-private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+/// NOTE: `URLSessionDataDelegate` conformance is LOAD-BEARING and must stay declared. Swift only
+/// exposes these methods to the Objective-C runtime when the class declares the @objc protocol, and
+/// URLSession decides whether to deliver body data with `respondsToSelector:`. Drop the conformance
+/// and `didReceive data:` is silently never called: the transfer runs, the server sends every byte,
+/// the task completes with NO error, and the part file is empty — which reads as "the transfer ended
+/// early" and cost a full debugging round.
+private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, URLSessionDataDelegate,
+                                      @unchecked Sendable {
     let store: TransferStore
     let onFinish: @Sendable (String, Int, TransferEngine) -> Void
     let onError: @Sendable (String, Int, String, Int, TransferEngine, Data?) -> Void
