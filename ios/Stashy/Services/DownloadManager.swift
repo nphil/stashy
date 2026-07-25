@@ -1861,6 +1861,11 @@ final class DownloadManager {
         if state == nil, restoringTasks { return }
         logActivityPush(state)
         if let error = liveActivity.sync(state) {
+            if liveActivityError != error {
+                RemoteLog.shared.event("dl-la-error", [
+                    ("msg", String(error.prefix(140))),
+                    ("bundle", DownloadLiveActivityCoordinator.bundleDiagnostic())])
+            }
             liveActivityError = error
         } else if state != nil, liveActivity.hasActivity {
             liveActivityError = nil
