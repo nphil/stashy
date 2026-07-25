@@ -22,7 +22,7 @@ final class DownloadLiveActivityCoordinator {
             return nil
         }
         guard ActivityAuthorizationInfo().areActivitiesEnabled else {
-            return "ActivityKit reports that Live Activities are disabled for Stashy."
+            return Self.deniedMessage
         }
         // A person can dismiss the card, or the system can end it under resource pressure. Don't retain a
         // dead handle forever and silently send every later update to an activity that no longer renders.
@@ -65,11 +65,19 @@ final class DownloadLiveActivityCoordinator {
                 // Live Activities may be disabled per-app or unavailable under the current signing/profile.
                 // The transfer itself must never depend on this optional presentation layer.
                 lastState = nil
+                if case ActivityAuthorizationError.denied = error { return Self.deniedMessage }
                 let nsError = error as NSError
                 return "\(nsError.domain) (\(nsError.code)): \(nsError.localizedDescription)"
             }
         }
     }
+
+    /// ActivityKit reports this as "the user has denied activities for this target", which reads as an
+    /// accusation when the usual cause is simply that the permission defaults off — reinstalling the app
+    /// resets it, and nothing in Stashy can turn it back on.
+    static let deniedMessage =
+        "Live Activities are turned off for Stashy. Turn them on in Settings › Stashy › Live Activities "
+        + "(reinstalling the app resets this)."
 
     private func end() {
         guard let activity else { return }

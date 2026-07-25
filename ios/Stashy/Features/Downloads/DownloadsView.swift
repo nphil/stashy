@@ -63,13 +63,19 @@ private struct LiveActivityDiagnostic: View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 6) {
                 Text("Dynamic Island unavailable")
                     .font(.subheadline.weight(.semibold))
                 Text(error)
-                    .font(.caption.monospaced())
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
+                // The permission lives in iOS Settings and no in-app control can grant it, so link
+                // straight there rather than leaving the user to hunt for it.
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    Link("Open Settings", destination: url)
+                        .font(.caption.weight(.semibold))
+                }
             }
             Spacer(minLength: 0)
         }
