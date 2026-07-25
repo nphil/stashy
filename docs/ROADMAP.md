@@ -766,11 +766,17 @@ blocks, both first-class iOS APIs:
     locally). ✅ H.264/HEVC (VideoToolbox) with resolution + quality presets.
 - **Downloaded Videos management screen** — list/manage offline videos (size, source, delete, play
   offline, re-download at different quality). ✅ (Downloader screen)
-- **Background continuation** — ✅ downloads run under a background `URLSession` and survive suspension
-  (dual-engine handoff: foreground 8-way ⇄ background single-connection). **Live Activity / Dynamic
-  Island** — ⏳ NOT built: needs a Widget Extension target in `ios/project.yml` (ActivityKit +
-  `NSSupportsLiveActivities`) — riskiest remaining downloads item since it changes the IPA structure for
-  a sideloaded app (see ENGINEERING_NOTES §3 Follow-ups).
+- **Background continuation** — ✅ downloads run under a background `URLSession` and survive suspension.
+  The transport is now **one connection, sliced into durable 64 MB ranges** (v1.0.325): multi-threading
+  was removed in v1.0.313 after benchmarking showed 1 connection beat 8 on the owner's own server, and
+  whole-file daemon transfers were replaced by slices because the system's hand-over step fails with
+  -3000 on every whole-file transfer (see the CLAUDE.md landmine + ENGINEERING_NOTES §3).
+- **Live Activity / Dynamic Island** — ✅ SHIPPED. The `StashyLiveActivity` widget-extension target lives
+  in `ios/project.yml` (ActivityKit, `NSSupportsLiveActivities`, extension id nested under the host's and
+  embedded at `PlugIns/`), driven by `DownloadLiveActivityCoordinator` — one activity for all transfers,
+  reattached after a background relaunch, and (v1.0.325) kept alive when a transfer stalls so the card
+  explains itself instead of vanishing. The IPA-structure risk was real but is behind us; what it exposed
+  is that an on-device signer can strip or re-id the extension, which `bundleDiagnostic()` now reports.
 - **Private storage** — ✅ downloaded media + sidecars live in a Stashy-scoped Application Support folder
   (never surfaced in the Files app or to other apps), excluded from iCloud/iTunes backup, migrated from
   the old Documents location.
@@ -860,22 +866,28 @@ latency tradeoff).
   a scroll lock to preserve it.
 
 ## Privacy & security
-- **★ PRIORITY — "Blur Media": one blur that covers ALL imagery, app-wide (owner-requested 2026-07-03).**
-  Rename the existing **Blur Thumbnails** toggle to **Blur Media** and make it apply the *same* blur
-  everywhere a frame/image is shown, with no gaps: scene/performer **thumbnails on every screen**
-  (scenes grid, performer page, search, and the **Downloads cards — currently unblurred**), **scrub
-  sprites**, the **long-press peek**, and **video playback itself** (inline AND fullscreen). Today
-  `blurThumbnails` only hits `SceneCard`, so coverage is patchy.
-  - **Approach (performance-safe):** a single global flag (`@AppStorage("blurMedia")`) + one reusable
-    `.privacyBlur(_ on:)` modifier applied at every media site so nothing is missed. **Static images**
-    (thumbnails/sprites) → SwiftUI `.blur(radius:)` — cheap, they don't animate. **Live video** → do NOT
-    per-frame CIFilter (expensive); overlay a **`UIVisualEffectView(UIBlurEffect)`** on the player layer
-    — hardware-accelerated, ~free, blurs whatever's behind it. (The player already has the Metal
-    `LiveBlurBackdropView` as precedent that blurring video on-device is cheap.)
-  - **Open decisions (ask owner):** fixed strong blur vs. an adjustable radius slider; whether to allow a
-    temporary **long-press-to-peek** reveal or keep it fully locked; whether to fold the separate **Blur
-    Titles** toggle into this or keep it independent; and whether this replaces/relates to the
-    app-switcher blur below.
+- **★ "Blur Media" — ✅ SHIPPED as "Privacy Mode".** One `@AppStorage("privacyMode")` toggle blurring all
+  media app-wide, exactly as designed below: static imagery uses SwiftUI `.blur`, live video uses a
+  hardware-cheap `UIVisualEffectView` overlay (`PrivacyPeek`, which also carries press-and-hold to peek).
+  `Features/Shared/PrivacyMode.swift` holds the whole model — `privacyImageBlur()`, `privacyTitleBlur()`,
+  `BlurEffectView`, `PrivacyPeek`.
+  - **The last coverage gaps closed 2026-07-25** (an audit of every `Image(uiImage:)`/`AsyncImage` site):
+    the **performer chip on Downloads cards** and **scraped artwork in the metadata sheets**
+    (`ScrapedImageView`, so StashDB/TPDB posters and headshots are covered too) were leaking. The
+    long-press peek was blurred but at a hardcoded radius 30 rather than the shared value. Everything
+    else already had coverage — including scrub sprites and fullscreen video, which sit *inside*
+    `PrivacyPeek` via `ScenePlayerView` and are blurred by its overlay rather than by their own modifier.
+  - **How the open decisions were resolved:** blur strength is **adjustable** (Settings → Privacy → Blur
+    Strength, 12–60, default 28), and it drives every surface from one number — `Privacy.imageRadius`,
+    read straight from `UserDefaults` rather than a per-view `@AppStorage`, because that modifier sits on
+    every grid cell and one defaults observer per visible cell is a scroll-perf cost for a value only a
+    Settings slider changes. Title blur derives from it (radius/4) so the two can never drift.
+    Long-press-to-peek is **kept** (it is what makes the mode livable). **Blur Titles was already folded
+    in** — `privacyTitleBlur()` runs off the same flag; there is no separate toggle to reconcile. The
+    app-switcher blur stays **independent** (different threat: the multitasking snapshot, not shoulder-
+    surfing) and defaults ON on its own.
+  - **Deliberately NOT blurred:** scraped *text* in the metadata sheets. That UI exists to pick the right
+    match, which is impossible if the names you are matching on are unreadable.
 - **App-switcher / background privacy blur.** ✅ SHIPPED 2026-07-11 (`e6bf2d0`):
   `SnapshotPrivacyModifier` in `Services/AppLock.swift`, applied outermost via `.snapshotPrivacy()` in
   `StashyApp.swift` — an unanimated thick-material cover whenever `scenePhase != .active`, so the
