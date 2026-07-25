@@ -484,6 +484,7 @@ final class DownloadManager {
             defaults.set(UIDevice.current.systemVersion, forKey: "daemonHandoverBrokenOS")
         }
     }
+    @ObservationIgnored private var loggedIdentity = false
     /// Items whose transfer ran in THIS session and hasn't finished — the ones whose Live Activity card
     /// must survive a stall instead of vanishing. See `liveActivityState()`.
     @ObservationIgnored private var activityOwned: Set<String> = []
@@ -603,15 +604,6 @@ final class DownloadManager {
 
         inBackground = UIApplication.shared.applicationState == .background
 
-        // Always logged, never trace-gated: what the INSTALLED app's identity actually is. On a
-        // sideloaded build the signer can rewrite the host bundle id or re-id the widget extension so it
-        // is no longer nested under it — and the system daemons that refuse to act for us (the download
-        // hand-over, ActivityKit) key off exactly that identity. One line at launch settles a question
-        // that has otherwise cost several build cycles to guess at.
-        RemoteLog.shared.event("dl-identity", [
-            ("bundle", Bundle.main.bundleIdentifier),
-            ("session", BackgroundDownloadSession.identifier),
-            ("detail", DownloadLiveActivityCoordinator.bundleDiagnostic())])
 
         loadCompleted()
         loadInterrupted()      // rebuild in-flight items from sidecars so relaunch callbacks find them
@@ -1625,6 +1617,18 @@ final class DownloadManager {
         // downstream branch has to remember to check together. Without this, a recovery path that only
         // consulted `foregroundFallback` could hand a flagged item back to the daemon that broke it.
         if daemonHandoverBroken { foregroundFallback.insert(item.id) }
+        // What the INSTALLED app's identity actually is. On a sideloaded build the signer can rewrite the
+        // host bundle id or re-id the widget extension so it is no longer nested under it — and the
+        // system daemons that refuse to act for us (the download hand-over, ActivityKit) key off exactly
+        // that identity. Emitted on the first transfer rather than from `init`, because init runs BEFORE
+        // RemoteLog is enabled and the line was silently dropped for a whole build cycle.
+        if RemoteLog.isLoggingEnabled, !loggedIdentity {
+            loggedIdentity = true
+            RemoteLog.shared.event("dl-identity", [
+                ("bundle", Bundle.main.bundleIdentifier),
+                ("session", BackgroundDownloadSession.identifier),
+                ("detail", DownloadLiveActivityCoordinator.bundleDiagnostic())])
+        }
         if RemoteLog.isDownloadTracingEnabled {
             let sliceable = item.totalBytes > 0 && !sliceUnsupported.contains(item.id)
             let engine: String

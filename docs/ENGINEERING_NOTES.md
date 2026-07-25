@@ -197,6 +197,31 @@ id is still nested under the host's), this distinguishes the live hypotheses:
 | correct | both `ok`, but `mine=0` beforehand | the daemon's own delivery directory is missing; pre-creating it may be the entire fix |
 | correct | both `ok`, directory present | the app is not at fault; the work becomes making the in-process path survive backgrounding |
 
+### VERDICT — the probe ran, 2026-07-25 (v1.0.328). Row 4. Stop looking in the app.
+```
+dl-probe why=pre-slice bundle=com.nphil.stashy root=1 downloads=1 mine=1 mkdir=ok write=ok
+dl-staging why=begin  exists=1 dirs=2 files=0 bytes=0 names=Downloads,com.nphil.stashy
+dl-err-detail item=2768 domain=NSURLErrorDomain code=-3000 blob=0      ← 4.19 GB free, first 64 MB slice
+dl-probe why=err-3000 bundle=com.nphil.stashy root=1 downloads=1 mine=1 mkdir=ok write=ok
+```
+The directory the daemon must deliver into **exists, sits inside our container, and our own process can
+both create it and write a file into it** — measured in the same millisecond as the refusal. The host
+bundle id is intact, so the signer did not rewrite it. Combined with the code audit (no path in
+`DownloadManager` can emit -3000; the only synthesised code is `NSURLErrorCannotWriteToFile`), every
+app-side explanation is exhausted: not space, not size, not Range, not the path, not permissions, not
+our code, not identity. It is an iOS-side refusal that carries no diagnostic.
+
+**Do not spend further builds hunting it.** The correct response is the shipped one: one -3000 condemns
+the transport (~1.5 s, ~52 MB — down from 472 MB across five retries) and everything runs in-process
+thereafter. Device-verified the same session: a 2.70 GB file completed at 100–112 MB/s and kept
+downloading for **29.7 s after the app was backgrounded**, finishing at 100% without being reopened.
+
+**The one real limit that remains.** The in-process path lives on `beginBackgroundTask`, which grants
+roughly 30 s. A transfer with more than ~30 s of work left when the user leaves the app will stall until
+they return. That is an enhancement (chunk the fallback so each backgrounded stretch commits, or revisit
+if a future iOS fixes the hand-over — `daemonHandoverBroken` is OS-version-stamped and re-tests
+automatically), not a regression: the daemon path it replaced never completed a single transfer.
+
 **The engine therefore slices (v1.0.325).** `startBackgroundTransfer` → `startBackgroundSlice`: one
 background range task at a time, `Range: bytes=<durable>-<durable+64MB-1>`, appended into our part file
 by the delegate's existing append branch, then the next slice is queued from `connectionFinished`. Why

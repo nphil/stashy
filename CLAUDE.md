@@ -208,19 +208,26 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   delivered — that IS the "System Data" growth. So v1.0.327 stops retrying: one -3000 with nothing
   durable condemns the transport, the verdict persists (OS-version-stamped, so an iOS update re-tests),
   and every later download goes in-process. The in-process path also holds a background assertion now.
-- **The next build is INSTRUMENTATION ONLY — do not ship another fix for a theory.** An earlier comment
-  in `connectionFailed` claimed device-proof that "the daemon stages OUTSIDE our container". **That was
-  wrong**: it rested on `dl-staging` reading `files=0 bytes=0` from a census that counted only non-empty
-  regular FILES, so an absent delivery directory and an empty one read identically. `stagingCensus` now
-  counts dirs + zero-byte entries, and **`probeDeliveryPath`** (`dl-probe`) walks
-  `Caches/com.apple.nsurlsessiond/Downloads/<bundle-id>`, then tries the two operations the daemon must
-  perform — `createDirectory` and a 1-byte write — and logs the errno of whichever fails.
-  **Read from ntfy, in this order:** `dl-identity` (host bundle id + whether the appex is nested under
-  it — if the signer rewrote either, that one line explains BOTH the -3000 and the ActivityKit
-  `.denied`); then `dl-probe` — `mkdir`/`write` failing = a permission/identity problem; both `ok` with
-  `mine=0` beforehand = the daemon's own directory is missing and pre-creating it may be the whole fix;
-  both `ok`, directory present, still -3000 = the app is not at fault and the work is making the
-  in-process path survive backgrounding.
+- **RESOLVED 2026-07-25, v1.0.328 device traces — downloads work, and the -3000 is NOT the app's fault.**
+  `dl-probe` measured the daemon's actual delivery path at the moment of failure:
+  `root=1 downloads=1 mine=1 mkdir=ok write=ok`, bundle `com.nphil.stashy` (NOT rewritten by the
+  signer), and `dl-staging dirs=2 names=Downloads,com.nphil.stashy`. So the directory the daemon must
+  deliver into **exists, is inside our container, and our own process can create and write in it** — and
+  the daemon fails anyway, with 4.19 GB free, on the first 64 MB slice. Every app-side hypothesis is
+  dead: not space, not size, not Range, not the path, not permissions, not our code (a full audit found
+  no path by which we can emit -3000), not a rewritten host bundle id. It is an iOS-side refusal with no
+  diagnostic attached. **Do not spend more builds on it.**
+  **The shipped behaviour is the right one:** one -3000 (~1.5 s, ~52 MB) condemns the transport, then
+  everything runs in-process. Device-verified: a **2.70 GB** download completed at 100–112 MB/s, and it
+  kept running for **29.7 s after the app was backgrounded** (16% → 100%) on the `beginBackgroundTask`
+  assertion added in v1.0.327.
+  **Known limit:** the in-process path only gets iOS's background grace (~30 s). A transfer with more
+  than ~30 s of work left when the app is backgrounded will stall until the app is reopened. Fixing that
+  properly means either the daemon working (out of our hands) or chunking the fallback so each backgrounded
+  stretch commits — file it as an enhancement, not a bug.
+  Still open: whether the widget extension's id is nested under the host's (the `dl-identity` line was
+  dropped for one build because `init` runs before RemoteLog is enabled; it now fires on the first
+  transfer). That is the remaining lead for the ActivityKit `.denied`.
   Earlier: v1.0.319 fixed the resume-blob storage leak + Reclaim Download Storage; v1.0.317 = strict
   free-space accounting; **v1.0.313** removed multi-threading.
 - Next candidates: **the VMAF map fix (plugin v0.3.1) is DONE — shipped, deployed, and live-verified**
