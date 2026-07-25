@@ -449,6 +449,9 @@ final class DownloadManager {
     @ObservationIgnored private var fgSession: URLSession!
     @ObservationIgnored private var bgSession: URLSession!
     @ObservationIgnored private var foregroundTasks: [String: URLSessionDataTask] = [:]
+    /// Background-execution assertions held while an in-process transfer is in flight (see
+    /// `holdTransferAssertion`). Keyed by item so each transfer owns exactly one.
+    @ObservationIgnored private var transferAssertions: [String: UIBackgroundTaskIdentifier] = [:]
     /// Items the daemon refused to deliver, now transferring through the in-process fallback. Sticky
     /// for the item's lifetime: once the system has failed to hand this file over twice, sending it
     /// back to the same transport just repeats the failure.
@@ -456,6 +459,31 @@ final class DownloadManager {
     /// Servers that answered a range request with something other than 206. In-memory, so it self-heals
     /// on relaunch and a misbehaving proxy can never permanently downgrade a capable server.
     @ObservationIgnored private var sliceUnsupported: Set<String> = []
+    /// Whether the background daemon has been caught failing its hand-over with nothing durable to show
+    /// for it (`-3000`). PERSISTED, because this is a property of the device/OS rather than of one file:
+    /// on the owner's phone it fails at every size, and each attempt strands a slice's worth of space
+    /// outside our container. Once set, transfers go straight to the in-process transport.
+    /// Computed, so it needs no `@ObservationIgnored` (the macro only instruments stored properties) and
+    /// no in-memory copy that could disagree with what a relaunch reads back. The verdict is stamped
+    /// with the OS version that earned it and re-tested after any iOS update — a point release could fix
+    /// the hand-over, and nothing else would ever clear the flag.
+    private var daemonHandoverBroken: Bool {
+        get {
+            let defaults = UserDefaults.standard
+            guard defaults.bool(forKey: "daemonHandoverBroken") else { return false }
+            guard defaults.string(forKey: "daemonHandoverBrokenOS") == UIDevice.current.systemVersion
+            else {
+                defaults.set(false, forKey: "daemonHandoverBroken")   // new OS → give it another chance
+                return false
+            }
+            return true
+        }
+        set {
+            let defaults = UserDefaults.standard
+            defaults.set(newValue, forKey: "daemonHandoverBroken")
+            defaults.set(UIDevice.current.systemVersion, forKey: "daemonHandoverBrokenOS")
+        }
+    }
     /// Items whose transfer ran in THIS session and hasn't finished — the ones whose Live Activity card
     /// must survive a stall instead of vanishing. See `liveActivityState()`.
     @ObservationIgnored private var activityOwned: Set<String> = []
@@ -1543,8 +1571,11 @@ final class DownloadManager {
             let margin: Int64 = 512 << 20
             let directNeed = item.totalBytes + margin
             let sliceable = !sliceUnsupported.contains(item.id)
-            let daemonNeed = sliceable ? item.totalBytes + Self.sliceBytes + margin
-                                       : item.totalBytes * 2 + margin
+            // With the daemon ruled out there is no staging copy to budget for at all — asking for one
+            // would refuse a download that fits perfectly well on the transport we're actually using.
+            let daemonNeed = daemonHandoverBroken ? directNeed
+                : (sliceable ? item.totalBytes + Self.sliceBytes + margin
+                             : item.totalBytes * 2 + margin)
             // Before judging, make the system release what it says it already has.
             if free > 0, free < daemonNeed, availableBytes() >= daemonNeed {
                 reserveSpace(daemonNeed)
@@ -1580,10 +1611,14 @@ final class DownloadManager {
         item.lastSampleBytes = item.receivedBytes
         markActive(item.id)
         reconcileDurableParts(item)
+        // Make "routed to the in-process transport" a single fact rather than two conditions that every
+        // downstream branch has to remember to check together. Without this, a recovery path that only
+        // consulted `foregroundFallback` could hand a flagged item back to the daemon that broke it.
+        if daemonHandoverBroken { foregroundFallback.insert(item.id) }
         if RemoteLog.isDownloadTracingEnabled {
             let sliceable = item.totalBytes > 0 && !sliceUnsupported.contains(item.id)
             let engine: String
-            if foregroundFallback.contains(item.id) { engine = "direct" }
+            if foregroundFallback.contains(item.id) || daemonHandoverBroken { engine = "direct" }
             else if sliceable { engine = "slices" }
             else { engine = "whole" }
             RemoteLog.shared.event("dl-begin", [
@@ -1592,7 +1627,7 @@ final class DownloadManager {
                 ("strict", availableBytesStrict()), ("lenient", availableBytes())])
             stagingCensus("begin")
         }
-        if foregroundFallback.contains(item.id) { startForegroundFallback(item) }
+        if foregroundFallback.contains(item.id) || daemonHandoverBroken { startForegroundFallback(item) }
         else { startBackgroundTransfer(item) }
         syncLiveActivity()
     }
@@ -1718,7 +1753,33 @@ final class DownloadManager {
         item.state = .downloading
         item.error = nil
         task.resume()
+        holdTransferAssertion(item.id)
         trace("dl-fg-fallback", [("item", item.id), ("from", base), ("total", item.totalBytes)])
+    }
+
+    /// Keep the process alive after the app is backgrounded so an in-process transfer can keep writing.
+    ///
+    /// The daemon path never needed this — the system owns that transfer. This one is OUR data task and
+    /// stops dead the moment we're suspended, which is why the fallback used to report `-1005` with zero
+    /// bytes over and over after a background trip. A background-task assertion buys iOS's execution
+    /// grace (~30 s), enough for a small download to land and for a large one to reach a slice boundary
+    /// instead of losing the connection outright.
+    private func holdTransferAssertion(_ itemID: String) {
+        guard transferAssertions[itemID] == nil else { return }
+        var bg: UIBackgroundTaskIdentifier = .invalid
+        bg = UIApplication.shared.beginBackgroundTask(withName: "transfer-\(itemID)") { [weak self] in
+            // Must end SYNCHRONOUSLY or iOS kills the app; the map is tidied on a hop afterwards so a
+            // later release can't end an already-expired identifier a second time.
+            if bg != .invalid { UIApplication.shared.endBackgroundTask(bg) }
+            Task { @MainActor in self?.transferAssertions[itemID] = nil }
+        }
+        guard bg != .invalid else { return }
+        transferAssertions[itemID] = bg
+    }
+
+    private func releaseTransferAssertion(_ itemID: String) {
+        guard let bg = transferAssertions.removeValue(forKey: itemID), bg != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(bg)
     }
 
     private func register(_ task: URLSessionTask, item: DownloadItem, conn: Int, engine: TransferEngine,
@@ -1857,6 +1918,7 @@ final class DownloadManager {
 
     private func cancelTasks(_ item: DownloadItem, produceResumeData: Bool) {
         foregroundTasks.removeValue(forKey: item.id)?.cancel()
+        releaseTransferAssertion(item.id)   // nothing of ours is writing any more
         guard let background = backgroundTasks.removeValue(forKey: item.id) else { return }
         let conn = taskConnection(background) ?? 0
         // A SLICED transfer must never bank an iOS resume blob. Its resume state is our own part file,
@@ -2157,7 +2219,7 @@ final class DownloadManager {
             trace("dl-revive", [("item", item.id), ("bytes", item.receivedBytes)])
             // A fallback item resumes on the fallback — its bytes are in OUR part file, and the
             // daemon would start over from zero and overwrite them.
-            if foregroundFallback.contains(item.id) { startForegroundFallback(item) }
+            if foregroundFallback.contains(item.id) || daemonHandoverBroken { startForegroundFallback(item) }
             else { startBackgroundTransfer(item) }
         }
         syncLiveActivity()
@@ -2259,6 +2321,7 @@ final class DownloadManager {
         guard let item = items.first(where: { $0.id == itemID }) else { return }
         backgroundTasks[itemID] = nil
         foregroundTasks[itemID] = nil
+        releaseTransferAssertion(itemID)
         // A cold background relaunch rebuilds items as .paused before `reconnectTasks` can flip them,
         // and the app is relaunched precisely BECAUSE a task reached a terminal state — so that task is
         // already gone from `getAllTasks` and the state never flips. Without adoption the finished
@@ -2313,6 +2376,7 @@ final class DownloadManager {
         guard let item = items.first(where: { $0.id == itemID }), item.state == .downloading else { return }
         backgroundTasks[itemID] = nil
         foregroundTasks[itemID] = nil
+        releaseTransferAssertion(itemID)
         // A failed SLICE leaves nothing in flight, so the part file is the whole truth. Its abandoned
         // in-flight bytes must be dropped from the reported figure now — carrying them would overstate
         // progress until the next slice lands and then correct itself with a visible backwards tick,
@@ -2348,11 +2412,24 @@ final class DownloadManager {
             RemoteLog.shared.event("dl-space", [
                 ("item", itemID), ("strict", free), ("lenient", availableBytes()),
                 ("total", item.totalBytes), ("got", item.receivedBytes), ("why", "err-3000")])
-            // iOS names no cause for -3000 (no underlying error, no path), so measure the one thing it
-            // could plausibly be: the daemon's staging area. It lives in OUR Library/Caches, which iOS
-            // purges under pressure and preferentially while the app is suspended — if it has been
-            // reaped out from under a 99%-complete transfer, this census is what says so.
             stagingCensus("err-3000")
+            // DEVICE-PROVEN 2026-07-25 (v1.0.326 traces): the hand-over is broken at EVERY size on this
+            // device. A 64 MB slice — the FIRST one, nothing durable yet — fails exactly like a 1.6 GB
+            // whole file, with 4.9 GB strict free and no underlying error. Five retries in a row failed
+            // in 5 seconds flat, and `dl-staging` read `files=0 bytes=0` throughout: the daemon stages
+            // OUTSIDE our container, so we can neither see nor reclaim it. Yet strict free fell 472 MB
+            // across those five attempts (~70 MB each — one slice's worth, stranded). That is the
+            // "System Data" growth, measured.
+            //
+            // So a -3000 with nothing durable is not a transient to retry. It is proof that this
+            // transport cannot deliver, and every further attempt leaks another slice for nothing.
+            // Give up on the daemon permanently: this is a device/OS property, not a per-file one, so
+            // the verdict persists and every later download goes straight to the in-process transport.
+            if fileSize(partURL(itemID, 0)) == 0, !daemonHandoverBroken {
+                daemonHandoverBroken = true
+                RemoteLog.shared.event("dl-daemon-broken", [
+                    ("item", itemID), ("strict", free), ("total", item.totalBytes)])
+            }
             // Not even one copy fits: the in-process fallback would fail too, so say so and stop
             // rather than spending another few gigabytes proving it.
             if item.totalBytes > 0, free > 0, free < item.totalBytes {
@@ -2392,7 +2469,11 @@ final class DownloadManager {
             // its predecessors are already banked — so it gets a real budget before we surrender the
             // only transport that runs while the app is suspended. Successful slices reset the count,
             // so this bounds CONSECUTIVE failures, not failures over the whole file.
-            let budget = ranged ? 4 : (transferredEverything ? 0 : 1)
+            // Once the daemon has proven it cannot hand a file over, its retry budget is ZERO — a retry
+            // cannot succeed and costs another stranded slice. Otherwise the budget is sized to what a
+            // retry costs.
+            let budget = daemonHandoverBroken && engine == .background
+                ? 0 : (ranged ? 4 : (transferredEverything ? 0 : 1))
             if attempt < budget {
                 trace("dl-retry", [("item", itemID), ("code", code), ("try", attempt + 1),
                                    ("blob", resumeData[itemID]?[0] != nil ? 1 : 0)])
