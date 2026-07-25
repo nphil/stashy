@@ -16,9 +16,13 @@ struct ScrapedImageView: View {
     var body: some View {
         Group {
             if let image {
+                // Scraped posters/headshots are media like any other, so Privacy Mode covers them too.
+                // Names and other scraped TEXT stay readable on purpose: this sheet exists to pick the
+                // right match, which is impossible if the thing you are matching on is blurred.
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
+                    .privacyImageBlur()
             } else {
                 Rectangle()
                     .fill(.secondary.opacity(0.15))

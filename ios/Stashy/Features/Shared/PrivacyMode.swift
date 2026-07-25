@@ -7,20 +7,39 @@ import UIKit
 /// `UIVisualEffectView` overlay and a press-and-hold peek.
 enum Privacy {
     static let key = "privacyMode"
-    static let imageRadius: CGFloat = 28   // strong enough that a thumbnail isn't discernible
-    static let titleRadius: CGFloat = 7    // enough to make names/filenames unreadable
+    /// Blur strength, tunable from Settings → Privacy. Media is only as private as the weakest blur in
+    /// the app, so ONE value drives every site rather than per-call-site constants that drift apart.
+    static let radiusKey = "privacyBlurRadius"
+    static let defaultImageRadius: Double = 28   // strong enough that a thumbnail isn't discernible
+    static let minImageRadius: Double = 12
+    static let maxImageRadius: Double = 60
+
+    /// Read straight from `UserDefaults`, NOT through a per-view `@AppStorage`. This is consulted by a
+    /// modifier that sits on every grid thumbnail and title, and an `@AppStorage` there would register a
+    /// defaults observer per visible cell — a standing scroll-perf cost for a number that only ever
+    /// changes from one Settings slider. Nothing needs live invalidation: `privacyMode` IS observed (so
+    /// toggling the mode redraws everything), and Settings covers the grid while the slider moves.
+    static var imageRadius: CGFloat {
+        let stored = UserDefaults.standard.double(forKey: radiusKey)
+        return CGFloat(stored > 0 ? stored : defaultImageRadius)
+    }
+    /// Text needs far less blur than imagery to become unreadable, and derives from the same slider so
+    /// names and thumbnails can never end up at mismatched strengths.
+    static var titleRadius: CGFloat { max(4, imageRadius / 4) }
 }
 
 private struct PrivacyBlurModifier: ViewModifier {
-    let radius: CGFloat
+    enum Kind { case image, title }
+    let kind: Kind
     @AppStorage(Privacy.key) private var privacyMode = false
+
     @ViewBuilder func body(content: Content) -> some View {
         // Structural on/off, NOT `.blur(radius: 0)`: a zero-radius blur still inserts a Gaussian filter
         // node per view, and this modifier sits on EVERY grid thumbnail and title — hundreds of no-op
         // filter layers during scrolling. With privacy off the content now renders filter-free; the
         // identity change on toggle is irrelevant (flipping Privacy Mode is a rare Settings action).
         if privacyMode {
-            content.blur(radius: radius)
+            content.blur(radius: kind == .image ? Privacy.imageRadius : Privacy.titleRadius)
         } else {
             content
         }
@@ -28,10 +47,11 @@ private struct PrivacyBlurModifier: ViewModifier {
 }
 
 extension View {
-    /// Blur an image/thumbnail when Privacy Mode is on.
-    func privacyImageBlur() -> some View { modifier(PrivacyBlurModifier(radius: Privacy.imageRadius)) }
+    /// Blur an image/thumbnail when Privacy Mode is on. Apply this at EVERY site that renders a frame,
+    /// a poster, a performer photo or a scraped image — the mode is worthless if one surface leaks.
+    func privacyImageBlur() -> some View { modifier(PrivacyBlurModifier(kind: .image)) }
     /// Blur a title/name/filename when Privacy Mode is on.
-    func privacyTitleBlur() -> some View { modifier(PrivacyBlurModifier(radius: Privacy.titleRadius)) }
+    func privacyTitleBlur() -> some View { modifier(PrivacyBlurModifier(kind: .title)) }
 }
 
 /// A `UIVisualEffectView` frosted blur — blurs whatever is rendered behind it in the hierarchy, live,

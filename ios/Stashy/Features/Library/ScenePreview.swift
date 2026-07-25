@@ -194,7 +194,11 @@ private struct ScenePreviewContainer: View {
 
                 popupContent
                     .frame(width: popupW, height: popupH)
-                    .blur(radius: privacyMode && !touching ? 30 : 0)   // Privacy Mode: hold to peek
+                    // Privacy Mode: hold to peek. An animatable radius rather than the structural
+                    // on/off `privacyImageBlur()` uses, so the reveal FADES instead of cutting — the
+                    // no-op-Gaussian cost that rules out `radius: 0` on grid cells doesn't apply to one
+                    // popup that only exists while a finger is down.
+                    .blur(radius: privacyMode && !touching ? Privacy.imageRadius : 0)
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 18, style: .continuous)

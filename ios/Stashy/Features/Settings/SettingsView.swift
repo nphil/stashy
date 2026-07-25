@@ -18,6 +18,7 @@ struct SettingsView: View {
     @AppStorage("animatedPreviews") private var animatedPreviews = true
     @AppStorage("appLockEnabled") private var appLockEnabled = false
     @AppStorage("privacyMode") private var privacyMode = false
+    @AppStorage(Privacy.radiusKey) private var privacyBlurRadius = Privacy.defaultImageRadius
     @AppStorage("appSwitcherBlurEnabled") private var appSwitcherBlur = true
     @AppStorage("watchHeatEnabled") private var watchHeatEnabled = true
     @State private var debugLogging = RemoteLog.isLoggingEnabled
@@ -271,13 +272,22 @@ struct SettingsView: View {
                     Toggle("Require Face ID", isOn: $appLockEnabled)
                         .disabled(!AppLock.isAvailable)
                     Toggle("Privacy Mode", isOn: $privacyMode)
+                    if privacyMode {
+                        // Only meaningful while the mode is on, so it appears with it rather than
+                        // sitting inert. One slider governs every blurred surface in the app.
+                        LabeledContent("Blur Strength") {
+                            Slider(value: $privacyBlurRadius,
+                                   in: Privacy.minImageRadius...Privacy.maxImageRadius)
+                                .frame(maxWidth: 170)
+                        }
+                    }
                     Toggle("Blur in App Switcher", isOn: $appSwitcherBlur)
                 } header: {
                     Text("Privacy")
                 } footer: {
                     Text(AppLock.isAvailable
-                         ? "Require Face ID, Touch ID, or your passcode to open Stashy. Privacy Mode blurs all media — thumbnails, names, sprites, and video (press and hold to peek). Blur in App Switcher covers the app whenever you leave it, so the multitasking snapshot never shows what was on screen."
-                         : "Set up Face ID, Touch ID, or a passcode in iOS Settings to enable app lock. Privacy Mode blurs all media — thumbnails, names, sprites, and video (press and hold to peek). Blur in App Switcher covers the app whenever you leave it, so the multitasking snapshot never shows what was on screen.")
+                         ? "Require Face ID, Touch ID, or your passcode to open Stashy. Privacy Mode blurs all media — thumbnails, performer photos, names, sprites, scraped artwork, and video (press and hold to peek); Blur Strength sets how heavily. Blur in App Switcher covers the app whenever you leave it, so the multitasking snapshot never shows what was on screen."
+                         : "Set up Face ID, Touch ID, or a passcode in iOS Settings to enable app lock. Privacy Mode blurs all media — thumbnails, performer photos, names, sprites, scraped artwork, and video (press and hold to peek); Blur Strength sets how heavily. Blur in App Switcher covers the app whenever you leave it, so the multitasking snapshot never shows what was on screen.")
                 }
 
                 // Cache section

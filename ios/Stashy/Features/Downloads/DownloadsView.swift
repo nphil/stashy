@@ -279,7 +279,7 @@ private struct DownloadCard: View {
                 HStack(spacing: 6) {
                     Group {
                         if let performer {
-                            Image(uiImage: performer).resizable().scaledToFill()
+                            Image(uiImage: performer).resizable().scaledToFill().privacyImageBlur()
                         } else {
                             Image(systemName: "person.fill").resizable().scaledToFit()
                                 .padding(7).foregroundStyle(.secondary)
