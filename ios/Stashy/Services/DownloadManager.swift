@@ -239,14 +239,16 @@ private final class TransferStore: @unchecked Sendable {
 private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, URLSessionDataDelegate,
                                       @unchecked Sendable {
     let store: TransferStore
-    let onFinish: @Sendable (String, Int, TransferEngine) -> Void
-    let onError: @Sendable (String, Int, String, Int, TransferEngine, Data?) -> Void
+    /// `(item, conn, engine, ranged)` — `ranged` distinguishes one landed SLICE of a sliced background
+    /// transfer from a whole-file transfer that delivered everything, which decide different things.
+    let onFinish: @Sendable (String, Int, TransferEngine, Bool) -> Void
+    let onError: @Sendable (String, Int, String, Int, TransferEngine, Data?, Bool) -> Void
     let onStopped: @Sendable (String, Int, TransferEngine) -> Void
     private var terminal: Set<TransferKey> = []
 
     init(store: TransferStore,
-         onFinish: @escaping @Sendable (String, Int, TransferEngine) -> Void,
-         onError: @escaping @Sendable (String, Int, String, Int, TransferEngine, Data?) -> Void,
+         onFinish: @escaping @Sendable (String, Int, TransferEngine, Bool) -> Void,
+         onError: @escaping @Sendable (String, Int, String, Int, TransferEngine, Data?, Bool) -> Void,
          onStopped: @escaping @Sendable (String, Int, TransferEngine) -> Void) {
         self.store = store
         self.onFinish = onFinish
@@ -297,7 +299,7 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, URLS
             ("path", nsError.userInfo[NSFilePathErrorKey] as? String),
             ("blob", nsError.userInfo[NSURLSessionDownloadTaskResumeData] != nil ? 1 : 0)])
         onError(info.item, info.conn, nsError.localizedDescription, code, info.engine,
-                nsError.userInfo[NSURLSessionDownloadTaskResumeData] as? Data)
+                nsError.userInfo[NSURLSessionDownloadTaskResumeData] as? Data, info.rangeRequest)
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
@@ -380,7 +382,7 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, URLS
             let key = key(for: session, task: downloadTask)
             terminal.insert(key)
             store.drop(key: key)
-            onFinish(info.item, info.conn, info.engine)
+            onFinish(info.item, info.conn, info.engine, info.rangeRequest)
         } catch {
             fail(error, session: session, task: downloadTask, info: info)
         }
@@ -406,7 +408,7 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, URLS
                     ("path", nsError.userInfo[NSFilePathErrorKey] as? String),
                     ("blob", nsError.userInfo[NSURLSessionDownloadTaskResumeData] != nil ? 1 : 0)])
                 onError(info.item, info.conn, nsError.localizedDescription, nsError.code, info.engine,
-                        nsError.userInfo[NSURLSessionDownloadTaskResumeData] as? Data)
+                        nsError.userInfo[NSURLSessionDownloadTaskResumeData] as? Data, info.rangeRequest)
             }
             return
         }
@@ -415,10 +417,10 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, URLS
         guard info.engine == .foreground else { return }
         let size = ((try? FileManager.default.attributesOfItem(atPath: info.part.path))?[.size] as? NSNumber)?.int64Value ?? 0
         if info.expectedBytes == 0 || size >= info.expectedBytes {
-            onFinish(info.item, info.conn, info.engine)
+            onFinish(info.item, info.conn, info.engine, info.rangeRequest)
         } else {
             onError(info.item, info.conn, "The transfer ended early.", NSURLErrorNetworkConnectionLost,
-                    info.engine, nil)
+                    info.engine, nil, info.rangeRequest)
         }
     }
 
@@ -451,6 +453,16 @@ final class DownloadManager {
     /// for the item's lifetime: once the system has failed to hand this file over twice, sending it
     /// back to the same transport just repeats the failure.
     @ObservationIgnored private var foregroundFallback: Set<String> = []
+    /// Servers that answered a range request with something other than 206. In-memory, so it self-heals
+    /// on relaunch and a misbehaving proxy can never permanently downgrade a capable server.
+    @ObservationIgnored private var sliceUnsupported: Set<String> = []
+    /// Items whose transfer ran in THIS session and hasn't finished — the ones whose Live Activity card
+    /// must survive a stall instead of vanishing. See `liveActivityState()`.
+    @ObservationIgnored private var activityOwned: Set<String> = []
+    /// How much of the file one background slice moves. Big enough that the per-slice hand-over and
+    /// append are noise against a ~90 MB/s LAN transfer (~0.7 s of data), small enough that a failed
+    /// hand-over costs under a second of bandwidth instead of the whole file.
+    private static let sliceBytes: Int64 = 64 << 20
     @ObservationIgnored private var delegate: DownloadDelegate!
     @ObservationIgnored private var backgroundTasks: [String: URLSessionDownloadTask] = [:]
     /// Foreground cancellations must drain before the background range reads the durable part sizes.
@@ -523,13 +535,15 @@ final class DownloadManager {
 
         delegate = DownloadDelegate(
             store: store,
-            onFinish: { [weak self] item, conn, engine in
-                Task { @MainActor in self?.connectionFinished(itemID: item, conn: conn, engine: engine) }
+            onFinish: { [weak self] item, conn, engine, ranged in
+                Task { @MainActor in
+                    self?.connectionFinished(itemID: item, conn: conn, engine: engine, ranged: ranged)
+                }
             },
-            onError: { [weak self] item, conn, msg, code, engine, resume in
+            onError: { [weak self] item, conn, msg, code, engine, resume, ranged in
                 Task { @MainActor in
                     self?.connectionFailed(itemID: item, conn: conn, message: msg, code: code,
-                                           engine: engine, resume: resume)
+                                           engine: engine, resume: resume, ranged: ranged)
                 }
             },
             onStopped: { [weak self] item, conn, engine in
@@ -1516,22 +1530,21 @@ final class DownloadManager {
         if item.totalBytes > 0, item.connections.first?.total != item.totalBytes {
             item.rebuildConnections(totalBytes: item.totalBytes)
         }
-        // Space, measured properly — this is what -3000 "Cannot create file" actually was.
+        // Space, measured properly. The figure to test against is `volumeAvailableCapacity`, NOT
+        // `…ForImportantUsage` — the latter counts purgeable caches iOS merely *might* reclaim and read
+        // 40 GB on a phone with 4 GB genuinely free, which is exactly how a 5.5 GB download got waved
+        // through and then failed at 99%.
         //
-        // A background download costs TWICE the file: the system streams into its own container and
-        // needs a second copy's worth to hand the result to us at the end. And the free-space figure
-        // to test against is `volumeAvailableCapacity`, NOT `…ForImportantUsage` — the latter counts
-        // purgeable caches iOS merely *might* reclaim and read 40 GB on a phone with 4 GB genuinely
-        // free, which is exactly how a 5.5 GB download got waved through and then failed at 99%.
-        //
-        // The in-process transport writes straight into our own part file, so it costs ONE copy. A
-        // phone that can fit one but not two is therefore routed there deliberately, up front, rather
-        // than after burning two full downloads discovering it.
+        // A SLICED background transfer stages one slice at a time, so it costs the file plus a slice —
+        // the old 2× applies only to a whole-file transfer, where the system holds a complete second
+        // copy in its own container until the hand-over. The in-process transport also costs one copy.
         if item.totalBytes > 0 {
             let free = availableBytesStrict()
             let margin: Int64 = 512 << 20
             let directNeed = item.totalBytes + margin
-            let daemonNeed = item.totalBytes * 2 + margin
+            let sliceable = !sliceUnsupported.contains(item.id)
+            let daemonNeed = sliceable ? item.totalBytes + Self.sliceBytes + margin
+                                       : item.totalBytes * 2 + margin
             // Before judging, make the system release what it says it already has.
             if free > 0, free < daemonNeed, availableBytes() >= daemonNeed {
                 reserveSpace(daemonNeed)
@@ -1567,39 +1580,102 @@ final class DownloadManager {
         item.lastSampleBytes = item.receivedBytes
         markActive(item.id)
         reconcileDurableParts(item)
+        if RemoteLog.isDownloadTracingEnabled {
+            let sliceable = item.totalBytes > 0 && !sliceUnsupported.contains(item.id)
+            let engine: String
+            if foregroundFallback.contains(item.id) { engine = "direct" }
+            else if sliceable { engine = "slices" }
+            else { engine = "whole" }
+            RemoteLog.shared.event("dl-begin", [
+                ("item", item.id), ("total", item.totalBytes), ("from", item.receivedBytes),
+                ("engine", engine),
+                ("strict", availableBytesStrict()), ("lenient", availableBytes())])
+            stagingCensus("begin")
+        }
         if foregroundFallback.contains(item.id) { startForegroundFallback(item) }
-        else { startFullBackgroundDownload(item) }
+        else { startBackgroundTransfer(item) }
         syncLiveActivity()
     }
 
-    /// THE engine: one full-file (200) download task on the background session, whether or not the app
-    /// is in the foreground.
+    /// THE engine: transfer the file on the background session as a chain of durable RANGE slices.
     ///
-    /// This is the default path because it is the only one that continues while the app is suspended:
-    /// it keeps running when Stashy is minimized, survives the app being killed, and relaunches the app
-    /// to deliver the finished file. Benchmarking against the owner's own server also killed the case
-    /// for the old segmented engine — one connection beat eight, so parallelism bought complexity and
-    /// no speed while being the one thing that could NOT run unattended.
+    /// The background session is the only transport that continues while the app is suspended, so it
+    /// has to be the default. Its weakness is the hand-over: the daemon streams into its own staging
+    /// file and moves the result to us only at the very end, and on the owner's device that move fails
+    /// with -3000 "Cannot create file" EVERY time — at 98% of a 560 MB file, 99% of a 1.45 GB one, with
+    /// 6.5–8 GB genuinely free and no underlying error to name. A whole-file transfer therefore pays
+    /// full bandwidth for the entire file and then throws all of it away.
     ///
-    /// Its known weakness is the hand-over: the system stages the file in its own container and moves
-    /// it to us at the end, and that move fails on this device with -3000 "Cannot create file" — seen
-    /// at 98% of a 560 MB file with 8 GB free, so not simply space. `startForegroundFallback` exists
-    /// for that; do not retry this transport after a delivery failure.
-    private func startFullBackgroundDownload(_ item: DownloadItem) {
+    /// Slicing makes that failure cheap and usually avoids it outright:
+    ///   * each slice is handed over separately, so a hand-over moves ~64 MB instead of gigabytes;
+    ///   * every landed slice is APPENDED to our own part file, so progress is durable and monotonic —
+    ///     the daemon never holds more than one slice's worth of bytes we could lose;
+    ///   * if the hand-over is broken at any size, we find out after one slice (a second or two) instead
+    ///     of at 99% of a multi-gigabyte download, and escalate to the in-process fallback having lost
+    ///     almost nothing.
+    /// Progress can only ever move forwards because it is read from the part file, never from bytes the
+    /// daemon is still holding — that was the defect that made the island count 15 → 12 → 8.
+    private func startBackgroundTransfer(_ item: DownloadItem) {
         guard backgroundTasks[item.id] == nil else { return }
         if (finished[item.id] ?? []).contains(0) { finalizeIfComplete(item); return }
+        // A range needs a known length to slice, and a server that has already refused a 206 will
+        // refuse the next one too. Both take the whole-file transport.
+        guard item.totalBytes > 0, !sliceUnsupported.contains(item.id) else {
+            return startWholeFileBackgroundDownload(item)
+        }
+        startBackgroundSlice(item)
+    }
+
+    /// Queue the next range slice, continuing from whatever is already durable on disk.
+    private func startBackgroundSlice(_ item: DownloadItem) {
+        let base = fileSize(partURL(item.id, 0))
+        guard base < item.totalBytes else {
+            finished[item.id, default: []].insert(0)
+            finalizeIfComplete(item)
+            return
+        }
+        let end = min(base + Self.sliceBytes, item.totalBytes) - 1
+        transferEpoch[item.id, default: 0] += 1
+        // A slice resumes from the part file, so any banked iOS blob describes a superseded range —
+        // handing it to a later whole-file transfer would restart it at the wrong offset.
+        if resumeData[item.id]?[0] != nil {
+            resumeData[item.id]?[0] = nil
+            clearResumeFiles(item.id)
+        }
+        var request = URLRequest(url: item.url)
+        request.setValue("bytes=\(base)-\(end)", forHTTPHeaderField: "Range")
+        let task = bgSession.downloadTask(with: request)
+        // `expected` is the part's size AFTER this slice lands, which is what the delegate's
+        // completeness check compares against — not the whole file's size.
+        register(task, item: item, conn: 0, engine: .background, base: base,
+                 expected: end + 1, rangeRequest: true)
+        backgroundTasks[item.id] = task
+        // Durable bytes are the floor: a slice that fails can never drag the reported figure below what
+        // is already on disk.
+        item.receivedBytes = max(item.receivedBytes, base)
+        if let first = item.connections.indices.first {
+            item.connections[first].received = max(item.connections[first].received, base)
+        }
+        task.resume()
+        trace("dl-slice", [("item", item.id), ("from", base), ("to", end),
+                           ("total", item.totalBytes), ("free", availableBytesStrict())])
+    }
+
+    /// One full-file (200) download task. Only for transfers that cannot be sliced: an unknown size (a
+    /// server transcode still being written) or a server that refused a range request.
+    private func startWholeFileBackgroundDownload(_ item: DownloadItem) {
         transferEpoch[item.id, default: 0] += 1
         let task: URLSessionDownloadTask
         let resumed = resumeData[item.id]?[0] != nil
         if let data = resumeData[item.id]?[0] {
             task = bgSession.downloadTask(withResumeData: data)
             resumeData[item.id]?[0] = nil
+            // Adopt the blob's offset BEFORE clearing it, so a resumed transfer shows where it is
+            // picking up instead of reading 0% until the first byte callback arrives.
+            item.receivedBytes = max(item.receivedBytes, Self.resumedBytes(in: data))
         } else {
             task = bgSession.downloadTask(with: URLRequest(url: item.url))
             clearResumeFiles(item.id)   // genuinely starting over — drop any stale blob on disk
-        }
-        if let blob = resumeData[item.id]?[0] {
-            item.receivedBytes = max(item.receivedBytes, Self.resumedBytes(in: blob))
         }
         register(task, item: item, conn: 0, engine: .background, base: 0,
                  expected: item.totalBytes, rangeRequest: false)
@@ -1660,6 +1736,13 @@ final class DownloadManager {
         guard let desc = task.taskDescription else { return nil }
         let parts = desc.components(separatedBy: "\u{1}")
         return parts.count >= 2 ? Int(parts[1]) : nil
+    }
+
+    /// Whether a task is one slice of a ranged transfer (field 6 of the persisted routing description).
+    private func taskIsRanged(_ task: URLSessionTask) -> Bool {
+        guard let desc = task.taskDescription else { return false }
+        let parts = desc.components(separatedBy: "\u{1}")
+        return parts.count >= 7 && parts[6] == "1"
     }
 
     /// Bytes already transferred, per an iOS resume blob (an archived property list). The key is
@@ -1775,9 +1858,12 @@ final class DownloadManager {
     private func cancelTasks(_ item: DownloadItem, produceResumeData: Bool) {
         foregroundTasks.removeValue(forKey: item.id)?.cancel()
         guard let background = backgroundTasks.removeValue(forKey: item.id) else { return }
-        // The one transfer is a full-file task, so an iOS resume blob is always worth asking for.
         let conn = taskConnection(background) ?? 0
-        if produceResumeData {
+        // A SLICED transfer must never bank an iOS resume blob. Its resume state is our own part file,
+        // which is strictly better (it survives relaunch and iOS purges), and the blob would describe a
+        // single range — reporting bytes that live only inside the daemon's staging file and inflating
+        // progress above what is actually saved.
+        if produceResumeData, !taskIsRanged(background) {
             let id = item.id
             let epoch = transferEpoch[id] ?? 0
             awaitingBlob.insert(id)
@@ -1904,9 +1990,23 @@ final class DownloadManager {
     /// Select one privacy-safe transfer to feature. Scene titles never leave the app; the Lock Screen only
     /// receives byte progress, speed/ETA, and a count when a bulk operation has multiple active jobs.
     private func liveActivityState() -> DownloadActivityAttributes.ContentState? {
+        // A card is "owned" from the moment its transfer runs until it finishes or is stopped. Owned
+        // items stay on the Lock Screen even when they stall, because an island that silently
+        // DISAPPEARS is the worst possible report — the owner watched one vanish mid-transfer with no
+        // way to tell a finished download from an abandoned one. Ownership is per-session and never
+        // covers an item merely restored as failed at launch, so a card can't come back from the dead.
+        for item in items where item.state == .downloading || item.state == .serverProcessing {
+            activityOwned.insert(item.id)
+        }
+        for item in items where item.state == .completed || item.state == .stopped {
+            activityOwned.remove(item.id)
+        }
+        activityOwned.formIntersection(items.map(\.id))   // deleted items take their card with them
+
         let active = items.filter {
             $0.state == .downloading || $0.state == .waitingForNetwork ||
-            $0.state == .merging || $0.state == .serverProcessing
+            $0.state == .merging || $0.state == .serverProcessing ||
+            (($0.state == .paused || $0.state == .failed) && activityOwned.contains($0.id))
         }
         guard !active.isEmpty else { return nil }
 
@@ -1915,6 +2015,7 @@ final class DownloadManager {
         let item = active.first(where: { $0.state == .downloading })
             ?? active.first(where: { $0.state == .waitingForNetwork })
             ?? active.first(where: { $0.state == .merging })
+            ?? active.first(where: { $0.state == .serverProcessing })
             ?? active.first!
         let now = Date.now
         let count = active.count
@@ -1957,6 +2058,24 @@ final class DownloadManager {
                 phase: .preparing, progress: 1,
                 estimatedStart: nil, estimatedEnd: nil, updatedAt: now,
                 status: "Assembling the offline file", activeJobCount: count
+            )
+
+        case .paused, .failed:
+            // Progress reads from the durable part file, so what this shows is what has actually been
+            // saved and will be resumed from — never a figure that can evaporate.
+            let progress = item.totalBytes > 0
+                ? min(1, max(0, Double(item.receivedBytes) / Double(item.totalBytes)))
+                : nil
+            let saved: String = item.receivedBytes > 0
+                ? " — \(Self.bytesLabel(item.receivedBytes)) saved" : ""
+            let stopped: String = item.error ?? "Stopped\(saved) · open Stashy to retry"
+            let status: String = item.state == .paused
+                ? "Paused\(saved) · resume in Stashy"
+                : String(stopped.prefix(80))
+            return .init(
+                phase: .waitingForNetwork, progress: progress,
+                estimatedStart: nil, estimatedEnd: nil, updatedAt: now,
+                status: status, activeJobCount: count
             )
 
         case .serverProcessing:
@@ -2039,7 +2158,7 @@ final class DownloadManager {
             // A fallback item resumes on the fallback — its bytes are in OUR part file, and the
             // daemon would start over from zero and overwrite them.
             if foregroundFallback.contains(item.id) { startForegroundFallback(item) }
-            else { startFullBackgroundDownload(item) }
+            else { startBackgroundTransfer(item) }
         }
         syncLiveActivity()
     }
@@ -2136,7 +2255,7 @@ final class DownloadManager {
         return true
     }
 
-    private func connectionFinished(itemID: String, conn: Int, engine: TransferEngine) {
+    private func connectionFinished(itemID: String, conn: Int, engine: TransferEngine, ranged: Bool) {
         guard let item = items.first(where: { $0.id == itemID }) else { return }
         backgroundTasks[itemID] = nil
         foregroundTasks[itemID] = nil
@@ -2150,11 +2269,28 @@ final class DownloadManager {
             item.state = .downloading
             trace("dl-adopt", [("item", itemID), ("conn", conn), ("bytes", item.receivedBytes)])
         }
+        let delivered = fileSize(partURL(itemID, conn))
+        // A sliced background transfer lands ONE range at a time. Its part grows with every slice, so a
+        // short part means "ask for the next slice", not "the download is complete". The bytes just
+        // committed are durable, which is the whole point: nothing here can be undone by a later failure.
+        if ranged, engine == .background, item.totalBytes > 0, delivered < item.totalBytes {
+            item.receivedBytes = max(item.receivedBytes, delivered)
+            if conn < item.connections.count { item.connections[conn].received = delivered }
+            // A slice that landed proves both the transport and the connection are healthy — neither
+            // budget should carry a grudge from an earlier failure into the rest of the file.
+            fileRecoveryAttempts[itemID] = nil
+            networkRetries[itemID] = 0
+            trace("dl-slice-done", [("item", itemID), ("at", delivered), ("total", item.totalBytes)])
+            guard item.state == .downloading else { return }   // paused/stopped between slices
+            startBackgroundSlice(item)
+            syncLiveActivity()
+            return
+        }
         finished[itemID, default: []].insert(conn)
         // Adopt what actually arrived: unknown-size transfers (server transcodes) learn their size
-        // here, and a scanned-size mismatch resolves in favour of the delivered file.
-        let delivered = fileSize(partURL(itemID, conn))
-        if delivered > 0 {
+        // here, and a scanned-size mismatch resolves in favour of the delivered file. Never for a range
+        // request, whose length we chose ourselves — that would record a slice boundary as the file size.
+        if delivered > 0, !ranged {
             item.totalBytes = delivered
             if conn < item.connections.count { item.connections[conn].total = delivered }
         }
@@ -2173,13 +2309,24 @@ final class DownloadManager {
     ]
 
     private func connectionFailed(itemID: String, conn: Int, message: String, code: Int,
-                                  engine: TransferEngine, resume: Data?) {
+                                  engine: TransferEngine, resume: Data?, ranged: Bool) {
         guard let item = items.first(where: { $0.id == itemID }), item.state == .downloading else { return }
         backgroundTasks[itemID] = nil
         foregroundTasks[itemID] = nil
+        // A failed SLICE leaves nothing in flight, so the part file is the whole truth. Its abandoned
+        // in-flight bytes must be dropped from the reported figure now — carrying them would overstate
+        // progress until the next slice lands and then correct itself with a visible backwards tick,
+        // which is the exact symptom this engine exists to eliminate.
+        if ranged, let first = item.connections.indices.first {
+            let durable = fileSize(partURL(itemID, first))
+            item.connections[first].received = durable
+            item.receivedBytes = durable
+        }
         // Bank the resume blob FIRST. Without it every dropped connection restarts the file from byte
-        // zero, which is exactly what a spotty cellular link produces over and over.
-        if let resume {
+        // zero, which is exactly what a spotty cellular link produces over and over. Never for a slice:
+        // its blob counts bytes INSIDE the aborted range, none of which are durable, so adopting them
+        // would claim progress that does not exist on disk.
+        if !ranged, let resume {
             resumeData[itemID, default: [:]][0] = resume
             try? resume.write(to: resumeDataURL(itemID, 0), options: .atomic)
             item.receivedBytes = max(item.receivedBytes, Self.resumedBytes(in: resume))
@@ -2201,6 +2348,11 @@ final class DownloadManager {
             RemoteLog.shared.event("dl-space", [
                 ("item", itemID), ("strict", free), ("lenient", availableBytes()),
                 ("total", item.totalBytes), ("got", item.receivedBytes), ("why", "err-3000")])
+            // iOS names no cause for -3000 (no underlying error, no path), so measure the one thing it
+            // could plausibly be: the daemon's staging area. It lives in OUR Library/Caches, which iOS
+            // purges under pressure and preferentially while the app is suspended — if it has been
+            // reaped out from under a 99%-complete transfer, this census is what says so.
+            stagingCensus("err-3000")
             // Not even one copy fits: the in-process fallback would fail too, so say so and stop
             // rather than spending another few gigabytes proving it.
             if item.totalBytes > 0, free > 0, free < item.totalBytes {
@@ -2213,39 +2365,65 @@ final class DownloadManager {
                 return
             }
         }
-        // The system refused to hand over the file. Retrying the SAME transport just repeats it — the
-        // owner watched a 1.6 GB download reach 100% and restart four times. Escalate instead:
-        //   1st: retry the daemon, reusing the resume blob if the error carried one (never wipe it —
-        //        that is what turned a resumable failure into a full re-download).
-        //   2nd: switch to the foreground transport, which writes each chunk into our own file and so
-        //        never performs the hand-over step that is failing.
+        // The system refused to hand the file over. Retry within a budget sized to what a retry COSTS
+        // (see below), then switch to the in-process transport, which writes every chunk into our own
+        // file and so never performs the hand-over step that is failing.
         let deliveryFailure = code == NSURLErrorCannotCreateFile || code == NSURLErrorCannotWriteToFile
             || code == NSURLErrorBadServerResponse
+        // A server that cannot serve ranges refuses the FIRST one, so a refusal with nothing durable yet
+        // is a genuine capability signal; later ones are proxies, 416s and transients (which must never
+        // downgrade a server that has already served slices). Whole-file is then the only option.
+        if code == NSURLErrorBadServerResponse, fileSize(partURL(itemID, 0)) == 0,
+           !sliceUnsupported.contains(itemID) {
+            sliceUnsupported.insert(itemID)
+            resumeData[itemID]?[0] = nil          // a range blob is meaningless to a whole-file task
+            clearResumeFiles(itemID)
+            RemoteLog.shared.event("dl-no-range", [("item", itemID)])
+        }
         if deliveryFailure {
             let attempt = fileRecoveryAttempts[itemID] ?? 0
             fileRecoveryAttempts[itemID, default: 0] += 1
             // Failing at ~100% IS the hand-over step: the bytes all arrived and only the final move
-            // failed, so retrying the daemon is guaranteed to repeat it — at the cost of the whole
-            // file again. Skip straight to the transport that has no hand-over step.
+            // failed, so retrying the daemon is guaranteed to repeat it.
             let transferredEverything = item.totalBytes > 0
                 && item.receivedBytes >= Int64(Double(item.totalBytes) * 0.9)
-            if attempt == 0, !transferredEverything {
-                trace("dl-retry", [("item", itemID), ("code", code),
+            // Retrying a WHOLE-FILE transfer that already moved everything simply repeats the hand-over
+            // at the cost of the entire file again, so it gets none. A SLICE costs at most one slice —
+            // its predecessors are already banked — so it gets a real budget before we surrender the
+            // only transport that runs while the app is suspended. Successful slices reset the count,
+            // so this bounds CONSECUTIVE failures, not failures over the whole file.
+            let budget = ranged ? 4 : (transferredEverything ? 0 : 1)
+            if attempt < budget {
+                trace("dl-retry", [("item", itemID), ("code", code), ("try", attempt + 1),
                                    ("blob", resumeData[itemID]?[0] != nil ? 1 : 0)])
-                startFullBackgroundDownload(item)      // reuses the blob when one was banked above
+                // Stay on whichever transport this item is on — an item already demoted to the
+                // in-process fallback must never be handed back to the daemon that failed it.
+                if foregroundFallback.contains(itemID) { startForegroundFallback(item) }
+                else { startBackgroundTransfer(item) } // reuses the blob when one was banked above
                 syncLiveActivity()
                 return
             }
-            if attempt <= 1 {
+            // Nothing left to escalate TO once we are already on the fallback: fall through and let the
+            // transient/terminal handling below decide, rather than restarting it in a loop.
+            if attempt <= budget, !foregroundFallback.contains(itemID) {
                 RemoteLog.shared.event("dl-fallback", [
                     ("item", itemID), ("code", code), ("bytes", item.receivedBytes)])
                 foregroundFallback.insert(itemID)
                 item.transcodeStatus = ""
-                // Start clean on our own file: the daemon's bytes live in a temp file we can't reach.
-                releaseResumeBlob(itemID)   // let the daemon drop its partial file
-                cleanupParts(itemID)
-                item.receivedBytes = 0
-                for i in item.connections.indices { item.connections[i].received = 0 }
+                releaseResumeBlob(itemID)   // the daemon's own partial is unreachable — let it drop it
+                // Only a WHOLE-FILE daemon transfer leaves us with nothing: it holds every byte in a temp
+                // file we can't reach, so the part is empty and the fallback has to start over. A sliced
+                // transfer has already committed each landed slice into our own part — resuming from it
+                // is the entire reason for slicing, so never wipe it here.
+                let durable = fileSize(partURL(itemID, 0))
+                if durable > 0 {
+                    item.receivedBytes = durable
+                    for i in item.connections.indices { item.connections[i].received = durable }
+                } else {
+                    cleanupParts(itemID)
+                    item.receivedBytes = 0
+                    for i in item.connections.indices { item.connections[i].received = 0 }
+                }
                 startForegroundFallback(item)
                 syncLiveActivity()
                 return
@@ -2650,6 +2828,28 @@ final class DownloadManager {
             }
         }
         bgSession.getAllTasks(completionHandler: handler)
+    }
+
+    /// Size up the background daemon's staging area (inside our own container, under
+    /// `Library/Caches/com.apple.nsurlsessiond`). Purely diagnostic: -3000 arrives with no underlying
+    /// error and no path, so the only way to test "iOS purged the staging file mid-transfer" is to look
+    /// at what is there when the failure lands.
+    private func stagingCensus(_ why: String) {
+        let fm = FileManager.default
+        guard let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask).first else { return }
+        let staging = caches.appendingPathComponent("com.apple.nsurlsessiond", isDirectory: true)
+        var bytes: Int64 = 0
+        var files = 0
+        if let walker = fm.enumerator(at: staging, includingPropertiesForKeys: [.fileSizeKey],
+                                      options: [], errorHandler: nil) {
+            for case let url as URL in walker {
+                let size = Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+                if size > 0 { bytes += size; files += 1 }
+            }
+        }
+        RemoteLog.shared.event("dl-staging", [
+            ("why", why), ("exists", fm.fileExists(atPath: staging.path) ? 1 : 0),
+            ("files", files), ("bytes", bytes)])
     }
 
     /// Delete the background daemon's staging directory inside our container and return the bytes
