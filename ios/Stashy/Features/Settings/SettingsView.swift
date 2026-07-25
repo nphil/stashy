@@ -17,6 +17,7 @@ struct SettingsView: View {
     @State private var isClearingCache = false
     @AppStorage("animatedPreviews") private var animatedPreviews = true
     @AppStorage("appLockEnabled") private var appLockEnabled = false
+    @State private var retested = false
     @AppStorage("privacyMode") private var privacyMode = false
     @AppStorage(Privacy.radiusKey) private var privacyBlurRadius = Privacy.defaultImageRadius
     @AppStorage("appSwitcherBlurEnabled") private var appSwitcherBlur = true
@@ -390,6 +391,17 @@ struct SettingsView: View {
                                 RemoteLog.isDownloadTracingEnabled = on
                             }
                         Text("Adds every background range slice, part-file size census, engine start and Live Activity update to the log — what's needed to diagnose a transfer that stalls or loses progress while the app is minimized. Verbose: leave off unless you're chasing a download bug.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Button {
+                            downloads.retestSystemTransfers()
+                            retested = true
+                        } label: {
+                            Label(retested ? "Will retry on next download" : "Re-test System Transfers",
+                                  systemImage: "arrow.triangle.2.circlepath")
+                        }
+                        .disabled(retested)
+                        Text("Stashy stops using the system's background download service once it has failed to hand a finished file over — retrying only wastes bandwidth and strands storage. This clears that verdict so the next download tries it again; use it after an iOS update, or when capturing diagnostics.")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }

@@ -603,6 +603,16 @@ final class DownloadManager {
 
         inBackground = UIApplication.shared.applicationState == .background
 
+        // Always logged, never trace-gated: what the INSTALLED app's identity actually is. On a
+        // sideloaded build the signer can rewrite the host bundle id or re-id the widget extension so it
+        // is no longer nested under it — and the system daemons that refuse to act for us (the download
+        // hand-over, ActivityKit) key off exactly that identity. One line at launch settles a question
+        // that has otherwise cost several build cycles to guess at.
+        RemoteLog.shared.event("dl-identity", [
+            ("bundle", Bundle.main.bundleIdentifier),
+            ("session", BackgroundDownloadSession.identifier),
+            ("detail", DownloadLiveActivityCoordinator.bundleDiagnostic())])
+
         loadCompleted()
         loadInterrupted()      // rebuild in-flight items from sidecars so relaunch callbacks find them
         resumeInterruptedTranscodes()   // continue a transcode the app was killed mid-way through
@@ -1691,6 +1701,9 @@ final class DownloadManager {
         if let first = item.connections.indices.first {
             item.connections[first].received = max(item.connections[first].received, base)
         }
+        // Measure the hand-over target BEFORE handing off, so a -3000 can be read against a known state
+        // rather than inferred from an error iOS attaches nothing to.
+        if RemoteLog.isDownloadTracingEnabled { probeDeliveryPath("pre-slice") }
         task.resume()
         trace("dl-slice", [("item", item.id), ("from", base), ("to", end),
                            ("total", item.totalBytes), ("free", availableBytesStrict())])
@@ -2373,7 +2386,22 @@ final class DownloadManager {
 
     private func connectionFailed(itemID: String, conn: Int, message: String, code: Int,
                                   engine: TransferEngine, resume: Data?, ranged: Bool) {
-        guard let item = items.first(where: { $0.id == itemID }), item.state == .downloading else { return }
+        // Log BEFORE the state guard. A failure arriving for an item that is paused, restored, or already
+        // terminal was previously swallowed in silence — which is exactly the case a background relaunch
+        // produces, and exactly the case we most need to see. Log only; the guard still owns the control
+        // flow below.
+        guard let item = items.first(where: { $0.id == itemID }) else {
+            RemoteLog.shared.event("dl-err", [
+                ("item", itemID), ("code", code), ("state", "gone"),
+                ("msg", String(message.prefix(60)))])
+            return
+        }
+        guard item.state == .downloading else {
+            RemoteLog.shared.event("dl-err", [
+                ("item", itemID), ("code", code), ("state", String(describing: item.state)),
+                ("bytes", item.receivedBytes), ("msg", String(message.prefix(60)))])
+            return
+        }
         backgroundTasks[itemID] = nil
         foregroundTasks[itemID] = nil
         releaseTransferAssertion(itemID)
@@ -2413,18 +2441,23 @@ final class DownloadManager {
                 ("item", itemID), ("strict", free), ("lenient", availableBytes()),
                 ("total", item.totalBytes), ("got", item.receivedBytes), ("why", "err-3000")])
             stagingCensus("err-3000")
-            // DEVICE-PROVEN 2026-07-25 (v1.0.326 traces): the hand-over is broken at EVERY size on this
-            // device. A 64 MB slice — the FIRST one, nothing durable yet — fails exactly like a 1.6 GB
-            // whole file, with 4.9 GB strict free and no underlying error. Five retries in a row failed
-            // in 5 seconds flat, and `dl-staging` read `files=0 bytes=0` throughout: the daemon stages
-            // OUTSIDE our container, so we can neither see nor reclaim it. Yet strict free fell 472 MB
-            // across those five attempts (~70 MB each — one slice's worth, stranded). That is the
-            // "System Data" growth, measured.
+            probeDeliveryPath("err-3000")
+            // DEVICE-MEASURED 2026-07-25 (v1.0.326 traces): the hand-over is broken at EVERY size on
+            // this device. A 64 MB slice — the FIRST one, nothing durable yet — fails exactly like a
+            // 1.6 GB whole file, with 4.9 GB strict free and no underlying error. Five retries in a row
+            // failed in 5 seconds flat while strict free fell 472 MB (~70 MB each — one slice's worth,
+            // stranded and never returned). That much is solid, and it is the "System Data" growth.
             //
-            // So a -3000 with nothing durable is not a transient to retry. It is proof that this
-            // transport cannot deliver, and every further attempt leaks another slice for nothing.
-            // Give up on the daemon permanently: this is a device/OS property, not a per-file one, so
-            // the verdict persists and every later download goes straight to the in-process transport.
+            // NOT established, despite an earlier comment here claiming it: WHERE those bytes go. That
+            // claim rested on `dl-staging` reading `files=0 bytes=0`, from a census that counted only
+            // non-empty regular FILES — so an absent delivery directory and an empty one were
+            // indistinguishable, and "the daemon stages outside our container" was never measured at
+            // all. `probeDeliveryPath` now tests the actual directory the daemon must write into.
+            //
+            // What DOES follow: a -3000 with nothing durable is not a transient to retry. Whatever the
+            // cause, the attempt cannot deliver and each one strands another slice. Give up on the
+            // daemon: this tracks the device/OS rather than one file, so the verdict persists (Settings →
+            // Diagnostics → Re-test System Transfers clears it) and later downloads go in-process.
             if fileSize(partURL(itemID, 0)) == 0, !daemonHandoverBroken {
                 daemonHandoverBroken = true
                 RemoteLog.shared.event("dl-daemon-broken", [
@@ -2871,6 +2904,17 @@ final class DownloadManager {
     /// `…ForImportantUsage` counts it as free and reads 40 GB on a 4 GB-free phone) but only actually
     /// reclaims it under pressure, so a run of failed multi-GB downloads sits there indefinitely as
     /// "System Data". With no live tasks it is safe for us to delete directly.
+    /// Clear the "the system can't hand files over on this device" verdict so the next transfer tries the
+    /// background service again. Exposed because the verdict is deliberately sticky: an iOS update could
+    /// fix the hand-over, and capturing diagnostics requires being able to reproduce the failure.
+    func retestSystemTransfers() {
+        daemonHandoverBroken = false
+        foregroundFallback.removeAll()
+        fileRecoveryAttempts.removeAll()
+        RemoteLog.shared.event("dl-retest", [("bundle", Bundle.main.bundleIdentifier)])
+        probeDeliveryPath("retest")
+    }
+
     func reclaimTransferStorage() {
         let before = availableBytesStrict()
         let fm = FileManager.default
@@ -2921,16 +2965,63 @@ final class DownloadManager {
         let staging = caches.appendingPathComponent("com.apple.nsurlsessiond", isDirectory: true)
         var bytes: Int64 = 0
         var files = 0
-        if let walker = fm.enumerator(at: staging, includingPropertiesForKeys: [.fileSizeKey],
+        var dirs = 0
+        var names: [String] = []
+        // Count DIRECTORIES and zero-byte entries too. The original filtered on `size > 0`, which meant
+        // an absent delivery directory and an empty one produced the identical `files=0 bytes=0` reading
+        // — and that reading is what wrongly convinced an earlier session the daemon stages outside our
+        // container. A census that cannot tell "nothing here" from "nothing to see" is not a measurement.
+        if let walker = fm.enumerator(at: staging, includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey],
                                       options: [], errorHandler: nil) {
             for case let url as URL in walker {
-                let size = Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
-                if size > 0 { bytes += size; files += 1 }
+                let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey])
+                if values?.isDirectory == true { dirs += 1 } else {
+                    files += 1
+                    bytes += Int64(values?.fileSize ?? 0)
+                }
+                if names.count < 12 { names.append(url.lastPathComponent) }
             }
         }
+        let listing: String? = names.isEmpty ? nil : names.joined(separator: ",")
         RemoteLog.shared.event("dl-staging", [
             ("why", why), ("exists", fm.fileExists(atPath: staging.path) ? 1 : 0),
-            ("files", files), ("bytes", bytes)])
+            ("dirs", dirs), ("files", files), ("bytes", bytes), ("names", listing)])
+    }
+
+    /// Probe the exact directory the background daemon must create the delivered file in, and prove
+    /// whether WE can create and write there ourselves.
+    ///
+    /// The hand-over is the only step of the transfer the app doesn't perform, and it is the one step
+    /// never actually measured — every previous conclusion about it was inferred from an error iOS
+    /// attaches nothing to. This walks the daemon's delivery path level by level, then tries the two
+    /// operations the daemon itself must perform (create the directory, write a file into it) and
+    /// reports exactly which one fails and with what errno. If our own process can do both, the failure
+    /// is about WHO is asking, not about the path. If it can't, the error names the real problem.
+    private func probeDeliveryPath(_ why: String) {
+        let fm = FileManager.default
+        guard let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask).first else { return }
+        let bundleID = Bundle.main.bundleIdentifier ?? "unknown"
+        let root = caches.appendingPathComponent("com.apple.nsurlsessiond", isDirectory: true)
+        let downloads = root.appendingPathComponent("Downloads", isDirectory: true)
+        let mine = downloads.appendingPathComponent(bundleID, isDirectory: true)
+
+        var createError: String?
+        do { try fm.createDirectory(at: mine, withIntermediateDirectories: true) }
+        catch { let e = error as NSError; createError = "\(e.domain):\(e.code)" }
+
+        var writeError: String?
+        let probe = mine.appendingPathComponent("stashy-probe.tmp")
+        do {
+            try Data([0x1]).write(to: probe, options: .atomic)
+            try fm.removeItem(at: probe)
+        } catch { let e = error as NSError; writeError = "\(e.domain):\(e.code)" }
+
+        RemoteLog.shared.event("dl-probe", [
+            ("why", why), ("bundle", bundleID),
+            ("root", fm.fileExists(atPath: root.path) ? 1 : 0),
+            ("downloads", fm.fileExists(atPath: downloads.path) ? 1 : 0),
+            ("mine", fm.fileExists(atPath: mine.path) ? 1 : 0),
+            ("mkdir", createError ?? "ok"), ("write", writeError ?? "ok")])
     }
 
     /// Delete the background daemon's staging directory inside our container and return the bytes

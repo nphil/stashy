@@ -201,17 +201,26 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.325** (`d756f0e`) — **the background engine now transfers in durable 64 MB
-  RANGE SLICES** (see the -3000 landmine). Whole-file daemon transfers survive only for unknown sizes
-  and range-refusing servers. Also: a Live Activity no longer vanishes when a transfer stalls
-  (paused/failed items that ran this session keep their card and say why), the escalation to the
-  in-process fallback keeps the durable part instead of wiping it, and new traces `dl-begin` /
-  `dl-slice` / `dl-slice-done` / `dl-no-range` / **`dl-staging`** (a census of the daemon's staging area
-  at start and at -3000 — the last untested theory, since iOS attaches no error to it).
-  **UNVERIFIED on device.** What the next session should read from the owner's ntfy:
-  `dl-slice-done` lines climbing = slicing works; a `-3000` on the FIRST slice = the hand-over is broken
-  at every size (then the fallback is the only answer and the question becomes making it run
-  backgrounded); `dl-staging bytes=0` at a -3000 = iOS purged the staging file mid-transfer.
+- Latest release: **v1.0.327** (`4055b9f`). Slicing shipped in v1.0.325 and **did not avoid the -3000**
+  — device traces proved the hand-over fails at EVERY size (the first 64 MB slice, nothing durable yet,
+  fails exactly like a 1.6 GB whole file, 4.9 GB strict free, no underlying error). Measured cost: strict
+  free fell **472 MB across 5 failed slices** (~70 MB each, stranded, never returned) for zero bytes
+  delivered — that IS the "System Data" growth. So v1.0.327 stops retrying: one -3000 with nothing
+  durable condemns the transport, the verdict persists (OS-version-stamped, so an iOS update re-tests),
+  and every later download goes in-process. The in-process path also holds a background assertion now.
+- **The next build is INSTRUMENTATION ONLY — do not ship another fix for a theory.** An earlier comment
+  in `connectionFailed` claimed device-proof that "the daemon stages OUTSIDE our container". **That was
+  wrong**: it rested on `dl-staging` reading `files=0 bytes=0` from a census that counted only non-empty
+  regular FILES, so an absent delivery directory and an empty one read identically. `stagingCensus` now
+  counts dirs + zero-byte entries, and **`probeDeliveryPath`** (`dl-probe`) walks
+  `Caches/com.apple.nsurlsessiond/Downloads/<bundle-id>`, then tries the two operations the daemon must
+  perform — `createDirectory` and a 1-byte write — and logs the errno of whichever fails.
+  **Read from ntfy, in this order:** `dl-identity` (host bundle id + whether the appex is nested under
+  it — if the signer rewrote either, that one line explains BOTH the -3000 and the ActivityKit
+  `.denied`); then `dl-probe` — `mkdir`/`write` failing = a permission/identity problem; both `ok` with
+  `mine=0` beforehand = the daemon's own directory is missing and pre-creating it may be the whole fix;
+  both `ok`, directory present, still -3000 = the app is not at fault and the work is making the
+  in-process path survive backgrounding.
   Earlier: v1.0.319 fixed the resume-blob storage leak + Reclaim Download Storage; v1.0.317 = strict
   free-space accounting; **v1.0.313** removed multi-threading.
 - Next candidates: **the VMAF map fix (plugin v0.3.1) is DONE — shipped, deployed, and live-verified**

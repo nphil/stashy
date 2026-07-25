@@ -22,7 +22,12 @@ final class DownloadLiveActivityCoordinator {
             return nil
         }
         guard ActivityAuthorizationInfo().areActivitiesEnabled else {
-            return Self.deniedMessage
+            // DISTINCT from the `.denied` message below, deliberately. These are different faults with
+            // different fixes — a switch that is off, versus iOS reporting the switch ON and refusing
+            // anyway — and an earlier build returned the same string for both, making the one report
+            // that could tell them apart unreadable.
+            return "Live Activities are switched off for Stashy. Turn them on in Settings › Stashy › "
+                + "Live Activities (reinstalling the app resets this)."
         }
         // A person can dismiss the card, or the system can end it under resource pressure. Don't retain a
         // dead handle forever and silently send every later update to an activity that no longer renders.
@@ -75,9 +80,11 @@ final class DownloadLiveActivityCoordinator {
     /// ActivityKit reports this as "the user has denied activities for this target", which reads as an
     /// accusation when the cause is usually elsewhere: either the per-app permission (reinstalling
     /// resets it) or, on a sideloaded build, a signer that broke the widget extension.
+    /// Only for the case where iOS says activities ARE enabled and ActivityKit refuses anyway. That
+    /// combination rules the permission out, so the message points where the fault actually is.
     static var deniedMessage: String {
-        "Live Activities are off for Stashy, or its widget extension isn't usable. Check Settings › "
-        + "Stashy › Live Activities (reinstalling resets it). Bundle: \(bundleDiagnostic())"
+        "iOS reports Live Activities as enabled for Stashy but refused to start one — which points at "
+        + "the widget extension rather than the setting. Bundle: \(bundleDiagnostic())"
     }
 
     /// What the INSTALLED app actually looks like — the build is only half the story for a sideloaded

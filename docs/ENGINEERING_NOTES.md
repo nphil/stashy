@@ -167,10 +167,35 @@ end. On the owner's device that final move fails for **every** whole-file transf
 `localizedFailureReason`** — it is a bare `NSURLErrorDomain -3000`. So it is none of the things this
 file has previously claimed: not "a background session can't run 8 parallel range tasks" (that was this
 same failure ×8), not "a background session can't deliver a 206" (plain 200 transfers fail identically),
-and not disk space (6.5 GB free for a 1.45 GB file). **Root cause remains unknown.** The one theory iOS
-gives us no error for is that the daemon's staging area — which lives in OUR
-`Library/Caches/com.apple.nsurlsessiond`, i.e. in purgeable space — gets reaped mid-transfer; v1.0.325
-adds `stagingCensus` (`dl-staging`, emitted at transfer start and at every -3000) to settle it.
+and not disk space (6.5 GB free for a 1.45 GB file). **And not size**: v1.0.326 traces show the FIRST
+64 MB slice, with nothing durable yet, failing exactly like a 1.6 GB whole file. **Root cause remains
+unknown.**
+
+What IS now measured: five consecutive failed 64 MB slices consumed **472 MB of strict free space**
+(~70 MB each — one slice's worth, stranded and never returned) while delivering zero bytes. That is the
+"System Data" growth, quantified.
+
+> **Correction (2026-07-25).** A previous revision of this section, and a comment in `connectionFailed`,
+> claimed device-proof that the daemon stages OUTSIDE our container. **That was wrong.** It rested on
+> `dl-staging` reading `files=0 bytes=0` — from a census whose loop was `if size > 0`, counting only
+> non-empty regular FILES. Directories report size 0, so "the delivery directory is absent" and "it is
+> empty" produced the identical reading; the theory was never tested at all. Treat any conclusion drawn
+> from a `dl-staging` line emitted before v1.0.328 as unsupported.
+
+`stagingCensus` now counts directories and zero-byte entries and lists names. **`probeDeliveryPath`**
+(`dl-probe`, emitted before every slice and at every -3000) is the real instrument: it walks
+`Caches/com.apple.nsurlsessiond` → `/Downloads` → `/<bundle-id>`, logging existence at each level, then
+performs the two operations the daemon itself must perform — `createDirectory(withIntermediateDirectories:)`
+and a 1-byte write-then-delete — and logs the NSError domain:code of whichever fails. Paired with
+`dl-identity` (the INSTALLED host bundle id, the session identifier, and whether the widget extension's
+id is still nested under the host's), this distinguishes the live hypotheses:
+
+| `dl-identity` | `dl-probe` | Reading |
+|---|---|---|
+| host id ≠ `com.nphil.stashy`, or appex not nested | — | the sideload signer rewrote identity; explains the -3000 AND the ActivityKit `.denied` in one stroke |
+| correct | `mkdir` or `write` fails | a permission/protection fault on the delivery path — the errno names it |
+| correct | both `ok`, but `mine=0` beforehand | the daemon's own delivery directory is missing; pre-creating it may be the entire fix |
+| correct | both `ok`, directory present | the app is not at fault; the work becomes making the in-process path survive backgrounding |
 
 **The engine therefore slices (v1.0.325).** `startBackgroundTransfer` → `startBackgroundSlice`: one
 background range task at a time, `Range: bytes=<durable>-<durable+64MB-1>`, appended into our part file
