@@ -225,9 +225,13 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   than ~30 s of work left when the app is backgrounded will stall until the app is reopened. Fixing that
   properly means either the daemon working (out of our hands) or chunking the fallback so each backgrounded
   stretch commits — file it as an enhancement, not a bug.
-  Still open: whether the widget extension's id is nested under the host's (the `dl-identity` line was
-  dropped for one build because `init` runs before RemoteLog is enabled; it now fires on the first
-  transfer). That is the remaining lead for the ActivityKit `.denied`.
+  **The Live Activity / Dynamic Island also works** (owner-confirmed on the same 2.70 GB download — it
+  showed progress throughout, including while backgrounded). So the earlier `ActivityAuthorizationError
+  .denied` was NOT a broken widget extension and NOT a signer rewriting bundle ids — `dl-probe` proved
+  the host id is intact, and the extension pairs fine. Working theory: a stale per-app Live Activities
+  permission that a reinstall cleared. **If it ever returns, the two failure messages are now distinct**
+  — "switched off for Stashy" means the iOS Settings toggle; "iOS reports Live Activities as enabled …
+  but refused" means the extension, and prints the installed host + appex ids. Don't re-derive this.
   Earlier: v1.0.319 fixed the resume-blob storage leak + Reclaim Download Storage; v1.0.317 = strict
   free-space accounting; **v1.0.313** removed multi-threading.
 - Next candidates: **the VMAF map fix (plugin v0.3.1) is DONE — shipped, deployed, and live-verified**
