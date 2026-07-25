@@ -150,26 +150,59 @@ predates this discovery and asserts the opposite — this file is the correction
   and the whole suspend→continue→relaunch flow. If single-bg -3000s, fall back to leaving downloads
   paused-on-background (foreground still works).
 
-### THE TRANSPORT VERDICT — corrected (v1.0.316, device logs 2026-07-24)
-Two earlier conclusions in this file were wrong. The truth, from `dl-trace` on iOS 26.5.2:
+### THE TRANSPORT VERDICT — corrected twice (current as of v1.0.325, device logs 2026-07-24/25)
+Several earlier conclusions in this file were wrong. The truth, from `dl-trace` on iOS 26.5.2:
 
 **`NSURLErrorCannotCreateFile` (-3000) is the system's HAND-OVER step failing.** A background
-`URLSessionDownloadTask` streams into its own temp file and moves it into our container only at the
-end. On the owner's device that final move fails for large files: item 2761 (1.6 GB) reached
-**exactly** `bytes == total` and then -3000, four consecutive times, **with 47 GB free**
-(`dl-space free=47830060505 strict=…`). So it is neither of the things this file previously claimed:
-not "a background session can't run 8 parallel range tasks" (that was this same failure ×8) and not
-"a background session can't deliver a 206" (plain 200 full-file transfers fail identically). **Root
-cause is still unknown** — v1.0.316 added `dl-err-detail` (NSUnderlyingError domain/code, the
-offending path, whether a resume blob came with it) plus `volumeAvailableCapacity` alongside
-`…ForImportantUsage`, because the latter counts purgeable space iOS may not release in time.
+`URLSessionDownloadTask` streams into its own staging file and moves it into our container only at the
+end. On the owner's device that final move fails for **every** whole-file transfer, at every size:
 
-**Never retry the same transport on a delivery failure.** Every byte already arrived, so the retry
-replays the whole file and fails identically — the owner watched 1.6 GB re-download four times.
-Escalate: `startForegroundFallback` runs an in-process data task that appends each chunk into our own
-part file. No hand-over step exists on that path, so this failure cannot occur; progress is durable
-and Range-resumable. It only advances while the app is open, so it is a fallback (sticky per item,
-entered on a failure at ≥90% or on the second failure of any size).
+| item | size | failed at | strict free | lenient free |
+|------|------|-----------|-------------|--------------|
+| 2761 | 1.6 GB | `bytes == total`, ×4 | — | 47 GB |
+| 2713 | 560 MB | 98% | 8.1 GB | 34.8 GB |
+| 1331 | 1.45 GB | 99% | 6.5 GB | 33.2 GB |
+
+`dl-err-detail` (v1.0.316) proves iOS attaches **no `NSUnderlyingError`, no `NSFilePathErrorKey` and no
+`localizedFailureReason`** — it is a bare `NSURLErrorDomain -3000`. So it is none of the things this
+file has previously claimed: not "a background session can't run 8 parallel range tasks" (that was this
+same failure ×8), not "a background session can't deliver a 206" (plain 200 transfers fail identically),
+and not disk space (6.5 GB free for a 1.45 GB file). **Root cause remains unknown.** The one theory iOS
+gives us no error for is that the daemon's staging area — which lives in OUR
+`Library/Caches/com.apple.nsurlsessiond`, i.e. in purgeable space — gets reaped mid-transfer; v1.0.325
+adds `stagingCensus` (`dl-staging`, emitted at transfer start and at every -3000) to settle it.
+
+**The engine therefore slices (v1.0.325).** `startBackgroundTransfer` → `startBackgroundSlice`: one
+background range task at a time, `Range: bytes=<durable>-<durable+64MB-1>`, appended into our part file
+by the delegate's existing append branch, then the next slice is queued from `connectionFinished`. Why
+this is the right shape regardless of which theory is true:
+
+* the unit of loss on ANY failure is one in-flight task — so make that unit 64 MB, not 1.6 GB;
+* every landed slice is durable, so progress is monotonic and survives suspension, relaunch, and iOS
+  purging its own caches;
+* if the hand-over is broken at every size, it now shows up after ONE slice (≈1 s of bandwidth) rather
+  than at 99% of a multi-gigabyte download.
+
+`expected` for a slice is `end + 1` — the part's size AFTER the slice lands — because that is what the
+delegate's completeness check compares against. `sliceUnsupported` (in-memory, so it self-heals on
+relaunch) routes range-refusing servers, and unknown-size transfers (a Companion transcode still being
+written), to `startWholeFileBackgroundDownload`.
+
+**Never retry the same transport on a whole-file delivery failure.** Every byte already arrived, so the
+retry replays the whole file and fails identically — the owner watched 1.6 GB re-download four times.
+The retry budget in `connectionFailed` is therefore sized to what a retry COSTS: `ranged ? 4 : (already
+moved ≥90% ? 0 : 1)`, and a successful slice clears it, so it bounds CONSECUTIVE failures. After that,
+escalate: `startForegroundFallback` runs an in-process data task that appends each chunk into our own
+part file. No hand-over step exists on that path, so this failure cannot occur; progress is durable and
+Range-resumable. It only advances while the app is open, so it is a fallback (sticky per item). The
+escalation **keeps the durable part** — only a whole-file transfer genuinely leaves us nothing, because
+it alone holds every byte in a temp file we cannot reach.
+
+**A slice must never contribute in-flight bytes to displayed progress.** Two paths would: an aborted
+slice's last `didWriteData` figure (now snapped back to the part's real size in `connectionFailed`) and
+an iOS resume blob banked from a slice (now refused — its `NSURLSessionResumeBytesReceived` counts bytes
+inside the aborted range, none of which are on disk). Both would show progress that a later read
+corrects DOWNWARD, which is precisely the 15 → 12 → 8 symptom.
 
 **Resume data for a FAILED task lives in the error's `userInfo[NSURLSessionDownloadTaskResumeData]`.**
 `cancel(byProducingResumeData:)` returns nothing for a task that already ended, so not reading the
@@ -184,10 +217,17 @@ connections only help where one TCP stream can't fill the pipe (high RTT, loss, 
 on a LAN they just make the array seek. `Services/TransferBenchmark.swift` re-measures this on demand
 (counterbalanced A B C C B A, disjoint slices, slow-start excluded per connection).
 
-### Durability rules### Durability rules (v1.0.307–308 — read before touching the background path)
+### Durability rules (v1.0.307–308 — read before touching the background path)
 The engine's ONE invariant: **a byte that reached disk is never thrown away by a recoverable error.**
 Six shipped defects violated it; the owner experienced them as "minimized a multi-thread download, the
 island went 15% → 12% → 8%, froze, and the download restarted on reopening".
+
+> **Historical note (v1.0.313 / v1.0.325).** Items 1 and 5 below describe code that no longer exists:
+> multi-threading is gone, so there is no `chunkRange`, no eight segments and no `pendingForegroundStops`
+> drain barrier. The *rules* still hold — item 1's diagnosis (a background task commits nothing until
+> its range finishes) is exactly why v1.0.325 slices, and its `backgroundSliceBytes` idea came back as
+> `DownloadManager.sliceBytes` (64 MB) with the defect that sank it the first time fixed: progress is
+> now read only from the part file, never from bytes the daemon is still holding.
 
 1. **Background ranges weren't durable.** A background `URLSessionDownloadTask` writes into URLSession's
    private temp file and only lands in our part at `didFinishDownloadingTo` — so an interruption

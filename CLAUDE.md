@@ -59,20 +59,21 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
 
 ## Landmines (one-liners — full stories in ENGINEERING_NOTES)
 - **-3000 "Cannot create file" is the system's HAND-OVER step failing, not Range and not disk space
-  (device-verified 2026-07-24, iOS 26.5.2, dl-trace).** A background `URLSessionDownloadTask` transfers
-  into ITS OWN temp file and only moves that into our container at the end; that final move is the one
-  part of the transfer the app doesn't control, and on the owner's device it fails for large files —
-  a 1.6 GB download reached **exactly** `bytes == total` and then -3000, four times running, **with
-  47 GB free** (`dl-space free=47830060505`). Earlier conclusions in this file were WRONG twice over:
-  it is not "8 parallel range tasks" (that was this same bug ×8) and not "bg sessions can't deliver
-  206" (plain 200 full-file downloads fail identically). Root cause still UNKNOWN — v1.0.316 ships
-  `dl-err-detail` (underlying POSIX/Cocoa error + path) and a strict free-space figure to name it.
-  **Do not "fix" this by retrying the same transport**: the bytes all arrived, so a retry just repeats
-  it and costs another full file. Current design: daemon task first (the only transport that runs
-  unattended); on a delivery failure at ≥90% — or a second failure — the item switches permanently to
-  `startForegroundFallback`, an in-process data task that appends every chunk into our own part file,
-  so there is no hand-over step to fail and progress is durable + Range-resumable. It only advances
-  while the app is open, hence fallback-only. (§3)
+  (device-verified 2026-07-24/25, iOS 26.5.2, dl-trace).** A background `URLSessionDownloadTask`
+  transfers into ITS OWN staging file and only moves that into our container at the end; that final move
+  is the one part of the transfer the app doesn't control, and on the owner's device a WHOLE-FILE
+  transfer fails it **every single time**: 98% of a 560 MB file (8.1 GB strict free), 99% of a 1.45 GB
+  one (6.5 GB free), 100% of a 1.6 GB one — and `dl-err-detail` proves iOS supplies **no underlying
+  error, no path, no failure reason**. Earlier conclusions here were WRONG twice over: not "8 parallel
+  range tasks" (that was this same bug ×8) and not "bg sessions can't deliver 206" (plain 200 full-file
+  downloads fail identically). **Do not "fix" this by retrying the same whole-file transport**: the bytes
+  all arrived, so a retry just repeats it and costs another full file.
+  **Current design (v1.0.325) = durable RANGE SLICES**: the background session runs one 64 MB range task
+  at a time, each appended into our own part file, so a hand-over moves 64 MB rather than gigabytes and
+  every landed slice is permanent. If the hand-over is broken at any size it now shows up after ONE slice
+  instead of at 99% of a multi-GB file, and the item escalates to `startForegroundFallback` (an
+  in-process data task with no hand-over step at all) having lost almost nothing — and keeping its part.
+  The fallback only advances while the app is open, hence fallback-only. (§3)
 - **A discarded resume blob LEAKS the partial file into "System Data" (owner hit 71.85 GB).** The blob
   is a pointer to a partially-downloaded file the daemon holds in ITS cache, outside the app sandbox —
   invisible to Stashy's storage listing and unreachable by it. Setting `resumeData[id] = nil` orphans
@@ -82,10 +83,11 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   → Diagnostics → **Reclaim Download Storage** does the sweep on demand. (§3)
 - **Test free space with `volumeAvailableCapacity`, NEVER `…ForImportantUsage`.** The latter counts
   purgeable caches iOS may never reclaim in time: it read **40 GB** on a device with **4.1 GB** genuinely
-  free, which is how a 5.5 GB download was waved through a preflight check and then died at 99%. And a
-  BACKGROUND download costs **2× the file** (the system streams into its own container, then needs a
-  second copy's worth to hand it over) while the in-process fallback costs 1× — so an item that fits one
-  copy but not two is routed to the fallback up front. (§3)
+  free, which is how a 5.5 GB download was waved through a preflight check and then died at 99%. A
+  WHOLE-FILE background download costs **2× the file** (the system streams into its own container, then
+  needs a second copy's worth to hand it over); a **sliced** one costs file + one slice, and the
+  in-process fallback costs 1× — so an item that fits one copy but not two is routed to the fallback up
+  front. (§3)
 - **iOS hands you resume data for a FAILED download in the error's `userInfo`**
   (`NSURLSessionDownloadTaskResumeData`) — `cancel(byProducingResumeData:)` does nothing for a task
   that already ended. Not reading it meant every dropped connection restarted a multi-GB file from
@@ -140,11 +142,14 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   long-press source rect), store it in a reference box, NOT `@State` (since v1.0.285 `ScenePreview`
   tracks size-only and derives the origin from the touch point). (§6)
 - **A background `URLSessionDownloadTask` commits NOTHING until it completes** (streams into URLSession's
-  private temp, lands in our file only at `didFinishDownloadingTo`) — and per the -3000 landmine above it
-  can never complete a RANGE request, so every byte a bg range task moved was guaranteed lost: retries
-  re-read a SMALLER durable size = the island % going BACKWARDS (owner: 15→12→8). The 16 MB slice
-  approach (v1.0.307–308) treated the symptom and is REMOVED; only full-file (200) daemon tasks run on
-  the background session now. (§3)
+  private temp, lands in our file only at `didFinishDownloadingTo`). That is WHY the engine slices: the
+  unit of loss on any failure is exactly one in-flight task, so make that unit small (64 MB) and append
+  it to our own part the instant it lands. **Never derive displayed progress from bytes the daemon is
+  still holding** — a retry then re-reads a smaller durable size and the island % goes BACKWARDS (owner:
+  15→12→8). `connectionFailed` snaps a ranged connection's `received` back to the part's real size and
+  refuses to bank an iOS resume blob for a slice, for exactly this reason. (An earlier 16 MB-slice build,
+  v1.0.307–308, was removed for the wrong reason — the conclusion "bg tasks can never complete a range
+  request" was later disproved. Its actual defect was in-flight bytes counted as progress.) (§3)
 - **Part files must NOT live in `Caches`** (they did until v1.0.307): iOS purges Caches under disk
   pressure and preferentially while the app is NOT running — exactly a big download left minimized. Every
   progress number derives from part FILE SIZES, so a reaped part reads as silent progress loss then a
@@ -193,8 +198,19 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.319** (`6ac3824`, IPA 9,494,750 B) — resume-blob storage leak fixed + Reclaim
-  Download Storage. v1.0.317 = strict free-space accounting; **v1.0.313** removed multi-threading.
+- Latest release: **v1.0.325** (`d756f0e`) — **the background engine now transfers in durable 64 MB
+  RANGE SLICES** (see the -3000 landmine). Whole-file daemon transfers survive only for unknown sizes
+  and range-refusing servers. Also: a Live Activity no longer vanishes when a transfer stalls
+  (paused/failed items that ran this session keep their card and say why), the escalation to the
+  in-process fallback keeps the durable part instead of wiping it, and new traces `dl-begin` /
+  `dl-slice` / `dl-slice-done` / `dl-no-range` / **`dl-staging`** (a census of the daemon's staging area
+  at start and at -3000 — the last untested theory, since iOS attaches no error to it).
+  **UNVERIFIED on device.** What the next session should read from the owner's ntfy:
+  `dl-slice-done` lines climbing = slicing works; a `-3000` on the FIRST slice = the hand-over is broken
+  at every size (then the fallback is the only answer and the question becomes making it run
+  backgrounded); `dl-staging bytes=0` at a -3000 = iOS purged the staging file mid-transfer.
+  Earlier: v1.0.319 fixed the resume-blob storage leak + Reclaim Download Storage; v1.0.317 = strict
+  free-space accounting; **v1.0.313** removed multi-threading.
 - **Backgrounded-downloads round 3 (v1.0.307–308) — SIX defects, all "durable bytes thrown away or
   never committed"**: the owner's "% went 15→12→8, froze, restarted on reopen" was NOT one bug. See the
   new Landmines entries + ENGINEERING_NOTES §3 "Durability rules" for the full list; the headline is that
