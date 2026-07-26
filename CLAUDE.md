@@ -209,7 +209,21 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   delivered — that IS the "System Data" growth. So v1.0.327 stops retrying: one -3000 with nothing
   durable condemns the transport, the verdict persists (OS-version-stamped, so an iOS update re-tests),
   and every later download goes in-process. The in-process path also holds a background assertion now.
-- **v1.0.332 — the LAST cheap -3000 experiment is live: a NEW background session identifier**
+- **THE SESSION-IDENTIFIER EXPERIMENT FAILED — the -3000 is CONFIRMED OS-side. Do not retry it.**
+  Device trace 2026-07-26 on v1.0.332, under the brand-new identifier `…downloads.v2`:
+  `dl-begin engine=slices` (so the latch cleared and the daemon really was re-tried) → `dl-slice
+  from=0 to=67108863` → **`dl-err code=-3000` 1.5 s later, byte 0, 5.5 GB strict free**. Identical to
+  the old identifier. So `nsurlsessiond`'s per-session record was NOT poisoned, and the refusal survives
+  a fresh one. Combined with v1.0.328 (delivery directory present + writable by us, bundle id intact)
+  and the code audit (nothing here can emit -3000), the hand-over is simply unavailable to this app on
+  this device. **NEVER bump the identifier suffix again** — v3 will fail the same way and cost another
+  stranded slice (~54 MB, measured). The next thing that could change the answer is an iOS update, which
+  the OS-version stamp re-tests automatically for free.
+  The fallback then moved the whole 421 MB file in ~5 s at 104 MB/s, so downloads themselves are fine.
+  **Still unmeasured: `dl-bg-window`** — it only logs when the app enters background with a transfer
+  live, and that run stayed in the foreground. That number decides whether `BGProcessingTask` is worth
+  building for unattended slow-cellular transfers; get it before designing anything.
+- **v1.0.332 — the LAST cheap -3000 experiment (FAILED, see above): a NEW background session identifier**
   (`com.nphil.stashy.downloads` → `…downloads.v2`). `nsurlsessiond` keeps per-(bundle id, session id)
   state OUTSIDE the container, so a reinstall/reboot/version bump all leave it intact — and the original
   identifier was in place for the very FIRST build that produced a -3000 and never changed since. If that
