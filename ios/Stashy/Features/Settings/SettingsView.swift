@@ -17,6 +17,7 @@ struct SettingsView: View {
     @State private var isClearingCache = false
     @AppStorage("animatedPreviews") private var animatedPreviews = true
     @AppStorage("appLockEnabled") private var appLockEnabled = false
+    @AppStorage("continuedProcessingEnabled") private var continuedProcessing = false
     @AppStorage("privacyMode") private var privacyMode = false
     @AppStorage(Privacy.radiusKey) private var privacyBlurRadius = Privacy.defaultImageRadius
     @AppStorage("appSwitcherBlurEnabled") private var appSwitcherBlur = true
@@ -389,6 +390,13 @@ struct SettingsView: View {
                             .onChange(of: downloadTrace) { _, on in
                                 RemoteLog.isDownloadTracingEnabled = on
                             }
+                        Toggle("Keep downloading in background", isOn: $continuedProcessing)
+                            .onChange(of: continuedProcessing) { _, on in
+                                DownloadManager.continuedProcessingEnabled = on
+                            }
+                        Text("EXPERIMENTAL. Asks iOS to let a download keep running after you leave Stashy, using a system API added in iOS 26. Apple guarantees no duration, and there are reports of it not working at all on some iPhone 17 Pro devices — it may do nothing. When it does run, iOS shows its own progress card alongside Stashy's. Nothing is lost either way: a download that stops still resumes from the exact byte when you reopen the app.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                         Text("Adds every background range slice, part-file size census, engine start and Live Activity update to the log — what's needed to diagnose a transfer that stalls or loses progress while the app is minimized. Verbose: leave off unless you're chasing a download bug.")
                             .font(.caption2)
                             .foregroundStyle(.secondary)

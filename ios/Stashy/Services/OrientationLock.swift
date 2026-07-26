@@ -16,6 +16,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         // identifier exactly once — a second registration of the same id kills the app. This method runs
         // once per process, so it is the only legal site.
         DownloadManager.registerScheduledResume()
+        // Registered unconditionally: the Settings toggle gates SUBMISSION. Registering late — say, when
+        // the toggle flips — is exactly what iOS kills the app for.
+        DownloadManager.registerContinuedProcessing()
         // Clear remux temps left by a prior crash/force-quit. Nothing is in use at launch, so run it off
         // the main thread — it enumerates + unlinks tmp files and needn't block the first frame.
         Task.detached(priority: .utility) { LocalRemuxStream.sweepStaleTempFiles() }
