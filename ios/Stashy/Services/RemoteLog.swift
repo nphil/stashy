@@ -67,6 +67,8 @@ final class RemoteLog: @unchecked Sendable {
     private let session: URLSession
     private let queue = DispatchQueue(label: "stashy.remotelog")
     private var buffer: [String] = []
+    /// Lines logged before `enable()` ran, replayed once it does. See the guard in `log(_:)`.
+    private var pending: [String] = []
     private var enabled = false
     private var timer: DispatchSourceTimer?
     private var memTimer: DispatchSourceTimer?
@@ -98,6 +100,12 @@ final class RemoteLog: @unchecked Sendable {
             }
             guard !self.enabled else { return }
             self.enabled = true
+            // Replay anything logged before the toggle was read, so launch-time events survive.
+            if !self.pending.isEmpty {
+                self.buffer.append(contentsOf: self.pending)
+                self.tail.append(contentsOf: self.pending)
+                self.pending.removeAll()
+            }
             // Recover + re-send the previous session's tail (captures a hard crash the live flush missed).
             if let prev = try? String(contentsOf: self.tailFile, encoding: .utf8), !prev.isEmpty {
                 self.post("=== PREVIOUS SESSION TAIL (recovered) ===\n" + prev, wait: nil)
@@ -151,7 +159,16 @@ final class RemoteLog: @unchecked Sendable {
     func log(_ message: String) {
         let line = String(format: "%7.2f  %@", Date().timeIntervalSince(start), message)
         queue.async {
-            guard self.enabled else { return }
+            guard self.enabled else {
+                // Do NOT drop it. Launch-time events are posted before the toggle is read — the
+                // BGTask registration, the legacy-session retirement, the bundle-identity stamp — and
+                // silently discarding them has now cost three separate diagnostics, each time reading
+                // as "the feature didn't run" when it had run and merely gone unrecorded. Hold a small
+                // window and replay on enable; a session that never enables logging just discards it.
+                self.pending.append(line)
+                if self.pending.count > 80 { self.pending.removeFirst(self.pending.count - 80) }
+                return
+            }
             self.buffer.append(line)
             if self.buffer.count > 400 { self.buffer.removeFirst(self.buffer.count - 400) }
             self.tail.append(line)

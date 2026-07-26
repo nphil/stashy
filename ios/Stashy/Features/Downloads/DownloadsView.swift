@@ -599,7 +599,15 @@ private struct DownloadCard: View {
             let extra = [item.speedLabel, item.etaLabel].filter { !$0.isEmpty }.joined(separator: " · ")
             return extra.isEmpty ? "\(pct)%" : "\(pct)%  ·  \(extra)"
         case .paused: return "Paused · \(Int(item.progress * 100))%"
-        case .waitingForNetwork: return "Waiting for network…"
+        // `.waitingForNetwork` covers two different waits and only one of them is the network. The
+        // in-process transport gets ~26 s of background execution (device-measured); when that runs out
+        // the transfer parks until the app is reopened, with the connection perfectly healthy. Blaming
+        // the network there sends the user hunting a problem that isn't theirs — and it is the far more
+        // common case, since it happens on every backgrounded transfer that outlives the window.
+        case .waitingForNetwork:
+            return downloads.pathSatisfied
+                ? "Paused · \(Int(item.progress * 100))% · reopen to continue"
+                : "Waiting for network…"
         case .merging: return "Merging parts…"
         case .completed: return "Downloaded"
         case .failed: return item.error ?? "Failed"

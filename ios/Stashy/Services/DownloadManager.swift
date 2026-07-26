@@ -531,7 +531,10 @@ final class DownloadManager {
     @ObservationIgnored private let liveActivity = DownloadLiveActivityCoordinator()
     @ObservationIgnored private let monitor = NWPathMonitor()
     /// Latest connectivity status from the monitor (whether the current path can carry traffic).
-    @ObservationIgnored private var pathSatisfied = true
+    /// Observed (not `@ObservationIgnored`) so the Downloads card re-renders when connectivity flips —
+    /// it distinguishes "waiting for the network" from "waiting for you to reopen the app", which are the
+    /// two very different things `.waitingForNetwork` covers.
+    private(set) var pathSatisfied = true
     /// Consecutive transient-network retries per item, so a persistently-unreachable URL eventually fails
     /// instead of retrying forever; reset when the item makes real progress.
     @ObservationIgnored private var networkRetries: [String: Int] = [:]
