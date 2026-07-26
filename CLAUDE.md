@@ -100,8 +100,9 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
 - **Multi-threaded downloading is GONE (v1.0.313) — do not reintroduce it.** Benchmarked on the
   owner's own server: one connection sustained ~32 MB/s vs ~14 for 8-way, and the single background
   transfer runs at **85–100 MB/s**. Parallelism only pays where one TCP stream can't fill the pipe
-  (high RTT, loss, per-flow shaping); on a LAN it just makes an array seek. `TransferBenchmark`
-  (scene ••• → Benchmark Transfer) re-measures it, counterbalanced A B C C B A. (§3)
+  (high RTT, loss, per-flow shaping); on a LAN it just makes an array seek. The `TransferBenchmark`
+  harness that measured this (counterbalanced A B C C B A) was **removed once the verdict was in** —
+  recover it from git history if a future link type ever makes the question live again. (§3)
 - **Popovers:** never host from a conditional/churning view — use a stable ZStack sibling
   (`FilterPopoverAnchor` pattern). Bit us three times. (§6)
 - Most CI failures ever hit were **Swift 6 strict-concurrency** — read the patterns before writing

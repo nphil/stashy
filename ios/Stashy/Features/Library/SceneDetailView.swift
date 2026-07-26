@@ -12,7 +12,6 @@ struct SceneDetailView: View {
     @State private var quality: ServerQuality = .auto   // gear-menu manual server-transcode override
     @State private var resumeAt: Double = 0             // position carried across a quality switch
     @State private var confirmDelete = false
-    @State private var benchmarking = false
     /// The scene list query slims performers to id+name to keep the payload small. Once the detail
     /// screen appears we re-fetch this one scene's full performer profiles (rating, urls, tags…) for
     /// the performer card and social links. Nil until the fetch lands; falls back to the slim scene.
@@ -163,11 +162,6 @@ struct SceneDetailView: View {
                 if let fresh { fullScene = fresh }
             }
         }
-        // Transfer benchmark: a transient diagnostic. It changes nothing about the scene, and it
-        // cancels its own transfers on dismissal.
-        .sheet(isPresented: $benchmarking) {
-            TransferBenchmarkSheet(scene: fullScene ?? scene, apiKey: apiKey)
-        }
         .libraryEditErrorToast(edits)
         .confirmationDialog(
             "Delete this scene?",
@@ -235,9 +229,6 @@ struct SceneDetailView: View {
                         },
                         PopupMenuAction(title: "Edit Metadata", systemImage: "square.and.pencil") {
                             metadataMode = .edit
-                        },
-                        PopupMenuAction(title: "Benchmark Transfer", systemImage: "speedometer") {
-                            benchmarking = true
                         },
                         PopupMenuAction(title: "Delete Scene", systemImage: "trash", isDestructive: true) {
                             confirmDelete = true

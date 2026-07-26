@@ -182,8 +182,14 @@ What IS now measured: five consecutive failed 64 MB slices consumed **472 MB of 
 > empty" produced the identical reading; the theory was never tested at all. Treat any conclusion drawn
 > from a `dl-staging` line emitted before v1.0.328 as unsupported.
 
-`stagingCensus` now counts directories and zero-byte entries and lists names. **`probeDeliveryPath`**
-(`dl-probe`, emitted before every slice and at every -3000) is the real instrument: it walks
+> **These instruments have been REMOVED** (2026-07-26) now that they have answered the question — see
+> the verdict below. `stagingCensus`/`dl-staging`, `probeDeliveryPath`/`dl-probe`, `dl-identity` and the
+> Settings → Diagnostics "Re-test System Transfers" button are all in git history; recover them from
+> there rather than rewriting them if the -3000 ever needs re-investigating. The description below is
+> kept because it documents what was measured and how.
+
+`stagingCensus` counted directories and zero-byte entries and listed names. **`probeDeliveryPath`**
+(`dl-probe`, emitted before every slice and at every -3000) was the real instrument: it walked
 `Caches/com.apple.nsurlsessiond` → `/Downloads` → `/<bundle-id>`, logging existence at each level, then
 performs the two operations the daemon itself must perform — `createDirectory(withIntermediateDirectories:)`
 and a 1-byte write-then-delete — and logs the NSError domain:code of whichever fails. Paired with
@@ -264,8 +270,10 @@ and since the blob arrives an async hop after `pause()`, Resume waits for it.
 **Multi-threading is gone (v1.0.313).** Benchmarked against the owner's server: 1 connection
 ~32 MB/s vs ~14 MB/s for 8-way, and the single background transfer runs at 85–100 MB/s. Parallel
 connections only help where one TCP stream can't fill the pipe (high RTT, loss, per-flow shaping);
-on a LAN they just make the array seek. `Services/TransferBenchmark.swift` re-measures this on demand
-(counterbalanced A B C C B A, disjoint slices, slow-start excluded per connection).
+on a LAN they just make the array seek. `Services/TransferBenchmark.swift` measured this (counterbalanced
+A B C C B A, disjoint slices, slow-start excluded per connection) and was **removed 2026-07-26** with the
+question settled — it is in git history if a future link type (high-RTT remote, shaped cellular) ever
+makes parallelism worth re-measuring. Do not rewrite it from scratch.
 
 ### Durability rules (v1.0.307–308 — read before touching the background path)
 The engine's ONE invariant: **a byte that reached disk is never thrown away by a recoverable error.**
