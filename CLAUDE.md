@@ -61,42 +61,38 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   a visible indicator; add `.scrollIndicators(.hidden)` as reinforcement on any new `ScrollView`/`List`.
 
 ## Landmines (one-liners — full stories in ENGINEERING_NOTES)
-- **-3000 "Cannot create file" is the system's HAND-OVER step failing, not Range and not disk space
-  (device-verified 2026-07-24/25, iOS 26.5.2, dl-trace).** A background `URLSessionDownloadTask`
-  transfers into ITS OWN staging file and only moves that into our container at the end; that final move
-  is the one part of the transfer the app doesn't control, and on the owner's device a WHOLE-FILE
-  transfer fails it **every single time**: 98% of a 560 MB file (8.1 GB strict free), 99% of a 1.45 GB
-  one (6.5 GB free), 100% of a 1.6 GB one — and `dl-err-detail` proves iOS supplies **no underlying
-  error, no path, no failure reason**. Earlier conclusions here were WRONG twice over: not "8 parallel
-  range tasks" (that was this same bug ×8) and not "bg sessions can't deliver 206" (plain 200 full-file
-  downloads fail identically). **Do not "fix" this by retrying the same whole-file transport**: the bytes
-  all arrived, so a retry just repeats it and costs another full file.
-  **Current design (v1.0.325) = durable RANGE SLICES**: the background session runs one 64 MB range task
-  at a time, each appended into our own part file, so a hand-over moves 64 MB rather than gigabytes and
-  every landed slice is permanent. If the hand-over is broken at any size it now shows up after ONE slice
-  instead of at 99% of a multi-GB file, and the item escalates to `startForegroundFallback` (an
-  in-process data task with no hand-over step at all) having lost almost nothing — and keeping its part.
-  The fallback only advances while the app is open, hence fallback-only. (§3)
-- **A discarded resume blob LEAKS the partial file into "System Data" (owner hit 71.85 GB).** The blob
-  is a pointer to a partially-downloaded file the daemon holds in ITS cache, outside the app sandbox —
-  invisible to Stashy's storage listing and unreachable by it. Setting `resumeData[id] = nil` orphans
-  that file forever. To release it you must materialise a task from the blob and `cancel()` it WITHOUT
-  requesting new resume data (`releaseResumeBlob`). This fed a vicious cycle: stranded partials ate the
-  REAL free space, which caused the next download's hand-over to fail, which stranded another. Settings
-  → Diagnostics → **Reclaim Download Storage** does the sweep on demand. (§3)
-- **Test free space with `volumeAvailableCapacity`, NEVER `…ForImportantUsage`.** The latter counts
-  purgeable caches iOS may never reclaim in time: it read **40 GB** on a device with **4.1 GB** genuinely
-  free, which is how a 5.5 GB download was waved through a preflight check and then died at 99%. A
-  WHOLE-FILE background download costs **2× the file** (the system streams into its own container, then
-  needs a second copy's worth to hand it over); a **sliced** one costs file + one slice, and the
-  in-process fallback costs 1× — so an item that fits one copy but not two is routed to the fallback up
-  front. (§3)
-- **iOS hands you resume data for a FAILED download in the error's `userInfo`**
-  (`NSURLSessionDownloadTaskResumeData`) — `cancel(byProducingResumeData:)` does nothing for a task
-  that already ended. Not reading it meant every dropped connection restarted a multi-GB file from
-  byte 0. Bank the blob BEFORE any recovery branch, and never let a reset path wipe it (shipped that
-  bug for one build). Blobs are epoch-guarded: one from a superseded task must never be handed back,
-  and `cancel(byProducingResumeData:)` delivers a hop late, so Resume waits for it. (§3)
+- **The -3000 download saga is CLOSED — do NOT reinvestigate it.** The system's background hand-over is
+  simply unavailable to this app on this device. A probe run in the same millisecond as the refusal
+  showed the daemon's delivery directory PRESENT inside our container and writable by our own process,
+  on an intact bundle id, with 4.9 GB free — failing on a 64 MB slice exactly as on a 1.6 GB file. Not
+  space, size, Range, path, permissions, identity, or our code (audited: nothing here can emit -3000). A
+  brand-new session identifier changed nothing (v1.0.332) — **never bump the suffix again**. One -3000
+  with nothing durable condemns the transport (~1.5 s, ~52 MB) and everything runs in-process after;
+  the verdict is OS-version-stamped so an iOS update re-tests for free. Evidence + decision table in §3.
+- **Download durability invariants — every one of these was a shipped bug.** A byte that reached disk is
+  never thrown away by a recoverable error. Parts live in Application Support, NEVER `Caches` (iOS reaps
+  those while the app is closed). Progress derives ONLY from part-file size, never from bytes a daemon
+  still holds — that was the island counting 15→12→8. A resume blob is banked from the FAILED task's
+  `userInfo` (`cancel(byProducingResumeData:)` does nothing for an ended task), never wiped by a reset
+  path; a discarded one strands its partial file forever in "System Data" (`releaseResumeBlob`). A cold
+  background relaunch restores items `.paused`, so every continue-branch must adopt them. The space
+  preflight sizes on `totalBytes − partSize` — charging for bytes already on disk refused a download
+  that fitted. (§3)
+- **Background execution is capped at ~26 s and NO API lifts it — all four avenues tested 2026-07-26.**
+  `beginBackgroundTask` measured twice: 25.57 s and 26.32 s. `BGProcessingTask` (shipped) runs ONLY
+  while the device is idle and iOS kills it the moment the user picks the phone up — a catch-up path,
+  never an unattended-now one; "needs wifi + charging" is folklore (both are opt-in predicates).
+  `BGContinuedProcessingTask` (shipped behind an OFF toggle) submits `ok=1` and **never fires** here —
+  suspect the iPhone 17 Pro reports and/or a sideloaded app having no entitlements. **Live Activities
+  grant ZERO runtime** — display only; Android's foreground service has no iOS equivalent, and that is
+  the real gap. Registration is `didFinishLaunchingWithOptions` ONLY and exactly once (a second one
+  KILLS the app); both plist keys are runtime-only requirements CI cannot check, so `dl-bg-register ok=`
+  is the proof. (§3)
+- **Test free space with `volumeAvailableCapacity`, NEVER `…ForImportantUsage`** — the latter counts
+  purgeable caches and read **40 GB** on a phone with **4.1 GB** genuinely free. (§3)
+- **Download diagnostics:** Settings → Diagnostics → **Trace downloads** (off by default) emits the
+  `dl-*` family — `dl-parts` (per-part size census) is the line that makes progress loss obvious.
+  RemoteLog buffers pre-`enable()` lines and replays them, so launch-time events survive. (§3)
 - **Multi-threaded downloading is GONE (v1.0.313) — do not reintroduce it.** Benchmarked on the
   owner's own server: one connection sustained ~32 MB/s vs ~14 for 8-way, and the single background
   transfer runs at **85–100 MB/s**. Parallelism only pays where one TCP stream can't fill the pipe
@@ -110,19 +106,6 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   `.greatestFiniteMagnitude` whenever no real value is available, and the crash happened BEFORE the
   `dl-phase to=background` log, so the trace went silent with no clue — it read exactly like an iOS
   suspension. **Clamp by magnitude, never by `isFinite`, before any Double→Int conversion.** (§2)
-- **`BGProcessingTask` runs ONLY when the device is idle, and iOS TERMINATES it the moment the user
-  picks the phone up** (Apple's own reference page, verbatim). So it can never serve "background the app
-  and the download keeps going" — it is a catch-up path for a phone sitting untouched. The popular
-  "needs wifi + charging" claim is **folklore**: `requiresExternalPower`/`requiresNetworkConnectivity`
-  are opt-in launch predicates defaulting to false, and Apple documents no wifi-vs-cellular rule.
-  `earliestBeginDate` only guarantees *not sooner*, never that it launches at all. Registration is
-  `didFinishLaunchingWithOptions` ONLY and exactly once — a second registration of the same identifier
-  **kills the app**. Both `UIBackgroundModes: [processing]` and `BGTaskSchedulerPermittedIdentifiers`
-  are RUNTIME requirements with no compile-time signal: CI goes green and the IPA ships even if they're
-  wrong, so `dl-bg-register ok=` is the only proof it wired up. The API that DOES match "keeps running
-  after backgrounding" is iOS 26's `BGContinuedProcessingTask` — but it renders its own system Live
-  Activity that would collide with ours, dies uncallbacked on app-switcher swipe, and has open Apple
-  Forums reports of not firing on **iPhone 17 Pro** specifically. Separate commit, separate device test.
 - **Popovers:** never host from a conditional/churning view — use a stable ZStack sibling
   (`FilterPopoverAnchor` pattern). Bit us three times. (§6)
 - Most CI failures ever hit were **Swift 6 strict-concurrency** — read the patterns before writing
@@ -165,41 +148,6 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   self-inflicted browse-grid judder we shipped then fixed. If you only need the value later (e.g. a
   long-press source rect), store it in a reference box, NOT `@State` (since v1.0.285 `ScenePreview`
   tracks size-only and derives the origin from the touch point). (§6)
-- **A background `URLSessionDownloadTask` commits NOTHING until it completes** (streams into URLSession's
-  private temp, lands in our file only at `didFinishDownloadingTo`). That is WHY the engine slices: the
-  unit of loss on any failure is exactly one in-flight task, so make that unit small (64 MB) and append
-  it to our own part the instant it lands. **Never derive displayed progress from bytes the daemon is
-  still holding** — a retry then re-reads a smaller durable size and the island % goes BACKWARDS (owner:
-  15→12→8). `connectionFailed` snaps a ranged connection's `received` back to the part's real size and
-  refuses to bank an iOS resume blob for a slice, for exactly this reason. (An earlier 16 MB-slice build,
-  v1.0.307–308, was removed for the wrong reason — the conclusion "bg tasks can never complete a range
-  request" was later disproved. Its actual defect was in-flight bytes counted as progress.) (§3)
-- **Part files must NOT live in `Caches`** (they did until v1.0.307): iOS purges Caches under disk
-  pressure and preferentially while the app is NOT running — exactly a big download left minimized. Every
-  progress number derives from part FILE SIZES, so a reaped part reads as silent progress loss then a
-  restart. They live in Application Support beside the downloads now. (§3)
-- **Never destroy durable bytes on a recoverable error.** Three shipped paths did: a mid-transfer range
-  refusal (`badServerResponse` → `launch(reset: true)`, now gated on zero bytes — a server that can't do
-  ranges refuses the FIRST request, so a later refusal is a proxy/416/transient), `retry()` (called
-  `launch(reset: true)` unconditionally, destroying the very parts that merge-failure and the -3000 hold
-  preserve *for* it — now resumes, and re-merges when all parts are complete), and the geometry rebuild
-  in `startConnections` (now requires `receivedBytes == 0`). (§3)
-- **The foreground-drain barrier must be retired by EVERY terminal callback, not just cancellation.**
-  `pendingForegroundStops` was a count decremented only on `NSURLErrorCancelled`; a cancelled writer that
-  finished cleanly, errored, or went through the delegate's `fail()` never retired it, so the barrier
-  stuck forever — and `startConnections` refuses to start ANY engine while it's set, so the item made
-  zero progress for the rest of the process (surviving even a foreground return). It's a `Set<Int>` of
-  conns now, retired from finished/failed/stopped alike, plus a 4 s watchdog (`dl-drain-timeout`). (§3)
-- **A cold background relaunch restores items as `.paused`** and `reconnectTasks` can't flip them (the
-  app was relaunched *because* the task went terminal, so `getAllTasks` no longer returns it) — while
-  every continue-branch is gated on `.downloading`. Result: one slice committed per relaunch, then dead,
-  and the Live Activity ends itself. A background callback for a paused item now adopts it (a user pause
-  cancels its tasks → `connectionStopped`, so the two stay distinguishable). (§3)
-- **Download diagnostics:** Settings → Diagnostics → **Trace downloads** (off by default, separate gate
-  from log streaming) emits `dl-slice`/`dl-slice-done`, `dl-parts` (per-part size census — the line that
-  makes progress loss obvious), `dl-err`, `dl-wipe`, `dl-drain*`, `dl-restore`, `dl-la` (what the Live
-  Activity was handed; a DECREASE is always logged). RemoteLog's flush timer is frozen while suspended,
-  so the engine calls `flushNow()` on both lifecycle transitions.
 - **Stash's `jobQueue` returns `null`, not `[]`, for an EMPTY queue** (nullable list + Go nil slice) —
   decode it optionally. The non-optional decode broke the jobs panel's scan bar (frozen snapshot, poll
   loop silently self-killed; fixed v1.0.296). General rule: a poll loop behind visible UI must never
@@ -222,73 +170,28 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.327** (`4055b9f`). Slicing shipped in v1.0.325 and **did not avoid the -3000**
-  — device traces proved the hand-over fails at EVERY size (the first 64 MB slice, nothing durable yet,
-  fails exactly like a 1.6 GB whole file, 4.9 GB strict free, no underlying error). Measured cost: strict
-  free fell **472 MB across 5 failed slices** (~70 MB each, stranded, never returned) for zero bytes
-  delivered — that IS the "System Data" growth. So v1.0.327 stops retrying: one -3000 with nothing
-  durable condemns the transport, the verdict persists (OS-version-stamped, so an iOS update re-tests),
-  and every later download goes in-process. The in-process path also holds a background assertion now.
-- **THE SESSION-IDENTIFIER EXPERIMENT FAILED — the -3000 is CONFIRMED OS-side. Do not retry it.**
-  Device trace 2026-07-26 on v1.0.332, under the brand-new identifier `…downloads.v2`:
-  `dl-begin engine=slices` (so the latch cleared and the daemon really was re-tried) → `dl-slice
-  from=0 to=67108863` → **`dl-err code=-3000` 1.5 s later, byte 0, 5.5 GB strict free**. Identical to
-  the old identifier. So `nsurlsessiond`'s per-session record was NOT poisoned, and the refusal survives
-  a fresh one. Combined with v1.0.328 (delivery directory present + writable by us, bundle id intact)
-  and the code audit (nothing here can emit -3000), the hand-over is simply unavailable to this app on
-  this device. **NEVER bump the identifier suffix again** — v3 will fail the same way and cost another
-  stranded slice (~54 MB, measured). The next thing that could change the answer is an iOS update, which
-  the OS-version stamp re-tests automatically for free.
-  The fallback then moved the whole 421 MB file in ~5 s at 104 MB/s, so downloads themselves are fine.
-  **Still unmeasured: `dl-bg-window`** — it only logs when the app enters background with a transfer
-  live, and that run stayed in the foreground. That number decides whether `BGProcessingTask` is worth
-  building for unattended slow-cellular transfers; get it before designing anything.
-- **v1.0.332 — the LAST cheap -3000 experiment (FAILED, see above): a NEW background session identifier**
-  (`com.nphil.stashy.downloads` → `…downloads.v2`). `nsurlsessiond` keeps per-(bundle id, session id)
-  state OUTSIDE the container, so a reinstall/reboot/version bump all leave it intact — and the original
-  identifier was in place for the very FIRST build that produced a -3000 and never changed since. If that
-  record was malformed from birth, nothing tried so far could have cleared it; a new string forces a
-  fresh one. The `daemonHandoverBroken` verdict is now stamped with **OS version + session identifier**,
-  so changing the id auto-re-enables the daemon (otherwise the latch would block the experiment).
-  `retireLegacySession()` attaches to the old id once and `invalidateAndCancel()`s it, which is the only
-  way to hand back the partials it stranded. **Read `dl-err`/`dl-begin` on the next download: a slice
-  that lands = the record was poisoned and the daemon is BACK (keep the id, delete the in-process
-  fallback's primacy); another -3000 = confirmed OS-side, and do NOT bump the suffix again.**
-  Also new: `dl-bg-window` (iOS's ACTUAL background grant in seconds + bytes outstanding, logged on
-  entering background — the value reads `.greatestFiniteMagnitude` in the foreground, so this is the only
-  honest moment) and `dl-bg-expired` (the assertion running out, which has NEVER been observed — the
-  29.7 s figure was a download FINISHING, a floor not a ceiling; stop quoting "~30 s" as measured).
-- **RESOLVED 2026-07-25, v1.0.328 device traces — downloads work, and the -3000 is NOT the app's fault.**
-  `dl-probe` measured the daemon's actual delivery path at the moment of failure:
-  `root=1 downloads=1 mine=1 mkdir=ok write=ok`, bundle `com.nphil.stashy` (NOT rewritten by the
-  signer), and `dl-staging dirs=2 names=Downloads,com.nphil.stashy`. So the directory the daemon must
-  deliver into **exists, is inside our container, and our own process can create and write in it** — and
-  the daemon fails anyway, with 4.19 GB free, on the first 64 MB slice. Every app-side hypothesis is
-  dead: not space, not size, not Range, not the path, not permissions, not our code (a full audit found
-  no path by which we can emit -3000), not a rewritten host bundle id. It is an iOS-side refusal with no
-  diagnostic attached. **Do not spend more builds on it.**
-  **The shipped behaviour is the right one:** one -3000 (~1.5 s, ~52 MB) condemns the transport, then
-  everything runs in-process. Device-verified: a **2.70 GB** download completed at 100–112 MB/s, and it
-  kept running for **29.7 s after the app was backgrounded** (16% → 100%) on the `beginBackgroundTask`
-  assertion added in v1.0.327.
-  **Known limit:** the in-process path only gets iOS's background grace (~30 s). A transfer with more
-  than ~30 s of work left when the app is backgrounded will stall until the app is reopened. Fixing that
-  properly means either the daemon working (out of our hands) or chunking the fallback so each backgrounded
-  stretch commits — file it as an enhancement, not a bug.
-  **The Live Activity / Dynamic Island also works** (owner-confirmed on the same 2.70 GB download — it
-  showed progress throughout, including while backgrounded). So the earlier `ActivityAuthorizationError
-  .denied` was NOT a broken widget extension and NOT a signer rewriting bundle ids — `dl-probe` proved
-  the host id is intact, and the extension pairs fine. Working theory: a stale per-app Live Activities
-  permission that a reinstall cleared. **If it ever returns, the two failure messages are now distinct**
-  — "switched off for Stashy" means the iOS Settings toggle; "iOS reports Live Activities as enabled …
-  but refused" means the extension, and prints the installed host + appex ids. Don't re-derive this.
-  Earlier: v1.0.319 fixed the resume-blob storage leak + Reclaim Download Storage; v1.0.317 = strict
-  free-space accounting; **v1.0.313** removed multi-threading.
+- Latest release: **v1.0.338** (`8a527d1`). Downloads are DONE as far as iOS permits — see the three
+  download landmines above; the -3000 investigation is closed and must not be reopened.
+- **What works:** app open → ~100 MB/s, resumes byte-exact through crashes, relaunches and suspension.
+  Backgrounded → ~26 s of grace, then it parks and the card says so honestly (Live Activity *and* the
+  Downloads screen both distinguish "paused, reopen" from a real network drop). Phone left idle →
+  `BGProcessingTask` converges it across windows. Dynamic Island works.
+- **What is not possible:** finishing a long cellular download while the phone is in use or pocketed.
+  Three separate mechanisms decline (background daemon, continued processing, plain background
+  execution); two decline in the way a system service declines for an app it can't fully vouch for.
+  Treat this as a platform ceiling, not a bug to fix. An iOS update auto-re-tests the daemon.
+- **Open, if ever wanted:** `BGContinuedProcessingTask` never fires here — retest after an iOS update
+  or if the app is ever properly signed, since a sideloaded build carries no entitlements. The
+  `audio` background mode legitimately keeps a transfer alive *while media actually plays*, which is
+  the one untried avenue that doesn't require Apple to change anything.
+- Diagnostics built for the saga were removed once they answered (`TransferBenchmark`, the -3000
+  probe/census, `dl-identity`, the retest button) — recover from git history, don't rewrite them.
 - Next candidates: **the VMAF map fix (plugin v0.3.1) is DONE — shipped, deployed, and live-verified**
   2026-07-16 (job 56 ran clean past the previous ~2h40m/20.7% death point, zero 401s; v0.3.2 settings-
   persistence also deployed to the box; ROADMAP §encode-quality has the full evidence — no further
-  action needed here). **Netflix fullscreen player UI** (next-biggest ★ player item); Blur-Media app-wide / WYSIWYG layout
-  editor / mini-player-PiP / AI zoom-follow (all in ROADMAP); **concurrent-queue server transcode**
-  (needs a Stash-scheduling spike first). (Resumable/checkpointed transcode already shipped 2026-07-04
-  as `FFmpegResumableTranscoder` — don't re-plan it. RemoteLog telemetry is a kept feature — the old
-  remove-before-release blocker is withdrawn.)
+  action needed here). **Netflix fullscreen player UI** (next-biggest ★ player item); WYSIWYG layout
+  editor / mini-player-PiP / AI zoom-follow / filmstrip timeline (all in ROADMAP); **concurrent-queue
+  server transcode** (needs a Stash-scheduling spike first). (Resumable/checkpointed transcode already shipped 2026-07-04
+  as `FFmpegResumableTranscoder` — don't re-plan it. **Blur Media shipped 2026-07-25** as Privacy Mode,
+  gaps closed and blur strength adjustable — don't re-plan that either. RemoteLog telemetry is a kept
+  feature; the old remove-before-release blocker is withdrawn.)

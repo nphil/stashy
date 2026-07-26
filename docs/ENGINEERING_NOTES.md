@@ -275,6 +275,64 @@ A B C C B A, disjoint slices, slow-start excluded per connection) and was **remo
 question settled — it is in git history if a future link type (high-RTT remote, shaped cellular) ever
 makes parallelism worth re-measuring. Do not rewrite it from scratch.
 
+### The background-execution ceiling — every avenue tested, 2026-07-26
+With the daemon hand-over confirmed unavailable, the in-process transport is all we have, and it only
+runs while the app runs. This is the exhaustive account of how much runtime iOS will give it. **All
+four mechanisms below were tested on the owner's device. Do not re-litigate them from first
+principles.**
+
+**1. `beginBackgroundTask` — MEASURED at ~26 s.** Two independent runs: 25.57 s (t=30.13→55.70) and
+26.32 s (t=576.35→602.67). `dl-bg-expired` is the only honest signal — an earlier "29.7 s" figure was
+a download *finishing*, a floor and not a ceiling, and was wrongly quoted as the limit for several
+sessions. On cellular at ~5 MB/s that moves ~144 MB, so a multi-gigabyte transfer parks. Note
+`UIApplication.backgroundTimeRemaining` reads `.greatestFiniteMagnitude` at the exact moment
+`didEnterBackgroundNotification` fires, so it is useless there; elapsed-time-to-expiry is the
+measurement. (Converting that sentinel is also what crashed the app in v1.0.332 — see §2.)
+
+**2. `BGProcessingTask` — implemented (v1.0.336), is a CATCH-UP path only.** Apple's reference page,
+verbatim: *"Processing tasks run only when the device is idle. The system terminates any background
+processing tasks running when the user starts using the device."* `earliestBeginDate` guarantees only
+*not sooner*. So it can never serve "background the app and it keeps going". The widespread "needs
+wifi + charging" claim is **folklore** — `requiresExternalPower` and `requiresNetworkConnectivity` are
+opt-in launch predicates defaulting to false, and Apple documents no wifi-vs-cellular rule; cellular is
+fine. What it buys is convergence across idle windows while the phone is untouched.
+
+**3. `BGContinuedProcessingTask` (iOS 26) — implemented behind a toggle (v1.0.337), DOES NOT FIRE.**
+This is the API whose stated purpose matches "the user started it, let it finish". Device result:
+`dl-cont-register ok=1`, four × `dl-cont-submit ok=1`, and **zero `dl-cont-begin`** — including one
+submission on a genuine user tap immediately followed by backgrounding, which is exactly its intended
+shape. iOS accepts the request and never grants a window. Two candidate explanations, neither
+disproven: open unresolved Apple Forums reports of it not firing on **iPhone 17 Pro** specifically, and
+the fact that an **unsigned sideloaded app carries no entitlements** — the same shape as the -3000,
+where a system service declines to act for an app it cannot fully vouch for. Toggle ships OFF.
+Apple also publishes no maximum duration for it, and developers report ~3 GB transfers surviving while
+~10 GB ones die seconds after backgrounding.
+
+**4. Foreground modes we cannot use.** `audio` is legitimate *only while audio genuinely plays* (iOS
+terminates an app that declares it and produces none) — but it does mean a download continues at full
+speed while the user watches something. `location`, VoIP, `bluetooth-central` and `external-accessory`
+are either abuse or unavailable to this app. Android's foreground-service model — a persistent
+notification that buys indefinite runtime — has **no iOS equivalent**, and that is the real gap;
+Live Activities are pure display and grant zero runtime, which is the single most common misconception
+about them.
+
+**Net:** downloads finish with the app open, survive ~26 s of backgrounding, converge overnight while
+the phone is idle, and cannot be made to finish unattended on cellular. That is a platform ceiling, not
+a missing feature in this app.
+
+### Free space: measure with `volumeAvailableCapacity`, never `…ForImportantUsage`
+`ForImportantUsage` counts purgeable caches iOS merely *might* reclaim, and read **40 GB on a phone
+with 4.1 GB genuinely free** — which is how a 5.5 GB download was waved through a preflight and then
+died at 99%. `availableBytesStrict()` is the honest number and the one every decision uses;
+`availableBytes()` is logged alongside it purely so the gap between the two stays visible.
+
+### Space preflight — size it on the REMAINDER (fixed v1.0.338)
+`startConnections` charged `item.totalBytes + margin` even when the part file already held bytes, so it
+demanded room for data that was **already on disk**. Device trace: a 2.17 GB download with 360 MB
+banked was refused with 2.62 GB free — it asked for 2.71 GB when 2.35 GB was the real need. Now sized
+on `max(0, totalBytes - fileSize(part))`. The one case still charged the full 2× is a whole-file daemon
+transfer, correctly: it cannot resume from our part and re-fetches everything into its own staging.
+
 ### Durability rules (v1.0.307–308 — read before touching the background path)
 The engine's ONE invariant: **a byte that reached disk is never thrown away by a recoverable error.**
 Six shipped defects violated it; the owner experienced them as "minimized a multi-thread download, the
