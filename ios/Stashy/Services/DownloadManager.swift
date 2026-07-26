@@ -1614,12 +1614,21 @@ final class DownloadManager {
         if item.totalBytes > 0 {
             let free = availableBytesStrict()
             let margin: Int64 = 512 << 20
-            let directNeed = item.totalBytes + margin
             let sliceable = !sliceUnsupported.contains(item.id)
+            // Bytes already in our part file are ALREADY occupying disk — only the REMAINDER needs room.
+            // Demanding space for the whole file again refused a transfer that fit comfortably: measured
+            // 2026-07-26, 2.62 GB free with 360 MB already downloaded, and this asked for 2.71 GB when
+            // 2.35 GB would have done. The refusal failed the item, and the retry restarted from zero —
+            // so the owner paid for 360 MB of cellular data twice, for a download that always fitted.
+            let durable = fileSize(partURL(item.id, 0))
+            let remaining = max(0, item.totalBytes - durable)
+            let directNeed = remaining + margin
             // With the daemon ruled out there is no staging copy to budget for at all — asking for one
             // would refuse a download that fits perfectly well on the transport we're actually using.
+            // A WHOLE-FILE daemon transfer is the one case that still needs 2× the full size: it cannot
+            // resume from our part, so it re-fetches everything into its own staging area.
             let daemonNeed = daemonHandoverBroken ? directNeed
-                : (sliceable ? item.totalBytes + Self.sliceBytes + margin
+                : (sliceable ? remaining + Self.sliceBytes + margin
                              : item.totalBytes * 2 + margin)
             // Before judging, make the system release what it says it already has.
             if free > 0, free < daemonNeed, availableBytes() >= daemonNeed {
