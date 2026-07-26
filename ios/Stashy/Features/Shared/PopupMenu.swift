@@ -23,7 +23,10 @@ struct PopupMenu: View {
 
     var body: some View {
         Menu {
-            ForEach(actions) { action in
+            // Keyed on title, not the synthesized UUID: the actions array is now rebuilt whenever the
+            // download queue changes state, and a fresh `id` per body evaluation would re-identify every
+            // row of an open menu.
+            ForEach(actions, id: \.title) { action in
                 Button(role: action.isDestructive ? .destructive : nil, action: action.action) {
                     Label(action.title, systemImage: action.systemImage)
                 }

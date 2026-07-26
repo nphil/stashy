@@ -16,6 +16,9 @@ struct SceneDetailView: View {
     /// screen appears we re-fetch this one scene's full performer profiles (rating, urls, tags…) for
     /// the performer card and social links. Nil until the fetch lands; falls back to the slim scene.
     @State private var fullScene: StashScene?
+    /// Drives the "Added to Downloads" confirmation. Needed because removing the navigation removed the
+    /// only signal that the add worked.
+    @State private var addedToQueue = false
     /// Metadata scrape/edit mini-sheet (••• menu). Item-driven so each mode opens in the right stage.
     @State private var metadataMode: SceneMetadataMode?
     /// Device (window) bounds + safe-area insets, independent of the nav bar. The screen's layout is
@@ -163,6 +166,34 @@ struct SceneDetailView: View {
             }
         }
         .libraryEditErrorToast(edits)
+        // Removing the navigation removed the only signal the add worked, so put one back — same shape
+        // as the shipped error toast so it reads native. Gated on `!isFullscreen`: rotating in-window
+        // would otherwise put it over the video, and nothing goes over the video. Tappable, so "add a
+        // few, then go start them" is two taps.
+        .overlay(alignment: .bottom) {
+            if addedToQueue && !isFullscreen {
+                Button {
+                    addedToQueue = false
+                    path.openDownloads()
+                } label: {
+                    Label("Added to Downloads", systemImage: "checkmark.circle.fill")
+                        .font(.footnote.weight(.medium))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(.black.opacity(0.82), in: Capsule())
+                        .shadow(color: .black.opacity(0.3), radius: 8, y: 3)
+                }
+                .buttonStyle(.plain)
+                .padding(.bottom, 78)   // clears the minimized tab bar this screen keeps visible
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .task(id: addedToQueue) {
+                    try? await Task.sleep(for: .seconds(1.6))
+                    addedToQueue = false
+                }
+            }
+        }
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: addedToQueue)
         .confirmationDialog(
             "Delete this scene?",
             isPresented: $confirmDelete,
@@ -218,12 +249,7 @@ struct SceneDetailView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                     PopupMenu(vertical: true, actions: [
-                        PopupMenuAction(title: "Download Video", systemImage: "arrow.down.circle") {
-                            // Stage it (don't start) — the Downloads card lets you pick source / threads /
-                            // server resolution, then Start.
-                            downloads.stage(scene: fullScene ?? scene, apiKey: apiKey)
-                            path.append(.downloads)
-                        },
+                        downloadMenuAction,
                         PopupMenuAction(title: "Scrape Metadata", systemImage: "sparkle.magnifyingglass") {
                             metadataMode = .scrape
                         },
@@ -302,6 +328,40 @@ struct SceneDetailView: View {
     }
 
     private var apiKey: String { appState.client?.apiKey ?? "" }
+
+    /// The first ••• row, which changes with the state of the download queue.
+    ///
+    /// Navigation happens ONLY when nothing else is pending. The first add taking you to the staging
+    /// screen is useful — that is where the source and codec pickers live — but on the tenth add it is
+    /// an interruption, and both this screen and the pushed Downloads hide their back buttons, so each
+    /// one costs two edge-swipes to get back to browsing.
+    ///
+    /// `.stopped` counts as ABSENT: `stop()` already wiped that item's parts and sidecar, and the
+    /// Downloads screen prunes the card on appear — so treating it as present would offer "Show in
+    /// Downloads" for a card that is about to vanish.
+    private var downloadMenuAction: PopupMenuAction {
+        let state = downloads.sceneDownloadState(scene.id)
+        guard state == nil || state == .stopped else {
+            return PopupMenuAction(title: "Show in Downloads", systemImage: "arrow.down.circle.fill") {
+                path.openDownloads()
+            }
+        }
+        if downloads.hasPendingWork {
+            return PopupMenuAction(title: "Add to Download Queue", systemImage: "plus.circle") {
+                downloads.pruneStopped()
+                downloads.stage(scene: fullScene ?? scene, apiKey: apiKey)
+                Haptics.tap(soft: true)
+                addedToQueue = true
+            }
+        }
+        return PopupMenuAction(title: "Download Video", systemImage: "arrow.down.circle") {
+            // Stage it (don't start) — the Downloads card lets you pick source / server resolution,
+            // then Start (or Start Queue in the toolbar).
+            downloads.pruneStopped()
+            downloads.stage(scene: fullScene ?? scene, apiKey: apiKey)
+            path.openDownloads()
+        }
+    }
 
     /// True when a completed offline copy of this scene exists on the phone — gates the extra
     /// "Delete Download from Phone" action in the delete dialog.

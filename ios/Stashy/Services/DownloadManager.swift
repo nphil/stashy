@@ -675,7 +675,27 @@ final class DownloadManager {
 
     // MARK: - Public API
 
-    func hasDownload(sceneID: String) -> Bool { items.contains { $0.id == sceneID } }
+    func sceneDownloadState(_ sceneID: String) -> DownloadState? {
+        items.first { $0.id == sceneID }?.state
+    }
+
+    /// Anything the user still thinks of as "in the downloads list".
+    ///
+    /// Deliberately WIDER than `hasActiveWork`, which excludes `.staged` and would miss the case the
+    /// owner named: a scene added but not started. Written as an EXCLUSION list so a future
+    /// `DownloadState` defaults to "pending" rather than silently vanishing from the menu logic.
+    ///
+    /// `.paused` is excluded ON PURPOSE: a pause is deliberate and survives relaunch, so counting it
+    /// would flip the ••• menu into never-navigate mode for the life of the install, invisibly.
+    /// Reads only `state` — never a per-tick field, or the scene screen would repaint at 120 Hz.
+    var hasPendingWork: Bool {
+        items.contains {
+            switch $0.state {
+            case .completed, .failed, .stopped, .paused: return false
+            case .staged, .serverProcessing, .queued, .downloading, .waitingForNetwork, .merging: return true
+            }
+        }
+    }
 
     func start(scene: StashScene, apiKey: String) {
         guard !items.contains(where: { $0.id == scene.id }) else { return }
@@ -2317,6 +2337,11 @@ final class DownloadManager {
             case .downloading, .waitingForNetwork:
                 fractions.append(item.totalBytes > 0
                                  ? min(1, Double(item.receivedBytes) / Double(item.totalBytes)) : 0)
+            case .staged, .queued:
+                // Counted so an add is VISIBLE on the root screens: without this the aggregate is empty,
+                // `floatingStatus` returns nil, and five freshly added scenes look identical to idle.
+                // It also revives the ×N badge, which the serial gate would otherwise pin at ×1.
+                fractions.append(0)
             case .serverProcessing:
                 if item.companionQueued { break }   // waiting for the GPU: 0% is a wait, not progress
                 fractions.append(min(1, max(0, item.serverJobProgress)))

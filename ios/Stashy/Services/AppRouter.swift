@@ -45,6 +45,16 @@ extension Array where Element == Route {
         }
     }
 
+    /// Push Downloads, or pop back to it when it is already on the stack — so repeated adds can never
+    /// stack duplicate Downloads screens.
+    mutating func openDownloads() {
+        if let idx = lastIndex(of: .downloads) {
+            if idx + 1 < count { removeSubrange((idx + 1)...) }
+        } else {
+            append(.downloads)
+        }
+    }
+
     /// Push a scene, or — if it's already on the stack — pop back to it.
     mutating func openScene(_ scene: StashScene) {
         if let idx = lastIndex(of: .scene(scene)) {
