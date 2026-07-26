@@ -59,9 +59,13 @@ final class AVPlaybackEngine: PlaybackEngine {
 
     init(url: URL, normalizationGain: Float = 1) {
         self.normalizationGain = normalizationGain
-        // The playback category is set once at launch (AppDelegate); just claim the session so sound
-        // plays through the ringer switch. Activating an already-active session is a cheap no-op, so a
-        // reinit creating a new engine no longer re-configures the whole category each time.
+        // Claim the session so sound plays through the ringer switch. The category is re-asserted
+        // rather than trusted: `DownloadKeepAlive` leaves the session mixing (`.mixWithOthers`, mode
+        // `.default`) so a background download can't silence the owner's music, and it deliberately
+        // doesn't restore it — changing the category of an already-active session interrupts other
+        // apps, so the right moment is here, when the user has actually pressed play. Setting a
+        // category is cheap and idempotent; activating an already-active session is a no-op.
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         try? AVAudioSession.sharedInstance().setActive(true)
 
         // Inject the Stash apikey as an HTTP header so HLS segment requests — which can drop the query

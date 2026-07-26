@@ -1785,10 +1785,17 @@ final class DownloadManager {
     /// that it only advances while Stashy is open, so it is a fallback, never the default.
     private func startForegroundFallback(_ item: DownloadItem) {
         // In-process transfers do not run while the app is suspended — starting one from the background
-        // burns a retry and returns zero bytes. Park it; enterForeground picks it up. The exception is a
-        // BGProcessingTask window, where iOS has granted the process real runtime precisely so this can
-        // run: `scheduledWindow` is owned solely by that launch handler.
-        guard !inBackground || scheduledWindow else {
+        // burns a retry and returns zero bytes. Park it; enterForeground picks it up. The exceptions are
+        // the two states where something is genuinely holding the process scheduled: a BGProcessingTask
+        // window (`scheduledWindow`, owned solely by that launch handler), and the audio keep-alive pump.
+        //
+        // The keep-alive clause is load-bearing, not defensive. EVERY background restart path funnels
+        // through here — `scheduleNetworkRetry` → `launch(reset:)`, `networkChanged`'s recovery loop,
+        // `connectionFailed`'s escalation — and `daemonHandoverBroken` routes every transfer on this
+        // device down them. Without it, one transient error (a Wi-Fi → cellular handoff is enough) parks
+        // the item for good while the pump keeps burning battery re-arming an assertion for a transfer
+        // that will never restart: the feature would be inert in precisely the scenario it exists for.
+        guard !inBackground || scheduledWindow || DownloadKeepAlive.shared.isRunning else {
             item.state = .waitingForNetwork
             item.error = nil
             cancelTasks(item, produceResumeData: false)
@@ -1826,6 +1833,11 @@ final class DownloadManager {
     /// grace (~30 s), enough for a small download to land and for a large one to reach a slice boundary
     /// instead of losing the connection outright.
     private func holdTransferAssertion(_ itemID: String) {
+        // iOS's background window is per-APP, not per-assertion: it only resets when NOTHING is
+        // outstanding. So while `DownloadKeepAlive` is pumping — ending its assertion and taking a
+        // fresh one every 10 s — a per-item assertion held here would pin the window open and defeat
+        // the entire renewal. The keep-alive owns the window while it runs; we stand down.
+        guard !DownloadKeepAlive.shared.isRunning else { return }
         guard transferAssertions[itemID] == nil else { return }
         var bg: UIBackgroundTaskIdentifier = .invalid
         bg = UIApplication.shared.beginBackgroundTask(withName: "transfer-\(itemID)") { [weak self] in
@@ -1845,6 +1857,11 @@ final class DownloadManager {
     private func releaseTransferAssertion(_ itemID: String) {
         guard let bg = transferAssertions.removeValue(forKey: itemID), bg != .invalid else { return }
         UIApplication.shared.endBackgroundTask(bg)
+    }
+
+    /// Hand the app's background window over to `DownloadKeepAlive` (see `holdTransferAssertion`).
+    private func releaseAllTransferAssertions() {
+        for id in Array(transferAssertions.keys) { releaseTransferAssertion(id) }
     }
 
     private func register(_ task: URLSessionTask, item: DownloadItem, conn: Int, engine: TransferEngine,
@@ -2295,6 +2312,18 @@ final class DownloadManager {
         // `submit` replaces any pending request with the same identifier, so repeated backgrounding is
         // harmless, and this no-ops when nothing is genuinely resumable.
         scheduleResumeIfNeeded()
+        // Opt-in (Settings → Diagnostics → "Keep the app awake while downloading"). Pumps a fresh
+        // `beginBackgroundTask` every 10 s behind an active audio session, which is how a sideloaded
+        // app outlives the measured ~26 s grace — full reasoning in `DownloadKeepAlive`. The predicate
+        // is re-checked each cycle, so it tears itself down within one tick of the last transfer
+        // finishing; nothing here has to watch for that.
+        DownloadKeepAlive.shared.start { [weak self] in
+            guard let self else { return false }
+            return self.items.contains { $0.state == .downloading || $0.state == .waitingForNetwork }
+        }
+        // Its renewal only resets the window when nothing else is outstanding, so the per-item
+        // assertions taken while we were in the foreground must be released now.
+        if DownloadKeepAlive.shared.isRunning { releaseAllTransferAssertions() }
         RemoteLog.shared.event("dl-phase", [("to", "background"), ("active", live.count)])
         for item in live { partCensus(item, "enter-bg") }
         syncLiveActivity()
@@ -2304,6 +2333,11 @@ final class DownloadManager {
     private func enterForeground() {
         guard inBackground else { return }
         inBackground = false
+        // Nothing to keep alive once we're on screen. This is the one call site that restores the audio
+        // category, so a player that outlived the background trip stops mixing — the pump's own
+        // self-teardown deliberately does not, since a download finishing off-screen must never take
+        // the session away from whatever the owner is listening to.
+        DownloadKeepAlive.shared.stop(restoringCategory: true)
         backgroundWindowClosing = false   // a fresh window; the card can show live speed again
         scheduledWindow = false           // can't be left stale by a scheduled run that was expired
         // First thing on waking: publish everything the background run buffered, then census the real
@@ -2727,8 +2761,11 @@ final class DownloadManager {
         // a foreground-taken assertion, and what it reads inside a BGTask window is undefined. One low
         // reading latches the flag, which makes the Live Activity announce a live transfer as stalled —
         // and the latch clears only on foreground return, so it would poison the card for the whole run.
-        guard inBackground, !scheduledWindow, !transferAssertions.isEmpty,
-              !backgroundWindowClosing else { return }
+        // The keep-alive owns the window in place of the per-item assertions when it runs, so read it
+        // as an equivalent claim — otherwise this check switches itself off and the card can never
+        // report a stall on the very configuration most likely to produce one.
+        guard inBackground, !scheduledWindow, !backgroundWindowClosing,
+              !transferAssertions.isEmpty || DownloadKeepAlive.shared.isRunning else { return }
         let remaining = UIApplication.shared.backgroundTimeRemaining
         // Clamp by MAGNITUDE: `.greatestFiniteMagnitude` passes `isFinite` (see the CLAUDE.md landmine —
         // converting it crashed the app), and it is also what this API reports when it has no real value,
