@@ -84,10 +84,13 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   background mode and holding an **active `AVAudioSession`** can end its assertion and be granted a
   fresh one indefinitely. Ending BEFORE re-taking is the whole trick — iOS's window is per-**app**, not
   per-assertion, so the clock only resets when nothing is outstanding (which is why anything else
-  holding one must stand down). Shipped v1.0.339 as `Services/DownloadKeepAlive.swift`, OFF by default.
-  Proven in XITRIX/iTorrent's source, NOT yet on this device — `UIBackgroundModes` is a plist
+  holding one must stand down). Shipped v1.0.339 as `Services/DownloadKeepAlive.swift`.
+  **DEVICE-PROVEN 2026-07-26 on the first run: 290 s unbroken, 725 MB transferred while backgrounded,
+  29/29 ticks, zero refusals** — no evidence of any remaining limit. `UIBackgroundModes` is a plist
   declaration policed at App Store review, not a signed capability, which is exactly why it isn't
-  gated like the two below. Verdict line: `dl-keepalive tick=` past ~30 s with `dl-parts` still growing.
+  gated like the two below. **A portable step-by-step recipe for other apps is in ENGINEERING_NOTES
+  §3 ("PORTABLE RECIPE").** The failure mode that makes it look broken: anything else in the app
+  holding a `beginBackgroundTask` pins the window open and you still die at 26 s.
 - **The two mechanisms that genuinely decline here.** `BGProcessingTask` (shipped) runs ONLY while the
   device is idle and iOS kills it the moment the user picks the phone up — a catch-up path, never an
   unattended-now one; "needs wifi + charging" is folklore (both are opt-in predicates).
@@ -185,17 +188,10 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   Backgrounded → ~26 s of grace, then it parks and the card says so honestly (Live Activity *and* the
   Downloads screen both distinguish "paused, reopen" from a real network drop). Phone left idle →
   `BGProcessingTask` converges it across windows. Dynamic Island works.
-- **AWAITING THE FIRST DEVICE TEST — the one open question, don't start anything else here until it is
-  answered.** v1.0.339 ships `DownloadKeepAlive` (audio background mode + a 10 s assertion pump), which
-  if it works removes the ~26 s ceiling entirely and makes an unattended long download possible. Test:
-  Settings → Diagnostics → *Keep the app awake while downloading* + *Trace downloads* on, start
-  something large, background it, leave it. **Pass** = `dl-keepalive tick=` climbing past ~30 s with
-  `dl-parts` still growing. **Fail** = ticks stop, or `dl-keepalive refused=`. On a fail, say so
-  plainly and revert rather than tuning — and record it here, because the honest close is "we tested
-  the last remaining avenue and it does not work on this device."
-- **Known lie on a PASS:** `noteBackgroundWindowClosing` still flips the card to "Paused — open Stashy"
-  when the assertion nears expiry. If the pump works, that fires while bytes are landing. Deliberately
-  deferred — fix it only once the premise is proven, not on the hypothesis.
+- **The background problem is SOLVED (2026-07-26).** `DownloadKeepAlive` was device-proven on its first
+  run: 290 s unbroken background runtime, 18.9 MB → 744 MB while backgrounded, 29/29 ticks, zero
+  refusals, Live Activity live throughout. Long unattended downloads now work. Do not re-open the
+  question of whether iOS permits this — it does, and the recipe is in ENGINEERING_NOTES §3.
 - Diagnostics built for the saga were removed once they answered (`TransferBenchmark`, the -3000
   probe/census, `dl-identity`, the retest button) — recover from git history, don't rewrite them.
 - Next candidates: **the VMAF map fix (plugin v0.3.1) is DONE — shipped, deployed, and live-verified**

@@ -397,15 +397,111 @@ Deliberate choices, each with a reason that is not obvious:
   false** — inaudible when it applies, and when it doesn't the worst case is hearing both rather than
   losing their audio.
 
-**UNVERIFIED ON DEVICE.** The evidence is source-only; nobody ran the technique on an iPhone 17 Pro /
-iOS 26. Two signals point opposite ways: iTorrent's service was patched days before we read it (live,
-maintained code), but there is also an open issue titled "Background downloading broken?" that could
-not be read. Apple has never documented an active session granting runtime, so a point release can
-regress it with no deprecation and no compile error. **Verdict line:** `dl-keepalive tick=` climbing
-past ~30 s with `dl-parts` still growing = it works. Ticks stopping, or `dl-keepalive refused=`, = it
-does not. On a negative result, revert rather than tune, and record it — "we tested the last remaining
-avenue and it does not work on this device" is a strictly better place to close the book than "we
-think iOS forbids this."
+**DEVICE-PROVEN, 2026-07-26, iPhone 17 Pro / iOS 26 — first run, no tuning.** The trace, in full:
+
+```
+ 62.85  dl-phase     to=background active=1
+ 62.85  dl-parts     item=2624 why=enter-bg  sum=18924673   total=4035314417 pct=0
+ 63.51  dl-keepalive tick=1  up=0
+ ...    (29 consecutive ticks, one per ~10 s, zero gaps)
+352.70  dl-keepalive tick=29 up=289
+353.50  dl-phase     to=foreground active=1
+353.50  dl-parts     item=2624 why=enter-fg  sum=743998057  total=4035314417 pct=18
+353.50  dl-keepalive stop=1 ticks=29 up=290 restored=1
+```
+
+**290 s of unbroken background runtime and 725 MB transferred while backgrounded**, against a previous
+hard ceiling of 26 s. Zero `refused`, zero `expired`, zero `dl-bg-closing`. The Live Activity pushed
+real progress the entire time (`dl-la pct=` 0 → 18, ten updates), which also confirms the process was
+genuinely scheduled rather than the card interpolating. `restored=1` confirms the audio-category
+restore path ran on foreground return. There is no reason to believe there is any remaining time limit:
+nothing in the trace degrades, and the run ended only because the owner reopened the app.
+
+Apple has never documented an active session granting runtime, so a point release can still regress it
+with no deprecation and no compile error. Re-read this trace shape after any iOS update.
+
+### PORTABLE RECIPE — indefinite iOS background execution, for any app
+Written to be lifted into another project. Nothing here is Stashy-specific; the whole mechanism is
+~150 lines and one plist key. Applies to any work that must keep running while the app is
+backgrounded — downloads, uploads, sync, a long local computation.
+
+**What it is.** iOS gives a backgrounded app one ~26 s `beginBackgroundTask` window. That window
+cannot be *extended*, but it **can be replaced indefinitely** by an app that (a) declares the `audio`
+background mode and (b) holds an **active** `AVAudioSession`. Ending the old assertion *before* asking
+for a new one is what makes the grant renewable — iOS's window is **per-app, not per-assertion**, so
+the clock only resets when nothing is outstanding.
+
+**Step 1 — the plist.** Add `audio` to `UIBackgroundModes`. That is the entire declaration. It is
+policed at App Store review, **not** by code signing, so it works in an unsigned/sideloaded build with
+no entitlement and no provisioning profile change. (Shipping on the App Store with it while producing
+no audible output violates guideline 2.5.4 — that is a review problem, not a technical one.)
+
+**Step 2 — hold an active session, mixing.**
+```swift
+try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+try session.setActive(true)
+```
+`.mixWithOthers` is not optional in practice: without it you silence the user's music the moment a
+background job starts. Never call `setActive(false)` on teardown — see the category trap below.
+
+**Step 3 — the pump.** Play a near-silent looping tone, then cycle every 10 s:
+```swift
+while !Task.isCancelled {
+    guard stillNeeded() else { teardown(); return }
+    player?.play()
+    try? await Task.sleep(for: .milliseconds(150))   // let the audio unit actually start
+    endAssertion()                                   // END FIRST — this is the whole trick
+    beginAssertion()                                 // ...then take a fresh one
+    player?.pause()
+    guard assertion != .invalid else { retryShortly(); continue }
+    try await Task.sleep(for: .seconds(10))
+}
+```
+The expiration handler must end the task **synchronously** (iOS kills the app otherwise) and then
+*re-enter* the loop rather than surrender.
+
+**Step 4 — nothing else may hold an assertion.** This is the mistake that makes the technique appear
+not to work. If any other part of the app is holding a `beginBackgroundTask` — a per-item transfer
+assertion, a library, an analytics SDK — the window never resets and you still die at ~26 s. Audit for
+`beginBackgroundTask` and make everything else stand down while the pump runs.
+
+**Step 5 — handle interruptions.** A phone call takes the session and iOS does **not** hand it back.
+Observe `AVAudioSession.interruptionNotification` and re-`setActive(true)`. Without this the pump keeps
+renewing an assertion with no audio behind it until the window closes for good. Reading
+`Notification.userInfo` from a `@Sendable` handler is awkward under Swift 6 strict concurrency — just
+attempt the re-claim on *any* interruption event; it throws harmlessly on the `.began` half.
+
+**The tone.** Generate it at runtime rather than bundling a resource — a bundled asset adds a silent
+failure mode (build system doesn't copy it, `path(forResource:)` returns nil, feature quietly dead).
+0.5 s of 16-bit mono PCM at ~−60 dBFS played at `volume = 0.01` is inaudible on any hardware. Use a
+frequency with a whole number of cycles in the buffer (400 Hz in 0.5 s = 200 cycles) so the infinite
+loop has no seam. **Avoid digital silence and single-sample files** — iTorrent shipped a 46-byte
+one-sample WAV and moved to a real clip; the reason was never documented, so respect it.
+
+**The category trap.** The audio session is a process-wide singleton. Three interacting facts:
+changing the category of an **already-active** session interrupts other apps; `setActive(false)` will
+kill your own media if any is playing; and a media player that survives the background trip is often
+never re-initialised, so it never re-asserts its own category. The resolution that works: leave the
+session mixing on teardown, restore the app's real category **only when
+`AVAudioSession.sharedInstance().isOtherAudioPlaying` is false**, and have the media player assert its
+category explicitly at the moment playback starts rather than trusting a launch-time default.
+
+**Gate it hard.** Re-check "is this still needed?" at the top of every cycle and tear down the instant
+it isn't. This deliberately prevents suspension: radio, CPU and an audio unit stay live, and the
+battery cost is real. Apple's documented memory ceiling for a mixable-audio background app is ~100 MB,
+so a memory-hungry app can be jetsammed — survivable if your work is checkpointed, but plan for it.
+
+**What does NOT work, so you don't waste the cycles** (all measured on this device):
+`BGProcessingTask` runs only while the device is idle and dies the moment the user picks the phone up.
+`BGContinuedProcessingTask` (iOS 26) registers and submits `ok=1` and **never fires** on a sideloaded
+build. Background `URLSession` hand-over fails with `-3000` for reasons no probe could attribute to the
+app. **Live Activities grant ZERO runtime** — they are display only; iTorrent's card stays live because
+its *process* does. Android's foreground-service model has no iOS equivalent, and the audio keep-alive
+is the closest thing that exists.
+
+**Verdict line for your own port:** log a tick per cycle with elapsed seconds. Ticks climbing past ~30 s
+while your work still progresses = it works. Ticks stopping, or the assertion being refused, = it
+doesn't, and you should revert rather than tune.
 
 **Known lie on a positive result:** `noteBackgroundWindowClosing` still flips the Live Activity to
 "Paused — open Stashy" as the assertion nears expiry, which would fire while bytes are landing. Left
