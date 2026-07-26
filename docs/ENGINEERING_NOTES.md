@@ -222,11 +222,12 @@ the transport (~1.5 s, ~52 MB — down from 472 MB across five retries) and ever
 thereafter. Device-verified the same session: a 2.70 GB file completed at 100–112 MB/s and kept
 downloading for **29.7 s after the app was backgrounded**, finishing at 100% without being reopened.
 
-**The one real limit that remains.** The in-process path lives on `beginBackgroundTask`, which grants
-roughly 30 s. A transfer with more than ~30 s of work left when the user leaves the app will stall until
-they return. That is an enhancement (chunk the fallback so each backgrounded stretch commits, or revisit
-if a future iOS fixes the hand-over — `daemonHandoverBroken` is OS-version-stamped and re-tests
-automatically), not a regression: the daemon path it replaced never completed a single transfer.
+**The one real limit that remains.** The in-process path lives on `beginBackgroundTask`, later measured
+at ~26 s (the "29.7 s" above is a download *finishing* — a floor, not the ceiling). A transfer with more
+than that much work left when the user leaves the app stalls until they return. That is an enhancement,
+not a regression: the daemon path it replaced never completed a single transfer. **Superseded as the
+final word by "The `audio` keep-alive" below — the window turns out to be renewable — but the figure
+itself stands and still governs whenever the keep-alive is off, which is the default.**
 
 **The engine therefore slices (v1.0.325).** `startBackgroundTransfer` → `startBackgroundSlice`: one
 background range task at a time, `Range: bytes=<durable>-<durable+64MB-1>`, appended into our part file
@@ -308,17 +309,115 @@ where a system service declines to act for an app it cannot fully vouch for. Tog
 Apple also publishes no maximum duration for it, and developers report ~3 GB transfers surviving while
 ~10 GB ones die seconds after backgrounding.
 
-**4. Foreground modes we cannot use.** `audio` is legitimate *only while audio genuinely plays* (iOS
-terminates an app that declares it and produces none) — but it does mean a download continues at full
-speed while the user watches something. `location`, VoIP, `bluetooth-central` and `external-accessory`
-are either abuse or unavailable to this app. Android's foreground-service model — a persistent
-notification that buys indefinite runtime — has **no iOS equivalent**, and that is the real gap;
-Live Activities are pure display and grant zero runtime, which is the single most common misconception
-about them.
+**4. Foreground modes.** `location`, VoIP, `bluetooth-central` and `external-accessory` are either
+abuse or unavailable to this app. Android's foreground-service model — a persistent notification that
+buys indefinite runtime — has **no iOS equivalent**. Live Activities are pure display and grant zero
+runtime, which is the single most common misconception about them. **`audio` is the exception, and the
+claim once written here — "legitimate only while audio genuinely plays, because iOS terminates an app
+that declares it and produces none" — is wrong; see the next section.**
 
-**Net:** downloads finish with the app open, survive ~26 s of backgrounding, converge overnight while
-the phone is idle, and cannot be made to finish unattended on cellular. That is a platform ceiling, not
-a missing feature in this app.
+**Net, as of the four tests above:** downloads finish with the app open, survive ~26 s of
+backgrounding, converge overnight while the phone is idle. That was read as a platform ceiling. It
+isn't — read on.
+
+### The `audio` keep-alive — how the ~26 s ceiling is actually lifted (v1.0.339)
+The four tests above are all sound. The **conclusion** drawn from them ("no API lifts it") was wrong,
+and this section exists so nobody re-derives the wrong one. It was found by studying
+**XITRIX/iTorrent** — a sideloaded open-source torrent client that downloads for hours in the
+background — at commit `e95af51`, on the owner's prompting.
+
+**The mechanism.** A `beginBackgroundTask` assertion cannot be *extended*. It can be *replaced*. An app
+that declares the `audio` background mode and holds an **active `AVAudioSession`** may end its
+assertion and immediately be granted a fresh one, indefinitely. iTorrent's pump, verbatim:
+
+```swift
+while !Task.isCancelled {
+    guard BackgroundService.isBackgroundNeeded else { stopBackgroundTask(); stopAudio(); return }
+    playAudio()
+    stopBackgroundTask()                                  // END the old assertion FIRST
+    backgroundTask = await UIApplication.shared.beginBackgroundTask { [weak self] in
+        self?.startBackgroundTask()                       // expiration → re-enter, don't surrender
+    }
+    stopAudio()
+    guard backgroundTask != .invalid else { continue }    // refused → retry, don't sleep into suspension
+    try await Task.sleep(for: .seconds(10))
+}
+```
+
+**Why ending first is load-bearing.** iOS's background window is **per-app, not per-assertion**. The
+clock only resets when *nothing* is outstanding. This is why `DownloadManager.holdTransferAssertion`
+now stands down while the pump runs and `enterBackground` releases the per-item assertions it already
+holds — one left over pins the window open and the whole renewal silently does nothing.
+
+**Why this one isn't gated like the others.** iTorrent's complete `.entitlements` is app-sandbox,
+app-groups, user-selected-files, network client/server, location — **not one `com.apple.developer.*`
+key.** `UIBackgroundModes` is a plist *declaration* policed at App Store review, not a signed
+capability, so it behaves identically in an unsigned sideloaded IPA. That is categorically unlike
+-3000 and `BGContinuedProcessingTask`, which are OS-service handshakes that can decline an app they
+cannot vouch for. It is also why an App Store-policy argument ("Stashy is a real media player, so the
+declaration is honest") is beside the point: iOS does not check whether you have a video player, it
+checks whether a session is active.
+
+**Two things the study also settled**, both killing plausible alternate theories: iTorrent's Live
+Activity is `pushType: .none` driven by in-process `Activity.update` — their Dynamic Island stays live
+because their *process* does, not because ActivityKit has a privilege. And their torrent payload never
+touches `URLSession` at all (raw libtorrent sockets), so their starting position was *worse* than ours
+— they never had a daemon hand-over to lose, and solved it purely by refusing to be suspended. The
+technique is transport-agnostic and wraps our `URLSessionDataTask` unchanged.
+
+**What we shipped:** `Services/DownloadKeepAlive.swift`, OFF by default behind Settings → Diagnostics.
+Deliberate choices, each with a reason that is not obvious:
+- **Copy the hybrid, not the ancestor.** iTorrent's `git log --follow` shows it shipped the naive
+  design first (`c57b61e`: one infinite silent loop, `numberOfLoops = -1`, no `beginBackgroundTask` at
+  all) and spent three rounds of "Background fixes" converging on the pump above. The simple version
+  was insufficient; don't rediscover that.
+- **The tone is generated at runtime, not bundled** — 0.5 s of 16-bit mono PCM at ~−60 dBFS, played at
+  `volume = 0.01`. A bundled resource adds a silent failure mode (XcodeGen not copying it,
+  `path(forResource:)` returning nil, the feature quietly doing nothing). Digital silence and
+  one-sample files are avoided on purpose: iTorrent shipped a 46-byte single-sample `3.wav` and moved
+  to a real 61 KB clip. The reason was never written down, so treat it as a respected hypothesis — but
+  there is no upside to retesting the option its author abandoned.
+- **A refused window retries rather than sleeping**, and three consecutive refusals tear the pump down
+  instead of spinning.
+- **An interruption observer re-claims the session.** A call takes the session and iOS does not hand it
+  back; without this the pump renews an assertion with no audio behind it until the window closes for
+  good. iTorrent needed this too (`9fe6cd4`, "Fix background service interruptions").
+- **`startForegroundFallback`'s background guard admits the keep-alive.** This was caught in review and
+  is not cosmetic: every background restart path funnels through that guard, and `daemonHandoverBroken`
+  routes every transfer on this device down them. Without it, one transient error — a Wi-Fi → cellular
+  handoff suffices — parks the item permanently while the pump burns battery for a transfer that will
+  never restart. The feature would have been inert in exactly the scenario it exists for.
+- **Audio-session category handling is a genuine three-way trade.** The pump leaves the session mixing
+  (`.mixWithOthers`) so a background download never silences the owner's music. Restoring that
+  unconditionally on foreground return would take the session outright *every time* they open Stashy
+  after a download — dropping `.mixWithOthers` on an already-active session interrupts other apps.
+  Never restoring leaves a player that outlived the background trip mixing for the rest of the scene,
+  because `ScenePlayerModel.start()` early-returns on `guard engine == nil` and `AVPlaybackEngine`'s
+  own assertion never runs again for it. Resolution: restore **only when `isOtherAudioPlaying` is
+  false** — inaudible when it applies, and when it doesn't the worst case is hearing both rather than
+  losing their audio.
+
+**UNVERIFIED ON DEVICE.** The evidence is source-only; nobody ran the technique on an iPhone 17 Pro /
+iOS 26. Two signals point opposite ways: iTorrent's service was patched days before we read it (live,
+maintained code), but there is also an open issue titled "Background downloading broken?" that could
+not be read. Apple has never documented an active session granting runtime, so a point release can
+regress it with no deprecation and no compile error. **Verdict line:** `dl-keepalive tick=` climbing
+past ~30 s with `dl-parts` still growing = it works. Ticks stopping, or `dl-keepalive refused=`, = it
+does not. On a negative result, revert rather than tune, and record it — "we tested the last remaining
+avenue and it does not work on this device" is a strictly better place to close the book than "we
+think iOS forbids this."
+
+**Known lie on a positive result:** `noteBackgroundWindowClosing` still flips the Live Activity to
+"Paused — open Stashy" as the assertion nears expiry, which would fire while bytes are landing. Left
+alone deliberately — it is correct for the current shipped behaviour, and rewriting it on a hypothesis
+is how this subsystem acquired its regressions.
+
+**Also unverified: whether declaring `audio` changes playback behaviour at all.** The player is
+`AVPlayerLayer`-attached and `audiovisualBackgroundPlaybackPolicy` is left at `.automatic`, which Apple
+documents only as "the system decides". Do not read either outcome on device as evidence about whether
+the plist key took effect, and do not set `.continuesIfPossible` to "fix" it — the key is unconditional
+while the keep-alive is opt-in, so that would give background audio to every user with the toggle off
+and break the invariant that OFF is byte-identical to before.
 
 ### Free space: measure with `volumeAvailableCapacity`, never `…ForImportantUsage`
 `ForImportantUsage` counts purgeable caches iOS merely *might* reclaim, and read **40 GB on a phone

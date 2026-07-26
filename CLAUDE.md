@@ -78,16 +78,26 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   background relaunch restores items `.paused`, so every continue-branch must adopt them. The space
   preflight sizes on `totalBytes − partSize` — charging for bytes already on disk refused a download
   that fitted. (§3)
-- **Background execution is capped at ~26 s and NO API lifts it — all four avenues tested 2026-07-26.**
-  `beginBackgroundTask` measured twice: 25.57 s and 26.32 s. `BGProcessingTask` (shipped) runs ONLY
-  while the device is idle and iOS kills it the moment the user picks the phone up — a catch-up path,
-  never an unattended-now one; "needs wifi + charging" is folklore (both are opt-in predicates).
+- **A `beginBackgroundTask` window is ~26 s and cannot be EXTENDED — but it can be REPLACED, forever.**
+  This corrects the "no API lifts it" verdict this file carried for one day. Measured twice at 25.57 s
+  and 26.32 s, and that stands. What was wrong is the conclusion: an app declaring the **`audio`**
+  background mode and holding an **active `AVAudioSession`** can end its assertion and be granted a
+  fresh one indefinitely. Ending BEFORE re-taking is the whole trick — iOS's window is per-**app**, not
+  per-assertion, so the clock only resets when nothing is outstanding (which is why anything else
+  holding one must stand down). Shipped v1.0.339 as `Services/DownloadKeepAlive.swift`, OFF by default.
+  Proven in XITRIX/iTorrent's source, NOT yet on this device — `UIBackgroundModes` is a plist
+  declaration policed at App Store review, not a signed capability, which is exactly why it isn't
+  gated like the two below. Verdict line: `dl-keepalive tick=` past ~30 s with `dl-parts` still growing.
+- **The two mechanisms that genuinely decline here.** `BGProcessingTask` (shipped) runs ONLY while the
+  device is idle and iOS kills it the moment the user picks the phone up — a catch-up path, never an
+  unattended-now one; "needs wifi + charging" is folklore (both are opt-in predicates).
   `BGContinuedProcessingTask` (shipped behind an OFF toggle) submits `ok=1` and **never fires** here —
-  suspect the iPhone 17 Pro reports and/or a sideloaded app having no entitlements. **Live Activities
-  grant ZERO runtime** — display only; Android's foreground service has no iOS equivalent, and that is
-  the real gap. Registration is `didFinishLaunchingWithOptions` ONLY and exactly once (a second one
-  KILLS the app); both plist keys are runtime-only requirements CI cannot check, so `dl-bg-register ok=`
-  is the proof. (§3)
+  suspect the iPhone 17 Pro reports and/or a sideloaded app having no entitlements. Both are OS-service
+  handshakes that can refuse an app they cannot vouch for, like -3000. **Live Activities grant ZERO
+  runtime** — display only, and iTorrent's `pushType: .none` card proves the point: their Dynamic Island
+  stays live because their PROCESS does. Registration is `didFinishLaunchingWithOptions` ONLY and
+  exactly once (a second one KILLS the app); both plist keys are runtime-only requirements CI cannot
+  check, so `dl-bg-register ok=` is the proof. (§3)
 - **Test free space with `volumeAvailableCapacity`, NEVER `…ForImportantUsage`** — the latter counts
   purgeable caches and read **40 GB** on a phone with **4.1 GB** genuinely free. (§3)
 - **Download diagnostics:** Settings → Diagnostics → **Trace downloads** (off by default) emits the
@@ -170,20 +180,22 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.338** (`8a527d1`). Downloads are DONE as far as iOS permits — see the three
-  download landmines above; the -3000 investigation is closed and must not be reopened.
+- Latest release: **v1.0.339** (`c0c8275`). The -3000 investigation is closed and must not be reopened.
 - **What works:** app open → ~100 MB/s, resumes byte-exact through crashes, relaunches and suspension.
   Backgrounded → ~26 s of grace, then it parks and the card says so honestly (Live Activity *and* the
   Downloads screen both distinguish "paused, reopen" from a real network drop). Phone left idle →
   `BGProcessingTask` converges it across windows. Dynamic Island works.
-- **What is not possible:** finishing a long cellular download while the phone is in use or pocketed.
-  Three separate mechanisms decline (background daemon, continued processing, plain background
-  execution); two decline in the way a system service declines for an app it can't fully vouch for.
-  Treat this as a platform ceiling, not a bug to fix. An iOS update auto-re-tests the daemon.
-- **Open, if ever wanted:** `BGContinuedProcessingTask` never fires here — retest after an iOS update
-  or if the app is ever properly signed, since a sideloaded build carries no entitlements. The
-  `audio` background mode legitimately keeps a transfer alive *while media actually plays*, which is
-  the one untried avenue that doesn't require Apple to change anything.
+- **AWAITING THE FIRST DEVICE TEST — the one open question, don't start anything else here until it is
+  answered.** v1.0.339 ships `DownloadKeepAlive` (audio background mode + a 10 s assertion pump), which
+  if it works removes the ~26 s ceiling entirely and makes an unattended long download possible. Test:
+  Settings → Diagnostics → *Keep the app awake while downloading* + *Trace downloads* on, start
+  something large, background it, leave it. **Pass** = `dl-keepalive tick=` climbing past ~30 s with
+  `dl-parts` still growing. **Fail** = ticks stop, or `dl-keepalive refused=`. On a fail, say so
+  plainly and revert rather than tuning — and record it here, because the honest close is "we tested
+  the last remaining avenue and it does not work on this device."
+- **Known lie on a PASS:** `noteBackgroundWindowClosing` still flips the card to "Paused — open Stashy"
+  when the assertion nears expiry. If the pump works, that fires while bytes are landing. Deliberately
+  deferred — fix it only once the premise is proven, not on the hypothesis.
 - Diagnostics built for the saga were removed once they answered (`TransferBenchmark`, the -3000
   probe/census, `dl-identity`, the retest button) — recover from git history, don't rewrite them.
 - Next candidates: **the VMAF map fix (plugin v0.3.1) is DONE — shipped, deployed, and live-verified**
