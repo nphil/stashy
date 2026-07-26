@@ -12,6 +12,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         if RemoteLog.isLoggingEnabled { RemoteLog.shared.enable() }   // off by default; toggle in Stats
+        // Every BGTaskScheduler launch handler MUST be registered before this method returns, and each
+        // identifier exactly once — a second registration of the same id kills the app. This method runs
+        // once per process, so it is the only legal site.
+        DownloadManager.registerScheduledResume()
         // Clear remux temps left by a prior crash/force-quit. Nothing is in use at launch, so run it off
         // the main thread — it enumerates + unlinks tmp files and needn't block the first frame.
         Task.detached(priority: .utility) { LocalRemuxStream.sweepStaleTempFiles() }

@@ -110,6 +110,19 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   `.greatestFiniteMagnitude` whenever no real value is available, and the crash happened BEFORE the
   `dl-phase to=background` log, so the trace went silent with no clue — it read exactly like an iOS
   suspension. **Clamp by magnitude, never by `isFinite`, before any Double→Int conversion.** (§2)
+- **`BGProcessingTask` runs ONLY when the device is idle, and iOS TERMINATES it the moment the user
+  picks the phone up** (Apple's own reference page, verbatim). So it can never serve "background the app
+  and the download keeps going" — it is a catch-up path for a phone sitting untouched. The popular
+  "needs wifi + charging" claim is **folklore**: `requiresExternalPower`/`requiresNetworkConnectivity`
+  are opt-in launch predicates defaulting to false, and Apple documents no wifi-vs-cellular rule.
+  `earliestBeginDate` only guarantees *not sooner*, never that it launches at all. Registration is
+  `didFinishLaunchingWithOptions` ONLY and exactly once — a second registration of the same identifier
+  **kills the app**. Both `UIBackgroundModes: [processing]` and `BGTaskSchedulerPermittedIdentifiers`
+  are RUNTIME requirements with no compile-time signal: CI goes green and the IPA ships even if they're
+  wrong, so `dl-bg-register ok=` is the only proof it wired up. The API that DOES match "keeps running
+  after backgrounding" is iOS 26's `BGContinuedProcessingTask` — but it renders its own system Live
+  Activity that would collide with ours, dies uncallbacked on app-switcher swipe, and has open Apple
+  Forums reports of not firing on **iPhone 17 Pro** specifically. Separate commit, separate device test.
 - **Popovers:** never host from a conditional/churning view — use a stable ZStack sibling
   (`FilterPopoverAnchor` pattern). Bit us three times. (§6)
 - Most CI failures ever hit were **Swift 6 strict-concurrency** — read the patterns before writing

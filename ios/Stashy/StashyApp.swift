@@ -17,7 +17,11 @@ struct StashyApp: App {
     @State private var imageCache = ImageCache()
     @State private var router = AppRouter()
     @State private var libraryEdits = LibraryEdits()
-    @State private var downloadManager = DownloadManager()
+    // The shared instance, NOT a fresh one: a BGProcessingTask launch handler reaches the manager
+    // through `DownloadManager.shared`, and a second instance would open a second URLSession on the
+    // same background identifier, a second NWPathMonitor and a second poll loop — two writers
+    // appending to the same part file.
+    @State private var downloadManager = DownloadManager.shared
 
     var body: some Scene {
         WindowGroup {

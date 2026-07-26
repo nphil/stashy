@@ -47,6 +47,16 @@ targets:
           NSAllowsArbitraryLoads: true
         NSFaceIDUsageDescription: Unlock Stashy with Face ID.
         NSSupportsLiveActivities: true
+        # BackgroundTasks: opportunistic idle-time resume for the in-process download path.
+        # BOTH keys are RUNTIME requirements with no compile-time signal — CI goes green and the IPA
+        # publishes even if they are wrong. Without the permitted identifier, BGTaskScheduler.register
+        # returns false and the feature is silently dead, which is why it is logged as `dl-bg-register`.
+        # The identifier must match `DownloadManager.scheduledResumeID` exactly. Never a wildcard form:
+        # that notation belongs to BGContinuedProcessingTask and raises an uncatchable ObjC exception.
+        UIBackgroundModes:
+          - processing
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.nphil.stashy.downloads.resume
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft

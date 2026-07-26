@@ -2,6 +2,8 @@ import SwiftUI
 import UIKit
 import Network
 import Observation
+import BackgroundTasks
+import os
 
 /// Process-wide handoff for the background `URLSession`. iOS relaunches the app (possibly straight into
 /// the background) when queued transfers finish while it was suspended, handing the app delegate a
@@ -507,6 +509,11 @@ final class DownloadManager {
     /// advertising a speed and an ETA it is seconds away from being unable to honour. Cleared on return
     /// to the foreground. See `noteBackgroundWindowClosing()`.
     @ObservationIgnored private var backgroundWindowClosing = false
+    /// True ONLY while a `BGProcessingTask` launch handler owns the process. Deliberately separate from
+    /// `inBackground`, which must keep meaning strictly "UI phase": clearing that would make the next
+    /// real `willEnterForeground` early-return in `enterForeground()`, silently skipping the transcode
+    /// auto-resume, the retry-budget reset, the part census and the revive loop.
+    @ObservationIgnored private var scheduledWindow = false
     /// Items whose transfer ran in THIS session and hasn't finished — the ones whose Live Activity card
     /// must survive a stall instead of vanishing. See `liveActivityState()`.
     @ObservationIgnored private var activityOwned: Set<String> = []
@@ -549,6 +556,13 @@ final class DownloadManager {
     @ObservationIgnored private let downloadsDir: URL
     @ObservationIgnored private let partsDir: URL
     @ObservationIgnored private let metaDir: URL
+
+    /// The one manager for the process. A `BGProcessingTask` launch handler is handed no context, so it
+    /// needs a way to reach the LIVE instance; constructing a second would open a second URLSession on
+    /// the same background identifier, a second `NWPathMonitor`, a second 120 ms poll, and two writers
+    /// appending to the same part file. `static let` is lazy, so a cold background launch builds exactly
+    /// one, at the moment the handler asks for it.
+    static let shared = DownloadManager()
 
     init() {
         let fm = FileManager.default
@@ -1754,8 +1768,10 @@ final class DownloadManager {
     /// that it only advances while Stashy is open, so it is a fallback, never the default.
     private func startForegroundFallback(_ item: DownloadItem) {
         // In-process transfers do not run while the app is suspended — starting one from the background
-        // burns a retry and returns zero bytes. Park it; enterForeground picks it up.
-        guard !inBackground else {
+        // burns a retry and returns zero bytes. Park it; enterForeground picks it up. The exception is a
+        // BGProcessingTask window, where iOS has granted the process real runtime precisely so this can
+        // run: `scheduledWindow` is owned solely by that launch handler.
+        guard !inBackground || scheduledWindow else {
             item.state = .waitingForNetwork
             item.error = nil
             cancelTasks(item, produceResumeData: false)
@@ -1778,7 +1794,10 @@ final class DownloadManager {
         item.state = .downloading
         item.error = nil
         task.resume()
-        holdTransferAssertion(item.id)
+        // A BGProcessingTask window already owns the process; taking a `beginBackgroundTask` assertion
+        // inside one is redundant AND would emit a false `dl-bg-expired` — the single event the whole
+        // background-window measurement is calibrated on.
+        if !scheduledWindow { holdTransferAssertion(item.id) }
         trace("dl-fg-fallback", [("item", item.id), ("from", base), ("total", item.totalBytes)])
     }
 
@@ -2255,6 +2274,10 @@ final class DownloadManager {
             RemoteLog.shared.event("dl-bg-window", [
                 ("secs", secs), ("left", outstanding), ("items", live.count)])
         }
+        // The one moment we know a transfer is outstanding AND the app is leaving the foreground.
+        // `submit` replaces any pending request with the same identifier, so repeated backgrounding is
+        // harmless, and this no-ops when nothing is genuinely resumable.
+        scheduleResumeIfNeeded()
         RemoteLog.shared.event("dl-phase", [("to", "background"), ("active", live.count)])
         for item in live { partCensus(item, "enter-bg") }
         syncLiveActivity()
@@ -2265,6 +2288,7 @@ final class DownloadManager {
         guard inBackground else { return }
         inBackground = false
         backgroundWindowClosing = false   // a fresh window; the card can show live speed again
+        scheduledWindow = false           // can't be left stale by a scheduled run that was expired
         // First thing on waking: publish everything the background run buffered, then census the real
         // on-disk state before any engine restarts and overwrites the evidence.
         RemoteLog.shared.flushNow()
@@ -2676,7 +2700,12 @@ final class DownloadManager {
     /// likely never be delivered. Instead watch the clock while we still have runtime and switch the card
     /// over a few seconds early — briefly pessimistic, permanently accurate.
     private func noteBackgroundWindowClosing() {
-        guard inBackground, !transferAssertions.isEmpty, !backgroundWindowClosing else { return }
+        // Never inside a scheduled window: `backgroundTimeRemaining` is only documented as meaningful for
+        // a foreground-taken assertion, and what it reads inside a BGTask window is undefined. One low
+        // reading latches the flag, which makes the Live Activity announce a live transfer as stalled —
+        // and the latch clears only on foreground return, so it would poison the card for the whole run.
+        guard inBackground, !scheduledWindow, !transferAssertions.isEmpty,
+              !backgroundWindowClosing else { return }
         let remaining = UIApplication.shared.backgroundTimeRemaining
         // Clamp by MAGNITUDE: `.greatestFiniteMagnitude` passes `isFinite` (see the CLAUDE.md landmine —
         // converting it crashed the app), and it is also what this API reports when it has no real value,
@@ -2899,6 +2928,126 @@ final class DownloadManager {
         // and a diagnostic is not worth a build cycle. `finishTasksAndInvalidate` would be wrong here —
         // it lets the tasks keep running against a session with no delegate.
         legacy.invalidateAndCancel()
+    }
+
+    // MARK: - Scheduled resume (BGProcessingTask)
+    //
+    // What this is and is NOT. iOS runs a processing task only when it decides the device is IDLE, and
+    // documents that it TERMINATES one the moment the user starts using the device. There is no way to
+    // ask for it sooner and no guarantee it ever runs. So this does not make a download finish while the
+    // phone is in use, and it does not start when the app is backgrounded.
+    //
+    // What it buys: while the phone sits untouched, iOS wakes Stashy and grants it minutes instead of
+    // the 25.57 s a `beginBackgroundTask` assertion gets (device-measured 2026-07-26). Because every
+    // chunk is already durable and resumes byte-exact from the part file, a multi-gigabyte transfer
+    // converges across a handful of idle windows instead of stalling forever. A catch-up path, not an
+    // unattended-now path. (Cellular is fine — "wifi and charging only" is folklore; both are opt-in
+    // launch predicates and we set neither.)
+
+    /// MUST match `BGTaskSchedulerPermittedIdentifiers` in `ios/project.yml`. A mismatch makes `register`
+    /// return false at runtime with no compile-time signal — hence `dl-bg-register`.
+    static let scheduledResumeID = "com.nphil.stashy.downloads.resume"
+
+    /// Registered exactly once, from `AppDelegate.application(_:didFinishLaunchingWithOptions:)`.
+    /// Registering the same identifier twice is documented to KILL the app — never call this from a
+    /// settings toggle, a retry path, or a view.
+    static func registerScheduledResume() {
+        // `using: DispatchQueue.main` is load-bearing. The launch handler is NOT a `@Sendable` parameter,
+        // so a bare closure written here would silently inherit MainActor isolation and then be invoked
+        // on iOS's own queue. Pinning the queue is what makes `assumeIsolated` honest — the same reason
+        // `observeAppPhase()` passes `queue: .main`.
+        let ok = BGTaskScheduler.shared.register(
+            forTaskWithIdentifier: scheduledResumeID,
+            using: DispatchQueue.main
+        ) { @Sendable task in
+            let box = UncheckedSendableBox(task)          // BGTask is not Sendable
+            MainActor.assumeIsolated { DownloadManager.shared.runScheduledResume(box.value) }
+        }
+        RemoteLog.shared.event("dl-bg-register", [("ok", ok ? 1 : 0)])
+    }
+
+    /// Ask iOS for an idle-time window if anything is genuinely outstanding.
+    private func scheduleResumeIfNeeded() {
+        let fm = FileManager.default
+        guard items.contains(where: {
+            ($0.state == .downloading || $0.state == .waitingForNetwork || $0.state == .paused)
+                && fm.fileExists(atPath: activeURL($0.id).path)
+                && !fm.fileExists(atPath: userPausedURL($0.id).path)
+        }) else { return }
+
+        let request = BGProcessingTaskRequest(identifier: Self.scheduledResumeID)
+        request.requiresNetworkConnectivity = true
+        // Launch PREDICATES, not grants. Leaving power false only means we add no charger requirement of
+        // our own; iOS still applies its own idle/thermal/battery policy on top.
+        request.requiresExternalPower = false
+        request.earliestBeginDate = Date().addingTimeInterval(60)
+        do {
+            try BGTaskScheduler.shared.submit(request)
+            RemoteLog.shared.event("dl-bg-submit", [("ok", 1)])
+        } catch {
+            RemoteLog.shared.event("dl-bg-submit", [("ok", 0), ("err", "\(error)")])
+        }
+    }
+
+    /// Runs on the main actor inside an iOS-granted idle window.
+    func runScheduledResume(_ task: BGTask) {
+        // Re-arm FIRST. An expiration kill never reaches the bottom of this function, and a run that
+        // completes without re-submitting would fire exactly once for the life of the install.
+        scheduleResumeIfNeeded()
+
+        let box = UncheckedSendableBox(task)
+        // `setTaskCompleted` must be called exactly once; the expiration handler and the watcher below
+        // genuinely race. `OSAllocatedUnfairLock` is Sendable, so both closures may hold it.
+        let completed = OSAllocatedUnfairLock(initialState: false)
+        let complete: @Sendable (Bool) -> Void = { success in
+            let already = completed.withLock { state -> Bool in
+                defer { state = true }
+                return state
+            }
+            guard !already else { return }
+            box.value.setTaskCompleted(success: success)
+        }
+
+        task.expirationHandler = {
+            // Must return SYNCHRONOUSLY — no actor hop, no await, no ActivityKit. Costs nothing: every
+            // chunk this path writes is already appended to our part file, so the next run re-reads the
+            // part size and resumes with a Range header from the exact byte.
+            RemoteLog.shared.event("dl-bg-sched-expire", [])
+            complete(false)
+        }
+
+        let fm = FileManager.default
+        let eligible = items.filter {
+            ($0.state == .paused || $0.state == .waitingForNetwork || $0.state == .downloading)
+                && foregroundTasks[$0.id] == nil
+                && fm.fileExists(atPath: activeURL($0.id).path)
+                && !fm.fileExists(atPath: userPausedURL($0.id).path)
+        }
+        RemoteLog.shared.event("dl-bg-sched", [("items", eligible.count)])
+        guard !eligible.isEmpty else { complete(true); return }
+
+        scheduledWindow = true
+        for item in eligible {
+            // NEVER re-test the daemon from a scheduled run. `foregroundFallback` is in-memory and empty
+            // in a fresh process, and `daemonHandoverBroken`'s stamp is keyed on OS version + session
+            // identifier — so the first scheduled run after an iOS point release would otherwise take the
+            // daemon path, eat a -3000, strand ~70 MB outside the container, and spend the whole
+            // unattended window growing "System Data". Only a foreground session, where a -3000 costs the
+            // user one second, may re-test that verdict.
+            foregroundFallback.insert(item.id)
+            startForegroundFallback(item)
+        }
+
+        Task { @MainActor [weak self] in
+            while true {
+                guard let self, self.scheduledWindow,
+                      self.items.contains(where: { $0.state == .downloading }) else { break }
+                try? await Task.sleep(for: .seconds(2))
+            }
+            self?.scheduledWindow = false
+            RemoteLog.shared.flushNow()   // the periodic timer is frozen while suspended
+            complete(true)
+        }
     }
 
     /// Keep large offline media out of iCloud/iTunes backups.
