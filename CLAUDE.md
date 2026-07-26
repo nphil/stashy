@@ -209,6 +209,21 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   delivered — that IS the "System Data" growth. So v1.0.327 stops retrying: one -3000 with nothing
   durable condemns the transport, the verdict persists (OS-version-stamped, so an iOS update re-tests),
   and every later download goes in-process. The in-process path also holds a background assertion now.
+- **v1.0.332 — the LAST cheap -3000 experiment is live: a NEW background session identifier**
+  (`com.nphil.stashy.downloads` → `…downloads.v2`). `nsurlsessiond` keeps per-(bundle id, session id)
+  state OUTSIDE the container, so a reinstall/reboot/version bump all leave it intact — and the original
+  identifier was in place for the very FIRST build that produced a -3000 and never changed since. If that
+  record was malformed from birth, nothing tried so far could have cleared it; a new string forces a
+  fresh one. The `daemonHandoverBroken` verdict is now stamped with **OS version + session identifier**,
+  so changing the id auto-re-enables the daemon (otherwise the latch would block the experiment).
+  `retireLegacySession()` attaches to the old id once and `invalidateAndCancel()`s it, which is the only
+  way to hand back the partials it stranded. **Read `dl-err`/`dl-begin` on the next download: a slice
+  that lands = the record was poisoned and the daemon is BACK (keep the id, delete the in-process
+  fallback's primacy); another -3000 = confirmed OS-side, and do NOT bump the suffix again.**
+  Also new: `dl-bg-window` (iOS's ACTUAL background grant in seconds + bytes outstanding, logged on
+  entering background — the value reads `.greatestFiniteMagnitude` in the foreground, so this is the only
+  honest moment) and `dl-bg-expired` (the assertion running out, which has NEVER been observed — the
+  29.7 s figure was a download FINISHING, a floor not a ceiling; stop quoting "~30 s" as measured).
 - **RESOLVED 2026-07-25, v1.0.328 device traces — downloads work, and the -3000 is NOT the app's fault.**
   `dl-probe` measured the daemon's actual delivery path at the moment of failure:
   `root=1 downloads=1 mine=1 mkdir=ok write=ok`, bundle `com.nphil.stashy` (NOT rewritten by the

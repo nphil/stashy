@@ -9,7 +9,19 @@ import Observation
 /// `AppDelegate.application(_:handleEventsForBackgroundURLSession:completionHandler:)` and
 /// `DownloadDelegate.urlSessionDidFinishEvents`.
 enum BackgroundDownloadSession {
-    static let identifier = "com.nphil.stashy.downloads"
+    /// **The `-3000` experiment (v1.0.332).** `nsurlsessiond` keeps per-(bundle id, session identifier)
+    /// state OUTSIDE the app container, so a reinstall, a reboot and a version bump all leave it intact.
+    /// The original identifier — `com.nphil.stashy.downloads` — was in place for the very first build that
+    /// ever produced a -3000 and never changed since, so if that record was malformed from birth, nothing
+    /// we have tried could have cleared it. A NEW string makes the daemon build a fresh one.
+    ///
+    /// This is the last cheap hypothesis standing: the delivery directory is present and writable by us,
+    /// the bundle id is intact, and no code path here can emit -3000 (see ENGINEERING_NOTES §3). Held back
+    /// until the probe had reported, so the two experiments could not confound each other.
+    ///
+    /// If a suffixed identifier delivers a file, keep it and record why. If it fails identically, the
+    /// verdict is confirmed OS-side — do NOT keep bumping the suffix hoping for a different answer.
+    static let identifier = "com.nphil.stashy.downloads.v2"
     /// Set on the main thread by the app delegate; called (and cleared) on the main thread once the
     /// session reports it has delivered every queued event. `nonisolated(unsafe)` because it is only ever
     /// touched on the main thread.
@@ -471,18 +483,25 @@ final class DownloadManager {
         get {
             let defaults = UserDefaults.standard
             guard defaults.bool(forKey: "daemonHandoverBroken") else { return false }
-            guard defaults.string(forKey: "daemonHandoverBrokenOS") == UIDevice.current.systemVersion
-            else {
-                defaults.set(false, forKey: "daemonHandoverBroken")   // new OS → give it another chance
+            guard defaults.string(forKey: "daemonHandoverBrokenStamp") == Self.handoverStamp else {
+                defaults.set(false, forKey: "daemonHandoverBroken")   // conditions changed → re-test
                 return false
             }
             return true
         }
         set {
-            let defaults = UserDefaults.standard
-            defaults.set(newValue, forKey: "daemonHandoverBroken")
-            defaults.set(UIDevice.current.systemVersion, forKey: "daemonHandoverBrokenOS")
+            UserDefaults.standard.set(newValue, forKey: "daemonHandoverBroken")
+            UserDefaults.standard.set(Self.handoverStamp, forKey: "daemonHandoverBrokenStamp")
         }
+    }
+
+    /// A verdict is only valid for the conditions that produced it. Re-test when the OS changes (a point
+    /// release could fix the hand-over) OR when the session identifier changes — the latter makes the
+    /// daemon build a fresh per-session record, which is the whole point of the v1.0.332 experiment and
+    /// could not otherwise run: the latched verdict from the old identifier would keep the daemon
+    /// switched off forever, on a device where the retest button no longer exists.
+    private static var handoverStamp: String {
+        "\(UIDevice.current.systemVersion)|\(BackgroundDownloadSession.identifier)"
     }
     /// Items whose transfer ran in THIS session and hasn't finished — the ones whose Live Activity card
     /// must survive a stall instead of vanishing. See `liveActivityState()`.
@@ -603,6 +622,8 @@ final class DownloadManager {
 
         inBackground = UIApplication.shared.applicationState == .background
 
+
+        Self.retireLegacySession()
 
         loadCompleted()
         loadInterrupted()      // rebuild in-flight items from sidecars so relaunch callbacks find them
@@ -1771,6 +1792,10 @@ final class DownloadManager {
             // Must end SYNCHRONOUSLY or iOS kills the app; the map is tidied on a hop afterwards so a
             // later release can't end an already-expired identifier a second time.
             if bg != .invalid { UIApplication.shared.endBackgroundTask(bg) }
+            // The ONLY moment that proves we ran out of window rather than finishing. Until this fires,
+            // every "~30 s limit" claim about this app is folklore — the one long transfer we have
+            // measured completed at 29.7 s, which is a floor, not the ceiling.
+            RemoteLog.shared.event("dl-bg-expired", [("item", itemID)])
             Task { @MainActor in self?.transferAssertions[itemID] = nil }
         }
         guard bg != .invalid else { return }
@@ -2195,6 +2220,17 @@ final class DownloadManager {
         // going while we're suspended and which relaunches us to deliver the finished file. The Live
         // Activity carries on from its measured ETA until we run again and can push real bytes.
         let live = items.filter { $0.state == .downloading }
+        // How much background runtime iOS ACTUALLY grants this device, measured at the only moment the
+        // value is meaningful (it reads `.greatestFiniteMagnitude` while in the foreground). Paired with
+        // the bytes still outstanding, this says whether the in-process transport can realistically
+        // finish a transfer unattended — the open question for slow cellular.
+        if !live.isEmpty, !transferAssertions.isEmpty {
+            let remaining = UIApplication.shared.backgroundTimeRemaining
+            let outstanding = live.reduce(Int64(0)) { $0 + max(0, $1.totalBytes - $1.receivedBytes) }
+            RemoteLog.shared.event("dl-bg-window", [
+                ("secs", remaining.isFinite ? Int(remaining) : nil),
+                ("left", outstanding), ("items", live.count)])
+        }
         RemoteLog.shared.event("dl-phase", [("to", "background"), ("active", live.count)])
         for item in live { partCensus(item, "enter-bg") }
         syncLiveActivity()
@@ -2790,6 +2826,31 @@ final class DownloadManager {
     }
 
     // MARK: - Files
+
+    /// Release the daemon state belonging to the retired `…downloads` session identifier (v1.0.332).
+    ///
+    /// Changing the identifier makes `nsurlsessiond` build a fresh record, but the OLD one keeps whatever
+    /// it was holding — and on this device that is a run of failed transfers whose bytes were stranded
+    /// outside our container (~70 MB per attempt; the "System Data" growth). Nothing else will ever
+    /// reclaim them: they are unreachable by path, and the new session cannot see the old session's
+    /// tasks. Attaching to the old identifier once and invalidating it is the only way to hand them back.
+    ///
+    /// Runs once, guarded by a flag, because attaching to a background session identifier is not free.
+    private static func retireLegacySession() {
+        let key = "retiredLegacyDownloadSession"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        let legacy = URLSession(
+            configuration: .background(withIdentifier: "com.nphil.stashy.downloads"),
+            delegate: nil, delegateQueue: nil)
+        RemoteLog.shared.event("dl-legacy-retire", [("id", "com.nphil.stashy.downloads")])
+        // Cancels every outstanding task AND tears the session down, which is what frees the daemon's
+        // partials. Deliberately NOT wrapped in a `getAllTasks` closure to report a count:
+        // `URLSession` is not Sendable, so capturing it in that `@Sendable` handler is a Swift 6 error,
+        // and a diagnostic is not worth a build cycle. `finishTasksAndInvalidate` would be wrong here —
+        // it lets the tasks keep running against a session with no delegate.
+        legacy.invalidateAndCancel()
+    }
 
     /// Keep large offline media out of iCloud/iTunes backups.
     nonisolated private static func excludeFromBackup(_ url: URL) {
