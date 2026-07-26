@@ -115,6 +115,11 @@ final class DownloadItem: Identifiable {
     /// an "Analyzing quality · X%" status distinct from the encode phase. `serverJobProgress` carries the
     /// analysis % during this phase, then restarts for the encode.
     var analyzing = false
+    /// True while this companion transcode is WAITING for the one server GPU — in `companionQueue`, not
+    /// yet `companionActiveID`. Distinguishes "waiting for the server" from "the server is working on
+    /// this one" WITHOUT a new `DownloadState` case, which would mean touching the three exhaustive
+    /// switches in `DownloadsView` plus the keep-alive predicate.
+    var companionQueued = false
     /// Achieved VMAF (phone model) of a completed server transcode, for the small Downloads badge. In-memory
     /// like `wasTranscoded` (not persisted to the sidecar), so it shows for the session after a transcode.
     var vmaf: Double?
@@ -717,7 +722,8 @@ final class DownloadManager {
         guard item.state == .staged, let scene = item.scene else { return }
         let apiKey = item.apiKey
         if let codec = item.companionCodec {
-            runCompanionTranscode(item, scene: scene, codec: codec)
+            enqueueCompanion(item, scene: scene, codec: codec)
+            pumpCompanionQueue()   // runs it immediately when the server is free; otherwise it waits
             return
         }
         if item.useServerTranscode {
@@ -773,14 +779,7 @@ final class DownloadManager {
                 item.companionCodec = codec
                 item.serverResolution = res
                 item.companionQuality = quality
-                item.state = .serverProcessing      // reuse the existing server-processing card
-                item.serverJobProgress = 0
-                item.transcodeStatus = "Queued…"
-                // Persist the queued item (jobID nil = not yet started) + mark active so a kill/relaunch
-                // restores it and resumes the queue — fire-and-forget overnight transcoding.
-                persistServerSidecar(item, scene: scene, codec: codec)
-                markActive(item.id)
-                companionQueue.append(item.id)
+                enqueueCompanion(item, scene: scene, codec: codec)
             }
         }
         pumpCompanionQueue()
@@ -839,6 +838,27 @@ final class DownloadManager {
         pumpTransferQueue()
     }
 
+    /// Put a companion (plugin) transcode into the serial queue.
+    ///
+    /// The ONLY legal way to begin one. `runCompanionTranscode` has no gate of its own — it never checks
+    /// `companionActiveID` and calls the plugin immediately — so every caller must come through here or
+    /// N staged cards fire N simultaneous jobs at the one server GPU, which is precisely the invariant
+    /// `companionQueue` exists to hold.
+    private func enqueueCompanion(_ item: DownloadItem, scene: StashScene, codec: StashCompanion.Codec) {
+        item.state = .serverProcessing      // reuse the existing server-processing card
+        item.serverJobProgress = 0
+        item.companionQueued = true
+        item.transcodeStatus = "Queued…"
+        // Set here, not only in `runCompanionTranscode`: a card that is still WAITING never reaches that
+        // function, and without a target label it falls through to a literal "Server transcoding · 0%".
+        item.transcodeTargetLabel = "\(codec.label) \(item.serverResolution.label)"
+        // Persist the queued item (jobID nil = not yet started) + mark active so a kill/relaunch
+        // restores it and resumes the queue — fire-and-forget overnight transcoding.
+        persistServerSidecar(item, scene: scene, codec: codec)
+        markActive(item.id)
+        if !companionQueue.contains(item.id) { companionQueue.append(item.id) }
+    }
+
     /// Start the next queued Companion transcode when the server is free (serial). Robust to items that were
     /// cancelled/removed while waiting (skipped).
     private func pumpCompanionQueue() {
@@ -849,6 +869,7 @@ final class DownloadManager {
                   item.state == .serverProcessing, let scene = item.scene,
                   let codec = item.companionCodec else { continue }
             companionActiveID = id
+            item.companionQueued = false
             item.transcodeStatus = ""
             runCompanionTranscode(item, scene: scene, codec: codec)
             return
@@ -859,6 +880,7 @@ final class DownloadManager {
     /// single (non-bulk) download — its id is never `companionActiveID` and isn't in the queue.
     private func releaseCompanionSlot(_ itemID: String) {
         companionQueue.removeAll { $0 == itemID }
+        items.first { $0.id == itemID }?.companionQueued = false
         if companionActiveID == itemID {
             companionActiveID = nil
             pumpCompanionQueue()
@@ -911,8 +933,10 @@ final class DownloadManager {
                     item.state = .failed
                     item.error = "Companion plugin: \(error.localizedDescription)"
                     clearActive(item.id)
-                    releaseCompanionSlot(item.id)
                 }
+                // Outside the state check: a slot left pinned to a dead item blocks EVERY future
+                // transcode until relaunch, since `pumpCompanionQueue` guards on `companionActiveID == nil`.
+                releaseCompanionSlot(item.id)
             }
         }
     }
@@ -944,7 +968,10 @@ final class DownloadManager {
         var qualityLogged = false   // the one-time "which VMAF map entry decided the cq" log line
         while true {
             try? await Task.sleep(for: .milliseconds(1800))
-            guard item.state == .serverProcessing else { return }   // cancelled / deleted / paused
+            guard item.state == .serverProcessing else {
+                releaseCompanionSlot(item.id)   // cancelled / deleted / paused — don't pin the server slot
+                return
+            }
             let update: CompanionUpdate
             do {
                 update = try await companion.poll(jobID: jobID, sceneID: scene.id)
@@ -952,7 +979,7 @@ final class DownloadManager {
                 networkFails += 1
                 if networkFails > 40 {   // ~72s of continuous failures → give up (offline / server down)
                     item.state = .failed; item.error = "Lost contact with the server transcode"
-                    clearActive(item.id); return
+                    clearActive(item.id); releaseCompanionSlot(item.id); return
                 }
                 continue   // transient network blip — keep trying
             }
@@ -1272,7 +1299,8 @@ final class DownloadManager {
         // A companion transcode that failed BEFORE any bytes arrived means the plugin job itself failed —
         // re-run the plugin rather than trying to byte-download a file that was never produced.
         if let codec = item.companionCodec, item.receivedBytes == 0, let scene = item.scene {
-            runCompanionTranscode(item, scene: scene, codec: codec)
+            enqueueCompanion(item, scene: scene, codec: codec)
+            pumpCompanionQueue()
             return
         }
         // stop() (or a prior-launch orphan sweep) may have removed the sidecar. Re-fetch it from the
@@ -1328,6 +1356,7 @@ final class DownloadManager {
     }
 
     func delete(_ item: DownloadItem) {
+        cancelCompanionJob(item)   // before the state change: it reads `companionJobID`
         item.state = .stopped   // makes any in-flight companion poll loop exit before we drop the item
         cancelTasks(item, produceResumeData: false)
         // Stop any in-flight transcode (and wipe its chunk work dir) so it doesn't keep writing to a file
@@ -1339,6 +1368,7 @@ final class DownloadManager {
         cleanupMeta(item.id)
         items.removeAll { $0.id == item.id }
         releaseTransferSlot(item.id)
+        releaseCompanionSlot(item.id)   // free the one server GPU for the next queued transcode
         syncLiveActivity()
     }
 
@@ -2174,6 +2204,7 @@ final class DownloadManager {
                 fractions.append(item.totalBytes > 0
                                  ? min(1, Double(item.receivedBytes) / Double(item.totalBytes)) : 0)
             case .serverProcessing:
+                if item.companionQueued { break }   // waiting for the GPU: 0% is a wait, not progress
                 fractions.append(min(1, max(0, item.serverJobProgress)))
             case .merging:
                 fractions.append(1)
@@ -2998,7 +3029,9 @@ final class DownloadManager {
                 item.companionQuality = CompanionQuality(rawValue: sidecar.companionQuality ?? "medium") ?? .medium
                 item.state = .serverProcessing
                 item.serverJobProgress = 0
+                item.companionQueued = true
                 item.transcodeStatus = "Queued…"
+                item.transcodeTargetLabel = "\(codec.label) \(item.serverResolution.label)"
                 items.append(item)
                 companionQueue.append(item.id)
                 continue

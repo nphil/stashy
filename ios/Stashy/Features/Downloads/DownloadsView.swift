@@ -174,7 +174,11 @@ private struct DownloadCard: View {
                     VStack(alignment: .leading, spacing: 8) {
                         specsFlow
                         if item.transcoding { transcodeBar }
-                        else if item.state == .serverProcessing { serverProcessingBar }
+                        else if item.state == .serverProcessing {
+                            // A card WAITING for the one server GPU gets no bar — a determinate bar
+                            // pinned at 0% for an hour reads as a hung server, not as a queue.
+                            if !item.companionQueued { serverProcessingBar }
+                        }
                         else if item.state != .completed {
                             if item.totalBytes > 0 { connectionBar } else { estimateBar }
                         }
@@ -478,7 +482,10 @@ private struct DownloadCard: View {
                     iconButton("arrow.down.to.line", tint: themeManager.current.accentColor) { downloads.beginStaged(item) }
                     iconButton("trash", tint: .red) { downloads.delete(item) }
                 case .serverProcessing:
-                    ProgressView().controlSize(.small)
+                    // No play button for a waiter: `startNow` guards on `.queued` so it would be a silent
+                    // dead tap, and loosening that guard would byte-download the ORIGINAL file (stage()
+                    // set the url/size from the direct file), discarding the chosen codec and resolution.
+                    if !item.companionQueued { ProgressView().controlSize(.small) }
                     iconButton("stop.fill", tint: .red) { downloads.stop(item) }
                 case .downloading:
                     iconButton("pause.fill") { downloads.pause(item) }
@@ -590,6 +597,7 @@ private struct DownloadCard: View {
         case .staged:
             return item.companionCodec != nil ? "Ready to transcode" : "Ready to download"
         case .serverProcessing:
+            if item.companionQueued { return "Queued for server transcode" }
             let pct = Int(item.serverJobProgress * 100)
             if item.analyzing { return "Analyzing quality · \(pct)%" }
             if let target = item.transcodeTargetLabel { return "Transcoding → \(target) · \(pct)%" }
