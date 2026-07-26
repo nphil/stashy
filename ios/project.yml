@@ -53,8 +53,24 @@ targets:
         # returns false and the feature is silently dead, which is why it is logged as `dl-bg-register`.
         # The identifier must match `DownloadManager.scheduledResumeID` exactly. Never a wildcard form:
         # that notation belongs to BGContinuedProcessingTask and raises an uncatchable ObjC exception.
+        # `audio` is not only about user media playback: it is the runtime grant that lets the process
+        # keep running while a download is in flight (DownloadKeepAlive holds an active AVAudioSession
+        # and re-arms `beginBackgroundTask` on a 10 s cycle). A plist DECLARATION, not an entitlement —
+        # policed at App Store review, which a sideloaded IPA never faces — so unlike the -3000 daemon
+        # hand-over and BGContinuedProcessingTask it isn't gated on a signing privilege we don't have.
+        # Proven shipping technique: XITRIX/iTorrent declares [audio, fetch, processing] and does
+        # exactly this with zero `com.apple.developer.*` entitlements.
+        # Possible side effect, UNVERIFIED: the key may let video audio keep playing when the app is
+        # backgrounded mid-playback. Unlikely as written — the player is AVPlayerLayer-attached
+        # (AVPlaybackEngine `layerClass`) and `audiovisualBackgroundPlaybackPolicy` is left at
+        # `.automatic`, which Apple documents only as "the system decides". Check on device, and do NOT
+        # read either outcome as evidence about whether the key itself took effect. Don't "fix" it by
+        # setting `.continuesIfPossible` either: this key is unconditional while the keep-alive is
+        # opt-in, so that would give background audio to every user with the toggle OFF and break the
+        # invariant that off is byte-identical to before.
         UIBackgroundModes:
           - processing
+          - audio
         BGTaskSchedulerPermittedIdentifiers:
           - com.nphil.stashy.downloads.resume
           # BGContinuedProcessingTask (iOS 26) — EXPERIMENTAL, off by default behind a Settings toggle.
