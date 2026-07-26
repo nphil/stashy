@@ -2126,10 +2126,20 @@ final class DownloadManager {
             let progress = item.totalBytes > 0
                 ? min(1, max(0, Double(item.receivedBytes) / Double(item.totalBytes)))
                 : nil
+            // `.waitingForNetwork` covers two very different waits, and blaming the connection for both
+            // is a lie the owner would read on the Lock Screen while their wifi is plainly fine. If the
+            // network path is satisfied, the transfer is parked because the app isn't running — the
+            // in-process transport gets iOS's background grace and no more. Say which it is, and say
+            // that the bytes already saved are safe either way.
+            let saved: String = item.receivedBytes > 0
+                ? " · \(Self.bytesLabel(item.receivedBytes)) saved" : ""
+            let status: String = pathSatisfied
+                ? "Paused — open Stashy to continue\(saved)"
+                : "Resumes automatically when the connection returns\(saved)"
             return .init(
                 phase: .waitingForNetwork, progress: progress,
                 estimatedStart: nil, estimatedEnd: nil, updatedAt: now,
-                status: "Resumes automatically when the connection returns", activeJobCount: count
+                status: status, activeJobCount: count
             )
 
         case .merging:
