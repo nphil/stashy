@@ -489,7 +489,12 @@ private struct DownloadCard: View {
                 case .failed, .stopped:
                     iconButton("arrow.clockwise") { downloads.retry(item) }
                     iconButton("trash", tint: .red) { downloads.delete(item) }
-                case .merging, .queued:
+                case .queued:
+                    // The manual override the queue exists to allow: start this one now, ahead of its
+                    // turn, alongside whatever is already running.
+                    iconButton("play.fill") { downloads.startNow(item) }
+                    iconButton("stop.fill", tint: .red) { downloads.stop(item) }
+                case .merging:
                     ProgressView().controlSize(.small)
                 case .completed:
                     iconButton("wand.and.stars") { showTranscode = true }   // on-device transcode
@@ -589,7 +594,11 @@ private struct DownloadCard: View {
             if item.analyzing { return "Analyzing quality · \(pct)%" }
             if let target = item.transcodeTargetLabel { return "Transcoding → \(target) · \(pct)%" }
             return "Server transcoding · \(pct)%"
-        case .queued: return "Queued…"
+        case .queued:
+            let saved = item.receivedBytes > 0
+                ? " · \(ByteCountFormatter.string(fromByteCount: item.receivedBytes, countStyle: .file)) saved"
+                : ""
+            return "Queued — starts when the current download finishes\(saved)"
         case .downloading:
             if item.totalBytes == 0 {   // live server transcode: no size is known — show real bytes + speed
                 let got = ByteCountFormatter.string(fromByteCount: item.receivedBytes, countStyle: .file)

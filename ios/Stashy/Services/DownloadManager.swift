@@ -788,6 +788,59 @@ final class DownloadManager {
         pumpCompanionQueue()
     }
 
+    // MARK: - Serial transfer queue
+
+    /// Ids waiting their turn to transfer, in the order they were asked for. The item currently moving
+    /// bytes is not in here — it is simply the one in `.downloading`.
+    @ObservationIgnored private var transferQueue: [String] = []
+    /// Ids the user explicitly started from a queued card. They bypass the gate exactly once, which is
+    /// what makes "unless I manually click resume/start" work without reordering the queue behind them.
+    @ObservationIgnored private var handStarted: Set<String> = []
+
+    /// Whether this item has to wait. A hand-started item never waits — that is the owner's override, and
+    /// it deliberately runs ALONGSIDE whatever is already downloading rather than displacing it.
+    private func serialQueueGateApplies(to item: DownloadItem) -> Bool {
+        if handStarted.remove(item.id) != nil { return false }
+        return items.contains { $0.id != item.id && $0.state == .downloading }
+    }
+
+    /// Start a queued download right now, ahead of its turn. Bound to the play button on a queued card.
+    func startNow(_ item: DownloadItem) {
+        guard item.state == .queued else { return }
+        transferQueue.removeAll { $0 == item.id }
+        handStarted.insert(item.id)
+        trace("dl-queue-override", [("item", item.id), ("depth", transferQueue.count)])
+        startConnections(item)
+    }
+
+    /// Promote the next waiting transfer. Called wherever a download stops occupying the single slot —
+    /// completion, failure, stop, pause — and robust to items cancelled or deleted while they waited.
+    ///
+    /// The keep-alive is (re)started here, not only from `enterBackground`. Without that, the moment
+    /// between item A's last byte and item B's first would leave nothing in `.downloading`, the pump's
+    /// predicate would go false, it would tear down, and iOS would suspend the app mid-queue — silently
+    /// halving the feature. `start(while:)` no-ops when it is already running or not needed.
+    private func pumpTransferQueue() {
+        guard !transferQueue.isEmpty else { return }   // cheapest check first: this runs from poll()
+        guard !items.contains(where: { $0.state == .downloading }) else { return }
+        while !transferQueue.isEmpty {
+            let id = transferQueue.removeFirst()
+            guard let next = items.first(where: { $0.id == id }), next.state == .queued else { continue }
+            trace("dl-queue-next", [("item", id), ("depth", transferQueue.count)])
+            handStarted.insert(id)          // it IS this item's turn — don't re-queue it in the gate
+            startConnections(next)
+            if inBackground { startKeepAliveIfNeeded() }
+            return
+        }
+    }
+
+    /// Drop an item out of the queue entirely (deleted, stopped, or finished) and let the next one run.
+    private func releaseTransferSlot(_ itemID: String) {
+        transferQueue.removeAll { $0 == itemID }
+        handStarted.remove(itemID)
+        pumpTransferQueue()
+    }
+
     /// Start the next queued Companion transcode when the server is free (serial). Robust to items that were
     /// cancelled/removed while waiting (skipped).
     private func pumpCompanionQueue() {
@@ -1248,6 +1301,7 @@ final class DownloadManager {
     func stop(_ item: DownloadItem) {
         cancelCompanionJob(item)   // if a server transcode is still running, tell Stash to stop it
         releaseCompanionSlot(item.id)   // free the serial bulk-transcode slot (no-op for non-bulk)
+        releaseTransferSlot(item.id)    // and let the next queued download start straight away
         cancelTasks(item, produceResumeData: false)
         releaseResumeBlob(item.id)   // otherwise the daemon keeps this download's partial file forever
         item.state = .stopped
@@ -1286,6 +1340,7 @@ final class DownloadManager {
         cleanupParts(item.id)
         cleanupMeta(item.id)
         items.removeAll { $0.id == item.id }
+        releaseTransferSlot(item.id)
         syncLiveActivity()
     }
 
@@ -1600,6 +1655,23 @@ final class DownloadManager {
     }
 
     private func startConnections(_ item: DownloadItem) {
+        // SERIAL GATE. Five separate fan-out sites can start transfers (`bulkDownload`, foreground
+        // revival, network recovery, the scheduled-resume window, and plain user taps), and every one of
+        // them iterates and launches EVERY eligible item. Gating them individually would be defeated by
+        // the next path someone adds, so the gate lives here — the single funnel all five reach.
+        //
+        // This is not only a UX preference. `fgSession` sets no `httpMaximumConnectionsPerHost`, so it
+        // inherits the default of 6: queuing several downloads used to open six concurrent streams to
+        // the owner's server, which benchmarked ~2× SLOWER than one stream (v1.0.313, ~32 MB/s single vs
+        // ~14 MB/s eight-way). One at a time is also simply faster.
+        if serialQueueGateApplies(to: item) {
+            item.state = .queued
+            item.error = nil
+            if !transferQueue.contains(item.id) { transferQueue.append(item.id) }
+            trace("dl-queued", [("item", item.id), ("depth", transferQueue.count)])
+            syncLiveActivity()
+            return
+        }
         if item.totalBytes > 0, item.connections.first?.total != item.totalBytes {
             item.rebuildConnections(totalBytes: item.totalBytes)
         }
@@ -1864,6 +1936,25 @@ final class DownloadManager {
         for id in Array(transferAssertions.keys) { releaseTransferAssertion(id) }
     }
 
+    /// Put the keep-alive in charge of the background window while there is any transfer work left.
+    ///
+    /// The predicate counts `.queued` and `.merging` as work, not just `.downloading`. That is the whole
+    /// reason a serial queue is safe: without them the pump would tear down in the gap between one
+    /// download's last byte and the next one's first, iOS would suspend the app, and a queue of ten
+    /// items would finish exactly one. `.merging` matters for the same reason at the tail of each item.
+    private func startKeepAliveIfNeeded() {
+        DownloadKeepAlive.shared.start { [weak self] in
+            guard let self else { return false }
+            return self.items.contains {
+                $0.state == .downloading || $0.state == .waitingForNetwork ||
+                $0.state == .queued || $0.state == .merging
+            }
+        }
+        // Its renewal only resets the window when nothing else is outstanding, so any per-item
+        // assertions taken while we were in the foreground must be released now.
+        if DownloadKeepAlive.shared.isRunning { releaseAllTransferAssertions() }
+    }
+
     private func register(_ task: URLSessionTask, item: DownloadItem, conn: Int, engine: TransferEngine,
                           base: Int64, expected: Int64, rangeRequest: Bool) {
         let part = partURL(item.id, conn)
@@ -2037,7 +2128,13 @@ final class DownloadManager {
     var downloadsScreenVisible = false
     /// Any download / merge / transcode currently in progress.
     var hasActiveWork: Bool {
-        items.contains { $0.state == .downloading || $0.state == .merging || $0.state == .serverProcessing || $0.transcoding }
+        // `.queued` counts: with the serial queue a batch spends most of its life with one item moving
+        // and the rest waiting, and an idle-sleep in that window would background the app and pause a
+        // foreground-only transcode. It also keeps the floating status button visible for the whole run.
+        items.contains {
+            $0.state == .downloading || $0.state == .queued || $0.state == .merging ||
+            $0.state == .serverProcessing || $0.transcoding
+        }
     }
     /// Keep the screen awake when the user is watching Downloads, or whenever work is happening — an
     /// idle-sleep backgrounds the app, which would pause a foreground-only transcode.
@@ -2161,7 +2258,7 @@ final class DownloadManager {
 
         let active = items.filter {
             $0.state == .downloading || $0.state == .waitingForNetwork ||
-            $0.state == .merging || $0.state == .serverProcessing ||
+            $0.state == .merging || $0.state == .serverProcessing || $0.state == .queued ||
             (($0.state == .paused || $0.state == .failed) && activityOwned.contains($0.id))
         }
         guard !active.isEmpty else { return nil }
@@ -2172,6 +2269,7 @@ final class DownloadManager {
             ?? active.first(where: { $0.state == .waitingForNetwork })
             ?? active.first(where: { $0.state == .merging })
             ?? active.first(where: { $0.state == .serverProcessing })
+            ?? active.first(where: { $0.state == .queued })
             ?? active.first!
         let now = Date.now
         let count = active.count
@@ -2268,6 +2366,21 @@ final class DownloadManager {
                 status: status, activeJobCount: count
             )
 
+        case .queued:
+            // Only ever featured in the gap between one transfer ending and the next starting. Ending the
+            // activity there and requesting a fresh one instead would visibly flicker the Lock Screen
+            // card once per queued item.
+            let waiting = transferQueue.count
+            return .init(
+                phase: .preparing, title: activityTitle(item),
+                receivedBytes: item.receivedBytes, totalBytes: item.totalBytes, speed: 0,
+                progress: item.totalBytes > 0
+                    ? min(1, max(0, Double(item.receivedBytes) / Double(item.totalBytes))) : nil,
+                estimatedStart: nil, estimatedEnd: nil, updatedAt: now,
+                status: waiting > 1 ? "Starting next of \(waiting) queued" : "Starting next download",
+                activeJobCount: count
+            )
+
         case .serverProcessing:
             let detail = item.transcodeStatus.isEmpty
                 ? (item.analyzing ? "Analyzing quality" : "Server is preparing the download")
@@ -2341,13 +2454,7 @@ final class DownloadManager {
         // app outlives the measured ~26 s grace — full reasoning in `DownloadKeepAlive`. The predicate
         // is re-checked each cycle, so it tears itself down within one tick of the last transfer
         // finishing; nothing here has to watch for that.
-        DownloadKeepAlive.shared.start { [weak self] in
-            guard let self else { return false }
-            return self.items.contains { $0.state == .downloading || $0.state == .waitingForNetwork }
-        }
-        // Its renewal only resets the window when nothing else is outstanding, so the per-item
-        // assertions taken while we were in the foreground must be released now.
-        if DownloadKeepAlive.shared.isRunning { releaseAllTransferAssertions() }
+        startKeepAliveIfNeeded()
         RemoteLog.shared.event("dl-phase", [("to", "background"), ("active", live.count)])
         for item in live { partCensus(item, "enter-bg") }
         syncLiveActivity()
@@ -2738,6 +2845,12 @@ final class DownloadManager {
     }
 
     private func poll() {
+        // Promote the next queued transfer. Deliberately ahead of every guard below, and deliberately a
+        // net rather than the only mechanism: an item can leave `.downloading` down a dozen paths
+        // (completion, merge, eight distinct failure sites, a stop, a delete), and a queue that stalls
+        // because one of them forgot to call the pump is a far worse bug than one cheap array check per
+        // tick. `pumpTransferQueue` returns immediately when the queue is empty, which is the norm.
+        pumpTransferQueue()
         // This poll only publishes UI progress; the transfer engines continue independently. Avoid its
         // 120 ms main-actor scan/update cadence while a library grid is delivering inertial frames.
         guard !BrowseScrollCoordinator.shared.isScrolling else { return }
@@ -3054,7 +3167,8 @@ final class DownloadManager {
     private func scheduleResumeIfNeeded() {
         let fm = FileManager.default
         guard items.contains(where: {
-            ($0.state == .downloading || $0.state == .waitingForNetwork || $0.state == .paused)
+            ($0.state == .downloading || $0.state == .waitingForNetwork || $0.state == .paused
+                || $0.state == .queued)
                 && fm.fileExists(atPath: activeURL($0.id).path)
                 && !fm.fileExists(atPath: userPausedURL($0.id).path)
         }) else { return }
