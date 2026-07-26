@@ -103,6 +103,13 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   (high RTT, loss, per-flow shaping); on a LAN it just makes an array seek. The `TransferBenchmark`
   harness that measured this (counterbalanced A B C C B A) was **removed once the verdict was in** —
   recover it from git history if a future link type ever makes the question live again. (§3)
+- **`Double.isFinite` does NOT guard `Int(_:)` — `greatestFiniteMagnitude` IS finite.** Only `.infinity`
+  and `.nan` fail `isFinite`, so `x.isFinite ? Int(x) : nil` still traps ("outside the representable
+  range") on the sentinel value. This crashed the app the instant it was backgrounded with a download
+  running (v1.0.332, fixed v1.0.333): `UIApplication.backgroundTimeRemaining` returns
+  `.greatestFiniteMagnitude` whenever no real value is available, and the crash happened BEFORE the
+  `dl-phase to=background` log, so the trace went silent with no clue — it read exactly like an iOS
+  suspension. **Clamp by magnitude, never by `isFinite`, before any Double→Int conversion.** (§2)
 - **Popovers:** never host from a conditional/churning view — use a stable ZStack sibling
   (`FilterPopoverAnchor` pattern). Bit us three times. (§6)
 - Most CI failures ever hit were **Swift 6 strict-concurrency** — read the patterns before writing

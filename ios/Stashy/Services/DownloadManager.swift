@@ -2225,11 +2225,17 @@ final class DownloadManager {
         // the bytes still outstanding, this says whether the in-process transport can realistically
         // finish a transfer unattended — the open question for slow cellular.
         if !live.isEmpty, !transferAssertions.isEmpty {
+            // `backgroundTimeRemaining` returns `.greatestFiniteMagnitude` whenever no real value is
+            // available — and that IS finite, so `isFinite` guards nothing. `Int(.greatestFiniteMagnitude)`
+            // is a fatal trap ("outside the representable range"), which crashed the app the instant it
+            // was backgrounded with a transfer running. Shipped in v1.0.332, fixed here. Clamp by
+            // MAGNITUDE, never by `isFinite`, before converting any Double to Int.
             let remaining = UIApplication.shared.backgroundTimeRemaining
+            let secs: Int? = (remaining.isFinite && remaining >= 0 && remaining < 86_400)
+                ? Int(remaining) : nil
             let outstanding = live.reduce(Int64(0)) { $0 + max(0, $1.totalBytes - $1.receivedBytes) }
             RemoteLog.shared.event("dl-bg-window", [
-                ("secs", remaining.isFinite ? Int(remaining) : nil),
-                ("left", outstanding), ("items", live.count)])
+                ("secs", secs), ("left", outstanding), ("items", live.count)])
         }
         RemoteLog.shared.event("dl-phase", [("to", "background"), ("active", live.count)])
         for item in live { partCensus(item, "enter-bg") }
