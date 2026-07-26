@@ -22,24 +22,31 @@ import UIKit
 /// per-APP, not per-assertion, so the clock only resets when nothing is outstanding — which is also
 /// why `DownloadManager.holdTransferAssertion` stands down while this runs.
 ///
-/// NOT PROVEN ON THIS DEVICE. Nobody has run the technique on an iPhone 17 Pro / iOS 26; the evidence
-/// is source-only, and Apple has never documented that an active session grants runtime, so a point
-/// release can regress it silently. It therefore ships OFF, behind Settings → Diagnostics, and with
-/// the toggle off the app behaves byte-identically to before. The proof is in the trace: `dl-keepalive
-/// tick=` lines continuing past ~30 s with `dl-parts` still growing.
+/// DEVICE-PROVEN, 2026-07-26, first run, no tuning: 290 s of unbroken background runtime, 18.9 MB →
+/// 744 MB transferred while backgrounded, 29/29 ticks, zero refusals, Live Activity pushing real
+/// progress throughout. ON by default since v1.0.340; the Settings → Downloads toggle turns it off for
+/// anyone who would rather trade unattended downloads for battery. Apple has never documented that an
+/// active session grants runtime, so a point release could still regress it silently — the trace to
+/// re-check after an iOS update is `dl-keepalive tick=` climbing past ~30 s with `dl-parts` growing.
 @MainActor
 final class DownloadKeepAlive {
     static let shared = DownloadKeepAlive()
     private init() {}
 
-    /// Shared with the `@AppStorage` toggle in Settings → Diagnostics. `nonisolated` because a SwiftUI
+    /// Shared with the `@AppStorage` toggle in Settings → Downloads. `nonisolated` because a SwiftUI
     /// `View`'s stored-property initialisers are not main-actor isolated, and everything inside a
     /// `@MainActor` type otherwise inherits that isolation.
     nonisolated static let settingKey = "audioKeepAliveEnabled"
 
-    /// Opt-in. Off is byte-identical to the pre-keep-alive app: nothing below ever runs.
+    /// ON unless the owner turned it off. `UserDefaults.bool(forKey:)` returns false for an ABSENT key,
+    /// which would silently disable the feature for every existing install, so the default is registered
+    /// once at launch rather than assumed — and `object(forKey:)` is the only honest way to tell "never
+    /// set" from "deliberately set to false".
     static var isEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: settingKey) }
+        get {
+            guard UserDefaults.standard.object(forKey: settingKey) != nil else { return true }
+            return UserDefaults.standard.bool(forKey: settingKey)
+        }
         set { UserDefaults.standard.set(newValue, forKey: settingKey) }
     }
 

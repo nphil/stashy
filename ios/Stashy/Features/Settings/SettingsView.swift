@@ -17,7 +17,7 @@ struct SettingsView: View {
     @State private var isClearingCache = false
     @AppStorage("animatedPreviews") private var animatedPreviews = true
     @AppStorage("appLockEnabled") private var appLockEnabled = false
-    @AppStorage(DownloadKeepAlive.settingKey) private var audioKeepAlive = false
+    @AppStorage(DownloadKeepAlive.settingKey) private var audioKeepAlive = true
     @AppStorage("privacyMode") private var privacyMode = false
     @AppStorage(Privacy.radiusKey) private var privacyBlurRadius = Privacy.defaultImageRadius
     @AppStorage("appSwitcherBlurEnabled") private var appSwitcherBlur = true
@@ -268,6 +268,18 @@ struct SettingsView: View {
                     Text("While scrubbing, a YouTube-style curve shows the parts you rewatch most. Tracked entirely on this device — nothing is sent anywhere. Turning it off also stops tracking.")
                 }
 
+                // Downloads section
+                Section {
+                    Toggle("Keep downloading in the background", isOn: $audioKeepAlive)
+                        .onChange(of: audioKeepAlive) { _, on in
+                            if !on { DownloadKeepAlive.shared.stop(restoringCategory: true) }
+                        }
+                } header: {
+                    Text("Downloads")
+                } footer: {
+                    Text("Downloads keep running after you leave Stashy, instead of pausing after about 26 seconds. Stashy holds an inaudible audio session so iOS keeps it scheduled — it mixes with your music rather than interrupting it, and stops the moment the last download finishes. It uses noticeably more battery while a download is running, so turn it off if you'd rather transfers only advance with the app open. Nothing is lost either way: a paused download resumes from the exact byte.")
+                }
+
                 // Privacy section
                 Section {
                     Toggle("Require Face ID", isOn: $appLockEnabled)
@@ -395,12 +407,6 @@ struct SettingsView: View {
                                     RemoteLog.isDownloadTracingEnabled = on
                                 }
                             Text("Adds every background range slice, part-file size census, engine start and Live Activity update to the log — what's needed to diagnose a transfer that stalls or loses progress while the app is minimized. Verbose: leave off unless you're chasing a download bug.")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        Group {
-                            Toggle("Keep the app awake while downloading", isOn: $audioKeepAlive)
-                            Text("EXPERIMENTAL. Plays an inaudible looping tone so iOS keeps Stashy scheduled instead of suspending it about 26 seconds after you leave the app — the technique sideloaded torrent clients use to download for hours. It mixes with other audio rather than interrupting it, and only runs while a download is actually in flight, but it will use noticeably more battery. Apple has never documented this as supported, so it may simply do nothing here. Nothing is lost either way: a download that stops still resumes from the exact byte when you reopen the app.")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
