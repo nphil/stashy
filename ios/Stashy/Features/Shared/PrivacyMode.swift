@@ -26,6 +26,12 @@ enum Privacy {
     /// Text needs far less blur than imagery to become unreadable, and derives from the same slider so
     /// names and thumbnails can never end up at mismatched strengths.
     static var titleRadius: CGFloat { max(4, imageRadius / 4) }
+
+    /// For the non-View callers. Blurring is a `ViewModifier` concern, but Privacy Mode also has to
+    /// gate what leaves the app entirely — the Live Activity title is rendered by the system on the
+    /// Lock Screen, where no modifier of ours can reach it. Read directly, same reasoning as
+    /// `imageRadius`.
+    static var isOn: Bool { UserDefaults.standard.bool(forKey: key) }
 }
 
 private struct PrivacyBlurModifier: ViewModifier {

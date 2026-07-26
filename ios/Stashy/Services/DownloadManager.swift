@@ -2131,8 +2131,20 @@ final class DownloadManager {
             ("down", regressed), ("status", String(state.status.prefix(40)))])
     }
 
-    /// Select one privacy-safe transfer to feature. Scene titles never leave the app; the Lock Screen only
-    /// receives byte progress, speed/ETA, and a count when a bulk operation has multiple active jobs.
+    /// What identifies the featured transfer on the Lock Screen.
+    ///
+    /// This carries the scene title OUT of the app, which earlier builds deliberately refused to do. The
+    /// owner asked for it (2026-07-26) — a card reading only "Download · 4%" can't be told apart from any
+    /// other. Privacy Mode is the boundary: when it is on, media is blurred everywhere inside the app, so
+    /// a plain-text title on the Lock Screen — visible to anyone holding the phone, with Stashy locked —
+    /// would be the one place the blur didn't reach. Send an EMPTY string rather than a placeholder so the
+    /// decision lives here and the widget simply falls back to its generic phase title.
+    private func activityTitle(_ item: DownloadItem) -> String {
+        guard !Privacy.isOn else { return "" }
+        return String(item.title.prefix(48))   // ActivityKit caps the whole payload at 4 KB
+    }
+
+    /// Select one transfer to feature, and describe it.
     private func liveActivityState() -> DownloadActivityAttributes.ContentState? {
         // A card is "owned" from the moment its transfer runs until it finishes or is stopped. Owned
         // items stay on the Lock Screen even when they stall, because an island that silently
@@ -2174,7 +2186,9 @@ final class DownloadManager {
             let saved: String = item.receivedBytes > 0
                 ? " · \(Self.bytesLabel(item.receivedBytes)) saved" : ""
             return .init(
-                phase: .waitingForNetwork, progress: progress,
+                phase: .waitingForNetwork, title: activityTitle(item),
+                receivedBytes: item.receivedBytes, totalBytes: item.totalBytes, speed: 0,
+                progress: progress,
                 estimatedStart: nil, estimatedEnd: nil, updatedAt: now,
                 status: "Paused — open Stashy to continue\(saved)", activeJobCount: count
             )
@@ -2196,7 +2210,9 @@ final class DownloadManager {
                 estimatedEnd = now.addingTimeInterval(Double(item.totalBytes - shownBytes) / item.speed)
             }
             return .init(
-                phase: .downloading, progress: progress,
+                phase: .downloading, title: activityTitle(item),
+                receivedBytes: shownBytes, totalBytes: item.totalBytes, speed: item.speed,
+                progress: progress,
                 estimatedStart: estimatedStart, estimatedEnd: estimatedEnd,
                 updatedAt: now, status: status, activeJobCount: count
             )
@@ -2216,14 +2232,18 @@ final class DownloadManager {
                 ? "Paused — open Stashy to continue\(saved)"
                 : "Resumes automatically when the connection returns\(saved)"
             return .init(
-                phase: .waitingForNetwork, progress: progress,
+                phase: .waitingForNetwork, title: activityTitle(item),
+                receivedBytes: item.receivedBytes, totalBytes: item.totalBytes, speed: 0,
+                progress: progress,
                 estimatedStart: nil, estimatedEnd: nil, updatedAt: now,
                 status: status, activeJobCount: count
             )
 
         case .merging:
             return .init(
-                phase: .preparing, progress: 1,
+                phase: .preparing, title: activityTitle(item),
+                receivedBytes: item.totalBytes, totalBytes: item.totalBytes, speed: 0,
+                progress: 1,
                 estimatedStart: nil, estimatedEnd: nil, updatedAt: now,
                 status: "Assembling the offline file", activeJobCount: count
             )
@@ -2241,7 +2261,9 @@ final class DownloadManager {
                 ? "Paused\(saved) · resume in Stashy"
                 : String(stopped.prefix(80))
             return .init(
-                phase: .waitingForNetwork, progress: progress,
+                phase: .waitingForNetwork, title: activityTitle(item),
+                receivedBytes: item.receivedBytes, totalBytes: item.totalBytes, speed: 0,
+                progress: progress,
                 estimatedStart: nil, estimatedEnd: nil, updatedAt: now,
                 status: status, activeJobCount: count
             )
@@ -2251,7 +2273,9 @@ final class DownloadManager {
                 ? (item.analyzing ? "Analyzing quality" : "Server is preparing the download")
                 : item.transcodeStatus
             return .init(
-                phase: .preparing, progress: min(1, max(0, item.serverJobProgress)),
+                phase: .preparing, title: activityTitle(item),
+                receivedBytes: 0, totalBytes: 0, speed: 0,
+                progress: min(1, max(0, item.serverJobProgress)),
                 estimatedStart: nil, estimatedEnd: nil, updatedAt: now,
                 status: String(detail.prefix(80)), activeJobCount: count
             )

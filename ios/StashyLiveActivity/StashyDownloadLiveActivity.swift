@@ -3,7 +3,12 @@ import Foundation
 import SwiftUI
 import WidgetKit
 
-private let segmentCount = 8
+/// The Dynamic Island's expanded regions sit inside the island's own rounded shape, and the system does
+/// NOT inset content away from that curve for you. A previous pass tried 2 pt and the leading character
+/// of the bottom status line still clipped on device. This is the value that actually clears it — do not
+/// reduce it, and do not reach for `minimumScaleFactor` instead: shrinking the text does not move it away
+/// from the curve, which is why that avenue was already spent once.
+private let islandInset: CGFloat = 13
 
 struct StashyDownloadLiveActivity: Widget {
     var body: some WidgetConfiguration {
@@ -14,62 +19,57 @@ struct StashyDownloadLiveActivity: Widget {
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    // Fit within the leading pocket: the label column may only get ~70 pt beside the
-                    // ring, so both lines scale down before they'd ever clip at the island's edge.
                     HStack(spacing: 7) {
-                        LiveSegmentRing(state: context.state)
-                            .frame(width: 25, height: 25)
-                        VStack(alignment: .leading, spacing: 0) {
-                            Text("STASHY")
-                                .font(.system(size: 9, weight: .bold, design: .rounded))
-                                .foregroundStyle(.secondary)
-                            Text(context.isStale ? "Updating" : context.state.phase.shortTitle)
-                                .font(.caption.weight(.semibold))
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.7)
-                        }
+                        LiveRing(state: context.state)
+                            .frame(width: 24, height: 24)
+                        Text("STASHY")
+                            .font(.system(size: 10, weight: .bold, design: .rounded))
+                            .foregroundStyle(.secondary)
                     }
-                    .padding(.leading, 2)
+                    .padding(.leading, islandInset)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    // "100%" at title3 can clip against the trailing curve — let it shrink instead.
-                    LiveTransferPercent(state: context.state)
-                        .font(.title3.weight(.semibold).monospacedDigit())
+                    LivePercent(state: context.state)
+                        .font(.system(size: 17, weight: .semibold, design: .rounded).monospacedDigit())
                         .lineLimit(1)
-                        .minimumScaleFactor(0.6)
-                        .padding(.trailing, 2)
+                        .padding(.trailing, islandInset)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    VStack(spacing: 6) {
-                        LiveSegmentBar(state: context.state)
+                    // Everything the owner asked to see, on three tight lines: what it is, how far
+                    // along in bytes, and how fast / how long. The bar is continuous — the eight
+                    // segments this used to draw represented the eight parallel connections that were
+                    // removed in v1.0.313, so they had been decorating a number that no longer existed.
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(context.state.displayTitle(stale: context.isStale))
+                            .font(.system(size: 13, weight: .semibold))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        LiveBar(state: context.state)
                             .frame(height: 5)
-                        HStack(alignment: .top, spacing: 8) {
-                            // Status lines (speed · ETA, or a server-transcode stage) can be long; wrap
-                            // to two lines and scale slightly rather than clipping at the screen edge.
-                            Text(context.isStale ? "Open Stashy to refresh" : context.state.status)
-                                .font(.caption2)
+                        HStack(spacing: 0) {
+                            Text(context.state.byteLine)
+                                .font(.system(size: 12).monospacedDigit())
                                 .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                                .minimumScaleFactor(0.85)
-                                .multilineTextAlignment(.leading)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            if context.state.activeJobCount > 1 {
-                                Text("+\(context.state.activeJobCount - 1)")
-                                    .font(.caption2.weight(.semibold).monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                            }
+                                .lineLimit(1)
+                            Spacer(minLength: 8)
+                            Text(context.state.rateLine(stale: context.isStale))
+                                .font(.system(size: 12).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
                         }
                     }
-                    .padding(.horizontal, 2)
+                    .padding(.horizontal, islandInset)
+                    .padding(.top, 2)
                 }
             } compactLeading: {
-                LiveSegmentRing(state: context.state)
+                LiveRing(state: context.state)
                     .frame(width: 19, height: 19)
             } compactTrailing: {
-                LiveTransferPercent(state: context.state)
+                LivePercent(state: context.state)
                     .font(.caption2.weight(.semibold).monospacedDigit())
             } minimal: {
-                LiveSegmentRing(state: context.state)
+                LiveRing(state: context.state)
                     .frame(width: 18, height: 18)
             }
             .keylineTint(.purple)
@@ -77,109 +77,88 @@ struct StashyDownloadLiveActivity: Widget {
     }
 }
 
-/// A deliberately short Lock Screen presentation: identity, percentage, one segmented bar and one status
-/// line. The system owns the outer Live Activity container, so reducing internal padding is what keeps the
-/// card from looking like an oversized notification.
+/// Lock Screen: the fullest presentation, and the one the owner actually watches. Name on top, a
+/// continuous bar, then bytes on the left and speed · ETA on the right.
 private struct LockScreenTransferView: View {
     let context: ActivityViewContext<DownloadActivityAttributes>
 
     var body: some View {
-        HStack(spacing: 10) {
-            LiveSegmentRing(state: context.state)
-                .frame(width: 30, height: 30)
-            VStack(spacing: 5) {
-                HStack(spacing: 8) {
-                    Text(context.isStale ? "Updating download" : context.state.phase.title)
+        HStack(alignment: .top, spacing: 11) {
+            LiveRing(state: context.state)
+                .frame(width: 32, height: 32)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(context.state.displayTitle(stale: context.isStale))
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
+                        .truncationMode(.middle)
                     Spacer(minLength: 4)
-                    LiveTransferPercent(state: context.state)
+                    LivePercent(state: context.state)
                         .font(.subheadline.weight(.semibold).monospacedDigit())
+                        .lineLimit(1)
                 }
-                LiveSegmentBar(state: context.state)
+                LiveBar(state: context.state)
                     .frame(height: 5)
-                HStack(spacing: 6) {
-                    Text(context.isStale ? "Open Stashy to refresh" : context.state.status)
-                        .font(.caption2)
+                HStack(spacing: 0) {
+                    Text(context.state.byteLine)
+                        .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-                    Spacer(minLength: 4)
+                    Spacer(minLength: 8)
+                    Text(context.state.rateLine(stale: context.isStale))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                     if context.state.activeJobCount > 1 {
-                        Text("\(context.state.activeJobCount) active")
+                        Text(" · +\(context.state.activeJobCount - 1)")
                             .font(.caption2.weight(.medium).monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
                 }
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
+        .padding(.horizontal, 15)
+        .padding(.vertical, 11)
     }
 }
 
-/// Eight arcs represent eight equal byte regions of the featured transfer. Completed regions stay filled,
-/// the current region fills continuously, and future regions remain as a quiet track.
-private struct LiveSegmentRing: View {
-    let state: DownloadActivityAttributes.ContentState
-
-    var body: some View {
-        TimelineView(.periodic(from: Date.now, by: 1)) { timeline in
-            SegmentedRing(progress: state.projectedProgress(at: timeline.date), phase: state.phase)
-        }
-    }
-}
-
-private struct SegmentedRing: View {
-    let progress: Double?
-    let phase: DownloadActivityAttributes.ContentState.Phase
-
-    var body: some View {
-        ZStack {
-            ForEach(0..<segmentCount, id: \.self) { index in
-                let start = CGFloat(index) / CGFloat(segmentCount)
-                let end = CGFloat(index + 1) / CGFloat(segmentCount)
-                let gap: CGFloat = 0.018
-                let filled = segmentProgress(overall: progress, index: index)
-
-                Circle()
-                    .trim(from: start + gap, to: end - gap)
-                    .stroke(.white.opacity(0.13), style: StrokeStyle(lineWidth: 2.7, lineCap: .round))
-                if filled > 0 {
-                    Circle()
-                        .trim(from: start + gap, to: start + gap + (end - start - gap * 2) * filled)
-                        .stroke(segmentColor(index, phase: phase),
-                                style: StrokeStyle(lineWidth: 2.7, lineCap: .round))
-                }
-            }
-        }
-        .rotationEffect(.degrees(-90))
-    }
-}
-
-private struct LiveSegmentBar: View {
+private struct LiveRing: View {
     let state: DownloadActivityAttributes.ContentState
 
     var body: some View {
         TimelineView(.periodic(from: Date.now, by: 1)) { timeline in
             let progress = state.projectedProgress(at: timeline.date)
-            HStack(spacing: 3) {
-                ForEach(0..<segmentCount, id: \.self) { index in
-                    GeometryReader { geometry in
-                        let filled = segmentProgress(overall: progress, index: index)
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(.white.opacity(0.12))
-                            Capsule()
-                                .fill(segmentColor(index, phase: state.phase))
-                                .frame(width: geometry.size.width * filled)
-                        }
-                    }
+            ZStack {
+                Circle()
+                    .stroke(.white.opacity(0.14), style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                Circle()
+                    .trim(from: 0, to: CGFloat(progress ?? 0.06))
+                    .stroke(state.phase.tint, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+            }
+        }
+    }
+}
+
+private struct LiveBar: View {
+    let state: DownloadActivityAttributes.ContentState
+
+    var body: some View {
+        TimelineView(.periodic(from: Date.now, by: 1)) { timeline in
+            let progress = state.projectedProgress(at: timeline.date)
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.white.opacity(0.14))
+                    Capsule()
+                        .fill(state.phase.tint)
+                        .frame(width: max(5, geometry.size.width * CGFloat(progress ?? 0)))
                 }
             }
         }
     }
 }
 
-private struct LiveTransferPercent: View {
+private struct LivePercent: View {
     let state: DownloadActivityAttributes.ContentState
 
     var body: some View {
@@ -194,41 +173,46 @@ private struct LiveTransferPercent: View {
     }
 }
 
-private func segmentProgress(overall: Double?, index: Int) -> CGFloat {
-    guard let overall else { return 0 }
-    return CGFloat(min(1, max(0, overall * Double(segmentCount) - Double(index))))
-}
-
-private func segmentColor(_ index: Int, phase: DownloadActivityAttributes.ContentState.Phase) -> Color {
-    switch phase {
-    case .waitingForNetwork:
-        return .orange
-    case .preparing:
-        return .cyan
-    case .downloading:
-        let colors: [Color] = [
-            Color(red: 0.27, green: 0.78, blue: 1.00),
-            Color(red: 0.32, green: 0.62, blue: 1.00),
-            Color(red: 0.42, green: 0.48, blue: 1.00),
-            Color(red: 0.55, green: 0.39, blue: 1.00),
-            Color(red: 0.67, green: 0.34, blue: 0.98),
-            Color(red: 0.76, green: 0.34, blue: 0.88),
-            Color(red: 0.84, green: 0.38, blue: 0.78),
-            Color(red: 0.89, green: 0.44, blue: 0.68)
-        ]
-        return colors[index % colors.count]
-    }
-}
-
 private extension DownloadActivityAttributes.ContentState {
-    /// Project the last byte snapshot along its measured ETA so the system-owned Live Activity keeps moving
-    /// while Stashy's process is suspended. Real delegate updates replace this estimate whenever available.
+    /// The scene title when the app sent one. It sends an empty string when Privacy Mode is on, so the
+    /// generic phase title is the deliberate fallback rather than a missing-data case.
+    func displayTitle(stale: Bool) -> String {
+        if stale { return title.isEmpty ? "Updating download" : title }
+        return title.isEmpty ? phase.title : title
+    }
+
+    /// "744 MB of 4.03 GB". Falls back to what is known when the source had no Content-Length.
+    var byteLine: String {
+        let received = Self.bytes(receivedBytes)
+        guard totalBytes > 0 else { return receivedBytes > 0 ? received : "" }
+        return "\(received) of \(Self.bytes(totalBytes))"
+    }
+
+    /// "6.2 MB/s · 9m 18s left". Both halves are dropped when unknown rather than shown as zero, and the
+    /// whole line yields to the status string whenever the transfer is not actually moving — that is what
+    /// carries "Paused — open Stashy to continue" and the network-drop wording.
+    func rateLine(stale: Bool) -> String {
+        if stale { return "Open Stashy to refresh" }
+        guard phase == .downloading, speed > 0 else { return status }
+        var parts = [Self.bytes(Int64(speed)) + "/s"]
+        if totalBytes > receivedBytes {
+            let secs = Int(Double(totalBytes - receivedBytes) / speed)
+            parts.append(secs >= 60 ? "\(secs / 60)m \(secs % 60)s left" : "\(secs)s left")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    static func bytes(_ n: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: n, countStyle: .file)
+    }
+
+    /// Project the last byte snapshot along its measured ETA so the card keeps moving between real
+    /// pushes. Real delegate updates replace this estimate whenever they arrive.
     ///
-    /// The projection is CLAMPED to a window above the last real byte snapshot, and never falls below
-    /// it. While the app is alive, real pushes land every ~2 s, so the projection barely deviates and
-    /// any correction is invisible. The wide cap matters when the app is SUSPENDED with a full-file
-    /// background download still running in the daemon: no pushes can arrive, and the ETA glide is the
-    /// only thing keeping the island moving — a tight cap would freeze it a few points in.
+    /// The projection is CLAMPED to a window above the last real byte snapshot and never falls below it.
+    /// With the keep-alive running, real pushes land every ~2 s even while backgrounded, so the
+    /// projection barely deviates; the wide cap remains for the case where the app IS suspended and the
+    /// glide is the only thing keeping the card alive.
     func projectedProgress(at date: Date) -> Double? {
         let real = progress.map { min(1, max(0, $0)) }
         if let start = estimatedStart, let end = estimatedEnd, start < end {
@@ -241,19 +225,19 @@ private extension DownloadActivityAttributes.ContentState {
 }
 
 private extension DownloadActivityAttributes.ContentState.Phase {
-    var shortTitle: String {
-        switch self {
-        case .downloading: "Download"
-        case .waitingForNetwork: "Waiting"
-        case .preparing: "Preparing"
-        }
-    }
-
     var title: String {
         switch self {
         case .downloading: "Downloading"
         case .waitingForNetwork: "Waiting for network"
         case .preparing: "Preparing download"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .downloading: Color(red: 0.42, green: 0.55, blue: 1.00)
+        case .waitingForNetwork: .orange
+        case .preparing: .cyan
         }
     }
 }
