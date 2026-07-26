@@ -689,7 +689,7 @@ final class DownloadManager {
             width: file?.width, height: file?.height, bitRate: file?.bit_rate,
             totalBytes: total, scene: scene, apiKey: apiKey
         )
-        items.insert(item, at: 0)
+        items.insert(item, at: queueTailIndex)
         startConnections(item)
         fetchSidecar(item, scene: scene, apiKey: apiKey)
     }
@@ -698,6 +698,17 @@ final class DownloadManager {
     /// (source, thread count, server resolution); the user taps Start → `beginStaged`. Ephemeral: no sidecar
     /// is written until the transfer begins, so an unstarted staged item simply doesn't persist across a
     /// relaunch (nothing to clean up).
+    /// Where a newly added item goes: after the last card that isn't finished.
+    ///
+    /// The list then reads top-to-bottom in the order the queue will actually run (`transferQueue` is
+    /// FIFO and drains with `removeFirst`), with the finished library below it. Inserting at 0 — which
+    /// both entry points used to do — made the list read BACKWARDS relative to the queue, so "Start
+    /// Queue" would have appeared to run it bottom-up. Nothing is ever re-sorted at runtime, so no card
+    /// moves under the user's thumb.
+    private var queueTailIndex: Int {
+        (items.lastIndex { $0.state != .completed }).map { $0 + 1 } ?? 0
+    }
+
     func stage(scene: StashScene, apiKey: String) {
         guard !items.contains(where: { $0.id == scene.id }) else { return }
         guard let url = scene.directFileURL(apiKey: apiKey) else { return }
@@ -711,7 +722,7 @@ final class DownloadManager {
             totalBytes: Int64(file?.size ?? 0), scene: scene, apiKey: apiKey
         )
         item.state = .staged
-        items.insert(item, at: 0)
+        items.insert(item, at: queueTailIndex)
     }
 
     /// Start a staged download with the options chosen on the card: the original file (multi/single-thread)
@@ -2995,6 +3006,17 @@ final class DownloadManager {
     /// items flagged active (a `.active` marker written while downloading) are resurrected — stopped ones
     /// are left dropped.
     private func loadInterrupted() {
+        // Everything already in `items` at this point is the finished library (`loadCompleted()` runs
+        // first, and its guard below depends on that order). Both append, so without the splice at the
+        // end every cold launch stacked the whole completed library ON TOP of every in-progress
+        // download. Restored actives go above it instead, matching the live convention.
+        let completedCount = items.count
+        defer {
+            guard items.count > completedCount else { return }
+            let restored = Array(items[completedCount...])
+            items.removeSubrange(completedCount...)
+            items.insert(contentsOf: restored, at: 0)
+        }
         guard let sidecars = try? FileManager.default.contentsOfDirectory(at: metaDir, includingPropertiesForKeys: nil) else { return }
         // Enqueue order, not filesystem-enumeration order (which is unspecified, so both the run order
         // and the card order reshuffled on every launch). `.active` is created exactly once, at enqueue,
