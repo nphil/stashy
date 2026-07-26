@@ -39,6 +39,28 @@ struct DownloadsView: View {
         .navigationBarTitleDisplayMode(.inline)
         // No top-left back button (owner preference); the edge-swipe (kept alive by EnableSwipeBack) goes back.
         .navigationBarBackButtonHidden(true)
+        // Works unchanged in BOTH modes: `compact` only empties the title, and
+        // `navigationBarBackButtonHidden` only clears the LEADING slot. Stable `ToolbarItem` identities
+        // with conditional CONTENT — swapping whole ToolbarItems behind an if/else makes SwiftUI's
+        // toolbar builder drop them. Disabled rather than hidden, so nothing re-lays-out under the thumb
+        // when the last staged item starts.
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { downloads.startAll() } label: { Image(systemName: "arrow.down.to.line") }
+                    .disabled(downloads.startableCount == 0)
+                    .accessibilityLabel("Start all downloads")
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    if downloads.queuePaused { downloads.resumeQueue() } else { downloads.pauseQueue() }
+                } label: {
+                    Image(systemName: downloads.queuePaused ? "play.fill" : "pause.fill")
+                        .contentTransition(.symbolEffect(.replace))
+                }
+                .disabled(!downloads.hasQueueWork && !downloads.queuePaused)
+                .accessibilityLabel(downloads.queuePaused ? "Resume queue" : "Pause queue")
+            }
+        }
         .background(EnableSwipeBack())
         // Scene-pushed Downloads arrives with the tab bar auto-collapsed (Downloads TAB root keeps it full).
         .background(compact ? TabBarMinimizer() : nil)
@@ -606,7 +628,9 @@ private struct DownloadCard: View {
             let saved = item.receivedBytes > 0
                 ? " · \(ByteCountFormatter.string(fromByteCount: item.receivedBytes, countStyle: .file)) saved"
                 : ""
-            return "Queued — starts when the current download finishes\(saved)"
+            if downloads.queuePaused { return "Queue paused\(saved)" }
+            if let pos = downloads.queuePosition(of: item) { return "Queued · #\(pos)\(saved)" }
+            return "Queued\(saved)"
         case .downloading:
             if item.totalBytes == 0 {   // live server transcode: no size is known — show real bytes + speed
                 let got = ByteCountFormatter.string(fromByteCount: item.receivedBytes, countStyle: .file)

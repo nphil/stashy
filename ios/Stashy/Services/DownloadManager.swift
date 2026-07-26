@@ -651,6 +651,7 @@ final class DownloadManager {
 
         Self.retireLegacySession()
 
+        queuePaused = UserDefaults.standard.bool(forKey: Self.queuePausedKey)
         loadCompleted()
         loadInterrupted()      // rebuild in-flight items from sidecars so relaunch callbacks find them
         resumeInterruptedTranscodes()   // continue a transcode the app was killed mid-way through
@@ -805,10 +806,101 @@ final class DownloadManager {
     /// what makes "unless I manually click resume/start" work without reordering the queue behind them.
     @ObservationIgnored private var handStarted: Set<String> = []
 
+    /// User-level "stop promoting". PERSISTED: an unpersisted flag would be cleared by a relaunch and
+    /// `resumeInterruptedDownloads` would quietly drain a queue that was deliberately paused overnight.
+    /// Observed (not `@ObservationIgnored`) so the toolbar toggle repaints; reading it outside a View
+    /// body registers no dependency, so the 120 ms poll pays nothing.
+    var queuePaused = false {
+        didSet { UserDefaults.standard.set(queuePaused, forKey: Self.queuePausedKey) }
+    }
+    private static let queuePausedKey = "downloadQueuePaused"
+
+    /// Items **Start Queue** would act on — drives the button's disabled state so it can never no-op.
+    var startableCount: Int {
+        items.count { $0.state == .staged || $0.state == .paused || $0.state == .waitingForNetwork }
+    }
+
+    /// Anything the queue controls govern — drives the Pause/Resume toggle's disabled state.
+    var hasQueueWork: Bool {
+        items.contains { $0.state == .downloading || $0.state == .queued }
+    }
+
+    /// 1-based position of a waiting transfer, for the card's status line. nil once it is running.
+    func queuePosition(of item: DownloadItem) -> Int? {
+        transferQueue.firstIndex(of: item.id).map { $0 + 1 }
+    }
+
+    /// COMMIT every card that is waiting on the user. It does NOT start N transfers: the serial gate
+    /// turns N calls into one downloading plus N-1 queued, in list order, with no new concurrency code.
+    ///
+    /// Deliberately does not touch `.failed` (it is reporting a problem the user hasn't read, and its
+    /// only correct affordance is the per-card Retry) or `.stopped` (whose parts and sidecar are already
+    /// gone).
+    func startAll() {
+        queuePaused = false
+        var pumpCompanion = false
+        for item in items {
+            switch item.state {
+            case .staged:
+                // NEVER `beginStaged` for a companion item — that is the ungated path that fires a job
+                // straight at the one server GPU.
+                if let codec = item.companionCodec, let scene = item.scene {
+                    enqueueCompanion(item, scene: scene, codec: codec)
+                    pumpCompanion = true
+                } else {
+                    beginStaged(item)
+                }
+            case .paused, .waitingForNetwork:
+                resume(item)
+            case .queued, .downloading, .merging, .serverProcessing, .completed, .stopped, .failed:
+                break
+            }
+        }
+        if pumpCompanion { pumpCompanionQueue() }
+        pumpTransferQueue()
+        syncLiveActivity()
+    }
+
+    /// Pause means BYTES STOP NOW and nothing new is promoted.
+    ///
+    /// Pausing only the active item would be worse than useless: `poll()` runs the pump every 120 ms and
+    /// its occupancy test is "is anything downloading", so the next queued item would start within one
+    /// tick — a Pause button that starts a download.
+    func pauseQueue() {
+        queuePaused = true
+        if let active = items.first(where: { $0.state == .downloading }) {
+            pause(active)                              // writes `.userpaused`; without it a relaunch
+            transferQueue.insert(active.id, at: 0)     // would silently un-pause it. Keeps the head slot.
+        }
+        scheduleResumeIfNeeded()
+        syncLiveActivity()
+    }
+
+    func resumeQueue() {
+        queuePaused = false
+        // Resume only the head — the gate queues the rest, which is what keeps it serial.
+        for item in items where item.state == .paused
+            && FileManager.default.fileExists(atPath: userPausedURL(item.id).path)
+            && transferQueue.contains(item.id) {
+            resume(item)
+            break
+        }
+        pumpTransferQueue()
+        scheduleResumeIfNeeded()
+        syncLiveActivity()
+    }
+
     /// Whether this item has to wait. A hand-started item never waits — that is the owner's override, and
     /// it deliberately runs ALONGSIDE whatever is already downloading rather than displacing it.
     private func serialQueueGateApplies(to item: DownloadItem) -> Bool {
+        // Order is load-bearing: consume the override FIRST so a queued card's play button still works
+        // while the queue is paused.
         if handStarted.remove(item.id) != nil { return false }
+        // Gated here rather than only in the pump, because four other paths reach `startConnections`
+        // without going through it — the companion hand-off, the network retry, the connectivity
+        // recovery loop and the foreground revival — and every one of them would start a download while
+        // the toolbar said "paused".
+        if queuePaused { return true }
         return items.contains { $0.id != item.id && $0.state == .downloading }
     }
 
@@ -830,9 +922,14 @@ final class DownloadManager {
     /// halving the feature. `start(while:)` no-ops when it is already running or not needed.
     private func pumpTransferQueue() {
         guard !transferQueue.isEmpty else { return }   // cheapest check first: this runs from poll()
+        guard !queuePaused else { return }
         guard !items.contains(where: { $0.state == .downloading }) else { return }
         while !transferQueue.isEmpty {
             let id = transferQueue.removeFirst()
+            // A pause hands its resume blob back one async hop later; promoting inside that window would
+            // find nothing and restart the whole file. `resume` waits for it; the pump must not race it,
+            // and Pause-then-Resume on one toolbar button lands squarely inside that window.
+            if awaitingBlob.contains(id) { transferQueue.insert(id, at: 0); return }
             guard let next = items.first(where: { $0.id == id }), next.state == .queued else { continue }
             trace("dl-queue-next", [("item", id), ("depth", transferQueue.count)])
             handStarted.insert(id)          // it IS this item's turn — don't re-queue it in the gate
@@ -2003,9 +2100,14 @@ final class DownloadManager {
         }
         DownloadKeepAlive.shared.start { [weak self] in
             guard let self else { return false }
+            // A PAUSED queue must not hold the window. Leave `.queued` counting while paused and the
+            // pump loops a tone on an active audio session and re-takes an assertion forever with zero
+            // bytes moving — the worst possible battery outcome. A blanket `!queuePaused` would be wrong
+            // in the other direction: a `startNow` override legitimately runs alongside a paused queue,
+            // so `.downloading` and `.merging` still count unconditionally.
             return self.items.contains {
-                $0.state == .downloading || $0.state == .waitingForNetwork ||
-                $0.state == .queued || $0.state == .merging
+                $0.state == .downloading || $0.state == .merging ||
+                (!self.queuePaused && ($0.state == .waitingForNetwork || $0.state == .queued))
             }
         }
         // Its renewal only resets the window when nothing else is outstanding, so any per-item
@@ -2190,8 +2292,9 @@ final class DownloadManager {
         // and the rest waiting, and an idle-sleep in that window would background the app and pause a
         // foreground-only transcode. It also keeps the floating status button visible for the whole run.
         items.contains {
-            $0.state == .downloading || $0.state == .queued || $0.state == .merging ||
-            $0.state == .serverProcessing || $0.transcoding
+            $0.state == .downloading || $0.state == .merging ||
+            $0.state == .serverProcessing || $0.transcoding ||
+            (!queuePaused && $0.state == .queued)   // else a paused queue pins the display on
         }
     }
     /// Keep the screen awake when the user is watching Downloads, or whenever work is happening — an
@@ -2436,7 +2539,8 @@ final class DownloadManager {
                 progress: item.totalBytes > 0
                     ? min(1, max(0, Double(item.receivedBytes) / Double(item.totalBytes))) : nil,
                 estimatedStart: nil, estimatedEnd: nil, updatedAt: now,
-                status: waiting > 1 ? "Starting next of \(waiting) queued" : "Starting next download",
+                status: queuePaused ? "Queue paused — resume in Stashy"
+                    : (waiting > 1 ? "Starting next of \(waiting) queued" : "Starting next download"),
                 activeJobCount: count
             )
 
@@ -3247,6 +3351,7 @@ final class DownloadManager {
 
     /// Ask iOS for an idle-time window if anything is genuinely outstanding.
     private func scheduleResumeIfNeeded() {
+        guard !queuePaused else { return }   // a window that would promote nothing
         let fm = FileManager.default
         guard items.contains(where: {
             ($0.state == .downloading || $0.state == .waitingForNetwork || $0.state == .paused
@@ -3294,6 +3399,14 @@ final class DownloadManager {
             // part size and resumes with a Range header from the exact byte.
             RemoteLog.shared.event("dl-bg-sched-expire", [])
             complete(false)
+        }
+
+        // A window granted before the owner paused, or held over from a previous launch. Hand it straight
+        // back rather than starting a transfer the toolbar says is paused.
+        guard !queuePaused else {
+            RemoteLog.shared.event("dl-bg-sched", [("skipped", "paused")])
+            complete(true)
+            return
         }
 
         let fm = FileManager.default
