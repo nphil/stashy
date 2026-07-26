@@ -1671,6 +1671,13 @@ final class DownloadManager {
         if serialQueueGateApplies(to: item) {
             item.state = .queued
             item.error = nil
+            // A queued item is LIVE and must survive a kill. Without this marker `loadInterrupted` skips
+            // it (it guards on `activeURL` existing) and `sweepOrphanedMeta` then reclaims its sidecar —
+            // so a ten-deep queue came back as ONE item, the rest deleted outright. The companion
+            // transcode queue has done this since day one; the transfer lane was missed when the serial
+            // gate landed. `scheduleResumeIfNeeded` already lists `.queued` behind an `activeURL` check
+            // that could never be true, which is the tell.
+            markActive(item.id)
             if !transferQueue.contains(item.id) { transferQueue.append(item.id) }
             trace("dl-queued", [("item", item.id), ("depth", transferQueue.count)])
             syncLiveActivity()
@@ -2958,7 +2965,15 @@ final class DownloadManager {
     /// are left dropped.
     private func loadInterrupted() {
         guard let sidecars = try? FileManager.default.contentsOfDirectory(at: metaDir, includingPropertiesForKeys: nil) else { return }
-        for url in sidecars where url.pathExtension == "json" {
+        // Enqueue order, not filesystem-enumeration order (which is unspecified, so both the run order
+        // and the card order reshuffled on every launch). `.active` is created exactly once, at enqueue,
+        // so its creation date IS the user's queue order. Unreadable dates sort last, deterministically.
+        let ordered = sidecars.filter { $0.pathExtension == "json" }.sorted { a, b in
+            let da = Self.activeDate(a, metaDir: metaDir), db = Self.activeDate(b, metaDir: metaDir)
+            if da == db { return a.lastPathComponent < b.lastPathComponent }
+            return (da ?? .distantFuture) < (db ?? .distantFuture)
+        }
+        for url in ordered {
             let id = url.deletingPathExtension().lastPathComponent
             if items.contains(where: { $0.id == id }) { continue }        // already loaded (completed)
             guard FileManager.default.fileExists(atPath: activeURL(id).path) else { continue }  // not active
@@ -3237,16 +3252,19 @@ final class DownloadManager {
         guard !eligible.isEmpty else { complete(true); return }
 
         scheduledWindow = true
-        for item in eligible {
-            // NEVER re-test the daemon from a scheduled run. `foregroundFallback` is in-memory and empty
-            // in a fresh process, and `daemonHandoverBroken`'s stamp is keyed on OS version + session
-            // identifier — so the first scheduled run after an iOS point release would otherwise take the
-            // daemon path, eat a -3000, strand ~70 MB outside the container, and spend the whole
-            // unattended window growing "System Data". Only a foreground session, where a -3000 costs the
-            // user one second, may re-test that verdict.
-            foregroundFallback.insert(item.id)
-            startForegroundFallback(item)
-        }
+        // NEVER re-test the daemon from a scheduled run. `foregroundFallback` is in-memory and empty
+        // in a fresh process, and `daemonHandoverBroken`'s stamp is keyed on OS version + session
+        // identifier — so the first scheduled run after an iOS point release would otherwise take the
+        // daemon path, eat a -3000, strand ~70 MB outside the container, and spend the whole
+        // unattended window growing "System Data". Only a foreground session, where a -3000 costs the
+        // user one second, may re-test that verdict. Flagged for EVERY candidate up front, because the
+        // serial gate may defer some of them to a later slot in this same window.
+        for item in eligible { foregroundFallback.insert(item.id) }
+        // Through `launch`, not straight to `startForegroundFallback`: the latter bypasses both the
+        // serial gate and the space preflight. That was invisible while a cold launch resurrected at
+        // most one item — now that a queue survives a relaunch it would start ten at once on `fgSession`
+        // (default 6 connections per host), the exact ~2x slowdown the gate exists to prevent.
+        for item in eligible { launch(item, reset: false) }
 
         Task { @MainActor [weak self] in
             while true {
@@ -3486,10 +3504,21 @@ final class DownloadManager {
     /// A marker distinguishing an active (resumable) download from a completed/stopped one, so relaunch
     /// only resurrects transfers the user actually wants continued.
     private func activeURL(_ itemID: String) -> URL { metaDir.appendingPathComponent("\(itemID).active") }
+    /// Creation date of an id's `.active` marker — the moment it entered the queue. `static` with an
+    /// explicit `metaDir` so it can be called from a sort closure without capturing an instance member.
+    private static func activeDate(_ sidecar: URL, metaDir: URL) -> Date? {
+        let id = sidecar.deletingPathExtension().lastPathComponent
+        let marker = metaDir.appendingPathComponent("\(id).active")
+        return try? marker.resourceValues(forKeys: [.creationDateKey]).creationDate
+    }
     /// Written only by an explicit user pause, so a relaunch can distinguish it from an interruption.
     private func userPausedURL(_ itemID: String) -> URL { metaDir.appendingPathComponent("\(itemID).userpaused") }
     private func markActive(_ itemID: String) {
-        FileManager.default.createFile(atPath: activeURL(itemID).path, contents: nil)
+        // Presence marker only — never re-stamp it. Its creation date IS the moment the item entered the
+        // queue, which is the order `loadInterrupted` restores in.
+        let url = activeURL(itemID)
+        guard !FileManager.default.fileExists(atPath: url.path) else { return }
+        FileManager.default.createFile(atPath: url.path, contents: nil)
     }
     private func clearActive(_ itemID: String) {
         try? FileManager.default.removeItem(at: activeURL(itemID))
