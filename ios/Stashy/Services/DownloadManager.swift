@@ -1032,7 +1032,12 @@ final class DownloadManager {
     /// uses. Nothing touches the load-bearing transfer path except the final `startConnections` hand-off.
     private func runCompanionTranscode(_ item: DownloadItem, scene: StashScene, codec: StashCompanion.Codec) {
         guard let serverURL = KeychainService.read("serverURL") else {
-            item.state = .failed; item.error = "Not connected to a Stash server"; return
+            item.state = .failed; item.error = "Not connected to a Stash server"
+            // `pumpCompanionQueue` is now the ONLY caller and it sets `companionActiveID` immediately
+            // before this call, so returning without releasing would pin the serial slot to a dead item
+            // and block every future transcode until relaunch. Harmless before the queue routing landed.
+            releaseCompanionSlot(item.id)
+            return
         }
         let companion = StashCompanion(client: StashClient(serverURL: serverURL, apiKey: item.apiKey))
         let resolution = item.serverResolution
@@ -3140,11 +3145,13 @@ final class DownloadManager {
         // end every cold launch stacked the whole completed library ON TOP of every in-progress
         // download. Restored actives go above it instead, matching the live convention.
         let completedCount = items.count
+        // `if`, not `guard ... else { return }`: Swift forbids transferring control out of a `defer`.
         defer {
-            guard items.count > completedCount else { return }
-            let restored = Array(items[completedCount...])
-            items.removeSubrange(completedCount...)
-            items.insert(contentsOf: restored, at: 0)
+            if items.count > completedCount {
+                let restored = Array(items[completedCount...])
+                items.removeSubrange(completedCount...)
+                items.insert(contentsOf: restored, at: 0)
+            }
         }
         guard let sidecars = try? FileManager.default.contentsOfDirectory(at: metaDir, includingPropertiesForKeys: nil) else { return }
         // Enqueue order, not filesystem-enumeration order (which is unspecified, so both the run order
