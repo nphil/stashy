@@ -503,6 +503,10 @@ final class DownloadManager {
     private static var handoverStamp: String {
         "\(UIDevice.current.systemVersion)|\(BackgroundDownloadSession.identifier)"
     }
+    /// Set when the background execution window is about to close, so the Live Activity can stop
+    /// advertising a speed and an ETA it is seconds away from being unable to honour. Cleared on return
+    /// to the foreground. See `noteBackgroundWindowClosing()`.
+    @ObservationIgnored private var backgroundWindowClosing = false
     /// Items whose transfer ran in THIS session and hasn't finished — the ones whose Live Activity card
     /// must survive a stall instead of vanishing. See `liveActivityState()`.
     @ObservationIgnored private var activityOwned: Set<String> = []
@@ -2108,6 +2112,20 @@ final class DownloadManager {
         let count = active.count
 
         switch item.state {
+        case .downloading where backgroundWindowClosing:
+            // The app is seconds from suspension and this transfer cannot continue without it. Say so,
+            // and drop the speed/ETA entirely rather than freeze a stale one on the Lock Screen.
+            let progress = item.totalBytes > 0
+                ? min(1, max(0, Double(item.receivedBytes) / Double(item.totalBytes)))
+                : nil
+            let saved: String = item.receivedBytes > 0
+                ? " · \(Self.bytesLabel(item.receivedBytes)) saved" : ""
+            return .init(
+                phase: .waitingForNetwork, progress: progress,
+                estimatedStart: nil, estimatedEnd: nil, updatedAt: now,
+                status: "Paused — open Stashy to continue\(saved)", activeJobCount: count
+            )
+
         case .downloading:
             let shownBytes = item.receivedBytes
             let progress = item.totalBytes > 0
@@ -2246,6 +2264,7 @@ final class DownloadManager {
     private func enterForeground() {
         guard inBackground else { return }
         inBackground = false
+        backgroundWindowClosing = false   // a fresh window; the card can show live speed again
         // First thing on waking: publish everything the background run buffered, then census the real
         // on-disk state before any engine restarts and overwrites the evidence.
         RemoteLog.shared.flushNow()
@@ -2642,6 +2661,30 @@ final class DownloadManager {
             if sum > item.receivedBytes { networkRetries[item.id] = 0 }   // real progress → clear retry count
             item.receivedBytes = sum
         }
+        noteBackgroundWindowClosing()
+    }
+
+    /// Tell the Live Activity the truth BEFORE the app is suspended.
+    ///
+    /// The in-process transport lives on a `beginBackgroundTask` assertion, measured at **25.6 s** on the
+    /// owner's device (`dl-bg-expired`, 2026-07-26). When it runs out the app suspends mid-transfer and
+    /// the card freezes on whatever it last showed — the owner watched it sit at "5.1 MB/s · 7m 7s left"
+    /// while nothing whatsoever was moving. A frozen speed and a counting-down ETA are an active lie.
+    ///
+    /// The expiration handler itself is the wrong place to fix it: it must end the task synchronously and
+    /// the app suspends immediately after, so an async ActivityKit update posted from there would very
+    /// likely never be delivered. Instead watch the clock while we still have runtime and switch the card
+    /// over a few seconds early — briefly pessimistic, permanently accurate.
+    private func noteBackgroundWindowClosing() {
+        guard inBackground, !transferAssertions.isEmpty, !backgroundWindowClosing else { return }
+        let remaining = UIApplication.shared.backgroundTimeRemaining
+        // Clamp by MAGNITUDE: `.greatestFiniteMagnitude` passes `isFinite` (see the CLAUDE.md landmine —
+        // converting it crashed the app), and it is also what this API reports when it has no real value,
+        // which must not be read as "about to expire".
+        guard remaining.isFinite, remaining >= 0, remaining < 6 else { return }
+        backgroundWindowClosing = true
+        RemoteLog.shared.event("dl-bg-closing", [("secs", Int(remaining))])
+        syncLiveActivity()
     }
 
     // MARK: - Network resilience
