@@ -420,6 +420,79 @@ nothing in the trace degrades, and the run ended only because the owner reopened
 Apple has never documented an active session granting runtime, so a point release can still regress it
 with no deprecation and no compile error. Re-read this trace shape after any iOS update.
 
+### Serial download queue + Live Activity payload (v1.0.340)
+Three shipped changes worth knowing before touching the download engine or the widget.
+
+**The queue gate lives in `startConnections`, not at the call sites.** FIVE separate fan-out paths can
+start a transfer — `bulkDownload`, foreground revival, network recovery, the `BGProcessingTask` resume
+window, and plain user taps — and every one iterates and launches every eligible item. Gating them
+individually is defeated by the sixth path someone adds later. `startConnections` is the single funnel
+all five reach. A queued item sits in `.queued` (a state that already existed and was vestigial, so no
+new `DownloadState` case and no new exhaustive switches); `pumpTransferQueue` promotes the next one.
+The manual override (`startNow`, the play button on a queued card) inserts the id into `handStarted`,
+which the gate consumes exactly once — so a hand-started item runs ALONGSIDE the current transfer
+rather than displacing it or reordering the queue behind it.
+
+Promotion runs from `poll()` ahead of that method's guards, plus immediately on stop and delete. That
+is a NET, not the only mechanism, and deliberately so: an item can leave `.downloading` down a dozen
+paths including eight distinct failure sites, and a queue that stalls because one of them forgot to
+call the pump is a far worse bug than one array check per 120 ms tick.
+
+Serial is also simply faster here. `fgSession` sets no `httpMaximumConnectionsPerHost`, so it inherits
+the default of 6: several queued downloads used to open six concurrent streams, and six benchmarked
+~2× SLOWER than one against the owner's server (v1.0.313: ~32 MB/s single vs ~14 MB/s eight-way). Do
+NOT instead set `httpMaximumConnectionsPerHost = 1` as a shortcut — that would also serialise sidecar,
+thumbnail and sprite fetches.
+
+**THE TRAP THE QUEUE ALMOST SET.** `DownloadKeepAlive`'s predicate originally counted only
+`.downloading` and `.waitingForNetwork`. In the gap between one item's last byte and the next one's
+first, nothing is in either state — the pump would tear down, iOS would suspend the app, and a queue of
+ten would finish exactly one. The predicate now counts `.queued` and `.merging` too, and
+`startKeepAliveIfNeeded()` is callable from the promotion path rather than only from `enterBackground`.
+Any future state that represents "work still outstanding" must be added there as well.
+
+**Live Activity payload.** `ContentState` carries `title`, `receivedBytes`, `totalBytes` and `speed`
+alongside the original phase/progress/ETA fields. Two things to remember:
+- The struct is compiled into BOTH targets via `project.yml`'s
+  `- path: Stashy/Services/DownloadActivityAttributes.swift`, so app and widget can never drift — but
+  adding a field means checking every `.init(` call site in `liveActivityState()` (there are seven) for
+  **declaration-order** argument matching, which this project has lost a CI cycle to before.
+- ActivityKit caps combined static + dynamic payload at 4 KB; the title is clamped to 48 characters.
+
+`.queued` is deliberately eligible to be FEATURED on the card. Without that, the instant between one
+download ending and the next starting has no active item, the activity ends, and the next push has to
+request a brand-new one — which flickers the Lock Screen card once per queued item.
+
+**Privacy Mode gates the title.** Earlier builds refused to send scene titles outside the app at all.
+The owner asked for the name (2026-07-26) because a card reading "Download · 4%" is indistinguishable
+from any other. The resolution: send the title normally, send an EMPTY string when Privacy Mode is on
+(`Privacy.isOn`), and let the widget fall back to its generic phase title. Otherwise the Lock Screen
+would be the one surface the app-wide blur didn't reach — in plain text, with the app locked.
+
+**The 8-segment bar is gone.** `segmentCount = 8` in the widget was a metaphor for the eight parallel
+connections removed in v1.0.313: it had been decorating a number that no longer existed, and it ate the
+horizontal space the card needed for byte counts. Do not reintroduce it. Separately, the Dynamic
+Island's expanded regions sit inside the island's rounded shape and the system does NOT inset content
+away from that curve — 2 pt was tried and still clipped on device; 13 pt clears it. `minimumScaleFactor`
+does not help, because shrinking text does not move it away from the curve.
+
+### Removed: BGContinuedProcessingTask (v1.0.340)
+Implemented, shipped behind an off-by-default toggle, and deleted once the keep-alive was proven. It
+registered `ok=1` and submitted `ok=1` four times on this device and **never fired once** — suspected
+to be the iPhone 17 Pro reports plus a sideloaded build carrying no entitlements. Recover it from git
+history if a signed build or a future iOS makes the question live again; do not rewrite it.
+`didFinishLaunchingWithOptions` now calls `BGTaskScheduler.cancel(taskRequestWithIdentifier:)` for the
+retired id so iOS is not left holding a request whose handler no longer exists (`cancel`, unlike
+`submit`, does not validate against `BGTaskSchedulerPermittedIdentifiers`, so dropping the plist entry
+is safe).
+
+**KEPT deliberately, despite looking like dead weight.** `BGProcessingTask`: it is the only background
+progress when the keep-alive toggle is off. Honest caveat — `dl-bg-sched` has never actually been
+observed firing, so "converges overnight" is the design, not a measurement. The entire background
+`URLSession` daemon path: unreachable today because `daemonHandoverBroken` latches on this device, but
+`handoverStamp` keys on the OS version, so an iOS point release re-tests ~250 lines of dormant slicing
+logic for free. Deleting it would be irreversible without re-deriving the slicing design.
+
 ### PORTABLE RECIPE — indefinite iOS background execution, for any app
 Written to be lifted into another project. Nothing here is Stashy-specific; the whole mechanism is
 ~150 lines and one plist key. Applies to any work that must keep running while the app is

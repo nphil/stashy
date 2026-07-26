@@ -93,10 +93,12 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   holding a `beginBackgroundTask` pins the window open and you still die at 26 s.
 - **The two mechanisms that genuinely decline here.** `BGProcessingTask` (shipped) runs ONLY while the
   device is idle and iOS kills it the moment the user picks the phone up — a catch-up path, never an
-  unattended-now one; "needs wifi + charging" is folklore (both are opt-in predicates).
-  `BGContinuedProcessingTask` (shipped behind an OFF toggle) submits `ok=1` and **never fires** here —
-  suspect the iPhone 17 Pro reports and/or a sideloaded app having no entitlements. Both are OS-service
-  handshakes that can refuse an app they cannot vouch for, like -3000. **Live Activities grant ZERO
+  unattended-now one; "needs wifi + charging" is folklore (both are opt-in predicates). Honest caveat:
+  `dl-bg-sched` has **never actually been observed firing**, so "converges it overnight" is the design,
+  not a measurement. `BGContinuedProcessingTask` submitted `ok=1` four times and **never fired** here —
+  suspect the iPhone 17 Pro reports and/or a sideloaded app having no entitlements; **REMOVED in
+  v1.0.340** now the keep-alive delivers more, recoverable from git history, do not rewrite it. Both are
+  OS-service handshakes that can refuse an app they cannot vouch for, like -3000. **Live Activities grant ZERO
   runtime** — display only, and iTorrent's `pushType: .none` card proves the point: their Dynamic Island
   stays live because their PROCESS does. Registration is `didFinishLaunchingWithOptions` ONLY and
   exactly once (a second one KILLS the app); both plist keys are runtime-only requirements CI cannot
@@ -183,11 +185,12 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.339** (`c0c8275`). The -3000 investigation is closed and must not be reopened.
+- Latest release: **v1.0.340** (`01807c8`). The -3000 investigation is closed and must not be reopened.
 - **What works:** app open → ~100 MB/s, resumes byte-exact through crashes, relaunches and suspension.
-  Backgrounded → ~26 s of grace, then it parks and the card says so honestly (Live Activity *and* the
-  Downloads screen both distinguish "paused, reopen" from a real network drop). Phone left idle →
-  `BGProcessingTask` converges it across windows. Dynamic Island works.
+  Backgrounded → keeps going indefinitely (keep-alive, ON by default since v1.0.340). Queued downloads
+  run **one at a time**; a queued card's play button force-starts that one alongside the current
+  transfer. Live Activity carries name / bytes / speed / ETA on a continuous bar (title suppressed under
+  Privacy Mode).
 - **The background problem is SOLVED (2026-07-26).** `DownloadKeepAlive` was device-proven on its first
   run: 290 s unbroken background runtime, 18.9 MB → 744 MB while backgrounded, 29/29 ticks, zero
   refusals, Live Activity live throughout. Long unattended downloads now work. Do not re-open the
