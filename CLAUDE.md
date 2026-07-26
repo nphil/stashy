@@ -185,12 +185,16 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.340** (`01807c8`). The -3000 investigation is closed and must not be reopened.
+- Latest release: **v1.0.341** (`b8b48c3`). The -3000 investigation is closed and must not be reopened.
 - **What works:** app open → ~100 MB/s, resumes byte-exact through crashes, relaunches and suspension.
-  Backgrounded → keeps going indefinitely (keep-alive, ON by default since v1.0.340). Queued downloads
-  run **one at a time**; a queued card's play button force-starts that one alongside the current
-  transfer. Live Activity carries name / bytes / speed / ETA on a continuous bar (title suppressed under
-  Privacy Mode).
+  Backgrounded → keeps going indefinitely (keep-alive, ON by default since v1.0.340). Downloads run
+  **one at a time** with Start All / Pause Queue in the Downloads toolbar; a queued card's play button
+  force-starts that one alongside the current transfer. The scene ••• row reads *Download Video* /
+  *Add to Download Queue* / *Show in Downloads* and only navigates when nothing else is pending. Live
+  Activity carries name / bytes / speed / ETA on a continuous bar (title suppressed under Privacy Mode).
+- **Queue invariants are in ENGINEERING_NOTES §3 ("The download queue manager") — read before touching
+  it.** Five were shipped bugs found in one review pass, including a data-loss one: a `.queued` item
+  without a `markActive` marker is DELETED on the next launch, sidecar and all.
 - **The background problem is SOLVED (2026-07-26).** `DownloadKeepAlive` was device-proven on its first
   run: 290 s unbroken background runtime, 18.9 MB → 744 MB while backgrounded, 29/29 ticks, zero
   refusals, Live Activity live throughout. Long unattended downloads now work. Do not re-open the

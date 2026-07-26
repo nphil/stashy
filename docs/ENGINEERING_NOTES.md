@@ -476,6 +476,88 @@ Island's expanded regions sit inside the island's rounded shape and the system d
 away from that curve — 2 pt was tried and still clipped on device; 13 pt clears it. `minimumScaleFactor`
 does not help, because shrinking text does not move it away from the curve.
 
+### The download queue manager (v1.0.341) — invariants, not preferences
+Five of these were shipped bugs found in one review pass. Read before touching the queue.
+
+**A queued item MUST be `markActive`d.** The general rule: *any state that means "live work the user
+expects to survive a kill" needs the `.active` marker*, because `loadInterrupted` guards on it and
+`sweepOrphanedMeta` deletes the sidecar of anything without it. The serial gate (v1.0.340) returned
+before `markActive` ran, so a ten-deep queue came back from a force-quit as ONE item — the other nine
+deleted outright, sidecars, thumbs and sprites with them. The companion queue had marked its waiting
+items active since it was written; the transfer lane was simply missed. If you add a new waiting state,
+mark it active.
+
+**`markActive` is idempotent, and that is load-bearing.** Its file creation date IS the enqueue order
+that `loadInterrupted` sorts by. Re-stamping it on every resume would scramble the queue on each
+relaunch. Directory enumeration order is unspecified — never rely on it.
+
+**`runCompanionTranscode` has NO gate. Never call it directly** — use `enqueueCompanion` +
+`pumpCompanionQueue`. It doesn't check `companionActiveID`, so two direct callers meant N staged cards
+fired N simultaneous jobs at the one server GPU. And every early return in the companion path must
+`releaseCompanionSlot`: `pumpCompanionQueue` guards on `companionActiveID == nil`, so ONE leak blocks
+every future transcode until relaunch. Four such leaks existed (`delete`, two in `monitorCompanionJob`,
+the missing-serverURL guard); the last only became reachable once the pump was the sole caller, which
+is the general hazard — *changing caller topology turns harmless early returns into permanent pins.*
+
+**The serial gate lives in `startConnections`, not at the call sites.** Five fan-out paths reach it
+(bulk download, foreground revival, network recovery, the BGProcessingTask window, user taps) and each
+one iterates and launches everything eligible. A gate at the call sites is defeated by the sixth path
+someone adds later. Same reasoning put `queuePaused` in `serialQueueGateApplies` rather than only in
+the pump.
+
+**A paused queue must drop out of the keep-alive predicate.** `.queued` counts as work, so pausing
+without this leaves the pump looping a tone on an active audio session and re-taking a background
+assertion every 10 s while moving zero bytes — the worst possible battery outcome. But a blanket
+`!queuePaused` is wrong in the other direction: a `startNow` override legitimately runs alongside a
+paused queue. Final shape — `.downloading || .merging` unconditionally, `.queued || .waitingForNetwork`
+only while unpaused. The same split applies to `hasActiveWork` (which pins the display on),
+`scheduleResumeIfNeeded` and `runScheduledResume`.
+
+**`queuePaused` is persisted.** Unpersisted, a relaunch clears it and `resumeInterruptedDownloads`
+quietly drains a queue that was deliberately paused overnight.
+
+**Pause must stop the ACTIVE download, not just promotion.** `poll()` runs the pump every 120 ms and
+its occupancy test is "is anything downloading" — pause promotion only and the next item starts within
+one tick, from a button labelled Pause. Use `pause(_:)`, never `suspend(_:auto:)`: only `pause` writes
+the `.userpaused` marker that stops `resumeInterruptedDownloads` un-pausing it on the next launch.
+
+**The pump must respect `awaitingBlob`.** A pause hands its resume blob back one async hop later;
+promoting inside that window finds nothing and restarts the whole file. `resume` waits for it — the
+pump didn't, and Pause-then-Resume on one toolbar button lands squarely in that window.
+
+**List order = queue order.** New items insert at `queueTailIndex` (after the last unfinished card),
+never at 0 — `transferQueue` is FIFO, so inserting at the top made the list read backwards and "Start
+Queue" appear to run it bottom-up. Restored actives splice above the finished library, because
+`loadCompleted()` runs first and both append. Nothing is re-sorted at runtime, which is why this is an
+ordering convention rather than grouped sections: no card ever moves under the user's thumb.
+
+**Menu label + navigation.** Three states on the scene ••• row: `Download Video` (nothing pending —
+stages and navigates), `Add to Download Queue` (something pending — stages and stays put), `Show in
+Downloads` (this scene already added). Navigation only when nothing is pending: the first add wants the
+staging screen, the tenth is an interruption, and both screens hide their back buttons so each costs
+two edge-swipes back. `hasPendingWork` is an EXCLUSION list so a future state defaults to pending, and
+it excludes `.paused` on purpose — a pause survives relaunch, so counting it would flip the menu into
+never-navigate mode for the life of the install.
+
+**Removing navigation removes the only feedback.** `floatingStatus` returned nil for waiting-only work,
+so freshly added scenes looked identical to idle on every root screen; it now counts `.staged`/`.queued`
+at 0. Plus a tappable confirmation capsule on the scene screen, since the floating button isn't on it.
+
+**Deliberately NOT built** (asked for or obvious, and refused): a top-level Stop All — `stop()` wipes
+every downloaded byte plus the sidecar, so a nav-bar bulk version is one mis-tap from hours of transfer
+and contradicts the durability invariant. Drag-to-reorder — `startNow` covers the case and queued cards
+show `#N` positions. A play button on a waiting server-transcode card — `startNow` guards on `.queued`
+so it would be a dead tap, and loosening that guard byte-downloads the ORIGINAL file, discarding the
+chosen codec and resolution.
+
+**Open decision:** the keep-alive predicate excludes `.serverProcessing`, so a queue of server
+transcodes holds no background window — lock the phone and progress tracking stops (the server keeps
+encoding; `reconnectCompanionTranscode` recovers on relaunch, nothing is lost). Including it means
+holding an audio-session-backed window for hours while zero bytes move. Owner's call, not a side effect
+of a plumbing commit.
+
+**Swift:** `return` cannot transfer control out of a `defer` block — use `if`. Cost a review catch here.
+
 ### Removed: BGContinuedProcessingTask (v1.0.340)
 Implemented, shipped behind an off-by-default toggle, and deleted once the keep-alive was proven. It
 registered `ok=1` and submitted `ok=1` four times on this device and **never fired once** — suspected
