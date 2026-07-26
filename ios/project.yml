@@ -73,11 +73,6 @@ targets:
           - audio
         BGTaskSchedulerPermittedIdentifiers:
           - com.nphil.stashy.downloads.resume
-          # BGContinuedProcessingTask (iOS 26) — EXPERIMENTAL, off by default behind a Settings toggle.
-          # Concrete id, not the `.*` wildcard form Apple also permits: a wildcard registration paired
-          # with a suffixed submit is reported to raise an uncatchable ObjC exception, and we gain
-          # nothing from per-item ids.
-          - com.nphil.stashy.downloads.continued
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft

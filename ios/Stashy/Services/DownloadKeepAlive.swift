@@ -54,6 +54,12 @@ final class DownloadKeepAlive {
     private var assertionGeneration = 0
     private var interruption: NSObjectProtocol?
     private var stillNeeded: (@MainActor () -> Bool)?
+    /// Called when the pump gives up while work REMAINS — as opposed to tearing down cleanly because the
+    /// last transfer finished. Without it, a surrender leaves the app with no assertion at all and no
+    /// signal that anything changed: the transfer stops dead and the Live Activity keeps showing a live
+    /// speed and a counting-down ETA, which is a worse card than never having run the pump. The owner of
+    /// the work re-arms its own background handling here.
+    var onSurrender: (@MainActor () -> Void)?
     private var ticks = 0
     private var refusals = 0
     private var startedAt = Date()
@@ -152,7 +158,7 @@ final class DownloadKeepAlive {
                 // don't spin: three refusals in a row means the technique isn't working here.
                 refusals += 1
                 RemoteLog.shared.event("dl-keepalive", [("refused", refusals)])
-                guard refusals < 3 else { RemoteLog.shared.flushNow(); stop(); return }
+                guard refusals < 3 else { surrender(); return }
                 try? await Task.sleep(for: .milliseconds(500))
                 continue
             }
@@ -167,6 +173,15 @@ final class DownloadKeepAlive {
             }
             do { try await Task.sleep(for: .seconds(10)) } catch { return }
         }
+    }
+
+    /// Give up while work is still outstanding. Distinct from `stop()`, which means "nothing left to do".
+    private func surrender() {
+        RemoteLog.shared.event("dl-keepalive", [("surrender", 1), ("ticks", ticks)])
+        let handBack = onSurrender
+        stop()
+        handBack?()
+        RemoteLog.shared.flushNow()
     }
 
     private func beginAssertion() {

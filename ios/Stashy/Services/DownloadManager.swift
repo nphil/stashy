@@ -514,8 +514,6 @@ final class DownloadManager {
     /// real `willEnterForeground` early-return in `enterForeground()`, silently skipping the transcode
     /// auto-resume, the retry-budget reset, the part census and the revive loop.
     @ObservationIgnored private var scheduledWindow = false
-    /// The live `BGContinuedProcessingTask`, held so the poll loop can feed the system's progress card.
-    @ObservationIgnored private var continuedTask: BGContinuedProcessingTask?
     /// Items whose transfer ran in THIS session and hasn't finished — the ones whose Live Activity card
     /// must survive a stall instead of vanishing. See `liveActivityState()`.
     @ObservationIgnored private var activityOwned: Set<String> = []
@@ -1483,13 +1481,19 @@ final class DownloadManager {
         // download. tmp is also OS-purgeable, so a purged in-progress transcode just fails cleanly.
         // tmp and Application Support share the app-container volume, so the finish move stays a rename.
         let dest = FileManager.default.temporaryDirectory.appendingPathComponent("\(id).transcode.mp4")
+        // Skipped while the keep-alive pump is running, for the same per-app-budget reason as the merge
+        // assertion above. A transcode is cancelled on backgrounding anyway (`enterBackground`), so the
+        // only thing this assertion covers in that window is a wedge — which is exactly the case that
+        // would pin the window open and kill a download running alongside it.
         var bg: UIBackgroundTaskIdentifier = .invalid
-        bg = UIApplication.shared.beginBackgroundTask(withName: "transcode-\(id)") {
-            // Last-seconds notice before the watchdog kills us, not extra time. Capture `transcoder`
-            // directly (it's @unchecked Sendable with a lock-guarded cancel) so the handler needs no
-            // main-actor hop and makes no assumption about which thread it runs on.
-            transcoder.cancel()
-            if bg != .invalid { UIApplication.shared.endBackgroundTask(bg) }
+        if !DownloadKeepAlive.shared.isRunning {
+            bg = UIApplication.shared.beginBackgroundTask(withName: "transcode-\(id)") {
+                // Last-seconds notice before the watchdog kills us, not extra time. Capture `transcoder`
+                // directly (it's @unchecked Sendable with a lock-guarded cancel) so the handler needs no
+                // main-actor hop and makes no assumption about which thread it runs on.
+                transcoder.cancel()
+                if bg != .invalid { UIApplication.shared.endBackgroundTask(bg) }
+            }
         }
         Task { @MainActor in
             do {
@@ -1754,9 +1758,6 @@ final class DownloadManager {
         }
         if foregroundFallback.contains(item.id) || daemonHandoverBroken { startForegroundFallback(item) }
         else { startBackgroundTransfer(item) }
-        // Must be submitted from the FOREGROUND on the user action that starts the transfer — that is the
-        // API's contract, and a background submission is rejected. No-ops unless the toggle is on.
-        submitContinuedProcessing(for: item)
         syncLiveActivity()
     }
 
@@ -1943,6 +1944,15 @@ final class DownloadManager {
     /// download's last byte and the next one's first, iOS would suspend the app, and a queue of ten
     /// items would finish exactly one. `.merging` matters for the same reason at the tail of each item.
     private func startKeepAliveIfNeeded() {
+        // If the pump ever gives up with transfers still live, take the window back the old way and tell
+        // the card the truth. Without this a surrender is silent: no assertion, no `backgroundWindowClosing`,
+        // so the Live Activity would keep animating a speed and an ETA for a transfer that has stopped —
+        // strictly worse than never having run the pump at all.
+        DownloadKeepAlive.shared.onSurrender = { [weak self] in
+            guard let self, self.inBackground else { return }
+            for item in self.items where item.state == .downloading { self.holdTransferAssertion(item.id) }
+            self.noteBackgroundWindowClosing()
+        }
         DownloadKeepAlive.shared.start { [weak self] in
             guard let self else { return false }
             return self.items.contains {
@@ -2521,9 +2531,17 @@ final class DownloadManager {
         let dest = downloadsDir.appendingPathComponent("\(item.id).\(item.ext)")
         // Keep the process alive long enough to assemble the file even when this fires during a background
         // relaunch (the merge is plain I/O off the main actor and can outlast the launch event window).
+        //
+        // But NOT while the keep-alive pump owns the window. iOS's background budget is per-app, so any
+        // second assertion outstanding stops the pump's end-then-retake from resetting the clock, and the
+        // whole thing dies at ~26 s — the exact failure mode that makes the technique look broken. The
+        // pump already keeps the process scheduled, and its predicate counts `.merging` precisely so this
+        // path is covered without an assertion of its own.
         var bg: UIBackgroundTaskIdentifier = .invalid
-        bg = UIApplication.shared.beginBackgroundTask(withName: "merge-\(item.id)") {
-            if bg != .invalid { UIApplication.shared.endBackgroundTask(bg) }
+        if !DownloadKeepAlive.shared.isRunning {
+            bg = UIApplication.shared.beginBackgroundTask(withName: "merge-\(item.id)") {
+                if bg != .invalid { UIApplication.shared.endBackgroundTask(bg) }
+            }
         }
         Task.detached(priority: .userInitiated) {
             let ok = Self.merge(parts: parts, into: dest)
@@ -2874,12 +2892,6 @@ final class DownloadManager {
             item.receivedBytes = sum
         }
         noteBackgroundWindowClosing()
-        // Feed the system's continued-processing card. It renders from `task.progress`, so without this
-        // it would sit at zero for the whole transfer.
-        if let continued = continuedTask,
-           let item = items.first(where: { $0.state == .downloading }) {
-            continued.progress.completedUnitCount = min(item.receivedBytes, continued.progress.totalUnitCount)
-        }
     }
 
     /// Tell the Live Activity the truth BEFORE the app is suspended.
@@ -3248,117 +3260,15 @@ final class DownloadManager {
         }
     }
 
-    // MARK: - Continued processing (BGContinuedProcessingTask, iOS 26) — EXPERIMENTAL
+    // BGContinuedProcessingTask (iOS 26) was implemented here and REMOVED in v1.0.340. It registered
+    // ok=1 and submitted ok=1 four times on this device and never fired once — suspected to be the
+    // iPhone 17 Pro reports plus a sideloaded build carrying no entitlements. `DownloadKeepAlive` now
+    // delivers strictly more (device-proven: 290 s unbroken, 725 MB backgrounded) with no OS-service
+    // handshake to decline us, so this was dead weight behind an off-by-default toggle.
     //
-    // The only iOS API whose stated purpose is "the user started this in the foreground, let it finish
-    // after they leave". Submitted on a user action, keeps running when the app is backgrounded, network
-    // explicitly permitted, and the system renders its own progress card from `task.progress`.
-    //
-    // Why it ships OFF behind a toggle. Apple publishes **no** maximum duration, developers report the
-    // expiration handler firing unpredictably (driven by elapsed time AND CPU/memory/battery), and the
-    // reported shape is that ~3 GB transfers survive while ~10 GB ones die *seconds* after backgrounding
-    // — the same signature this app has been fighting all night. There are also open, unresolved Apple
-    // Forums reports of it never firing at all on **iPhone 17 Pro**, which is the owner's device. So this
-    // is an experiment with a real chance of doing nothing, and it must not be able to make the shipped
-    // path worse.
-    //
-    // Deliberately NOT suppressing our own Live Activity while this runs, even though the system draws
-    // its own card and two cards is ugly. If the system card never appears (the iPhone 17 Pro reports)
-    // and we had suppressed ours, the user would see NOTHING — a cosmetic problem traded for a
-    // functional one. Decide that only after seeing it work on device.
+    // Recover it from git history if a future iOS or a properly-signed build makes the question live
+    // again — do not rewrite it. ENGINEERING_NOTES §3 records what it did and why it never fired.
 
-    static let continuedResumeID = "com.nphil.stashy.downloads.continued"
-    /// Off by default. Settings → Diagnostics.
-    static var continuedProcessingEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: "continuedProcessingEnabled") }
-        set { UserDefaults.standard.set(newValue, forKey: "continuedProcessingEnabled") }
-    }
-
-    /// Registered once, beside the scheduled-resume handler, from `didFinishLaunchingWithOptions`.
-    /// Registration is unconditional — the TOGGLE gates submission, not registration, because
-    /// registering late (e.g. when the toggle flips) is exactly what iOS kills the app for.
-    static func registerContinuedProcessing() {
-        let ok = BGTaskScheduler.shared.register(
-            forTaskWithIdentifier: continuedResumeID,
-            using: DispatchQueue.main
-        ) { @Sendable task in
-            let box = UncheckedSendableBox(task)
-            MainActor.assumeIsolated { DownloadManager.shared.runContinuedProcessing(box.value) }
-        }
-        RemoteLog.shared.event("dl-cont-register", [("ok", ok ? 1 : 0)])
-    }
-
-    /// Submit while still in the FOREGROUND, on the user action that starts a transfer — that is the
-    /// API's contract, and a submission from the background is rejected.
-    private func submitContinuedProcessing(for item: DownloadItem) {
-        guard Self.continuedProcessingEnabled, !inBackground, !scheduledWindow else { return }
-        let request = BGContinuedProcessingTaskRequest(
-            identifier: Self.continuedResumeID,
-            title: "Downloading \(item.title.prefix(40))",
-            subtitle: Self.bytesLabel(item.totalBytes)
-        )
-        // `.queue` rather than `.fail`: if the system is busy, wait for a slot instead of throwing away
-        // the request outright.
-        request.strategy = .queue
-        do {
-            try BGTaskScheduler.shared.submit(request)
-            RemoteLog.shared.event("dl-cont-submit", [("item", item.id), ("ok", 1)])
-        } catch {
-            RemoteLog.shared.event("dl-cont-submit", [("item", item.id), ("ok", 0), ("err", "\(error)")])
-        }
-    }
-
-    /// The system granted a continued-processing window. Keep the in-process transfer running and feed
-    /// `task.progress`, which is what the system's own card renders.
-    func runContinuedProcessing(_ task: BGTask) {
-        guard let continued = task as? BGContinuedProcessingTask else {
-            task.setTaskCompleted(success: false)
-            return
-        }
-        let box = UncheckedSendableBox(continued)
-        let completed = OSAllocatedUnfairLock(initialState: false)
-        let complete: @Sendable (Bool) -> Void = { success in
-            let already = completed.withLock { state -> Bool in
-                defer { state = true }
-                return state
-            }
-            guard !already else { return }
-            box.value.setTaskCompleted(success: success)
-        }
-
-        continued.expirationHandler = {
-            // Synchronous only. Every byte is already durable, so losing the window costs nothing but
-            // the window — the next foreground return resumes byte-exact.
-            RemoteLog.shared.event("dl-cont-expire", [])
-            complete(false)
-        }
-
-        let live = items.filter { $0.state == .downloading || $0.state == .waitingForNetwork }
-        RemoteLog.shared.event("dl-cont-begin", [("items", live.count)])
-        guard let item = live.first else { complete(true); return }
-
-        continued.progress.totalUnitCount = max(1, item.totalBytes)
-        continued.progress.completedUnitCount = item.receivedBytes
-        continuedTask = continued
-        scheduledWindow = true          // reuses the guard that lets the transfer run while backgrounded
-        for target in live where foregroundTasks[target.id] == nil {
-            foregroundFallback.insert(target.id)   // never the daemon from a background window
-            startForegroundFallback(target)
-        }
-
-        Task { @MainActor [weak self] in
-            while true {
-                guard let self, self.continuedTask != nil,
-                      self.items.contains(where: { $0.state == .downloading }) else { break }
-                try? await Task.sleep(for: .seconds(1))
-            }
-            self?.continuedTask = nil
-            self?.scheduledWindow = false
-            RemoteLog.shared.event("dl-cont-done", [])
-            RemoteLog.shared.flushNow()
-            complete(true)
-        }
-    }
 
     /// Keep large offline media out of iCloud/iTunes backups.
     nonisolated private static func excludeFromBackup(_ url: URL) {

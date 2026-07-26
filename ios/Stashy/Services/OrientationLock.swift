@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import AVFoundation
+import BackgroundTasks
 
 /// App delegate whose only job is to report the currently-allowed interface orientations. The whole
 /// app is portrait by default; only fullscreen video temporarily allows landscape.
@@ -16,9 +17,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         // identifier exactly once — a second registration of the same id kills the app. This method runs
         // once per process, so it is the only legal site.
         DownloadManager.registerScheduledResume()
-        // Registered unconditionally: the Settings toggle gates SUBMISSION. Registering late — say, when
-        // the toggle flips — is exactly what iOS kills the app for.
-        DownloadManager.registerContinuedProcessing()
+        // A pending BGContinuedProcessingTask request may still exist from a build that had the feature.
+        // Its handler no longer exists, so cancel it rather than leave iOS holding a request nothing can
+        // service. Harmless when there is nothing pending.
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: "com.nphil.stashy.downloads.continued")
         // Clear remux temps left by a prior crash/force-quit. Nothing is in use at launch, so run it off
         // the main thread — it enumerates + unlinks tmp files and needn't block the first frame.
         Task.detached(priority: .utility) { LocalRemuxStream.sweepStaleTempFiles() }

@@ -17,7 +17,6 @@ struct SettingsView: View {
     @State private var isClearingCache = false
     @AppStorage("animatedPreviews") private var animatedPreviews = true
     @AppStorage("appLockEnabled") private var appLockEnabled = false
-    @AppStorage("continuedProcessingEnabled") private var continuedProcessing = false
     @AppStorage(DownloadKeepAlive.settingKey) private var audioKeepAlive = false
     @AppStorage("privacyMode") private var privacyMode = false
     @AppStorage(Privacy.radiusKey) private var privacyBlurRadius = Privacy.defaultImageRadius
@@ -402,15 +401,6 @@ struct SettingsView: View {
                         Group {
                             Toggle("Keep the app awake while downloading", isOn: $audioKeepAlive)
                             Text("EXPERIMENTAL. Plays an inaudible looping tone so iOS keeps Stashy scheduled instead of suspending it about 26 seconds after you leave the app — the technique sideloaded torrent clients use to download for hours. It mixes with other audio rather than interrupting it, and only runs while a download is actually in flight, but it will use noticeably more battery. Apple has never documented this as supported, so it may simply do nothing here. Nothing is lost either way: a download that stops still resumes from the exact byte when you reopen the app.")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        Group {
-                            Toggle("Keep downloading in background", isOn: $continuedProcessing)
-                                .onChange(of: continuedProcessing) { _, on in
-                                    DownloadManager.continuedProcessingEnabled = on
-                                }
-                            Text("EXPERIMENTAL. Asks iOS to let a download keep running after you leave Stashy, using a system API added in iOS 26. Apple guarantees no duration, and there are reports of it not working at all on some iPhone 17 Pro devices — it may do nothing. When it does run, iOS shows its own progress card alongside Stashy's. Nothing is lost either way: a download that stops still resumes from the exact byte when you reopen the app.")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
