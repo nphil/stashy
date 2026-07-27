@@ -152,7 +152,12 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   convert via CoreImage); (2) the model has a **device-specific max dimension** that iOS 26 can't query
   (`maximumDimensions` is nil; OS 27 only). The old hardcoded 1280×720 was a third party's M1 Pro figure —
   since v1.0.344 `probeMaxSizeIfNeeded()` MEASURES it once per device+OS (ladder 4K→1440p→1080p→720p, real
-  session + synthetic pair per rung) and 720p is only the fallback. **Don't "simplify" it back to a
+  session + synthetic pair per rung). **Measured on the owner's iPhone 17 Pro / iOS 26, 2026-07-27:
+  `max=1280×720 trusted=1` — 4K/1440p/1080p all rejected, so the M1 Pro figure was right and the A19 buys
+  nothing. The limit is the shipped model, not the silicon.** (Confidence: the three big rungs were refused
+  in <20 ms combined vs ~60 ms for 720p, i.e. declined at session creation rather than marginally inside
+  `process`, and 720p really did produce a frame — so the synthetic-buffer method is sound.) Keep the probe
+  anyway: it is OS-stamped, so a future iOS that raises the limit is picked up for free. **Don't "simplify" it back to a
   constant** — real frames display at native res while synthesised ones are made at the cap and upscaled,
   so every rung below the true ceiling is visible as sharp/soft pulsing on HD sources. A probe that fails
   even at 720p indicts the probe, not the device (`trusted=0`), and must never shrink the shipped default.
