@@ -550,11 +550,35 @@ show `#N` positions. A play button on a waiting server-transcode card — `start
 so it would be a dead tap, and loosening that guard byte-downloads the ORIGINAL file, discarding the
 chosen codec and resolution.
 
-**Open decision:** the keep-alive predicate excludes `.serverProcessing`, so a queue of server
-transcodes holds no background window — lock the phone and progress tracking stops (the server keeps
-encoding; `reconnectCompanionTranscode` recovers on relaunch, nothing is lost). Including it means
-holding an audio-session-backed window for hours while zero bytes move. Owner's call, not a side effect
-of a plumbing commit.
+**`.serverProcessing` stays OUT of the keep-alive — decided 2026-07-26, don't re-open it.** A queue of
+server transcodes holds no background window: lock the phone and progress tracking stops. That is
+correct, because nothing is lost — the server keeps encoding regardless, and
+`reconnectCompanionTranscode` picks the job back up by its persisted id on relaunch. Holding an
+audio-session-backed window for hours to animate a bar while zero bytes move would be the worst
+battery trade in the app.
+
+The tempting counter-argument, and why it doesn't land as stated: "the plugin knows the percentage, so
+the Live Activity could just show it." True but incomplete — `monitorCompanionJob` obtains that
+percentage by POLLING the server every 1.8 s, which requires the app to be running. The server knowing
+a number does not move it to a suspended phone.
+
+What WOULD do it is ActivityKit push: `pushType: .token` instead of the `pushType: nil` we pass today,
+with the Companion plugin POSTing updates straight to APNs. That is the correct architecture for
+"remote thing reports progress" and is how delivery/sports-score activities update with the app fully
+suspended. Believed blocked here — APNs authentication needs a key from a paid Developer account and
+the app needs a push entitlement, while this build ships unsigned with NO entitlements file at all —
+but that is **believed, not verified**, and it is the same shape of untested platform claim that kept
+the `audio` keep-alive off the table for a week. The cheap test is one build: request with
+`pushType: .token` inside a `do/catch` that falls back to `nil`, and log whether a usable token
+arrives. Do that before declaring it impossible.
+
+Note that push would NOT replace the keep-alive for transfers: it updates the display only and grants
+no runtime, so bytes still would not move.
+
+Rejected middle option: pointing the Live Activity's existing `estimatedStart`/`estimatedEnd`
+projection at the server's reported ETA so a transcode bar keeps gliding while suspended. It renders an
+estimate as fact, and a stalled transcode would animate cheerfully — the same class of lie as the
+frozen "5.1 MB/s · 7m 7s left" card that started the whole background investigation.
 
 **Swift:** `return` cannot transfer control out of a `defer` block — use `if`. Cost a review catch here.
 
