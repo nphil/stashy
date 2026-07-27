@@ -178,6 +178,13 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   decode it optionally. The non-optional decode broke the jobs panel's scan bar (frozen snapshot, poll
   loop silently self-killed; fixed v1.0.296). General rule: a poll loop behind visible UI must never
   self-terminate — clear stale state, show a reconnecting line, back off, keep trying. (§6)
+  **This rule was broken AGAIN in v1.0.345** by `scheduleSlowMoReengage`: after a seek it polled 6 s for
+  the player to stabilise, then gave up silently with nothing re-arming it, so AI slow-mo stayed dead
+  until the user toggled it by hand — and there was no log line for the give-up, so the trace showed only
+  healthy session starts. Two compounding traps worth generalising: (a) abandon on loss of INTENT (toggle
+  off, rate raised), never on a transient readiness flag; (b) if the poll's gate is a SUBSET of the
+  conditions the action itself checks, the action can silently reject and burn the retry — here
+  `canSlowForward` was checked only inside `updateSlowMo`, not in the poll. Gate on the full set.
 
 ## Docs map — what to read when
 - **`docs/ENGINEERING_NOTES.md`** — deep reference: CI detail, Swift 6 concurrency patterns,
