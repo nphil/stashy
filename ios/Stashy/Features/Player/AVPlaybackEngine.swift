@@ -138,7 +138,7 @@ final class AVPlaybackEngine: PlaybackEngine {
                         return (nowT >= s && nowT <= e) ? e - nowT : nil
                     }.max() ?? 0
                     let w = Int(presentation.width), h = Int(presentation.height)
-                    RemoteLog.shared.log(String(format: "av t=%.0f rate=%.0f keepUp=%@ empty=%@ buf=%.1fs dropped=%d stalls=%d %dx%d",
+                    RemoteLog.shared.log(String(format: "av t=%.0f rate=%.2f keepUp=%@ empty=%@ buf=%.1fs dropped=%d stalls=%d %dx%d",
                         nowT.isFinite ? nowT : -1, self.player.rate,
                         self.item.isPlaybackLikelyToKeepUp ? "Y" : "N",
                         self.item.isPlaybackBufferEmpty ? "Y" : "N",

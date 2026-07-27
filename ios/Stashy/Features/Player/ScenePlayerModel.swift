@@ -604,14 +604,35 @@ final class ScenePlayerModel {
         slowMoReengage?.cancel()
         guard aiSlowMoEnabled, playbackRate > 0, playbackRate <= 0.5, slowMoRunner == nil else { return }
         slowMoReengage = Task { @MainActor [weak self] in
-            for _ in 0..<15 {
+            // ~24 s, not 6. The old window gave up silently while the item was still rebuffering — routine
+            // when a download is saturating the link — and nothing re-armed it, so slow-mo stayed off until
+            // the user toggled it by hand. That was the "I had to reset it a few times" report.
+            for attempt in 1...60 {
                 try? await Task.sleep(for: .milliseconds(400))
                 guard let self, !Task.isCancelled, !self.stopped else { return }
-                if self.isPlaying, self.isReady, !self.isBuffering {
-                    self.updateSlowMo()   // re-checks the toggle/rate/engine at fire time
+                // Abandon only when the INTENT is gone (toggle off, rate raised), never because the player
+                // is momentarily unready.
+                guard self.aiSlowMoEnabled, self.playbackRate > 0, self.playbackRate <= 0.5 else { return }
+                guard self.slowMoRunner == nil else { return }
+                // `canSlowForward` is part of the gate here, not just inside `updateSlowMo`. It reads the
+                // item's live capability, which is transiently false after a seek — sampling it once and
+                // treating a false as final is what burned the single retry and left the effect dead.
+                guard self.isPlaying, self.isReady, !self.isBuffering,
+                      self.engine?.canSlowForward == true else { continue }
+                self.updateSlowMo()
+                if self.slowMoRunner != nil {
+                    RemoteLog.shared.event("⚙︎ slowmo-reengage", [("ok", 1), ("ms", attempt * 400)])
                     return
                 }
             }
+            // Never silent again: say exactly which precondition was still unmet when we stopped trying.
+            guard let self else { return }
+            RemoteLog.shared.event("⚙︎ slowmo-reengage", [
+                ("ok", 0),
+                ("playing", self.isPlaying ? 1 : 0), ("ready", self.isReady ? 1 : 0),
+                ("buffering", self.isBuffering ? 1 : 0),
+                ("canSlow", (self.engine?.canSlowForward ?? false) ? 1 : 0),
+                ("rate", self.playbackRate)])
         }
     }
 
