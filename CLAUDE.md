@@ -149,8 +149,14 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
 - **`VTFrameProcessor` (AI slow-mo):** `-19730 "Processor is not initialized"` is a **misleading** error —
   it means the input is unsupported, NOT that startSession failed. Two real causes, both bit us: (1) feed
   buffers in the config's own `sourcePixelBufferAttributes` format (**420v biplanar YUV**, NOT BGRA —
-  convert via CoreImage); (2) the model has a **device-specific max dimension (~720p)** that iOS 26 can't
-  query (OS 27 only) — so **cap interpolation at 1280×720**, never scale up. `SlowMoInterpolator`.
+  convert via CoreImage); (2) the model has a **device-specific max dimension** that iOS 26 can't query
+  (`maximumDimensions` is nil; OS 27 only). The old hardcoded 1280×720 was a third party's M1 Pro figure —
+  since v1.0.344 `probeMaxSizeIfNeeded()` MEASURES it once per device+OS (ladder 4K→1440p→1080p→720p, real
+  session + synthetic pair per rung) and 720p is only the fallback. **Don't "simplify" it back to a
+  constant** — real frames display at native res while synthesised ones are made at the cap and upscaled,
+  so every rung below the true ceiling is visible as sharp/soft pulsing on HD sources. A probe that fails
+  even at 720p indicts the probe, not the device (`trusted=0`), and must never shrink the shipped default.
+  `SlowMoInterpolator`.
 - **iOS 26 zoom-transition source-card freeze (Apple bug FB21961572; fine on iOS 18):** scrolling right
   after a `.navigationTransition(.zoom)` zoom-back freezes the SOURCE grid card ~1s (the transition holds
   it out of the scroll layout during its settle). `geometryGroup()` and the
