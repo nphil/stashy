@@ -2130,8 +2130,19 @@ final class DownloadManager {
             // bytes moving — the worst possible battery outcome. A blanket `!queuePaused` would be wrong
             // in the other direction: a `startNow` override legitimately runs alongside a paused queue,
             // so `.downloading` and `.merging` still count unconditionally.
+            //
+            // `.serverProcessing` counts too, by owner decision (2026-07-26), and it is the one clause
+            // here that buys VISIBILITY rather than throughput: the server transcodes whether or not we
+            // run, so this holds the process alive purely so the Live Activity keeps showing real
+            // progress. That is the point of having the card. It costs a background window for the whole
+            // encode — hours, on a big job — and the owner accepted that explicitly.
+            //
+            // NOT gated on `queuePaused`: that flag governs the TRANSFER queue, and pausing it does not
+            // stop a server-side encode. Gating here would blank the card for work that is still running.
+            // Waiting (`companionQueued`) items count as well, for the same reason `.queued` does — the
+            // gap between one transcode finishing and the pump starting the next must not suspend us.
             return self.items.contains {
-                $0.state == .downloading || $0.state == .merging ||
+                $0.state == .downloading || $0.state == .merging || $0.state == .serverProcessing ||
                 (!self.queuePaused && ($0.state == .waitingForNetwork || $0.state == .queued))
             }
         }
