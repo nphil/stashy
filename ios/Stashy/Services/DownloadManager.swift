@@ -1100,7 +1100,11 @@ final class DownloadManager {
         var doneMisses = 0       // consecutive polls where the job is gone but no ready result yet
         var qualityLogged = false   // the one-time "which VMAF map entry decided the cq" log line
         while true {
-            try? await Task.sleep(for: .milliseconds(1800))
+            // Backgrounded, this loop now runs for the WHOLE encode (the keep-alive holds the process so
+            // the Live Activity stays live), which at 1.8 s is ~2000 requests an hour and a radio
+            // wake-up for each. The card only re-renders every 2 s, so anything faster is invisible.
+            // Foreground keeps the tight cadence for a responsive bar.
+            try? await Task.sleep(for: .milliseconds(inBackground ? 5000 : 1800))
             guard item.state == .serverProcessing else {
                 releaseCompanionSlot(item.id)   // cancelled / deleted / paused — don't pin the server slot
                 return
@@ -1110,7 +1114,9 @@ final class DownloadManager {
                 update = try await companion.poll(jobID: jobID, sceneID: scene.id)
             } catch {
                 networkFails += 1
-                if networkFails > 40 {   // ~72s of continuous failures → give up (offline / server down)
+                // ~72 s of continuous failures in the foreground, ~200 s backgrounded — deliberately
+                // more forgiving there, where a sleeping radio makes transient failures likelier.
+                if networkFails > 40 {
                     item.state = .failed; item.error = "Lost contact with the server transcode"
                     clearActive(item.id); releaseCompanionSlot(item.id); return
                 }
@@ -1174,7 +1180,8 @@ final class DownloadManager {
                 item.error = update.job?.error ?? "Server transcode failed"
                 clearActive(item.id); releaseCompanionSlot(item.id); return
             }
-            // Job gone/finished but no ready result — tolerate a brief write race, then fail.
+            // Job gone/finished but no ready result — tolerate a brief write race, then fail. ~11 s of
+            // grace in the foreground, ~30 s backgrounded, since the cadence differs.
             let jobDone = update.job == nil || update.job?.status.uppercased() == "FINISHED"
             if jobDone && result?.status != "running" {
                 doneMisses += 1
