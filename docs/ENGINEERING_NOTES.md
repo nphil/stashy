@@ -550,14 +550,23 @@ show `#N` positions. A play button on a waiting server-transcode card — `start
 so it would be a dead tap, and loosening that guard byte-downloads the ORIGINAL file, discarding the
 chosen codec and resolution.
 
-**`.serverProcessing` stays OUT of the keep-alive — decided 2026-07-26, don't re-open it.** A queue of
-server transcodes holds no background window: lock the phone and progress tracking stops. That is
-correct, because nothing is lost — the server keeps encoding regardless, and
-`reconnectCompanionTranscode` picks the job back up by its persisted id on relaunch. Holding an
-audio-session-backed window for hours to animate a bar while zero bytes move would be the worst
-battery trade in the app.
+**`.serverProcessing` IS in the keep-alive — owner decision 2026-07-26, don't quietly remove it as an
+optimisation.** It is the one clause in the predicate that buys VISIBILITY rather than throughput: the
+server encodes whether or not the phone runs, so this holds the process alive purely so the Live
+Activity keeps showing real progress. A card frozen at 4% for two hours is worse than no card, and
+being able to see it is the entire reason the card exists. The cost — a background window held for the
+whole encode, hours on a big job — was accepted explicitly.
 
-The tempting counter-argument, and why it doesn't land as stated: "the plugin knows the percentage, so
+It works because the LA sync loop ticks every 2 s and `monitorCompanionJob` refreshes
+`serverJobProgress` every 1.8 s: a live process means a live card. NOT gated on `queuePaused` (that
+flag governs the transfer queue; pausing it does not stop a server-side encode, and gating would blank
+the card for work still running). `companionQueued` waiters count too, same reason `.queued` does.
+
+The earlier decision was the opposite — exclude it, on the grounds that nothing is LOST when the app
+suspends, which is true: the server keeps encoding and `reconnectCompanionTranscode` recovers the job
+by id on relaunch. That reasoning weighed durability and ignored the feature's actual purpose.
+
+The counter-argument that came up on the way, and why it doesn't land as stated: "the plugin knows the percentage, so
 the Live Activity could just show it." True but incomplete — `monitorCompanionJob` obtains that
 percentage by POLLING the server every 1.8 s, which requires the app to be running. The server knowing
 a number does not move it to a suspended phone.
