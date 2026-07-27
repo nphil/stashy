@@ -194,7 +194,8 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   Activity carries name / bytes / speed / ETA on a continuous bar (title suppressed under Privacy Mode).
 - **Queue invariants are in ENGINEERING_NOTES §3 ("The download queue manager") — read before touching
   it.** Five were shipped bugs found in one review pass, including a data-loss one: a `.queued` item
-  without a `markActive` marker is DELETED on the next launch, sidecar and all.
+  without a `markActive` marker is DELETED on the next launch, sidecar and all. Fix device-verified
+  2026-07-27 (force-quit with a batch queued: all cards back, bytes retained, order preserved).
 - **The background problem is SOLVED (2026-07-26).** `DownloadKeepAlive` was device-proven on its first
   run: 290 s unbroken background runtime, 18.9 MB → 744 MB while backgrounded, 29/29 ticks, zero
   refusals, Live Activity live throughout. Long unattended downloads now work. Do not re-open the

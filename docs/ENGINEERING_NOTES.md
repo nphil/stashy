@@ -479,7 +479,10 @@ does not help, because shrinking text does not move it away from the curve.
 ### The download queue manager (v1.0.341) — invariants, not preferences
 Five of these were shipped bugs found in one review pass. Read before touching the queue.
 
-**A queued item MUST be `markActive`d.** The general rule: *any state that means "live work the user
+**A queued item MUST be `markActive`d.** *(Fix DEVICE-VERIFIED 2026-07-27: a batch queued with one
+transfer in flight survived a force-quit intact — every card back, bytes retained, and the restored order
+matching the order they were added. The enqueue-date sort held; the coarse-filesystem-timestamp risk it
+carried did not materialise.)* The general rule: *any state that means "live work the user
 expects to survive a kill" needs the `.active` marker*, because `loadInterrupted` guards on it and
 `sweepOrphanedMeta` deletes the sidecar of anything without it. The serial gate (v1.0.340) returned
 before `markActive` ran, so a ten-deep queue came back from a force-quit as ONE item — the other nine
