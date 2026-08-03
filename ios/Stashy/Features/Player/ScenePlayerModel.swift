@@ -614,6 +614,11 @@ final class ScenePlayerModel {
     /// engine can't drive one. Re-read after any engine rebuild — the view dies with its engine.
     var externalRenderView: UIView? { engine?.externalRenderView }
 
+    /// Whether the current route can actually play below 1×. False on a growing loopback-remux EVENT
+    /// playlist, where `supportedRate` clamps every sub-1× rate to 1.0 — so the remote's jog zone must
+    /// creep by seeking instead of pretending to slow the picture down.
+    var canSlowForwardNow: Bool { engine?.canSlowForward ?? false }
+
     /// Suspend AI slow-mo across a user interaction (seek/pause): tear the runner down exactly like the
     /// manual toggle-off does, keeping the playback rate. Re-engagement goes through
     /// `scheduleSlowMoReengage` — a FRESH runner on stabilised playback is the one proven-smooth path;

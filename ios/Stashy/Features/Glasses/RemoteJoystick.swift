@@ -40,6 +40,9 @@ struct RemoteJoystick: UIViewRepresentable {
     var onFocusStep: (Int, Int) -> Void = { _, _ in }
     var onFocusRefused: () -> Void = {}
     var onSelect: () -> Void = {}
+    /// A tap inside the stick zone that never left the deadzone. The zone covers the lower half of the
+    /// screen, so without this, tap-to-play would simply stop working down there.
+    var onTap: () -> Void = {}
     /// (rung index into `JoystickMapping.jogRates`, direction +1 forward / −1 reverse-creep). nil = off.
     var onJog: (Int?, Int) -> Void = { _, _ in }
     var onShuttle: (Double) -> Void = { _ in }            // signed media-seconds per second, 0 = off
@@ -150,7 +153,12 @@ struct RemoteJoystick: UIViewRepresentable {
             shuttleActive = false
         }
 
-        func tapped() { parent.onSelect() }
+        func tapped() {
+            switch parent.mode {
+            case .browse: parent.onSelect()
+            case .transport, .frame: parent.onTap()
+            }
+        }
 
         // MARK: 30 Hz emit loop
 
@@ -331,6 +339,8 @@ final class JoystickHostView: UIView {
 
     private var centre: CGPoint = .zero
     private var grabBias: CGVector = .zero
+    private var maxDeflection: CGFloat = 0
+    private var downAt: CFTimeInterval = 0
     private var returnAnimator: UIViewPropertyAnimator?
     private var mode: RemoteJoystick.StickMode = .browse
 
@@ -497,6 +507,8 @@ final class JoystickHostView: UIView {
         CATransaction.begin(); CATransaction.setDisableActions(true)
         dome.position = p
         CATransaction.commit()
+        maxDeflection = 0
+        downAt = CACurrentMediaTime()
         setAssemblyOpacity(1.0, duration: 0.10)
         coordinator?.began()
     }
@@ -527,6 +539,7 @@ final class JoystickHostView: UIView {
                                                          width: rDome * 2 + 3, height: rDome * 2 + 3)).cgPath
             CATransaction.commit()
         }
+        maxDeflection = max(maxDeflection, hypot(v.dx, v.dy))
         coordinator?.moved(v)
     }
 
@@ -539,7 +552,11 @@ final class JoystickHostView: UIView {
     }
 
     private func finish(cancelled: Bool) {
+        let wasTap = !cancelled
+            && maxDeflection < JoystickMapping.deadzone
+            && CACurrentMediaTime() - downAt < 0.4
         if cancelled { coordinator?.abort() } else { coordinator?.ended() }
+        if wasTap { coordinator?.tapped(); Haptics.tap() }
         springHome()
         setAssemblyOpacity(0.35, duration: 0.5)
     }

@@ -27,6 +27,7 @@ struct SettingsView: View {
     @State private var debugTopic = RemoteLog.topic
     @State private var downloadTrace = RemoteLog.isDownloadTracingEnabled
     @State private var stickHaptics = StickHaptics.isEnabled
+    @State private var remoteJoystick = RemoteRootView.joystickEnabled
     @State private var hapticTestRunning = false
     @State private var reclaimed = false
 
@@ -409,6 +410,15 @@ struct SettingsView: View {
                                     RemoteLog.isDownloadTracingEnabled = on
                                 }
                             Text("Adds every background range slice, part-file size census, engine start and Live Activity update to the log — what's needed to diagnose a transfer that stalls or loses progress while the app is minimized. Verbose: leave off unless you're chasing a download bug.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Group {
+                            Toggle("XR remote joystick", isOn: $remoteJoystick)
+                                .onChange(of: remoteJoystick) { _, on in
+                                    RemoteRootView.joystickEnabled = on
+                                }
+                            Text("Replaces the XR remote's drag gestures with an analog stick in the lower half of the screen: push right for slow motion (AI interpolation engages on the slow rungs), further for variable-speed shuttle, up/down for playback speed, and it pans the picture while zoomed. Taps, double-taps, two-finger tap and pinch are unchanged. Off restores the drag vocabulary exactly.")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }

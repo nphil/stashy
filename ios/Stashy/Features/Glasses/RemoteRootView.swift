@@ -31,12 +31,30 @@ struct RemoteRootView: View {
                 appLockVeil
             } else {
                 touchSurface
+                // The stick owns the LOWER HALF, layered above the surface as a sibling so neither
+                // steals the other's touches. A tap down here still plays/pauses (see `onTap`), so
+                // nothing the old vocabulary offered is lost in that region.
+                if stickEnabled {
+                    VStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        joystick
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 422)
+                    }
+                    .ignoresSafeArea()
+                }
+                // Chrome sits ABOVE the stick in z-order, but only the chips are hit-testable — the
+                // status card and hints already opt out and a Spacer renders nothing, so every touch
+                // in the lower half reaches the stick. The chips move to the TOP with the stick
+                // enabled: at the bottom they sat in the middle of the stick's field, and on a
+                // bezel-less slab the top corners are the only positions findable by touch alone.
                 VStack(spacing: 0) {
                     statusCard
                         .padding(.top, 24)
+                    if stickEnabled { chipRow.padding(.top, 10) }
                     Spacer()
                     gestureHints
-                    chipRow
+                    if !stickEnabled { chipRow }
                 }
                 .padding(.horizontal, 20)
                 if remoteLocked { lockHint }
@@ -52,6 +70,77 @@ struct RemoteRootView: View {
         // A lock flip mid-pinch skips the gesture's ended-reset (the handler guards on remoteLocked),
         // which would leave the next pinch starting from a stale base — zoom jump on first use.
         .onChange(of: remoteLocked) { _, _ in pinchBase = nil }
+        // Pay the ~30 ms engine start when the remote appears, not on the first touch.
+        .task { await StickHaptics.shared.prepare() }
+        .onDisappear { StickHaptics.shared.abort() }
+    }
+
+    // MARK: - Analog stick
+
+    /// Owner escape hatch: the whole pre-stick gesture vocabulary stays intact and one tap away, so a
+    /// bad first impression is never a regression.
+    private var stickEnabled: Bool { RemoteRootView.joystickEnabled }
+
+    static var joystickEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "remoteJoystick") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "remoteJoystick") }
+    }
+
+    /// Mode is DERIVED, never toggled: the wearer can see the glasses, and a spring-return stick has
+    /// no way to display a latched mode it put you in.
+    private var stickMode: RemoteJoystick.StickMode {
+        switch coordinator.mode {
+        case .browse, .grid: return .browse
+        case .playing: return coordinator.isZoomed ? .frame : .transport
+        }
+    }
+
+    private var joystick: some View {
+        RemoteJoystick(
+            mode: stickMode,
+            enabled: !remoteLocked,
+            duration: coordinator.player?.duration ?? 0,
+            zoomScale: coordinator.zoomScale,
+            slowUnavailable: !(coordinator.player?.canSlowForwardNow ?? false),
+            onFocusStep: { dx, dy in
+                if coordinator.moveFocus(dx: dx, dy: dy) {
+                    Haptics.step()
+                } else {
+                    Haptics.tap(soft: true); Haptics.tap(soft: true)
+                }
+            },
+            onSelect: {
+                Haptics.notify(.success)
+                coordinator.selectFocused()
+            },
+            onTap: { coordinator.togglePlayPause() },
+            onJog: { rung, direction in coordinator.setJog(rung: rung, direction: direction) },
+            onShuttle: { rate in
+                coordinator.shuttleTick(rate: rate)
+                // One tick per sprite cue crossed, so what the hand feels and what the glasses show
+                // stay in lockstep (the same rule the old drag-scrub follows).
+                if let target = coordinator.scrubTarget, coordinator.sprites.isReady {
+                    let cue = coordinator.sprites.cueIndex(at: target)
+                    if cue != lastCue { lastCue = cue; Haptics.selectionTick() }
+                }
+            },
+            onShuttleCommit: { coordinator.endShuttle(commit: true); lastCue = -1 },
+            onSpeedStep: { delta in
+                if coordinator.stepSpeed(delta) {
+                    Haptics.step()
+                } else {
+                    Haptics.tap(soft: true); Haptics.tap(soft: true)
+                }
+            },
+            onPan: { v, dt in coordinator.panTick(v, dt: dt) },
+            onZoomStep: { delta in
+                if coordinator.zoomStep(delta) {
+                    Haptics.step()
+                } else {
+                    Haptics.tap(soft: true); Haptics.tap(soft: true)
+                }
+            }
+        )
     }
 
     // MARK: - Surface
@@ -93,6 +182,10 @@ struct RemoteRootView: View {
                 Haptics.tap(soft: true)
             },
             onScrub: { dx, vertical, ended in
+                // With the stick on, the surface's drag-scrub stands down: two competing scrub
+                // mechanisms on one screen is a bug factory, and the stick's variable-rate shuttle
+                // supersedes it. Every TAP gesture stays byte-identical either way.
+                guard !stickEnabled else { return }
                 guard !remoteLocked, let player = coordinator.player else { return }
                 if ended {
                     if coordinator.scrubTarget != nil {
@@ -125,7 +218,7 @@ struct RemoteRootView: View {
                 if cue != lastCue { lastCue = cue; Haptics.selectionTick() }
             },
             onSpeedStep: { delta in
-                guard !remoteLocked else { return }
+                guard !stickEnabled, !remoteLocked else { return }
                 if coordinator.stepSpeed(delta) {
                     Haptics.step()
                 } else {
@@ -247,13 +340,19 @@ struct RemoteRootView: View {
         Group {
             switch coordinator.mode {
             case .browse:
-                Text("Swipe to browse  ·  Tap to play")
+                Text(stickEnabled ? "Stick ↔ browse  ·  Tap to play" : "Swipe to browse  ·  Tap to play")
             case .grid:
-                Text("Swipe to browse  ·  Tap to play  ·  Two-finger tap to go back")
+                Text(stickEnabled
+                     ? "Stick to browse  ·  Tap to play  ·  Two-finger tap = back"
+                     : "Swipe to browse  ·  Tap to play  ·  Two-finger tap to go back")
             case .playing:
-                Text(coordinator.isZoomed
-                     ? "Drag to pan  ·  Double-tap to reset zoom"
-                     : "Drag ↔ scrub   ↕ speed  ·  Pinch to zoom  ·  Volume buttons for sound")
+                Text(stickEnabled
+                     ? (coordinator.isZoomed
+                        ? "Stick pans  ·  ↕ past the notch = zoom  ·  Double-tap resets"
+                        : "Stick → slow-mo · push further = shuttle  ·  ↕ = speed  ·  Pinch = zoom")
+                     : (coordinator.isZoomed
+                        ? "Drag to pan  ·  Double-tap to reset zoom"
+                        : "Drag ↔ scrub   ↕ speed  ·  Pinch to zoom  ·  Volume buttons for sound"))
             }
         }
         .font(.caption2)

@@ -648,6 +648,8 @@ final class GlassesCoordinator {
 
     private func stopPlayback() {
         resetZoom()
+        shuttleTarget = nil
+        jogActive = false
         player?.stop()
         player = nil
         playingScene = nil
@@ -698,6 +700,87 @@ final class GlassesCoordinator {
         guard let player else { return }
         player.setPlaybackRate(holding ? 2.0 : Self.speedRungs[speedIndex])
         speedPulse += 1
+    }
+
+    // MARK: - Analog stick transport
+
+    /// True while the jog zone is holding a slow rate (drives the OSD's AI-pending state).
+    private(set) var jogActive = false
+    @ObservationIgnored private var shuttleTarget: TimeInterval?
+    @ObservationIgnored private var shuttleLastTick: CFTimeInterval = 0
+
+    /// Inner-zone jog. Forward rungs are {0.10, 0.25, 0.50}× — at or below the 0.5 threshold that
+    /// `ScenePlayerModel.updateSlowMo` engages on, so AI slow motion arrives by simply pushing the
+    /// stick, with no toggle and no new plumbing. Where the route cannot really slow down (remux), and
+    /// for every reverse rung, it degrades to a preview creep instead of silently doing nothing.
+    func setJog(rung: Int?, direction: Int) {
+        guard let player else { return }
+        guard let rung, JoystickMapping.jogRates.indices.contains(rung) else {
+            if jogActive {
+                jogActive = false
+                player.setPlaybackRate(Self.speedRungs[speedIndex])
+                speedPulse += 1
+            }
+            if direction == 0 { endShuttle(commit: true) }
+            return
+        }
+        let rate = JoystickMapping.jogRates[rung]
+        if direction > 0, player.canSlowForwardNow {
+            jogActive = true
+            player.setPlaybackRate(rate)
+            speedPulse += 1
+        } else {
+            // Creep: ±0.25 / 0.5 / 1.0 media-seconds per second, shown on the scrub strip.
+            jogActive = false
+            shuttleTick(rate: Double(direction < 0 ? -1 : 1) * [0.25, 0.5, 1.0][rung])
+        }
+    }
+
+    /// Outer-zone shuttle. The decoder is NEVER commanded at 36× — the target is integrated in wall
+    /// time and shown on the existing scrub strip (sprite preview and all), then committed with ONE
+    /// seek on release. That is the only mechanism that works on both engines and every route.
+    func shuttleTick(rate: Double) {
+        guard let player else { return }
+        let now = CACurrentMediaTime()
+        if shuttleTarget == nil {
+            shuttleTarget = player.currentTime
+            shuttleLastTick = now
+            Haptics.prepareSelection()
+        }
+        let dt = min(0.25, max(0, now - shuttleLastTick))
+        shuttleLastTick = now
+        guard rate != 0 else { return }
+        // Finite ceiling always — an indefinite stream reports duration 0, and an unbounded target
+        // meets Int() downstream (the greatestFiniteMagnitude-is-finite landmine).
+        let ceiling = player.duration > 0 ? player.duration - 0.3 : (shuttleTarget ?? 0) + 7200
+        let next = max(0, min((shuttleTarget ?? 0) + rate * dt, ceiling))
+        shuttleTarget = next
+        scrubTarget = next
+    }
+
+    func endShuttle(commit: Bool) {
+        guard let player, let target = shuttleTarget else { return }
+        shuttleTarget = nil
+        scrubTarget = nil
+        if commit { player.seek(to: target) }
+    }
+
+    /// Velocity pan while zoomed — the stick's real advantage over a finger drag, which cannot hold a
+    /// slow constant creep.
+    func panTick(_ v: CGVector, dt: Double) {
+        guard isZoomed else { return }
+        guard v != .zero else { return }
+        setZoom(scale: zoomScale,
+                offset: CGPoint(x: zoomOffset.x + v.dx * dt, y: zoomOffset.y + v.dy * dt))
+    }
+
+    /// One quarter-step of zoom, latched. Refuses at the ends so the remote can double-tick.
+    @discardableResult
+    func zoomStep(_ delta: Int) -> Bool {
+        let target = zoomScale + CGFloat(delta) * 0.25
+        guard target >= 1, target <= 4 else { return false }
+        setZoom(scale: target, offset: zoomOffset)
+        return true
     }
 
     // MARK: - Zoom (pinch on the remote, rendered on the glasses)
