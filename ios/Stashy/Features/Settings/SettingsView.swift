@@ -26,6 +26,8 @@ struct SettingsView: View {
     @State private var debugServer = RemoteLog.server
     @State private var debugTopic = RemoteLog.topic
     @State private var downloadTrace = RemoteLog.isDownloadTracingEnabled
+    @State private var stickHaptics = StickHaptics.isEnabled
+    @State private var hapticTestRunning = false
     @State private var reclaimed = false
 
     private let swatchColumns = [GridItem(.adaptive(minimum: 64), spacing: 12)]
@@ -410,6 +412,18 @@ struct SettingsView: View {
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
+                        Group {
+                            Toggle("Stick haptics", isOn: $stickHaptics)
+                                .onChange(of: stickHaptics) { _, on in
+                                    StickHaptics.isEnabled = on
+                                    if !on { StickHaptics.shared.abort() }
+                                }
+                            Button("Test stick haptics (8 s)") { runHapticTest() }
+                                .disabled(!stickHaptics || hapticTestRunning)
+                            Text("The XR remote's analog stick uses CoreHaptics for continuous, deflection-modulated feedback. It runs on its own haptics-only engine with no audio session of its own, so it must not disturb background downloads — the test sweeps the bed for 8 seconds so that can be confirmed on device with a transfer running and the app backgrounded. Turn this off to fall back to plain tick feedback.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 } header: {
                     Text("Diagnostics")
@@ -454,6 +468,31 @@ struct SettingsView: View {
             }
             // Floating live download/transcode status (bottom-right) → Downloads tab.
             .downloadStatusOverlay()
+        }
+    }
+
+    /// Sweeps the stick's continuous bed through its full range for 8 s. The point is not the feel —
+    /// it is proving on device that CoreHaptics does not disturb the download keep-alive: run it with
+    /// Trace downloads ON, a large transfer running and the app backgrounded, then confirm the
+    /// `dl-keepalive` ticks stay unbroken with no `interrupt=` line.
+    private func runHapticTest() {
+        guard !hapticTestRunning else { return }
+        hapticTestRunning = true
+        Task { @MainActor in
+            await StickHaptics.shared.prepare()
+            RemoteLog.shared.log("glasses-haptic test start fallback=\(StickHaptics.shared.usingFallback ? 1 : 0)")
+            StickHaptics.shared.beginBed(.transport)
+            // 8 s at 30 Hz: two full triangle sweeps of deflection, with a detent dip each second.
+            for tick in 0..<240 {
+                let phase = Double(tick) / 120.0                 // 0…2 over the run
+                let u = Float(1 - abs(phase.truncatingRemainder(dividingBy: 1) * 2 - 1))
+                StickHaptics.shared.setBed(tick < 120 ? .transport : .viscous, u: u)
+                if tick % 30 == 0 { StickHaptics.shared.dip(); Haptics.step() }
+                try? await Task.sleep(for: .milliseconds(33))
+            }
+            StickHaptics.shared.endBed()
+            RemoteLog.shared.log("glasses-haptic test end")
+            hapticTestRunning = false
         }
     }
 
