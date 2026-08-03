@@ -218,18 +218,19 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   run: 290 s unbroken background runtime, 18.9 MB → 744 MB while backgrounded, 29/29 ticks, zero
   refusals, Live Activity live throughout. Long unattended downloads now work. Do not re-open the
   question of whether iOS permits this — it does, and the recipe is in ENGINEERING_NOTES §3.
-- **XR glasses (Viture Pro): still MIRRORING as of v1.0.347 — two fixes tested, third in flight.**
-  v1.0.346 shipped the whole pipe unreachable (`UIApplicationSupportsMultipleScenes` absent — iOS never
-  creates an external scene without it). v1.0.347 added the flag; device-verified INSUFFICIENT on
-  iOS 26.6: five launches, `scene-config` shows the app role only, external role never offered, IPA
-  confirmed to contain the flag. Current hypothesis (v1.0.348): iOS decides supported roles from the
-  STATIC `UISceneConfigurations` dict, and only consults `configurationForConnecting` for roles it
-  already chose to create — so the external role needs a static entry (delegate class name
-  module-qualified via `$(PRODUCT_MODULE_NAME)`). A `screen-notify` diagnostic (deprecated
-  `UIScreen.didConnectNotification`, log-only, remove once answered) disambiguates the remaining
-  failure mode: fires-but-no-scene = role policy; never-fires = iPhone 26.6 handles DP-out entirely at
-  the system level and NO app-side change can claim the display (the -3000 shape). The pipe itself
-  (second `AVPlayerLayer`, opacity-hidden phone surface, tap remote) is built and waiting. Glasses rules:
+- **XR glasses (Viture Pro) pipe DEVICE-PROVEN 2026-08-03 (v1.0.348):** `glasses-connect
+  bounds=1920×1080 scale=1.0 maxfps=60 overscan=zero`, clean disconnect events. **The mirroring saga's
+  answer, hard-won across three builds: an external-display scene requires BOTH
+  `UIApplicationSupportsMultipleScenes: true` AND a STATIC `UISceneConfigurations` entry for
+  `UIWindowSceneSessionRoleExternalDisplayNonInteractive` (delegate class module-qualified via
+  `$(PRODUCT_MODULE_NAME)`).** The flag alone was device-verified insufficient on iOS 26.6, and
+  `configurationForConnecting` is NEVER consulted for the external role even when it works — iOS reads
+  the static manifest only (CarPlay-style). Do not remove the static entry; do not trust the dynamic
+  method for role discovery. DP alt-mode is 60 Hz (not 120). The `screen-notify` diagnostic answered
+  its question and can be removed. Video = second `AVPlayerLayer` on the same player
+  (`externalRenderView`); phone surface hides in place; glasses code must never take
+  `beginBackgroundTask` or touch the audio session. **Glasses-FIRST mode (10-foot UI on glasses +
+  full-time phone remote) is the active build.** Glasses rules:
   **no `beginBackgroundTask` and no audio-session writes anywhere in glasses code** (pins the window,
   kills the keep-alive); AI slow-mo is intent-gated off while connected (renders on a phone-hosted
   overlay); `ScreenAwake` arbiters the idle timer (locking the phone kills DP output); scene pickers
