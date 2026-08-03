@@ -31,7 +31,10 @@ struct LibraryView: View {
         // Keep the display awake while watching Downloads or while a download/transcode runs (a
         // foreground-only transcode would otherwise pause when the screen sleeps and the app backgrounds).
         .onChange(of: downloads.keepScreenAwake, initial: true) { _, awake in
-            UIApplication.shared.isIdleTimerDisabled = awake
+            // Through the arbiter, not a direct write: a glasses session also holds the idle timer, and
+            // a download finishing mid-session must not re-enable sleep underneath it (locking the phone
+            // kills DisplayPort output).
+            ScreenAwake.set(.downloads, awake)
         }
     }
 }
