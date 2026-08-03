@@ -34,6 +34,15 @@ enum Haptics {
         generator.prepare()
     }
 
+    private static let impactRigid = UIImpactFeedbackGenerator(style: .rigid)
+
+    /// A crisp detent for eyes-free focus/rung steps — rigid reads sharper through a case-held phone
+    /// than the selection tick, which stays for fine continuous feedback (scrub cues, volume).
+    static func step() {
+        impactRigid.impactOccurred(intensity: 0.8)
+        impactRigid.prepare()
+    }
+
     private static let notifier = UINotificationFeedbackGenerator()
 
     /// A MODE boundary (remote lock/unlock, exit, browse→play commit): the heavier patterned feedback,

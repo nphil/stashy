@@ -13,12 +13,17 @@ struct GlassesPlaybackOSD: View {
                 pausedCard(player)
                 skipBadge
                 scrubStrip(player)
+                speedPill(player)
+                modeChips(player)
                 volumePill(player)
                 loadingHint(player)
             }
         }
         .animation(.easeOut(duration: 0.18), value: coordinator.player?.isPlaying ?? true)
         .animation(.easeOut(duration: 0.18), value: coordinator.scrubTarget != nil)
+        .animation(.easeOut(duration: 0.18), value: coordinator.speedPulse)
+        .animation(.easeOut(duration: 0.18), value: coordinator.volumePulse)
+        .animation(.easeOut(duration: 0.18), value: coordinator.isZoomed)
     }
 
     // MARK: - Paused
@@ -74,6 +79,20 @@ struct GlassesPlaybackOSD: View {
             VStack {
                 Spacer()
                 VStack(spacing: 20) {
+                    // Sprite-sheet preview of the target frame (Netflix scrub model). Re-rendered per
+                    // scrubTarget tick — `thumbnail(at:)` is a cached crop, cheap at 60 Hz. Sprites are
+                    // upscaled from ~160pt tiles; soft is fine at cinema distance.
+                    if let thumb = coordinator.sprites.thumbnail(at: target) {
+                        Image(uiImage: thumb)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 416, height: 234)
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 14)
+                                    .strokeBorder(.white.opacity(0.35), lineWidth: 2)
+                            }
+                    }
                     HStack(alignment: .firstTextBaseline, spacing: 20) {
                         Text(Self.clock(target))
                             .font(.system(size: 46, weight: .semibold).monospacedDigit())
@@ -104,6 +123,89 @@ struct GlassesPlaybackOSD: View {
                 .padding(.bottom, 54)
             }
         }
+    }
+
+    // MARK: - Speed pill (top-centre, transient)
+
+    /// Answers the remote's vertical speed-drag: the actual engine rate (truthful during 2×-hold),
+    /// plus an AI badge once the interpolation runner is live on the slow rungs.
+    @ViewBuilder
+    private func speedPill(_ player: ScenePlayerModel) -> some View {
+        if coordinator.speedPulse > 0 {
+            VStack {
+                HStack(spacing: 16) {
+                    Image(systemName: "gauge.with.needle")
+                        .font(.system(size: 30, weight: .medium))
+                    Text(Self.rate(player.playbackRate))
+                        .font(.system(size: 34, weight: .semibold).monospacedDigit())
+                    if player.slowMoActive {
+                        aiBadge
+                    }
+                }
+                .foregroundStyle(.white.opacity(0.92))
+                .padding(.horizontal, 30).padding(.vertical, 18)
+                .background(Color.black.opacity(0.40), in: Capsule())
+                .padding(.top, 64)
+                Spacer()
+            }
+            .id(coordinator.speedPulse)                        // restart the fade on every step
+            .task {
+                try? await Task.sleep(for: .milliseconds(1400))
+                coordinator.speedPulse = 0
+            }
+            .transition(.opacity)
+        }
+    }
+
+    // MARK: - Mode chips (top-right, persistent while a mode is on)
+
+    /// Quiet standing indicators for the two easy-to-forget states: digital zoom and a non-1× rate.
+    /// Dim and small so they read as status, not chrome; gone entirely in the normal case.
+    @ViewBuilder
+    private func modeChips(_ player: ScenePlayerModel) -> some View {
+        let offSpeed = abs(player.playbackRate - 1.0) > 0.001
+        if coordinator.isZoomed || offSpeed {
+            VStack {
+                HStack(spacing: 14) {
+                    Spacer()
+                    if coordinator.isZoomed {
+                        chip {
+                            Image(systemName: "plus.magnifyingglass")
+                                .font(.system(size: 22, weight: .medium))
+                            Text(String(format: "%.1f×", coordinator.zoomScale))
+                                .font(.system(size: 24, weight: .semibold).monospacedDigit())
+                        }
+                    }
+                    if offSpeed {
+                        chip {
+                            Text(Self.rate(player.playbackRate))
+                                .font(.system(size: 24, weight: .semibold).monospacedDigit())
+                            if player.slowMoActive {
+                                aiBadge
+                            }
+                        }
+                    }
+                }
+                .padding(.trailing, 96).padding(.top, 64)
+                Spacer()
+            }
+            .transition(.opacity)
+        }
+    }
+
+    private func chip(@ViewBuilder _ content: () -> some View) -> some View {
+        HStack(spacing: 10, content: content)
+            .foregroundStyle(.white.opacity(0.7))
+            .padding(.horizontal, 20).padding(.vertical, 10)
+            .background(Color.black.opacity(0.35), in: Capsule())
+    }
+
+    private var aiBadge: some View {
+        Text("AI")
+            .font(.system(size: 20, weight: .bold))
+            .foregroundStyle(.white.opacity(0.92))
+            .padding(.horizontal, 10).padding(.vertical, 3)
+            .background(Color.white.opacity(0.16), in: Capsule())
     }
 
     // MARK: - Volume pill (bottom-right)
@@ -182,5 +284,11 @@ struct GlassesPlaybackOSD: View {
         guard d.isFinite else { return "" }
         let s = Int(d)
         return s < 0 ? "−\(Self.clock(TimeInterval(-s)))" : "+\(Self.clock(TimeInterval(s)))"
+    }
+
+    /// "0.25×" / "0.5×" / "1×" / "1.5×" / "2×" — %g drops trailing zeros.
+    private static func rate(_ r: Double) -> String {
+        guard r.isFinite, r > 0 else { return "1×" }
+        return String(format: "%g×", r)
     }
 }

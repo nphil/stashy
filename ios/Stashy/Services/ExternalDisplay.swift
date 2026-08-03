@@ -42,6 +42,18 @@ final class GlassesSession {
         rootController?.setVideo(view)
     }
 
+    /// Host an overlay INSIDE the video container (the AI slow-mo frame stream) so it zooms and pans
+    /// with the video. nil clears.
+    func setOverlay(_ view: UIView?) {
+        rootController?.setOverlay(view)
+    }
+
+    /// Pinch-zoom state from the remote: scale 1…4 with a pan offset, applied as a transform to the
+    /// whole video container (video + slow-mo overlay together).
+    func setZoom(scale: CGFloat, offset: CGPoint) {
+        rootController?.setZoom(scale: scale, offset: offset)
+    }
+
     fileprivate func attach(_ controller: GlassesRootController) {
         rootController = controller
         isConnected = true
@@ -186,11 +198,28 @@ final class GlassesRootController: UIViewController {
         }
     }
 
+    private var overlayView: UIView?
+
     func setVideo(_ videoView: UIView?) {
-        for sub in videoContainer.subviews { sub.removeFromSuperview() }
+        for sub in videoContainer.subviews where sub !== overlayView { sub.removeFromSuperview() }
         guard let videoView else { return }
         videoView.frame = videoContainer.bounds
         videoView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        videoContainer.addSubview(videoView)
+        videoContainer.insertSubview(videoView, at: 0)
+    }
+
+    func setOverlay(_ view: UIView?) {
+        overlayView?.removeFromSuperview()
+        overlayView = view
+        guard let view else { return }
+        view.frame = videoContainer.bounds
+        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        videoContainer.addSubview(view)   // above the player layer, inside the zoom transform
+    }
+
+    func setZoom(scale: CGFloat, offset: CGPoint) {
+        let s = max(1, min(4, scale))
+        videoContainer.transform = CGAffineTransform(translationX: offset.x, y: offset.y)
+            .scaledBy(x: s, y: s)
     }
 }

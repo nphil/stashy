@@ -129,11 +129,15 @@ private struct GlassesPosterCard: View {
         .opacity(focused ? 1.0 : 0.45)
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: focused)
         .task(id: scene.id) {
-            if let localThumb {
-                poster = await imageCache.localImage(at: localThumb)
-            }
-            if poster == nil, let url = scene.thumbnailURL(apiKey: apiKey) {
+            // Server screenshot FIRST: the phone grid and the remote's status card use it, so the
+            // wall must too or a downloaded scene wears a different image on each screen (the
+            // download-time local frame grab is a different frame entirely, and it made the glasses
+            // look out of sync with the remote). The local thumb is the offline fallback only.
+            if let url = scene.thumbnailURL(apiKey: apiKey) {
                 poster = try? await imageCache.image(for: url)
+            }
+            if poster == nil, let localThumb {
+                poster = await imageCache.localImage(at: localThumb)
             }
         }
     }

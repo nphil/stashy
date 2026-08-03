@@ -57,6 +57,18 @@ final class GlassesCoordinator {
     /// Server-rail fetch, kept so disconnect can cancel it.
     @ObservationIgnored private var railTask: Task<Void, Never>?
 
+    /// Scrub-preview sprites for the playing scene (10-foot Netflix-style peek). Local-first.
+    @ObservationIgnored private(set) var sprites = SpriteThumbnails()
+    /// Playback speed ladder driven by the remote's vertical drag. Index into `Self.speedRungs`.
+    private(set) var speedIndex = 2
+    static let speedRungs: [Double] = [0.25, 0.5, 1.0, 1.5, 2.0]
+    /// Transient speed pill pulse for the OSD.
+    var speedPulse = 0
+    /// Pinch zoom: 1…4 scale + pan, applied to the glasses video container.
+    private(set) var zoomScale: CGFloat = 1
+    private(set) var zoomOffset: CGPoint = .zero
+    var isZoomed: Bool { zoomScale > 1.02 }
+
     var focusedScene: StashScene? {
         guard rails.indices.contains(railIndex) else { return nil }
         let rail = rails[railIndex]
@@ -76,6 +88,17 @@ final class GlassesCoordinator {
         }
         set { if newValue > 0 { UserDefaults.standard.set(min(1, newValue), forKey: volumeKey) } }
     }
+
+    // MARK: - Recently Played (persisted, most-recent-first, capped)
+
+    private static let historyKey = "glassesPlayHistory"
+    static func recordPlay(_ sceneID: String) {
+        var ids = UserDefaults.standard.stringArray(forKey: historyKey) ?? []
+        ids.removeAll { $0 == sceneID }
+        ids.insert(sceneID, at: 0)
+        UserDefaults.standard.set(Array(ids.prefix(20)), forKey: historyKey)
+    }
+    static var playHistory: [String] { UserDefaults.standard.stringArray(forKey: historyKey) ?? [] }
 
     // MARK: - Session lifecycle
 
@@ -101,21 +124,22 @@ final class GlassesCoordinator {
 
     // MARK: - Rails
 
+    /// Netflix-shaped wall (owner spec): Recently Played on top, Recently Added underneath, Downloaded
+    /// last (the offline safety shelf). Downloaded + any cached history paint instantly; server rails
+    /// fill in. Rail ORDER is fixed regardless of arrival order.
     func refreshRails() {
         guard let env = GlassesSession.shared.env else { return }
-        // Downloaded first: paints instantly from disk, works with no server. Through `edits.visible`
-        // so locally-deleted scenes don't come back from the dead on the big screen.
         let downloaded = env.edits.visible(
             env.downloads.items.filter { $0.state == .completed }.compactMap(\.scene))
-        var next: [Rail] = []
-        if !downloaded.isEmpty { next.append(Rail(id: "downloads", title: "Downloaded", scenes: downloaded)) }
-        rails = next
-        clampFocus()
-        prefetchPosters(for: downloaded)
+        // Instant first paint: history resolved against what's on disk, full resolution follows.
+        let history = Self.playHistory
+        let offlineHistory = history.compactMap { id in downloaded.first { $0.id == id } }
+        upsertRail(id: "played", title: "Recently Played", scenes: offlineHistory)
+        upsertRail(id: "downloads", title: "Downloaded", scenes: downloaded)
+        prefetchPosters(for: Array((offlineHistory + downloaded).prefix(10)))
 
-        // Recent: a FIXED default query (date desc), deliberately not the phone's persisted browse sort —
-        // a 10-foot shelf must be deterministic. Retry loop never self-terminates (the jobs-panel rule):
-        // gate on the full condition set, back off, keep trying until disconnect.
+        // Server rails: Recently ADDED (created_at desc — a stable shelf, not the phone's browse sort)
+        // and the full history resolution by ids. Never self-terminates (the jobs-panel rule).
         railTask?.cancel()
         railTask = Task { @MainActor [weak self] in
             var delay: Double = 2
@@ -125,13 +149,18 @@ final class GlassesCoordinator {
                     try? await Task.sleep(for: .seconds(delay)); continue
                 }
                 do {
-                    let result = try await client.findScenes(SceneQuery(), page: 1, perPage: 25)
-                    let scenes = (GlassesSession.shared.env?.edits.visible(result.scenes)) ?? result.scenes
-                    self.setRecentRail(scenes)
-                    self.prefetchPosters(for: Array(scenes.prefix(8)))
+                    let added = try await client.findScenes(
+                        SceneQuery(sort: .createdAt, direction: .desc), page: 1, perPage: 25)
+                    let visibleAdded = (GlassesSession.shared.env?.edits.visible(added.scenes)) ?? added.scenes
+                    let ids = Self.playHistory
+                    let playedFull = ids.isEmpty ? [] : (try await client.findScenesByIDs(ids))
+                    let visiblePlayed = (GlassesSession.shared.env?.edits.visible(playedFull)) ?? playedFull
+                    self.upsertRail(id: "played", title: "Recently Played", scenes: visiblePlayed)
+                    self.upsertRail(id: "added", title: "Recently Added", scenes: visibleAdded)
+                    self.prefetchPosters(for: Array((visiblePlayed + visibleAdded).prefix(12)))
                     return
                 } catch {
-                    RemoteLog.shared.event("glasses-rail", [("recent", "retry"),
+                    RemoteLog.shared.event("glasses-rail", [("fetch", "retry"),
                                                             ("err", String("\(error)".prefix(60)))])
                     try? await Task.sleep(for: .seconds(delay))
                     delay = min(30, delay * 1.6)
@@ -140,12 +169,15 @@ final class GlassesCoordinator {
         }
     }
 
-    private func setRecentRail(_ scenes: [StashScene]) {
-        guard !scenes.isEmpty else { return }
-        if let idx = rails.firstIndex(where: { $0.id == "recent" }) {
-            rails[idx].scenes = scenes
-        } else {
-            rails.append(Rail(id: "recent", title: "Recent", scenes: scenes))
+    /// Insert/update a rail while preserving the FIXED order played → added → downloads. Empty rails
+    /// are removed entirely (no dead shelf headers).
+    private func upsertRail(id: String, title: String, scenes: [StashScene]) {
+        let order = ["played", "added", "downloads"]
+        rails.removeAll { $0.id == id }
+        if !scenes.isEmpty {
+            let rail = Rail(id: id, title: title, scenes: scenes)
+            let pos = rails.firstIndex { (order.firstIndex(of: $0.id) ?? 99) > (order.firstIndex(of: id) ?? 99) }
+            rails.insert(rail, at: pos ?? rails.count)
         }
         clampFocus()
     }
@@ -210,6 +242,17 @@ final class GlassesCoordinator {
         playingScene = scene
         mode = .playing
         model.start(autoplay: true)
+        Self.recordPlay(scene.id)
+        resetZoom()
+        speedIndex = 2
+        // Scrub-preview sprites, local-first (downloaded scenes have them on disk).
+        sprites = SpriteThumbnails()
+        if let vtt = env.downloads.localVTT(sceneID: scene.id) ?? scene.vttURL(apiKey: env.appState.client?.apiKey ?? ""),
+           let sheet = env.downloads.localSprite(sceneID: scene.id) ?? scene.spriteURL(apiKey: env.appState.client?.apiKey ?? "") {
+            let cache = env.imageCache
+            let sprites = self.sprites
+            Task { await sprites.load(vttURL: vtt, spriteURL: sheet, imageCache: cache) }
+        }
         // Owner decision: glasses playback restores the last glasses volume (models start muted by
         // design — that rule is the PHONE's; the wearer expects sound in their ears).
         model.setVolume(Self.storedVolume)
@@ -243,6 +286,7 @@ final class GlassesCoordinator {
     }
 
     private func stopPlayback() {
+        resetZoom()
         player?.stop()
         player = nil
         playingScene = nil
@@ -269,15 +313,49 @@ final class GlassesCoordinator {
         }
     }
 
-    func setVolume(_ v: Double) {
-        guard let player else { return }
-        player.setVolume(v)
-        if v > 0 { Self.storedVolume = v }
-        volumePulse += 1
-    }
-
     func toggleMute() {
         player?.toggleMute()
         volumePulse += 1
+    }
+
+    /// One rung up/down the speed ladder [0.25, 0.5, 1, 1.5, 2]. Slow rungs get AI interpolation
+    /// automatically when the AI slow-mo toggle is on — the runner hosts its frames on the glasses.
+    /// Returns false at ladder ends (remote double-ticks).
+    @discardableResult
+    func stepSpeed(_ delta: Int) -> Bool {
+        guard let player else { return false }
+        let target = speedIndex + delta
+        guard Self.speedRungs.indices.contains(target) else { return false }
+        speedIndex = target
+        player.setPlaybackRate(Self.speedRungs[target])
+        speedPulse += 1
+        return true
+    }
+
+    /// Temporary 2× while held (long-press); restores the ladder rung on release.
+    func holdSpeed(_ holding: Bool) {
+        guard let player else { return }
+        player.setPlaybackRate(holding ? 2.0 : Self.speedRungs[speedIndex])
+        speedPulse += 1
+    }
+
+    // MARK: - Zoom (pinch on the remote, rendered on the glasses)
+
+    func setZoom(scale: CGFloat, offset: CGPoint) {
+        zoomScale = max(1, min(4, scale))
+        // Clamp the pan so the video can't be pushed fully off-screen: at scale s the content half-
+        // overhang is (s-1)/2 of the 1920×1080 canvas.
+        let maxX = (zoomScale - 1) * 960, maxY = (zoomScale - 1) * 540
+        zoomOffset = CGPoint(x: max(-maxX, min(maxX, offset.x)),
+                             y: max(-maxY, min(maxY, offset.y)))
+        if zoomScale <= 1.02 { zoomOffset = .zero }
+        GlassesSession.shared.setZoom(scale: zoomScale, offset: zoomOffset)
+    }
+
+    func resetZoom() { setZoom(scale: 1, offset: .zero) }
+
+    /// Double-tap parity with Apple Photos: toggle fit ↔ 2.4× centred.
+    func toggleZoom() {
+        setZoom(scale: isZoomed ? 1 : 2.4, offset: .zero)
     }
 }

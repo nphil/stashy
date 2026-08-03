@@ -82,8 +82,12 @@ final class ScenePlayerModel {
     /// The overlay the zoom surface hosts INSIDE its zoom container (slow-mo's synthesised frame stream —
     /// it must zoom identically to the video). AI upscaling was reverted 2026-07-10 (buggy in the field;
     /// see ROADMAP §AI-upscaling for the postmortem + the iOS 27 / Real-ESRGAN plan).
-    var overlayActive: Bool { slowMoActive }
-    var overlayRenderView: UIView? { slowMoActive ? slowMoRenderView : nil }
+    /// PHONE-side hosting contract only: goes false/nil while the glasses own the frame stream (which
+    /// reaches the glasses container via `GlassesSession.setOverlay`). A UIView has ONE superview — if
+    /// the hidden phone surface also attached the render view (v1 EXIT flow keeps `ScenePlayerView`
+    /// live with `glassesActive` set), it would silently steal it off the glasses.
+    var overlayActive: Bool { slowMoActive && !glassesActive }
+    var overlayRenderView: UIView? { overlayActive ? slowMoRenderView : nil }
 
     /// True once playback has run to the end (player parked there). The next play() restarts from 0.
     @ObservationIgnored private var reachedEnd = false
@@ -93,14 +97,17 @@ final class ScenePlayerModel {
 
     @ObservationIgnored private var engine: PlaybackEngine?
     /// True while a glasses session is showing this player's video. INTENT, not readiness (the v1.0.345
-    /// lesson): it gates AI slow-mo — the interpolated stream renders on a phone-hosted overlay, so with
-    /// glasses connected the wearer would see raw 0.25×/0.5× frames while the hidden phone interpolates.
-    /// Raw slow rates still work on glasses; interpolation re-arms on disconnect.
+    /// lesson). Flipping it rebuilds the AI slow-mo runner so the interpolated stream hosts on the right
+    /// SIDE: the glasses overlay (`GlassesSession.setOverlay`, inside the zoom transform) when active,
+    /// the phone's zoom surface otherwise — `overlayActive`/`overlayRenderView` read false/nil for the
+    /// phone while the glasses own the view.
     var glassesActive = false {
         didSet {
             guard glassesActive != oldValue else { return }
-            if glassesActive { updateSlowMo() }        // engage-gate now fails → suspends the runner
-            else { scheduleSlowMoReengage() }
+            // Rebuild the runner so its render view hosts on the right SIDE (glasses overlay vs phone
+            // surface) for the new state.
+            suspendSlowMo()
+            scheduleSlowMoReengage()
         }
     }
     @ObservationIgnored private let route: PlaybackRoute
@@ -494,6 +501,7 @@ final class ScenePlayerModel {
         slowMoReengage?.cancel(); slowMoReengage = nil
         slowMoRunner?.stop()
         slowMoRunner = nil
+        GlassesSession.shared.setOverlay(nil)   // unconditional: in the glassesActive didSet this runs AFTER the flag flipped
         slowMoRenderView = nil
         slowMoActive = false
         watchdog?.cancel()
@@ -611,6 +619,7 @@ final class ScenePlayerModel {
         guard slowMoRunner != nil else { return }
         slowMoRunner?.stop()
         slowMoRunner = nil
+        GlassesSession.shared.setOverlay(nil)   // unconditional: in the glassesActive didSet this runs AFTER the flag flipped
         slowMoRenderView = nil
         slowMoActive = false
         slowMoTelemetry = SlowMoTelemetry()
@@ -632,8 +641,7 @@ final class ScenePlayerModel {
                 guard let self, !Task.isCancelled, !self.stopped else { return }
                 // Abandon only when the INTENT is gone (toggle off, rate raised), never because the player
                 // is momentarily unready.
-                guard self.aiSlowMoEnabled, self.playbackRate > 0, self.playbackRate <= 0.5,
-                      !self.glassesActive else { return }
+                guard self.aiSlowMoEnabled, self.playbackRate > 0, self.playbackRate <= 0.5 else { return }
                 guard self.slowMoRunner == nil else { return }
                 // `canSlowForward` is part of the gate here, not just inside `updateSlowMo`. It reads the
                 // item's live capability, which is transiently false after a seek — sampling it once and
@@ -696,7 +704,9 @@ final class ScenePlayerModel {
     private func updateSlowMo() {
         // Engage only when the user has opted in, at ≤0.5×, AND the item can actually slow-play. The opt-in
         // is required because VTFrameProcessor can hard-crash on some inputs (see `aiSlowMoEnabled`).
-        let engage = aiSlowMoEnabled && playbackRate > 0 && playbackRate <= 0.5 && !glassesActive
+        // Glasses mode no longer disables AI slow-mo — the interpolated stream is HOSTED ON THE
+        // GLASSES (an overlay inside the external video container, so it zooms with the video).
+        let engage = aiSlowMoEnabled && playbackRate > 0 && playbackRate <= 0.5
             && (engine?.canSlowForward ?? false)
         if engage {
             guard slowMoRunner == nil else { return }
@@ -707,12 +717,14 @@ final class ScenePlayerModel {
             )
             slowMoRunner = runner
             slowMoRenderView = runner.renderView
+            if glassesActive { GlassesSession.shared.setOverlay(runner.renderView) }
             slowMoTelemetry = SlowMoTelemetry(active: true)
             slowMoActive = true
             runner.start()
         } else if slowMoRunner != nil {
             slowMoRunner?.stop()
             slowMoRunner = nil
+            GlassesSession.shared.setOverlay(nil)   // unconditional: in the glassesActive didSet this runs AFTER the flag flipped
             slowMoRenderView = nil
             slowMoActive = false
             slowMoTelemetry = SlowMoTelemetry()

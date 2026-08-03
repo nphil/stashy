@@ -1,21 +1,29 @@
 import SwiftUI
 
-/// The phone while glasses are connected: a fullscreen eyes-free remote. True black (OLED off), one dim
-/// status cluster for the occasional glance, chips along the bottom. Everything else is gesture surface;
-/// all feedback renders on the GLASSES, where the eyes are.
+/// The phone while glasses are connected: a fullscreen eyes-free remote. True black (OLED off); one
+/// glanceable status card up top; everything else is gesture surface. All feedback renders on the
+/// GLASSES — the phone's job is to be felt, not looked at.
+///
+/// v2 vocabulary (volume moved to the hardware buttons, freeing the vertical axis):
+///   browse:   drag/flick = focus (52 pt per step), tap = play
+///   playback: tap = play/pause · double-tap halves = ±10 s · H-drag = scrub (4-gear by vertical offset)
+///             V-drag = speed ladder 0.25→2× (slow rungs get AI interpolation on the glasses)
+///             long-press = 2× while held · two-finger tap = mute · pinch = zoom, drags pan while
+///             zoomed, double-tap resets
 struct RemoteRootView: View {
     @Bindable var coordinator: GlassesCoordinator
     @State private var lock = AppLockState.shared
-    /// Remote-surface lock (the LOCK chip) — guards against pocket/grip touches. Distinct from app lock.
     @State private var remoteLocked = false
     @State private var exitHold: Task<Void, Never>?
 
-    // Scrub session state (playback mode)
+    // Scrub session state
     @State private var scrubBase: TimeInterval = 0
     @State private var scrubAccum: TimeInterval = 0
     @State private var lastCue = -1
-    // Volume session state
-    @State private var volumeBase: Double = 0
+    // Pinch session state
+    @State private var pinchBase: CGFloat?
+    // Status-card poster
+    @State private var poster: UIImage?
 
     var body: some View {
         ZStack {
@@ -24,185 +32,258 @@ struct RemoteRootView: View {
             if lock.isLocked {
                 appLockVeil
             } else {
-                RemoteTouchSurface(
-                    mode: coordinator.mode == .browse ? .browse : .playback,
-                    onFocusStep: { dx, dy in
-                        if remoteLocked { return }
-                        if coordinator.moveFocus(dx: dx, dy: dy) {
-                            Haptics.selectionTick(minInterval: 0.03)
-                        } else {
-                            Haptics.tap(soft: true); Haptics.tap(soft: true)   // hard stop: double-tick
-                        }
-                    },
-                    onSelect: {
-                        guard !remoteLocked else { return }
-                        Haptics.notify(.success)
-                        coordinator.playFocused()
-                    },
-                    onTogglePlay: {
-                        guard !remoteLocked else { return }
-                        coordinator.togglePlayPause()
-                        Haptics.tap()
-                    },
-                    onSkip: { side in
-                        guard !remoteLocked else { return }
-                        coordinator.skip(Double(side) * 10)
-                        Haptics.tap(soft: true)
-                    },
-                    onScrub: { dx, vertical, ended in
-                        guard !remoteLocked, let player = coordinator.player else { return }
-                        if ended {
-                            if coordinator.scrubTarget != nil {
-                                player.seek(to: max(0, scrubBase + scrubAccum))
-                                coordinator.scrubTarget = nil
-                            }
-                            return
-                        }
-                        if coordinator.scrubTarget == nil {          // scrub session begins
-                            scrubBase = player.currentTime
-                            scrubAccum = 0
-                            lastCue = -1
-                            Haptics.prepareSelection()
-                        }
-                        let (rate, tier) = ScrubSpeed.tier(verticalDistance: vertical)
-                        coordinator.scrubTier = tier
-                        // Relative jog: full width ≈ the whole video at full gear, scaled by the tier.
-                        let width = max(UIScreen.main.bounds.width, 1)
-                        scrubAccum += Double(dx / width) * max(player.duration, 60) * rate
-                        // The ceiling is ALWAYS finite. A local-HLS remux genuinely reports duration 0
-                        // while growing, and an unbounded target later meets `Int(target / 10)` — the
-                        // documented `.greatestFiniteMagnitude`-is-finite trap that crashed v1.0.332.
-                        // Unknown duration ⇒ allow a 2 h forward roam from where the scrub began.
-                        let ceiling = player.duration > 0 ? player.duration - 0.3 : scrubBase + 7200
-                        let target = max(0, min(scrubBase + scrubAccum, ceiling))
-                        scrubAccum = target - scrubBase
-                        coordinator.scrubTarget = target
-                        let cue = Int(target / 10)                   // tick every 10 s of media crossed
-                        if cue != lastCue { lastCue = cue; Haptics.selectionTick() }
-                    },
-                    onVolume: { dy, ended in
-                        guard !remoteLocked, let player = coordinator.player else { return }
-                        if ended { return }
-                        if volumeBase == 0 { volumeBase = player.volume }
-                        let next = min(1, max(0, player.volume + Double(dy) / 400))
-                        if Int(next * 100) != player.volumePercent {
-                            Haptics.selectionTick()
-                        }
-                        coordinator.setVolume(next)
-                    },
-                    onHoldSpeed: { holding in
-                        guard !remoteLocked, let player = coordinator.player else { return }
-                        player.setPlaybackRate(holding ? 2.0 : 1.0)
-                        Haptics.tap()
-                    },
-                    onMute: {
-                        guard !remoteLocked else { return }
-                        coordinator.toggleMute()
-                        Haptics.tap()
-                    }
-                )
-                .ignoresSafeArea()
-
-                statusCluster
-                chipRow
+                touchSurface
+                VStack(spacing: 0) {
+                    statusCard
+                        .padding(.top, 24)
+                    Spacer()
+                    gestureHints
+                    chipRow
+                }
+                .padding(.horizontal, 20)
                 if remoteLocked { lockHint }
             }
         }
         .statusBarHidden()
         .persistentSystemOverlays(.hidden)
-        // End of video → back to the rails, focus on what just played. `didReachEnd` was built for
-        // exactly this and a review caught it written-but-never-read.
         .onChange(of: coordinator.player?.didReachEnd ?? false) { _, ended in
             if ended { coordinator.returnToBrowse() }
         }
-        // Engine rebuilds (HLS fallback, far-seek reinit) kill the external layer — re-host on every
-        // readiness flip, mirroring the rule the phone-side routing already follows.
         .onChange(of: coordinator.player?.isReady ?? false) { _, ready in
             if ready { coordinator.rehost() }
         }
+        .task(id: coordinator.focusedScene?.id ?? coordinator.playingScene?.id) {
+            await loadPoster()
+        }
     }
 
-    // MARK: - Status (dim, glanceable, burn-in-safe)
+    // MARK: - Surface
 
-    private var statusCluster: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "eyeglasses")
-                .font(.system(size: 28, weight: .light))
-                .foregroundStyle(.white.opacity(0.22))
-            switch coordinator.mode {
-            case .browse:
-                Text("Browsing on glasses")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.25))
-                if !Privacy.isOn, let scene = coordinator.focusedScene {
-                    Text(scene.title ?? "")
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.35))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .padding(.horizontal, 44)
+    private var touchSurface: some View {
+        RemoteTouchSurface(
+            mode: coordinator.mode == .browse ? .browse : .playback,
+            onFocusStep: { dx, dy in
+                if remoteLocked { return }
+                if coordinator.moveFocus(dx: dx, dy: dy) {
+                    Haptics.step()
+                } else {
+                    Haptics.tap(soft: true); Haptics.tap(soft: true)
                 }
-            case .playing:
-                if let player = coordinator.player {
-                    Text("\(Self.clock(player.currentTime)) / \(Self.clock(player.duration))")
-                        .font(.title3.monospacedDigit())
-                        .foregroundStyle(.white.opacity(0.35))
-                    Text(player.isPlaying ? "Playing on glasses" : "Paused")
-                        .font(.caption)
+            },
+            onSelect: {
+                guard !remoteLocked else { return }
+                Haptics.notify(.success)
+                coordinator.playFocused()
+            },
+            onTogglePlay: {
+                guard !remoteLocked else { return }
+                coordinator.togglePlayPause()
+                Haptics.tap()
+            },
+            onSkip: { side in
+                guard !remoteLocked else { return }
+                coordinator.skip(Double(side) * 10)
+                Haptics.tap(soft: true)
+            },
+            onScrub: { dx, vertical, ended in
+                guard !remoteLocked, let player = coordinator.player else { return }
+                if ended {
+                    if coordinator.scrubTarget != nil {
+                        player.seek(to: max(0, scrubBase + scrubAccum))
+                        coordinator.scrubTarget = nil
+                        Haptics.tap(soft: true)
+                    }
+                    return
+                }
+                if coordinator.scrubTarget == nil {
+                    scrubBase = player.currentTime
+                    scrubAccum = 0
+                    lastCue = -1
+                    Haptics.prepareSelection()
+                }
+                let (rate, tier) = ScrubSpeed.tier(verticalDistance: vertical)
+                coordinator.scrubTier = tier
+                let width = max(UIScreen.main.bounds.width, 1)
+                scrubAccum += Double(dx / width) * max(player.duration, 60) * rate
+                // Finite ceiling always — an indefinite stream reports duration 0, and an unbounded
+                // target meets Int() downstream (the greatestFiniteMagnitude-is-finite landmine).
+                let ceiling = player.duration > 0 ? player.duration - 0.3 : scrubBase + 7200
+                let target = max(0, min(scrubBase + scrubAccum, ceiling))
+                scrubAccum = target - scrubBase
+                coordinator.scrubTarget = target
+                // Tick per PREVIEW FRAME crossed (sprite cue), so what the glasses show and what the
+                // hand feels stay in lockstep; fall back to 10 s buckets when no sprite index loaded.
+                let cue = coordinator.sprites.isReady
+                    ? coordinator.sprites.cueIndex(at: target) : Int(target / 10)
+                if cue != lastCue { lastCue = cue; Haptics.selectionTick() }
+            },
+            onSpeedStep: { delta in
+                guard !remoteLocked else { return }
+                if coordinator.stepSpeed(delta) {
+                    Haptics.step()
+                } else {
+                    Haptics.tap(soft: true); Haptics.tap(soft: true)
+                }
+            },
+            onHoldSpeed: { holding in
+                guard !remoteLocked else { return }
+                coordinator.holdSpeed(holding)
+                Haptics.tap()
+            },
+            onMute: {
+                guard !remoteLocked else { return }
+                coordinator.toggleMute()
+                Haptics.tap()
+            },
+            isZoomed: { coordinator.isZoomed },
+            onPinch: { scale, ended in
+                guard !remoteLocked else { return }
+                if pinchBase == nil { pinchBase = coordinator.zoomScale; Haptics.tap(soft: true) }
+                coordinator.setZoom(scale: (pinchBase ?? 1) * scale, offset: coordinator.zoomOffset)
+                if ended { pinchBase = nil; if !coordinator.isZoomed { Haptics.tap(soft: true) } }
+            },
+            onZoomPan: { dx, dy in
+                guard !remoteLocked else { return }
+                // Phone points → glasses pixels: ~3× feels 1:1 through the optic (1920 vs ~393 wide).
+                coordinator.setZoom(scale: coordinator.zoomScale,
+                                    offset: CGPoint(x: coordinator.zoomOffset.x + dx * 3,
+                                                    y: coordinator.zoomOffset.y + dy * 3))
+            },
+            onZoomToggle: {
+                guard !remoteLocked else { return }
+                coordinator.toggleZoom()
+                Haptics.tap()
+            }
+        )
+        .ignoresSafeArea()
+    }
+
+    // MARK: - Status card (the one glanceable element)
+
+    private var statusCard: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.06))
+                if let poster, !Privacy.isOn {
+                    Image(uiImage: poster)
+                        .resizable().aspectRatio(contentMode: .fill)
+                } else {
+                    Image(systemName: "eyeglasses")
+                        .font(.system(size: 18, weight: .light))
                         .foregroundStyle(.white.opacity(0.25))
                 }
             }
+            .frame(width: 78, height: 44)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            VStack(alignment: .leading, spacing: 5) {
+                if !Privacy.isOn, let title = (coordinator.playingScene ?? coordinator.focusedScene)?.title {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.75))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                switch coordinator.mode {
+                case .browse:
+                    if coordinator.rails.indices.contains(coordinator.railIndex) {
+                        let rail = coordinator.rails[coordinator.railIndex]
+                        Text("\(rail.title)  ·  \(coordinator.itemIndex + 1) of \(rail.scenes.count)")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.white.opacity(0.4))
+                    }
+                case .playing:
+                    if let player = coordinator.player {
+                        HStack(spacing: 8) {
+                            Text(Self.clock(player.currentTime))
+                            progressBar(player)
+                            Text(Self.clock(player.duration))
+                        }
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.4))
+                    }
+                }
+            }
+            Spacer(minLength: 0)
         }
-        .frame(maxHeight: .infinity, alignment: .center)
+        .padding(14)
+        .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Color.white.opacity(0.08)))
         .allowsHitTesting(false)
     }
 
-    // MARK: - Chips
+    private func progressBar(_ player: ScenePlayerModel) -> some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.white.opacity(0.12))
+                Capsule().fill(Color.white.opacity(0.55))
+                    .frame(width: player.duration > 0
+                           ? geo.size.width * min(1, max(0, player.currentTime / player.duration)) : 0)
+            }
+        }
+        .frame(height: 3)
+    }
+
+    // MARK: - Hints + chips
+
+    private var gestureHints: some View {
+        Group {
+            switch coordinator.mode {
+            case .browse:
+                Text("Swipe to browse  ·  Tap to play")
+            case .playing:
+                Text(coordinator.isZoomed
+                     ? "Drag to pan  ·  Double-tap to reset zoom"
+                     : "Drag ↔ scrub   ↕ speed  ·  Pinch to zoom  ·  Volume buttons for sound")
+            }
+        }
+        .font(.caption2)
+        .foregroundStyle(.white.opacity(0.22))
+        .padding(.bottom, 14)
+        .allowsHitTesting(false)
+    }
 
     private var chipRow: some View {
-        VStack {
-            Spacer()
-            HStack(spacing: 14) {
-                if coordinator.mode == .playing {
-                    chip("Browse", systemImage: "square.grid.2x2") {
-                        Haptics.tap(soft: true)
-                        coordinator.returnToBrowse()
-                    }
-                }
-                holdChip("Exit", systemImage: "iphone") {
-                    Haptics.notify(.success)
-                    coordinator.player?.pause()
-                    coordinator.takeoverSuppressed = true
-                }
-                chip(remoteLocked ? "Unlock" : "Lock",
-                     systemImage: remoteLocked ? "lock.open" : "lock") {
-                    remoteLocked.toggle()
-                    Haptics.notify(remoteLocked ? .warning : .success)
+        HStack(spacing: 12) {
+            if coordinator.mode == .playing {
+                chip("Browse", systemImage: "square.grid.2x2") {
+                    Haptics.tap(soft: true)
+                    coordinator.returnToBrowse()
                 }
             }
-            .padding(.bottom, 28)
+            holdChip("Exit", systemImage: "iphone") {
+                Haptics.notify(.success)
+                coordinator.player?.pause()
+                coordinator.takeoverSuppressed = true
+            }
+            chip(remoteLocked ? "Unlock" : "Lock",
+                 systemImage: remoteLocked ? "lock.open" : "lock") {
+                remoteLocked.toggle()
+                Haptics.notify(remoteLocked ? .warning : .success)
+            }
         }
+        .padding(.bottom, 26)
     }
 
     private func chip(_ label: String, systemImage: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(label, systemImage: systemImage)
-                .font(.footnote.weight(.medium))
-                .foregroundStyle(.white.opacity(0.4))
-                .padding(.horizontal, 16).padding(.vertical, 10)
-                .background(Color.white.opacity(0.07), in: Capsule())
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.55))
+                .padding(.horizontal, 18).padding(.vertical, 12)
+                .background(Color.white.opacity(0.08), in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.white.opacity(0.08)))
         }
         .buttonStyle(.plain)
     }
 
-    /// EXIT is hold-to-confirm (600 ms) — a tap must never eject the user from the remote, because a
-    /// pocket brush taps. Progress echoes on the GLASSES via the coordinator.
     private func holdChip(_ label: String, systemImage: String, action: @escaping () -> Void) -> some View {
         Label(label, systemImage: systemImage)
-            .font(.footnote.weight(.medium))
-            .foregroundStyle(.white.opacity(0.4))
-            .padding(.horizontal, 16).padding(.vertical, 10)
-            .background(Color.white.opacity(0.07), in: Capsule())
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(.white.opacity(0.55))
+            .padding(.horizontal, 18).padding(.vertical, 12)
+            .background(Color.white.opacity(0.08), in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.08)))
             .onLongPressGesture(minimumDuration: 0.6) {
                 coordinator.exitProgress = nil
                 action()
@@ -227,7 +308,7 @@ struct RemoteRootView: View {
             Text("Remote locked")
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.3))
-                .padding(.top, 70)
+                .padding(.top, 90)
             Spacer()
         }
         .allowsHitTesting(false)
@@ -241,6 +322,21 @@ struct RemoteRootView: View {
             Text("Unlock Stashy to use the remote")
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.3))
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func loadPoster() async {
+        poster = nil
+        guard let env = GlassesSession.shared.env,
+              let scene = coordinator.playingScene ?? coordinator.focusedScene else { return }
+        let apiKey = env.appState.client?.apiKey ?? ""
+        if let url = scene.thumbnailURL(apiKey: apiKey),
+           let img = try? await env.imageCache.image(for: url) {
+            poster = img
+        } else if let local = env.downloads.localThumb(sceneID: scene.id) {
+            poster = await env.imageCache.localImage(at: local)
         }
     }
 
