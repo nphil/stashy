@@ -59,6 +59,20 @@ struct GlassesHomeView: View {
         .frame(width: 1920, height: 1080, alignment: .topLeading)
     }
 
+    /// Focusable positions in a rail: its scenes, then the View More tile when present. A named type,
+    /// not a tuple — `ForEach(…, id: \.element.id)` needs a key path, and Swift has none into tuples.
+    /// Stable string ids so a rail whose contents are replaced mid-session doesn't reuse card state
+    /// by position.
+    private struct RailSlot: Identifiable {
+        let id: String
+        let scene: StashScene?
+    }
+
+    private func slots(for rail: GlassesCoordinator.Rail) -> [RailSlot] {
+        rail.scenes.map { RailSlot(id: $0.id, scene: $0) }
+            + (rail.more == nil ? [] : [RailSlot(id: "more-\(rail.id)", scene: nil)])
+    }
+
     private func railView(_ rail: GlassesCoordinator.Rail, railIdx: Int) -> some View {
         let isFocusedRail = railIdx == coordinator.railIndex
         let displayIndex = coordinator.displayIndex(for: rail)
@@ -69,15 +83,21 @@ struct GlassesHomeView: View {
                 .frame(height: Self.railTitleHeight, alignment: .leading)
                 .padding(.leading, 96)
 
-            // The row slides so the focused card sits in the fixed centre slot.
+            // The row slides so the focused card sits in the fixed centre slot. The trailing slot is
+            // the View More tile when the rail has more than it shows — a focusable TILE rather than
+            // a button under the header, because the remote's whole browse vocabulary is dx/dy focus
+            // steps: a header button would be literally unreachable.
             HStack(spacing: Self.gutter) {
-                ForEach(Array(rail.scenes.enumerated()), id: \.element.id) { idx, scene in
+                ForEach(Array(slots(for: rail).enumerated()), id: \.element.id) { idx, slot in
                     GlassesPosterCard(
-                        scene: scene,
+                        scene: slot.scene,
+                        moreSubtitle: "\(rail.total) scenes",
                         imageCache: imageCache,
                         apiKey: apiKey,
-                        localThumb: localThumb(scene.id),
-                        focused: isFocusedRail && idx == coordinator.itemIndex
+                        localThumb: slot.scene.flatMap { localThumb($0.id) },
+                        focused: isFocusedRail && idx == coordinator.itemIndex,
+                        slot: Self.cardSlot,
+                        drawn: Self.focusDraw
                     )
                 }
             }
@@ -97,85 +117,25 @@ struct GlassesHomeView: View {
     /// it exactly on top of the next rail's header, glyph for glyph.
     private var focusedTitleBlock: some View {
         VStack(alignment: .center, spacing: 8) {
-            if let scene = coordinator.focusedScene {
-                Text(scene.title ?? "Untitled")
+            if coordinator.rails.indices.contains(coordinator.railIndex) {
+                let rail = coordinator.rails[coordinator.railIndex]
+                // Never collapses to empty: on the View More tile the block names the affordance.
+                Text(coordinator.focusedScene?.title ?? (coordinator.focusedMoreSource == nil
+                                                         ? "Untitled" : "View More"))
                     .font(.system(size: 46, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.92))
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: 1440)
-                if coordinator.rails.indices.contains(coordinator.railIndex) {
-                    let rail = coordinator.rails[coordinator.railIndex]
-                    Text("\(rail.title)  ·  \(coordinator.itemIndex + 1) of \(rail.scenes.count)")
-                        .font(.system(size: 24, weight: .medium).monospacedDigit())
-                        .foregroundStyle(.white.opacity(0.40))
-                }
+                Text(coordinator.focusedMoreSource == nil
+                     ? "\(rail.title)  ·  \(coordinator.itemIndex + 1) of \(rail.slotCount)"
+                     : "\(rail.title)  ·  \(rail.total) scenes")
+                    .font(.system(size: 24, weight: .medium).monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.40))
             }
         }
         .frame(width: 1920, height: 92, alignment: .center)
         .padding(.top, Self.metaTop)
         .animation(.easeOut(duration: 0.15), value: coordinator.focusedScene?.id)
-    }
-}
-
-/// One poster card. Cards carry no text — identity lives in the fixed title block, so the shelf reads
-/// as imagery. Posters are deliberately UNBLURRED regardless of Privacy Mode: the optical path is
-/// wearer-only, and that privacy IS the feature (the phone-side remote is what suppresses everything).
-private struct GlassesPosterCard: View {
-    let scene: StashScene
-    let imageCache: ImageCache
-    let apiKey: String
-    let localThumb: URL?
-    let focused: Bool
-    @State private var poster: UIImage?
-
-    var body: some View {
-        ZStack {
-            if let poster {
-                Image(uiImage: poster)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-            } else {
-                Rectangle().fill(Color.white.opacity(0.06))
-                Image(systemName: "film")
-                    .font(.system(size: 56, weight: .light))
-                    .foregroundStyle(.white.opacity(0.18))
-            }
-        }
-        // Draw at FOCUS size and scale DOWN. Drawing at 384 and scaling 1.5× up would resample the
-        // focused card from 384 px of real data — soft edges, mushy ring, and a visible sharp/soft
-        // pulse against native-res content. Downsampling never softens; upsampling always does.
-        .frame(width: GlassesHomeView.focusDraw.width, height: GlassesHomeView.focusDraw.height)
-        .clipShape(RoundedRectangle(cornerRadius: 18))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18)
-                .strokeBorder(.white.opacity(focused ? 0.92 : 0), lineWidth: 6)
-        }
-        .scaleEffect(focused ? 1.0 : GlassesHomeView.restScale)
-        .shadow(color: .black.opacity(focused ? 0.85 : 0), radius: 26, y: 12)   // contact shadow
-        .shadow(color: .white.opacity(focused ? 0.25 : 0), radius: 30)          // lit glow
-        .opacity(focused ? 1.0 : 0.38)
-        .offset(y: focused ? -14 : 0)
-        // HStack siblings draw in layout order, so without this the NEXT card overdraws the focused
-        // card's 96 pt of overhang on the right.
-        .zIndex(focused ? 1 : 0)
-        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: focused)
-        // LAYOUT slot last: pitch stays 408 for every card and .frame does not clip, so the focused
-        // card overhangs its slot symmetrically and simply covers 72 pt of each neighbour. Occlusion
-        // is the strongest depth cue available and it is exactly the exaggeration that was asked for.
-        .frame(width: GlassesHomeView.cardSlot.width, height: GlassesHomeView.cardSlot.height)
-        .task(id: scene.id) {
-            // Server screenshot first. NOTE: `localThumb` is a byte copy of this same
-            // `paths.screenshot` (DownloadManager.fetchSidecar writes `<id>-thumb.jpg`), so this order
-            // is a CACHE-LOCALITY choice, not an image-content one — it shares the phone grid's cache
-            // entry and self-heals a regenerated cover. It is not what fixed the "wrong thumbnail"
-            // report; the wall geometry was.
-            if let url = scene.thumbnailURL(apiKey: apiKey) {
-                poster = try? await imageCache.image(for: url)
-            }
-            if poster == nil, let localThumb {
-                poster = await imageCache.localImage(at: localThumb)
-            }
-        }
     }
 }

@@ -207,7 +207,7 @@ struct ScenePlayerView: View {
             .allowsHitTesting(!glasses.isConnected)
             .overlay {
                 if glasses.isConnected {
-                    GlassesRemoteSurface(model: model, title: scene.title ?? "")
+                    GlassesRemoteSurface(model: model)
                         .frame(width: avail.width, height: avail.height)
                 }
             }

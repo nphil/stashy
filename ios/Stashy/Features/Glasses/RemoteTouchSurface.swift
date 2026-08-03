@@ -13,6 +13,9 @@ struct RemoteTouchSurface: UIViewRepresentable {
     var onFocusStep: (Int, Int) -> Void = { _, _ in }      // dx, dy ∈ {-1, 0, 1}, one step
     var onFocusEnd: () -> Void = {}                        // hit a rail/row end (hard-stop feedback)
     var onSelect: () -> Void = {}
+    /// Two-finger tap while browsing = back out of a full list. (Declaration order matters: the call
+    /// site's labelled arguments must match it exactly — Swift won't reorder them.)
+    var onBack: () -> Void = {}
 
     // Playback events
     var onTogglePlay: () -> Void = {}
@@ -121,8 +124,13 @@ struct RemoteTouchSurface: UIViewRepresentable {
         }
 
         @objc func handleTwoFingerTap(_ gr: UITapGestureRecognizer) {
-            guard parent.mode == .playback else { return }
-            parent.onMute()
+            // Mute in playback; back out of a full list while browsing. The gesture is free in browse
+            // and "up from the top row" is deliberately NOT an exit — an eyes-free drift would fling
+            // the wearer out of the list.
+            switch parent.mode {
+            case .playback: parent.onMute()
+            case .browse: parent.onBack()
+            }
         }
 
         @objc func handleHold(_ gr: UILongPressGestureRecognizer) {

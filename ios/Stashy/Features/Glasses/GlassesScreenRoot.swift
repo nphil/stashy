@@ -16,6 +16,13 @@ struct GlassesScreenRoot: View {
                 Color.black.ignoresSafeArea()
             } else if coordinator.takeoverSuppressed {
                 GlassesIdleCard(hint: "Remote closed — resume from your phone")
+            } else if coordinator.mode == .grid, let env = session.env {
+                GlassesGridView(
+                    coordinator: coordinator,
+                    imageCache: env.imageCache,
+                    apiKey: env.appState.client?.apiKey ?? "",
+                    localThumb: { env.downloads.localThumb(sceneID: $0) }
+                )
             } else if let env = session.env, env.appState.isAuthenticated, !coordinator.rails.isEmpty {
                 GlassesHomeView(
                     coordinator: coordinator,

@@ -2451,8 +2451,11 @@ final class DownloadManager {
     /// a plain-text title on the Lock Screen — visible to anyone holding the phone, with Stashy locked —
     /// would be the one place the blur didn't reach. Send an EMPTY string rather than a placeholder so the
     /// decision lives here and the widget simply falls back to its generic phase title.
+    /// Second boundary: XR mode. While the glasses are connected the phone is face-up by definition,
+    /// and the Dynamic Island draws ABOVE every window including the remote takeover — it is the one
+    /// surface the black remote cannot cover, so it is the biggest identity leak in glasses mode.
     private func activityTitle(_ item: DownloadItem) -> String {
-        guard !Privacy.isOn else { return "" }
+        guard !Privacy.isOn, !GlassesSession.shared.isConnected else { return "" }
         return String(item.title.prefix(48))   // ActivityKit caps the whole payload at 4 KB
     }
 

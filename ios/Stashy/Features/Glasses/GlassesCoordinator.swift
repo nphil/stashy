@@ -20,13 +20,39 @@ final class GlassesCoordinator {
     static let shared = GlassesCoordinator()
     private init() {}
 
-    enum Mode { case browse, playing }
+    /// PAYLOAD-FREE on purpose. Swift synthesises `Equatable` only for enums with no associated
+    /// values, and that synthesis is what lets the bare `coordinator.mode == .playing` comparisons all
+    /// over the remote compile with no declared conformance. A `case grid(GridSource)` would break
+    /// every one of them with a cryptic error — the payload lives in `gridSource` instead.
+    enum Mode { case browse, playing, grid }
+
+    /// Which full list a "View More" tile opens.
+    enum GridSource: String, Sendable, CaseIterable {
+        case played, added, downloads
+        var title: String {
+            switch self {
+            case .played: return "Recently Watched"
+            case .added: return "Recently Added"
+            case .downloads: return "Downloaded"
+            }
+        }
+    }
 
     struct Rail: Identifiable {
         let id: String
         let title: String
         var scenes: [StashScene]
+        /// nil = no trailing View More tile.
+        var more: GridSource?
+        var total: Int
+        /// Focusable positions: the scenes plus the View More tile when present.
+        var slotCount: Int { scenes.count + (more == nil ? 0 : 1) }
     }
+
+    /// Scenes shown per rail before the View More tile takes over. Also drops the wall from up to 75
+    /// eagerly-rendered cards to 39 — these HStacks are NOT lazy, so it is 39 concurrent image fetches
+    /// instead of 75.
+    static let railCap = 12
 
     // MARK: - State
 
@@ -75,12 +101,39 @@ final class GlassesCoordinator {
     private(set) var zoomOffset: CGPoint = .zero
     var isZoomed: Bool { zoomScale > 1.02 }
 
+    /// nil when the cursor is parked on a View More tile — the wall and the metadata block both key
+    /// off that nil, so do not "fix" it to clamp.
     var focusedScene: StashScene? {
         guard rails.indices.contains(railIndex) else { return nil }
         let rail = rails[railIndex]
         guard rail.scenes.indices.contains(itemIndex) else { return nil }
         return rail.scenes[itemIndex]
     }
+
+    /// The full list the focused View More tile would open, or nil when a poster is focused.
+    var focusedMoreSource: GridSource? {
+        guard rails.indices.contains(railIndex) else { return nil }
+        let rail = rails[railIndex]
+        return itemIndex == rail.scenes.count ? rail.more : nil
+    }
+
+    // MARK: - Full-list grid state
+
+    private(set) var gridSource: GridSource?
+    private(set) var gridItems: [StashScene] = []
+    private(set) var gridTotal = 0
+    private(set) var gridIndex = 0
+    private(set) var gridLoading = false
+    private(set) var gridReconnecting = false
+    @ObservationIgnored private var gridTask: Task<Void, Never>?
+    @ObservationIgnored private var gridPage = 1
+    /// Playback was launched from the grid, so BROWSE/end-of-video returns there rather than the wall.
+    @ObservationIgnored private var gridReturn = false
+
+    static let gridColumns = 5
+    var gridFocusedScene: StashScene? { gridItems.indices.contains(gridIndex) ? gridItems[gridIndex] : nil }
+    var gridRow: Int { gridIndex / Self.gridColumns }
+    var gridRowCount: Int { (gridItems.count + Self.gridColumns - 1) / Self.gridColumns }
 
     // MARK: - Volume (owner decision 2026-08-03: restore last glasses volume, persistently)
 
@@ -98,11 +151,14 @@ final class GlassesCoordinator {
     // MARK: - Recently Played (persisted, most-recent-first, capped)
 
     private static let historyKey = "glassesPlayHistory"
+    /// 100, not 20: the rail shows 12 and View More opens the rest, so a short history makes the
+    /// affordance pointless.
+    static let historyCap = 100
     static func recordPlay(_ sceneID: String) {
         var ids = UserDefaults.standard.stringArray(forKey: historyKey) ?? []
         ids.removeAll { $0 == sceneID }
         ids.insert(sceneID, at: 0)
-        UserDefaults.standard.set(Array(ids.prefix(20)), forKey: historyKey)
+        UserDefaults.standard.set(Array(ids.prefix(historyCap)), forKey: historyKey)
     }
     static var playHistory: [String] { UserDefaults.standard.stringArray(forKey: historyKey) ?? [] }
 
@@ -120,12 +176,22 @@ final class GlassesCoordinator {
     func sessionEnded() {
         railTask?.cancel()
         railTask = nil
+        gridTask?.cancel()
+        gridTask = nil
         stopPlayback()
         takeoverSuppressed = false
         rails = []
         focusMemory.removeAll()
         railIndex = 0
         itemIndex = 0
+        playedFromRailID = nil
+        gridSource = nil
+        gridItems = []
+        gridTotal = 0
+        gridIndex = 0
+        gridLoading = false
+        gridReconnecting = false
+        gridReturn = false
     }
 
     // MARK: - Rails
@@ -140,8 +206,10 @@ final class GlassesCoordinator {
         // Instant first paint: history resolved against what's on disk, full resolution follows.
         let history = Self.playHistory
         let offlineHistory = history.compactMap { id in downloaded.first { $0.id == id } }
-        upsertRail(id: "played", title: "Recently Played", scenes: offlineHistory)
-        upsertRail(id: "downloads", title: "Downloaded", scenes: downloaded)
+        upsertRail(id: "played", title: "Recently Watched", scenes: Array(offlineHistory.prefix(Self.railCap)),
+                   more: history.count > Self.railCap ? .played : nil, total: history.count)
+        upsertRail(id: "downloads", title: "Downloaded", scenes: Array(downloaded.prefix(Self.railCap)),
+                   more: downloaded.count > Self.railCap ? .downloads : nil, total: downloaded.count)
         prefetchPosters(for: Array((offlineHistory + downloaded).prefix(10)))
 
         // Server rails: Recently ADDED (created_at desc — a stable shelf, not the phone's browse sort)
@@ -156,9 +224,10 @@ final class GlassesCoordinator {
                 }
                 do {
                     let added = try await client.findScenes(
-                        SceneQuery(sort: .createdAt, direction: .desc), page: 1, perPage: 25)
+                        SceneQuery(sort: .createdAt, direction: .desc), page: 1, perPage: Self.railCap)
                     let visibleAdded = (GlassesSession.shared.env?.edits.visible(added.scenes)) ?? added.scenes
-                    let ids = Self.playHistory
+                    // Only the rail's worth is resolved here; View More fetches the rest on demand.
+                    let ids = Array(Self.playHistory.prefix(Self.railCap))
                     let playedFull = ids.isEmpty ? [] : (try await client.findScenesByIDs(ids))
                     let visiblePlayed = (GlassesSession.shared.env?.edits.visible(playedFull)) ?? playedFull
                     // ONE StashScene per id across the whole wall. The Downloaded rail is built from
@@ -168,11 +237,16 @@ final class GlassesCoordinator {
                     // different covers. Server copies win.
                     var fresh: [String: StashScene] = [:]
                     for s in visibleAdded + visiblePlayed { fresh[s.id] = s }
-                    let currentDownloads = self.rails.first { $0.id == "downloads" }?.scenes ?? []
-                    self.upsertRail(id: "played", title: "Recently Played", scenes: visiblePlayed)
-                    self.upsertRail(id: "added", title: "Recently Added", scenes: visibleAdded)
+                    let downloadRail = self.rails.first { $0.id == "downloads" }
+                    let historyCount = Self.playHistory.count
+                    self.upsertRail(id: "played", title: "Recently Watched", scenes: visiblePlayed,
+                                    more: historyCount > Self.railCap ? .played : nil, total: historyCount)
+                    // `added.count` is the true library total and arrives free with the fetch.
+                    self.upsertRail(id: "added", title: "Recently Added", scenes: visibleAdded,
+                                    more: added.count > Self.railCap ? .added : nil, total: added.count)
                     self.upsertRail(id: "downloads", title: "Downloaded",
-                                    scenes: currentDownloads.map { fresh[$0.id] ?? $0 })
+                                    scenes: (downloadRail?.scenes ?? []).map { fresh[$0.id] ?? $0 },
+                                    more: downloadRail?.more, total: downloadRail?.total ?? 0)
                     self.prefetchPosters(for: Array((visiblePlayed + visibleAdded).prefix(12)))
                     return
                 } catch {
@@ -187,7 +261,8 @@ final class GlassesCoordinator {
 
     /// Insert/update a rail while preserving the FIXED order played → added → downloads. Empty rails
     /// are removed entirely (no dead shelf headers).
-    private func upsertRail(id: String, title: String, scenes: [StashScene]) {
+    private func upsertRail(id: String, title: String, scenes: [StashScene],
+                            more: GridSource? = nil, total: Int = 0) {
         // Focus follows the rail's IDENTITY, not its position: a server rail landing ABOVE the one
         // being browsed must not silently shift the wearer onto a different shelf.
         let focusedID = rails.indices.contains(railIndex) ? rails[railIndex].id : nil
@@ -199,7 +274,7 @@ final class GlassesCoordinator {
         let order = ["played", "added", "downloads"]
         rails.removeAll { $0.id == id }
         if !scenes.isEmpty {
-            let rail = Rail(id: id, title: title, scenes: scenes)
+            let rail = Rail(id: id, title: title, scenes: scenes, more: more, total: total)
             let pos = rails.firstIndex { (order.firstIndex(of: $0.id) ?? 99) > (order.firstIndex(of: id) ?? 99) }
             rails.insert(rail, at: pos ?? rails.count)
         }
@@ -240,7 +315,7 @@ final class GlassesCoordinator {
 
     private func clampFocus() {
         railIndex = min(railIndex, max(0, rails.count - 1))
-        let count = rails.indices.contains(railIndex) ? rails[railIndex].scenes.count : 0
+        let count = rails.indices.contains(railIndex) ? rails[railIndex].slotCount : 0
         itemIndex = min(itemIndex, max(0, count - 1))
     }
 
@@ -249,6 +324,7 @@ final class GlassesCoordinator {
     /// One focus step. Returns false when the move hit an end (the remote double-ticks a hard stop).
     @discardableResult
     func moveFocus(dx: Int, dy: Int) -> Bool {
+        if mode == .grid { return moveGridFocus(dx: dx, dy: dy) }
         guard mode == .browse, !rails.isEmpty else { return false }
         if dy != 0 {
             let target = railIndex + dy
@@ -262,11 +338,165 @@ final class GlassesCoordinator {
         }
         if dx != 0 {
             let target = itemIndex + dx
-            guard rails[railIndex].scenes.indices.contains(target) else { return false }
+            guard target >= 0, target < rails[railIndex].slotCount else { return false }
             itemIndex = target
             return true
         }
         return false
+    }
+
+    /// The remote's one "select" verb: play a poster, open a full list, or play a grid tile.
+    func selectFocused() {
+        switch mode {
+        case .browse:
+            if let source = focusedMoreSource { openGrid(source) } else { playFocused() }
+        case .grid:
+            playGridFocused()
+        case .playing:
+            break
+        }
+    }
+
+    // MARK: - Full list ("View More")
+
+    func openGrid(_ source: GridSource) {
+        gridTask?.cancel()
+        gridSource = source
+        gridItems = []
+        gridTotal = 0
+        gridIndex = 0
+        gridPage = 1
+        gridReturn = false
+        gridReconnecting = false
+        mode = .grid
+        loadGrid(reset: true)
+    }
+
+    func closeGrid() {
+        gridTask?.cancel()
+        gridTask = nil
+        gridSource = nil
+        gridItems = []
+        gridTotal = 0
+        gridIndex = 0
+        gridReturn = false
+        gridLoading = false
+        gridReconnecting = false
+        // Focus is already parked on the View More tile — leave railIndex/itemIndex alone.
+        mode = .browse
+    }
+
+    /// 2D focus inside the grid. Routed from `moveFocus` so the remote stays dumb (it only ever emits
+    /// dx/dy steps and knows nothing about modes).
+    @discardableResult
+    private func moveGridFocus(dx: Int, dy: Int) -> Bool {
+        guard !gridItems.isEmpty else { return false }
+        if dx != 0 {
+            let col = gridIndex % Self.gridColumns
+            let target = gridIndex + dx
+            // Clamp at row edges, never wrap: wrapping teleports the cursor a whole row in a UI the
+            // wearer is driving without looking at their hand.
+            guard col + dx >= 0, col + dx < Self.gridColumns, gridItems.indices.contains(target) else { return false }
+            gridIndex = target
+        } else if dy != 0 {
+            let target = gridIndex + dy * Self.gridColumns
+            if target < 0 { return false }
+            if target >= gridItems.count {
+                // Partial last row: land on the final item rather than refusing the move.
+                guard dy > 0, gridIndex < gridItems.count - 1 else { return false }
+                gridIndex = gridItems.count - 1
+            } else {
+                gridIndex = target
+            }
+        } else {
+            return false
+        }
+        maybeLoadMoreGrid()
+        prefetchGridPosters()
+        return true
+    }
+
+    func playGridFocused() {
+        guard let scene = gridFocusedScene else { return }
+        gridReturn = true
+        play(scene)
+    }
+
+    private func maybeLoadMoreGrid() {
+        guard gridSource == .added, !gridLoading, gridItems.count < gridTotal,
+              gridRow >= gridRowCount - 2 else { return }
+        gridPage += 1
+        loadGrid(reset: false)
+    }
+
+    /// Retry-forever with backoff, exactly like `refreshRails` — a fetch behind visible UI must never
+    /// self-terminate; it clears stale state, shows a reconnecting line, backs off, and keeps trying.
+    private func loadGrid(reset: Bool) {
+        guard let source = gridSource else { return }
+        gridTask?.cancel()
+        gridLoading = true
+        gridTask = Task { @MainActor [weak self] in
+            var delay: Double = 2
+            while !Task.isCancelled {
+                guard let self, GlassesSession.shared.isConnected, let env = GlassesSession.shared.env else { return }
+                // Downloads need no network at all.
+                if source == .downloads {
+                    let items = env.edits.visible(
+                        env.downloads.items.filter { $0.state == .completed }.compactMap(\.scene))
+                    self.gridItems = items
+                    self.gridTotal = items.count
+                    self.gridLoading = false
+                    self.gridReconnecting = false
+                    self.prefetchGridPosters()
+                    return
+                }
+                guard let client = env.appState.client else {
+                    try? await Task.sleep(for: .seconds(delay)); continue
+                }
+                do {
+                    switch source {
+                    case .added:
+                        let page = self.gridPage
+                        let result = try await client.findScenes(
+                            SceneQuery(sort: .createdAt, direction: .desc), page: page, perPage: 60)
+                        let visible = (GlassesSession.shared.env?.edits.visible(result.scenes)) ?? result.scenes
+                        var merged = reset ? [] : self.gridItems
+                        let known = Set(merged.map(\.id))
+                        merged.append(contentsOf: visible.filter { !known.contains($0.id) })
+                        self.gridItems = merged
+                        self.gridTotal = result.count
+                    case .played:
+                        let ids = Array(Self.playHistory.prefix(Self.historyCap))
+                        let scenes = ids.isEmpty ? [] : (try await client.findScenesByIDs(ids))
+                        // findScenesByIDs re-orders results to the ids passed, so recency survives.
+                        let visible = (GlassesSession.shared.env?.edits.visible(scenes)) ?? scenes
+                        self.gridItems = visible
+                        self.gridTotal = visible.count
+                    case .downloads:
+                        break
+                    }
+                    self.gridLoading = false
+                    self.gridReconnecting = false
+                    self.prefetchGridPosters()
+                    return
+                } catch {
+                    self.gridReconnecting = true
+                    RemoteLog.shared.event("glasses-grid", [("src", source.rawValue),
+                                                            ("err", String("\(error)".prefix(60)))])
+                    try? await Task.sleep(for: .seconds(delay))
+                    delay = min(30, delay * 1.6)
+                }
+            }
+        }
+    }
+
+    private func prefetchGridPosters() {
+        guard let env = GlassesSession.shared.env else { return }
+        let apiKey = env.appState.client?.apiKey ?? ""
+        let window = gridItems.dropFirst(max(0, gridIndex)).prefix(15)
+        let urls = window.compactMap { $0.thumbnailURL(apiKey: apiKey) }
+        // ImageCache is an ACTOR — the hop must be explicit from this @MainActor context.
+        if !urls.isEmpty { Task { await env.imageCache.prefetch(urls: urls, maxPixel: 600) } }
     }
 
     // MARK: - Playback (glasses-first: the coordinator owns the model)
@@ -344,6 +574,13 @@ final class GlassesCoordinator {
     /// on the rail it was LAUNCHED from. Searching top-down instead dropped a wearer who started from
     /// Downloaded two shelves up, because the same scene also sits in Recently Played.
     func returnToBrowse() {
+        // Launched from a full list → go back to that list, not to the wall behind it.
+        if gridReturn {
+            playedFromRailID = nil
+            stopPlayback()              // ends with mode = .browse …
+            mode = .grid                // … so restore the grid after it, not before
+            return
+        }
         if let played = playingScene {
             let preferred = playedFromRailID.flatMap { id in rails.firstIndex { $0.id == id } }
             let searchOrder = (preferred.map { [$0] } ?? []) + rails.indices.filter { $0 != preferred }
@@ -361,10 +598,13 @@ final class GlassesCoordinator {
     /// cable-connect edge, so without this the shelf stays byte-identical for the whole session —
     /// you watch something, press Browse, and the wall disagrees with what you just did.
     private func promotePlayed(_ scene: StashScene) {
-        var played = rails.first { $0.id == "played" }?.scenes ?? []
+        let existing = rails.first { $0.id == "played" }
+        var played = existing?.scenes ?? []
         played.removeAll { $0.id == scene.id }
         played.insert(scene, at: 0)
-        upsertRail(id: "played", title: "Recently Played", scenes: played)
+        let total = Self.playHistory.count
+        upsertRail(id: "played", title: "Recently Watched", scenes: Array(played.prefix(Self.railCap)),
+                   more: total > Self.railCap ? .played : nil, total: total)
     }
 
     private func stopPlayback() {

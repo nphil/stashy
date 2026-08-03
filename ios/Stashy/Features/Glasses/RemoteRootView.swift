@@ -58,7 +58,10 @@ struct RemoteRootView: View {
 
     private var touchSurface: some View {
         RemoteTouchSurface(
-            mode: coordinator.mode == .browse ? .browse : .playback,
+            // Test for .playing, NOT for .browse: written the other way round, ANY new mode (the grid)
+            // silently inherits the playback gesture set — scrub and pinch instead of focus steps, and
+            // onSelect never fires. Compile-clean, device-only.
+            mode: coordinator.mode == .playing ? .playback : .browse,
             onFocusStep: { dx, dy in
                 if remoteLocked { return }
                 if coordinator.moveFocus(dx: dx, dy: dy) {
@@ -70,7 +73,14 @@ struct RemoteRootView: View {
             onSelect: {
                 guard !remoteLocked else { return }
                 Haptics.notify(.success)
-                coordinator.playFocused()
+                coordinator.selectFocused()
+            },
+            onBack: {
+                guard !remoteLocked else { return }
+                if coordinator.mode == .grid {
+                    Haptics.tap(soft: true)
+                    coordinator.closeGrid()
+                }
             },
             onTogglePlay: {
                 guard !remoteLocked else { return }
@@ -175,10 +185,17 @@ struct RemoteRootView: View {
                 case .browse:
                     if coordinator.rails.indices.contains(coordinator.railIndex) {
                         let rail = coordinator.rails[coordinator.railIndex]
-                        Text("\(rail.title)  ·  \(coordinator.itemIndex + 1) of \(rail.scenes.count)")
+                        // The rail NAME is app chrome, not content — every wall has the same three
+                        // shelves, so it carries zero bits about which title. A future content-derived
+                        // rail (a performer or tag shelf) would be a leak; fail closed on rail ID.
+                        Text("\(Self.safeRailTitles.contains(rail.id) ? rail.title : "Rail \(coordinator.railIndex + 1)")  ·  \(coordinator.itemIndex + 1) of \(rail.slotCount)")
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.white.opacity(0.4))
                     }
+                case .grid:
+                    Text("\(coordinator.gridSource?.title ?? "")  ·  \(min(coordinator.gridIndex + 1, max(coordinator.gridTotal, 1))) of \(coordinator.gridTotal)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.4))
                 case .playing:
                     if let player = coordinator.player {
                         HStack(spacing: 8) {
@@ -203,9 +220,14 @@ struct RemoteRootView: View {
     private var modeSymbol: String {
         switch coordinator.mode {
         case .browse: return "square.grid.2x2"
+        case .grid: return "square.grid.3x3"
         case .playing: return (coordinator.player?.isPlaying ?? false) ? "play.fill" : "pause.fill"
         }
     }
+
+    /// Rail ids whose TITLE is safe to print on the phone. Keyed on id, not title, so renaming a rail
+    /// can't bypass it.
+    private static let safeRailTitles: Set<String> = ["played", "added", "downloads"]
 
     private func progressBar(_ player: ScenePlayerModel) -> some View {
         GeometryReader { geo in
@@ -226,6 +248,8 @@ struct RemoteRootView: View {
             switch coordinator.mode {
             case .browse:
                 Text("Swipe to browse  ·  Tap to play")
+            case .grid:
+                Text("Swipe to browse  ·  Tap to play  ·  Two-finger tap to go back")
             case .playing:
                 Text(coordinator.isZoomed
                      ? "Drag to pan  ·  Double-tap to reset zoom"
@@ -244,6 +268,12 @@ struct RemoteRootView: View {
                 chip("Browse", systemImage: "square.grid.2x2") {
                     Haptics.tap(soft: true)
                     coordinator.returnToBrowse()
+                }
+            }
+            if coordinator.mode == .grid {
+                chip("Back", systemImage: "chevron.left") {
+                    Haptics.tap(soft: true)
+                    coordinator.closeGrid()
                 }
             }
             holdChip("Exit", systemImage: "iphone") {

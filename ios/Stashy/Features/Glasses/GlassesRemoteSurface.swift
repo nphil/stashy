@@ -9,9 +9,9 @@ import SwiftUI
 /// gesture is deliberate — it proves the pipe on device before the feel work is layered on.
 struct GlassesRemoteSurface: View {
     @Bindable var model: ScenePlayerModel
-    /// Scene title, empty to omit. Privacy gating happens here (not at the call site) so the rule
-    /// lives next to the rendering it governs.
-    var title: String = ""
+    // No title property, deliberately. This surface only ever appears while the glasses are connected
+    // (it is the post-EXIT phone view), and the standing rule is that the phone shows NO scene
+    // identity in XR mode — not even gated on Privacy Mode. Do not re-add one.
 
     var body: some View {
         ZStack {
@@ -21,14 +21,6 @@ struct GlassesRemoteSurface: View {
                 Image(systemName: "eyeglasses")
                     .font(.system(size: 34, weight: .light))
                     .foregroundStyle(.white.opacity(0.25))
-                if !Privacy.isOn, !title.isEmpty {
-                    Text(title)
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.35))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .padding(.horizontal, 40)
-                }
                 Text("\(Self.clock(model.currentTime)) / \(Self.clock(model.duration))")
                     .font(.title3.monospacedDigit())
                     .foregroundStyle(.white.opacity(0.35))
