@@ -22,8 +22,6 @@ struct RemoteRootView: View {
     @State private var lastCue = -1
     // Pinch session state
     @State private var pinchBase: CGFloat?
-    // Status-card poster
-    @State private var poster: UIImage?
 
     var body: some View {
         ZStack {
@@ -55,9 +53,6 @@ struct RemoteRootView: View {
         // A lock flip mid-pinch skips the gesture's ended-reset (the handler guards on remoteLocked),
         // which would leave the next pinch starting from a stale base — zoom jump on first use.
         .onChange(of: remoteLocked) { _, _ in pinchBase = nil }
-        .task(id: coordinator.focusedScene?.id ?? coordinator.playingScene?.id) {
-            await loadPoster()
-        }
     }
 
     // MARK: - Surface
@@ -165,28 +160,18 @@ struct RemoteRootView: View {
 
     private var statusCard: some View {
         HStack(spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.06))
-                if let poster, !Privacy.isOn {
-                    Image(uiImage: poster)
-                        .resizable().aspectRatio(contentMode: .fill)
-                } else {
-                    Image(systemName: "eyeglasses")
-                        .font(.system(size: 18, weight: .light))
-                        .foregroundStyle(.white.opacity(0.25))
-                }
-            }
-            .frame(width: 78, height: 44)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            // NO poster, NO title, ever — not even gated on Privacy Mode. The whole point of watching
+            // on the glasses is that the optical path is wearer-only; a phone lying face-up showing
+            // the artwork and name of what you're watching hands all of it back (owner, 2026-08-03).
+            // The phone renders STATE only: where you are, how long, how fast. The glasses render
+            // identity.
+            Image(systemName: modeSymbol)
+                .font(.system(size: 20, weight: .medium))
+                .foregroundStyle(.white.opacity(0.35))
+                .frame(width: 44, height: 44)
+                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
 
             VStack(alignment: .leading, spacing: 5) {
-                if !Privacy.isOn, let title = (coordinator.playingScene ?? coordinator.focusedScene)?.title {
-                    Text(title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.75))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
                 switch coordinator.mode {
                 case .browse:
                     if coordinator.rails.indices.contains(coordinator.railIndex) {
@@ -213,6 +198,14 @@ struct RemoteRootView: View {
         .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Color.white.opacity(0.08)))
         .allowsHitTesting(false)
+    }
+
+    /// State-only glyph — never scene artwork.
+    private var modeSymbol: String {
+        switch coordinator.mode {
+        case .browse: return "square.grid.2x2"
+        case .playing: return (coordinator.player?.isPlaying ?? false) ? "play.fill" : "pause.fill"
+        }
     }
 
     private func progressBar(_ player: ScenePlayerModel) -> some View {
@@ -329,19 +322,6 @@ struct RemoteRootView: View {
     }
 
     // MARK: - Helpers
-
-    private func loadPoster() async {
-        poster = nil
-        guard let env = GlassesSession.shared.env,
-              let scene = coordinator.playingScene ?? coordinator.focusedScene else { return }
-        let apiKey = env.appState.client?.apiKey ?? ""
-        if let url = scene.thumbnailURL(apiKey: apiKey),
-           let img = try? await env.imageCache.image(for: url) {
-            poster = img
-        } else if let local = env.downloads.localThumb(sceneID: scene.id) {
-            poster = await env.imageCache.localImage(at: local)
-        }
-    }
 
     private static func clock(_ t: TimeInterval) -> String {
         guard t.isFinite, t >= 0 else { return "0:00" }
