@@ -1561,3 +1561,100 @@ Newest first.
   rebuild (seek-reinit / quality / fallback). Persisted **"Mute when slowed"** toggle in the same menu
   (mute vs. pitch-corrected audio below 1×; `slowMute` is a separate output-volume gate so it never
   clobbers the user's volume). Fully-decoupled *normal-speed audio under slow video* stays deferred.
+
+## 9. XR glasses (Viture Pro) — external-display mode, remote, and the hosting rules
+
+Device-proven pipe (2026-08-03, v1.0.348): `glasses-connect bounds=1920×1080 scale=1.0 maxfps=60
+overscan=zero`. DP alt-mode is 60 Hz — design all glasses animation for 60, not ProMotion.
+
+### The pipe (three builds of pain — do not re-derive)
+- An external-display scene requires **BOTH** `UIApplicationSupportsMultipleScenes: true` **AND** a
+  **STATIC** `UISceneConfigurations` entry for `UIWindowSceneSessionRoleExternalDisplayNonInteractive`
+  (delegate module-qualified via `$(PRODUCT_MODULE_NAME).ExternalSceneDelegate`). The flag alone was
+  device-verified insufficient (iOS 26.6); `configurationForConnecting` is **NEVER consulted** for the
+  external role even when everything works — iOS reads the static manifest only (CarPlay-style).
+  Without both keys you get silent system mirroring and zero `glasses-*` log lines.
+- iOS 27 moves discovery to `UISceneAccessory` — availability-gate a migration then.
+- Video on glasses = a **second `AVPlayerLayer` on the same `AVPlayer`** (`externalRenderView`).
+  Never reparent the phone's layer; never rebuild the player for a route change.
+
+### Ownership model (v1.0.349+, "glasses-first")
+- Plug in → `GlassesTakeoverDriver` (observation-driven, `initial: true`) presents a **takeover
+  WINDOW** (`.normal + 1`, no makeKey, filters `.windowApplication`) over the whole app tree — nav
+  state survives unplug. Phone shows `RemoteRootView` (the eyes-free remote); glasses show
+  `GlassesScreenRoot` (10-foot home + playback).
+- `GlassesCoordinator` (singleton, `@MainActor @Observable`) owns glasses-first playback: builds
+  `ScenePlayerModel` via `PlaybackRouteResolver`, sets `glassesActive = true`, restores the persisted
+  `glassesVolume` (owner decision; models start muted by design — that rule is the PHONE's).
+- The v1 per-player routing in `ScenePlayerView` (opacity-hide + syncGlassesRouting) still exists,
+  reachable only after EXIT — deliberate interim; retire once the coordinator path is trusted.
+
+### THE hosting rule — a UIView has ONE superview (v2 lesson, two real bugs)
+The AI slow-mo runner's `renderView` is ONE view that either the phone's zoom surface or the glasses
+container may host, never both:
+- `ScenePlayerModel.overlayActive`/`overlayRenderView` are the **PHONE-side contract only** and read
+  `slowMoActive && !glassesActive` — without the gate, the hidden v1-EXIT phone surface silently
+  **steals** the view off the glasses container (last `addSubview` wins).
+- The glasses receive the view explicitly via `GlassesSession.setOverlay(view)`, hosted INSIDE
+  `videoContainer` so pinch-zoom transforms video + interpolated frames together; `setVideo`
+  deliberately preserves the overlay subview (`where sub !== overlayView`, video at index 0).
+- Teardown paths call `setOverlay(nil)` **UNCONDITIONALLY**: a `didSet` observer runs AFTER the
+  property flipped, so `if glassesActive { setOverlay(nil) }` inside the glassesActive→false
+  transition never fires and strands a frozen interpolated frame on the glasses forever. Clearing is
+  a no-op with no scene attached — gate the SET, never the CLEAR.
+- Flipping `glassesActive` does `suspendSlowMo(); scheduleSlowMoReengage()` — the runner is REBUILT
+  for the new hosting side, not migrated.
+
+### Remote (phone) — gesture vocabulary + feel
+- All UIKit recognizers on one clear view (`RemoteTouchSurface`); browse focus steps 52 pt horizontal
+  / 70 pt vertical (72/90 device-tested "a bit slow"); flick = one step; dominant-axis lock at 12 pt
+  holds for the whole gesture.
+- Playback: horizontal drag scrubs (tiered rate by vertical distance, commit on lift); vertical drag
+  = **speed ladder** (±1 rung per 80 pt over [0.25, 0.5, 1, 1.5, 2], up = faster); long-press = 2×
+  hold; single tap play/pause; double-tap = ±10 s by tap half; two-finger tap = mute. **Volume is the
+  phone's hardware buttons** (owner: gesture freed for the ladder).
+- Pinch = zoom 1–4× (absolute scale vs `pinchBase` captured at gesture start); while zoomed,
+  one-finger drags PAN 2D (×3 pt→px mapping) and double-tap resets (Photos parity). **Pan↔pinch must
+  be delegate-paired for simultaneous recognition** — default UIKit exclusion starves the pinch
+  whenever one finger moves ~10 pt first. Reset `pinchBase` on `remoteLocked` flips (a mid-pinch lock
+  skips the ended-reset → stale base → zoom jump).
+- Haptics vocabulary (`Services/Haptics.swift`): `selectionTick` (rate-limited picker tick — scrub
+  cues), `step` (rigid detent — focus/rung steps), `tap` (medium/light press), `notify`
+  (mode boundaries: lock, exit, play commit). Scrub ticks fire per **sprite cue crossed** (matches
+  the preview frame the wearer sees), 10 s buckets before sprites load.
+- Status card: 78×44 poster + title (BOTH gated on `Privacy.isOn` — the remote is the shoulder-surfable
+  surface), progress bar + times while playing, "rail · n of m" while browsing.
+
+### Glasses UI (10-foot)
+- 1920×1080 at scale 1.0 → **pt == px**. No glass/materials on black (nothing to refract — documented
+  landmine); white caps at **0.92, never pure** (birdbath optic blooms); text ≥ medium weight; pure
+  black idle screens (micro-OLED pixels off). Springs: `response 0.32, damping 0.86`;
+  opacity/transform-only animation at 60 Hz.
+- Wall: fixed focus slot, content slides (Apple TV model). Rails in FIXED order **Recently Played
+  (UserDefaults `glassesPlayHistory`, capped 20) → Recently Added (`created_at desc` — a stable shelf,
+  deliberately not the phone's browse sort) → Downloaded** (offline shelf, paints instantly from
+  disk). `upsertRail` restores focus by rail **IDENTITY** — a server rail landing above the browsed
+  one must not shift focus by position. Server fetch retries forever (jobs-panel rule) with backoff.
+- **Poster parity rule:** every surface (glasses wall, phone grid, remote card) renders the SERVER
+  screenshot first, download-time local frame grab as offline fallback ONLY — local-first on one
+  surface made downloaded scenes look like different videos across screens.
+- Focus treatment (device-iterated): scale 1.18 + lift −10 + 5 pt ring + white shadow; unfocused
+  cards 0.45, unfocused rails 0.30 (1.08 read ambiguous at cinema distance).
+- Playback OSD answers every remote gesture where the eyes are: paused card, ±10 s badges, scrub
+  strip (sprite preview thumb 416×234 above timecode/delta/tier + 1152×8 bar), transient speed pill
+  (truthful `playbackRate`, AI badge when the runner is live), persistent top-right mode chips (zoom
+  scale; non-1× rate) — dim status, not chrome; nothing rendered in the normal case.
+- `GlassesScreenRoot` renders BLACK while `mode == .playing` — an `AVPlayerLayer` shows nothing until
+  first decoded frame, and the home UI bleeding through a buffering start looked broken.
+- Posters/playback on glasses are deliberately **UNBLURRED under Privacy Mode** (optical path is
+  wearer-only; that privacy IS the feature). Blackout cover gates on `appActive &&
+  !AppLockState.isLocked` (didBecomeActive fires when the Face ID prompt APPEARS, not on success).
+
+### Standing glasses rules
+- **No `beginBackgroundTask` and no audio-session writes anywhere in glasses code** — either pins the
+  ~26 s background window open and kills DownloadKeepAlive's renewal.
+- `ScreenAwake` arbiters the idle timer by reason-set (locking the phone kills DP output).
+- Any scene enumeration must filter `.windowApplication` (the external scene is not one —
+  OrientationController/DebugOverlay do this).
+- Known gaps, deliberate: end-of-video countdown card not built (didReachEnd currently returns to
+  browse); v1 EXIT routing retained; `screen-notify` diagnostic answered its question, removable.

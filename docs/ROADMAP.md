@@ -515,6 +515,16 @@ never sees a spinner.
 - Open questions: exact-frame switch vs. small overlap; audio continuity; storage/cleanup policy.
 
 ### XR glasses support (Viture Pro XR et al.) — "phone becomes the remote"
+**✅ SHIPPED 2026-08-03 (v1.0.348 pipe → v1.0.349 glasses-first → v1.0.351+ v2).** The vision below
+became real with these deltas: discovery needed the STATIC `UISceneConfigurations` entry (the dynamic
+delegate method is never consulted — ENGINEERING_NOTES §9 has the whole recipe + hosting rules);
+`allowsExternalPlayback` was never needed (second `AVPlayerLayer` on the same player); vertical drag
+became a playback-SPEED ladder, not volume (volume = hardware buttons, owner decision); the wall is
+Recently Played / Recently Added / Downloaded rails with a fixed focus slot; pinch zoom 1–4× with pan
+landed; AI slow-mo hosts on the glasses. Remaining (tech debt): end-of-video countdown card, retire
+the v1 EXIT per-player routing, iOS 27 `UISceneAccessory` migration. Original spec kept below as the
+design record.
+
 **Refined vision (Netflix-style handoff).** When XR glasses are connected (they present to iOS as a
 standard external DisplayPort display over USB-C), Stashy switches into a big-screen "10-foot" layout on
 the glasses, and when a video goes fullscreen the **entire phone screen becomes a gesture remote /

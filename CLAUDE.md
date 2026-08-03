@@ -189,7 +189,8 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
 ## Docs map — what to read when
 - **`docs/ENGINEERING_NOTES.md`** — deep reference: CI detail, Swift 6 concurrency patterns,
   downloads internals + handoff mechanics, transcoder, playback pipeline, UI patterns, misc gotchas,
-  release history. Read before touching a subsystem.
+  release history, XR glasses (§9: pipe recipe, hosting rules, remote gesture map). Read before
+  touching a subsystem.
 - **`docs/ROADMAP.md`** — master roadmap + owner wishlist (watch-heat overlay, XR-glasses remote
   mode, nav/"back" cleanup, encrypt-downloads, 1letzgo comparative features…).
 - **`docs/OUTSTANDING_2026-07-01.md`** — prioritized punch list (snapshot @ v1.0.101; see its header
@@ -203,7 +204,8 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.346** (`6a33db0`). The -3000 investigation is closed and must not be reopened.
+- Latest release: **v1.0.351** (`07ac71a`, glasses v2). The -3000 investigation is closed and must not
+  be reopened.
 - **What works:** app open → ~100 MB/s, resumes byte-exact through crashes, relaunches and suspension.
   Backgrounded → keeps going indefinitely (keep-alive, ON by default since v1.0.340). Downloads run
   **one at a time** with Start All / Pause Queue in the Downloads toolbar; a queued card's play button
@@ -218,31 +220,21 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   run: 290 s unbroken background runtime, 18.9 MB → 744 MB while backgrounded, 29/29 ticks, zero
   refusals, Live Activity live throughout. Long unattended downloads now work. Do not re-open the
   question of whether iOS permits this — it does, and the recipe is in ENGINEERING_NOTES §3.
-- **XR glasses (Viture Pro) pipe DEVICE-PROVEN 2026-08-03 (v1.0.348):** `glasses-connect
-  bounds=1920×1080 scale=1.0 maxfps=60 overscan=zero`, clean disconnect events. **The mirroring saga's
-  answer, hard-won across three builds: an external-display scene requires BOTH
-  `UIApplicationSupportsMultipleScenes: true` AND a STATIC `UISceneConfigurations` entry for
-  `UIWindowSceneSessionRoleExternalDisplayNonInteractive` (delegate class module-qualified via
-  `$(PRODUCT_MODULE_NAME)`).** The flag alone was device-verified insufficient on iOS 26.6, and
-  `configurationForConnecting` is NEVER consulted for the external role even when it works — iOS reads
-  the static manifest only (CarPlay-style). Do not remove the static entry; do not trust the dynamic
-  method for role discovery. DP alt-mode is 60 Hz (not 120). The `screen-notify` diagnostic answered
-  its question and can be removed. Video = second `AVPlayerLayer` on the same player
-  (`externalRenderView`); phone surface hides in place; glasses code must never take
-  `beginBackgroundTask` or touch the audio session. **Glasses-FIRST mode SHIPPED v1.0.349, awaiting
-  device test:** plug in → 10-foot home on glasses (Downloaded + Recent rails, fixed focus slot,
-  content slides) + the phone becomes a fullscreen takeover remote (a WINDOW over the app tree — nav
-  state survives unplug). `GlassesCoordinator` owns glasses-first playback (no phone player view);
-  volume restores the persisted `glassesVolume` (owner decision; 40% first run). Interim gaps,
-  deliberate: v1 per-player routing still exists behind EXIT; scrub preview thumbs + end-countdown
-  next. Landmines already hit in review: `ImageCache` is an ACTOR (explicit hop from @MainActor);
-  built-but-unwired seams (`didReachEnd`, rehost-on-ready) — wire the reaction when you build the seam. Glasses rules:
-  **no `beginBackgroundTask` and no audio-session writes anywhere in glasses code** (pins the window,
-  kills the keep-alive); AI slow-mo is intent-gated off while connected (renders on a phone-hosted
-  overlay); `ScreenAwake` arbiters the idle timer (locking the phone kills DP output); scene pickers
-  must filter `.windowApplication` (OrientationController/DebugOverlay do). iOS 27 moves discovery to
-  `UISceneAccessory` — availability-gate then. Full design (jog-dial gesture vocabulary, glasses OSD,
-  guards) is specced in the session plan; built incrementally on top of a proven pipe.
+- **XR glasses (Viture Pro): pipe device-proven (v1.0.348), glasses-first v2 SHIPPED v1.0.351 (+
+  review-polish follow-up), awaiting device test. THE deep reference is ENGINEERING_NOTES §9** (pipe recipe — static
+  `UISceneConfigurations` entry is mandatory, `configurationForConnecting` never consulted; hosting
+  rules; gesture/haptics map; 10-foot design tokens). v2 = Netflix-style wall (Recently Played /
+  Recently Added / Downloaded, focus restored by rail IDENTITY), poster parity (server screenshot
+  first everywhere — local grab was the glasses/phone mismatch), speed ladder on vertical drag
+  (volume → hardware buttons), pinch zoom 1–4× + 2D pan + double-tap reset (pan↔pinch delegate-paired
+  or the pinch starves), sprite scrub-preview thumbs + speed/zoom pills on the glasses OSD, and **AI
+  slow-mo now hosts ON the glasses** (overlay inside the zoom transform; phone contract
+  `overlayActive` gated on `!glassesActive` — ONE-superview rule, §9). Hard rules: **no
+  `beginBackgroundTask`, no audio-session writes in glasses code**; teardown clears the overlay
+  UNCONDITIONALLY (didSet ordering); `ScreenAwake` arbiters the idle timer; scene pickers filter
+  `.windowApplication`; glasses posters deliberately unblurred under Privacy Mode (remote is the
+  gated surface). Interim, deliberate: v1 EXIT routing retained; end-countdown card not built;
+  `screen-notify` removable; iOS 27 `UISceneAccessory` migration when available.
 - Diagnostics built for the saga were removed once they answered (`TransferBenchmark`, the -3000
   probe/census, `dl-identity`, the retest button) — recover from git history, don't rewrite them.
 - Next candidates: **the VMAF map fix (plugin v0.3.1) is DONE — shipped, deployed, and live-verified**
