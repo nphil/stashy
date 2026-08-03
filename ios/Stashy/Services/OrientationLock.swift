@@ -25,6 +25,23 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         // VideoToolbox's serial queue and returns immediately; nothing waits on it, and until it lands the
         // shipped 1280×720 floor applies unchanged.
         SlowMoInterpolator.probeMaxSizeIfNeeded()
+        // DIAGNOSTIC for the glasses-mirroring investigation: does UIKit report a second screen to
+        // this PROCESS at all when the cable goes in? Deprecated API used deliberately, log-only —
+        // if `screen-notify` fires but the external scene role never arrives, the block is in scene
+        // delivery (manifest/role policy); if it never fires, iPhone 26.6 is handling DP-out entirely
+        // at the system level and no app-side change can claim the display. Remove once answered.
+        NotificationCenter.default.addObserver(forName: UIScreen.didConnectNotification,
+                                               object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated {
+                RemoteLog.shared.event("screen-notify", [("connect", 1), ("screens", UIScreen.screens.count)])
+            }
+        }
+        NotificationCenter.default.addObserver(forName: UIScreen.didDisconnectNotification,
+                                               object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated {
+                RemoteLog.shared.event("screen-notify", [("connect", 0), ("screens", UIScreen.screens.count)])
+            }
+        }
         // Clear remux temps left by a prior crash/force-quit. Nothing is in use at launch, so run it off
         // the main thread — it enumerates + unlinks tmp files and needn't block the first frame.
         Task.detached(priority: .utility) { LocalRemuxStream.sweepStaleTempFiles() }

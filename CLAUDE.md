@@ -218,14 +218,18 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   run: 290 s unbroken background runtime, 18.9 MB → 744 MB while backgrounded, 29/29 ticks, zero
   refusals, Live Activity live throughout. Long unattended downloads now work. Do not re-open the
   question of whether iOS permits this — it does, and the recipe is in ENGINEERING_NOTES §3.
-- **XR glasses (Viture Pro) pipe shipped v1.0.346; first device test found system MIRRORING, fixed in
-  v1.0.347: `UIApplicationSupportsMultipleScenes` was absent**, so iOS never created an external scene
-  and `configurationForConnecting` was never called (zero `glasses-*` log lines — the delegate was
-  unreachable, not broken). The flag is REQUIRED for external-display scenes; on iPhone it adds no
-  multi-window UI. Video routes to the glasses as a SECOND `AVPlayerLayer` on the same player
-  (`PlaybackEngine.externalRenderView`); the phone hides its surface in place (opacity only — the
-  never-reparent rule stands) and shows a minimal tap-to-play/pause remote. Retest verdict =
-  `scene-config role=` then `glasses-connect bounds= maxfps=` on plug-in. Glasses rules:
+- **XR glasses (Viture Pro): still MIRRORING as of v1.0.347 — two fixes tested, third in flight.**
+  v1.0.346 shipped the whole pipe unreachable (`UIApplicationSupportsMultipleScenes` absent — iOS never
+  creates an external scene without it). v1.0.347 added the flag; device-verified INSUFFICIENT on
+  iOS 26.6: five launches, `scene-config` shows the app role only, external role never offered, IPA
+  confirmed to contain the flag. Current hypothesis (v1.0.348): iOS decides supported roles from the
+  STATIC `UISceneConfigurations` dict, and only consults `configurationForConnecting` for roles it
+  already chose to create — so the external role needs a static entry (delegate class name
+  module-qualified via `$(PRODUCT_MODULE_NAME)`). A `screen-notify` diagnostic (deprecated
+  `UIScreen.didConnectNotification`, log-only, remove once answered) disambiguates the remaining
+  failure mode: fires-but-no-scene = role policy; never-fires = iPhone 26.6 handles DP-out entirely at
+  the system level and NO app-side change can claim the display (the -3000 shape). The pipe itself
+  (second `AVPlayerLayer`, opacity-hidden phone surface, tap remote) is built and waiting. Glasses rules:
   **no `beginBackgroundTask` and no audio-session writes anywhere in glasses code** (pins the window,
   kills the keep-alive); AI slow-mo is intent-gated off while connected (renders on a phone-hosted
   overlay); `ScreenAwake` arbiters the idle timer (locking the phone kills DP output); scene pickers

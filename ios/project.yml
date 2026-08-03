@@ -55,6 +55,16 @@ targets:
         # multi-window UI; it exists solely to make the external scene deliverable.
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: true
+          # The flag alone was NOT enough (device-observed on iOS 26.6, v1.0.347: five launches, the
+          # external role never offered, `configurationForConnecting` called for the app role only).
+          # iOS appears to decide which roles an app supports from THIS static dictionary — the
+          # delegate method is only consulted for roles the system already chose to create. The
+          # delegate class name is module-qualified; $(PRODUCT_MODULE_NAME) expands at build time
+          # (same mechanism as CFBundleExecutable above).
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleExternalDisplayNonInteractive:
+              - UISceneConfigurationName: Glasses
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).ExternalSceneDelegate
         # BackgroundTasks: opportunistic idle-time resume for the in-process download path.
         # BOTH keys are RUNTIME requirements with no compile-time signal — CI goes green and the IPA
         # publishes even if they are wrong. Without the permitted identifier, BGTaskScheduler.register
