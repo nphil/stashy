@@ -154,8 +154,9 @@ final class GlassesCoordinator {
         guard let env = GlassesSession.shared.env else { return }
         let apiKey = env.appState.client?.apiKey ?? ""
         let urls = scenes.prefix(8).compactMap { $0.thumbnailURL(apiKey: apiKey) }
-        // Same maxPixel as the phone grid so cache entries are shared, not duplicated.
-        if !urls.isEmpty { env.imageCache.prefetch(urls: urls, maxPixel: 600) }
+        // Same maxPixel as the phone grid so cache entries are shared, not duplicated. ImageCache is
+        // an ACTOR — the hop must be explicit from this @MainActor context.
+        if !urls.isEmpty { Task { await env.imageCache.prefetch(urls: urls, maxPixel: 600) } }
     }
 
     private func clampFocus() {

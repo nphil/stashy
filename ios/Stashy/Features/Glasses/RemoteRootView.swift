@@ -110,6 +110,16 @@ struct RemoteRootView: View {
         }
         .statusBarHidden()
         .persistentSystemOverlays(.hidden)
+        // End of video → back to the rails, focus on what just played. `didReachEnd` was built for
+        // exactly this and a review caught it written-but-never-read.
+        .onChange(of: coordinator.player?.didReachEnd ?? false) { _, ended in
+            if ended { coordinator.returnToBrowse() }
+        }
+        // Engine rebuilds (HLS fallback, far-seek reinit) kill the external layer — re-host on every
+        // readiness flip, mirroring the rule the phone-side routing already follows.
+        .onChange(of: coordinator.player?.isReady ?? false) { _, ready in
+            if ready { coordinator.rehost() }
+        }
     }
 
     // MARK: - Status (dim, glanceable, burn-in-safe)
