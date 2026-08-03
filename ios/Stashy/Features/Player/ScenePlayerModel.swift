@@ -246,6 +246,10 @@ final class ScenePlayerModel {
         startInProgress = true
         startPaused = !autoplay
         stopped = false
+        // ONE watch history for both surfaces. It was glasses-only, so the wall's "Recently Watched"
+        // shelf ignored everything played on the phone — and on a first-ever glasses session it was
+        // empty. Idempotent (the id is moved to the head), so an engine rebuild costs nothing.
+        if let sceneID { GlassesCoordinator.recordPlay(sceneID) }
         RemoteLog.shared.log("▶︎ start: \(route.streamType) · \(route.reason) · engine=\(route.engine)")
         switch route.engine {
         case .avPlayer:

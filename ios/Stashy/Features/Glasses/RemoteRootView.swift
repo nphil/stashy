@@ -47,9 +47,8 @@ struct RemoteRootView: View {
         .onChange(of: coordinator.player?.didReachEnd ?? false) { _, ended in
             if ended { coordinator.returnToBrowse() }
         }
-        .onChange(of: coordinator.player?.isReady ?? false) { _, ready in
-            if ready { coordinator.rehost() }
-        }
+        // (Re-hosting on readiness now lives in the coordinator's own observation — this view dies
+        // with the takeover window, so it could never cover the post-EXIT engine rebuilds.)
         // A lock flip mid-pinch skips the gesture's ended-reset (the handler guards on remoteLocked),
         // which would leave the next pinch starting from a stale base — zoom jump on first use.
         .onChange(of: remoteLocked) { _, _ in pinchBase = nil }

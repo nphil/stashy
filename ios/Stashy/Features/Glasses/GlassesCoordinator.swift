@@ -35,7 +35,13 @@ final class GlassesCoordinator {
     private(set) var railIndex = 0
     private(set) var itemIndex = 0
     /// Per-rail focus memory (tvOS behaviour): moving between rails returns to where you were.
-    @ObservationIgnored private var focusMemory: [String: Int] = [:]
+    /// Keyed rail-id → SCENE id, never an ordinal: a rail's contents are replaced mid-session (the
+    /// offline subset is swapped for the full server resolution), so a remembered index addresses a
+    /// different video afterwards. Observable because the wall reads it to park unfocused rails.
+    private var focusMemory: [String: String] = [:]
+    /// Which rail playback was launched from, so BROWSE returns to that shelf and not merely to the
+    /// first one that happens to contain the scene.
+    @ObservationIgnored private var playedFromRailID: String?
 
     /// The glasses-first player. Owned HERE — there is no phone player view in this mode.
     private(set) var player: ScenePlayerModel?
@@ -155,8 +161,18 @@ final class GlassesCoordinator {
                     let ids = Self.playHistory
                     let playedFull = ids.isEmpty ? [] : (try await client.findScenesByIDs(ids))
                     let visiblePlayed = (GlassesSession.shared.env?.edits.visible(playedFull)) ?? playedFull
+                    // ONE StashScene per id across the whole wall. The Downloaded rail is built from
+                    // frozen sidecar snapshots whose `paths.screenshot` carries a stale `?t=<updated_at>`
+                    // cache-buster; ImageCache keys on the full URL, so the same scene appearing in two
+                    // rails would fetch twice, pop in at different times, and can genuinely wear two
+                    // different covers. Server copies win.
+                    var fresh: [String: StashScene] = [:]
+                    for s in visibleAdded + visiblePlayed { fresh[s.id] = s }
+                    let currentDownloads = self.rails.first { $0.id == "downloads" }?.scenes ?? []
                     self.upsertRail(id: "played", title: "Recently Played", scenes: visiblePlayed)
                     self.upsertRail(id: "added", title: "Recently Added", scenes: visibleAdded)
+                    self.upsertRail(id: "downloads", title: "Downloaded",
+                                    scenes: currentDownloads.map { fresh[$0.id] ?? $0 })
                     self.prefetchPosters(for: Array((visiblePlayed + visibleAdded).prefix(12)))
                     return
                 } catch {
@@ -175,6 +191,11 @@ final class GlassesCoordinator {
         // Focus follows the rail's IDENTITY, not its position: a server rail landing ABOVE the one
         // being browsed must not silently shift the wearer onto a different shelf.
         let focusedID = rails.indices.contains(railIndex) ? rails[railIndex].id : nil
+        // …and the CURSOR follows the SCENE, not the ordinal. The "played" rail is guaranteed to be
+        // replaced mid-session (offline subset → full server resolution), so a preserved index lands
+        // the ring, the title block and playFocused() on a different video with no input from the
+        // wearer. That is the "carousel doesn't match" complaint in its second form.
+        let focusedSceneID = focusedScene?.id
         let order = ["played", "added", "downloads"]
         rails.removeAll { $0.id == id }
         if !scenes.isEmpty {
@@ -185,7 +206,27 @@ final class GlassesCoordinator {
         if let focusedID, let idx = rails.firstIndex(where: { $0.id == focusedID }) {
             railIndex = idx
         }
+        if let focusedSceneID, rails.indices.contains(railIndex),
+           let i = rails[railIndex].scenes.firstIndex(where: { $0.id == focusedSceneID }) {
+            itemIndex = i
+        }
         clampFocus()
+    }
+
+    /// Where an UNFOCUSED rail should be parked. Without this a rail sits at index 0, which — with a
+    /// centred focus slot — renders one lone card mid-screen with 768 pt of black beside it.
+    func displayIndex(for rail: Rail) -> Int {
+        if rails.indices.contains(railIndex), rails[railIndex].id == rail.id { return itemIndex }
+        return rememberedIndex(in: rail)
+    }
+
+    /// Memory-only lookup — must NOT consult `railIndex`, because `moveFocus` calls it immediately
+    /// after moving the cursor onto the target rail (at which point the "is focused" test is true
+    /// and would just hand back the outgoing rail's index).
+    private func rememberedIndex(in rail: Rail) -> Int {
+        guard let sceneID = focusMemory[rail.id],
+              let i = rail.scenes.firstIndex(where: { $0.id == sceneID }) else { return 0 }
+        return i
     }
 
     private func prefetchPosters(for scenes: [StashScene]) {
@@ -212,9 +253,11 @@ final class GlassesCoordinator {
         if dy != 0 {
             let target = railIndex + dy
             guard rails.indices.contains(target) else { return false }
-            focusMemory[rails[railIndex].id] = itemIndex
+            if rails[railIndex].scenes.indices.contains(itemIndex) {
+                focusMemory[rails[railIndex].id] = rails[railIndex].scenes[itemIndex].id
+            }
             railIndex = target
-            itemIndex = min(focusMemory[rails[target].id] ?? 0, max(0, rails[target].scenes.count - 1))
+            itemIndex = rememberedIndex(in: rails[target])
             return true
         }
         if dx != 0 {
@@ -241,6 +284,7 @@ final class GlassesCoordinator {
             RemoteLog.shared.event("glasses-play", [("item", scene.id), ("route", "nil")])
             return
         }
+        playedFromRailID = rails.indices.contains(railIndex) ? rails[railIndex].id : nil
         stopPlayback()
         let model = ScenePlayerModel(route: route, sceneID: scene.id)
         model.glassesActive = true          // AI slow-mo hosts on the glasses overlay (see ScenePlayerModel.glassesActive)
@@ -249,6 +293,7 @@ final class GlassesCoordinator {
         mode = .playing
         model.start(autoplay: true)
         Self.recordPlay(scene.id)
+        promotePlayed(scene)
         resetZoom()
         speedIndex = 2
         // Scrub-preview sprites, local-first (downloaded scenes have them on disk).
@@ -263,6 +308,7 @@ final class GlassesCoordinator {
         // design — that rule is the PHONE's; the wearer expects sound in their ears).
         model.setVolume(Self.storedVolume)
         rehost()
+        armRehost()
         // Cable pull while we own playback: pause explicitly and unconditionally — the OS route-loss
         // auto-pause does NOT fire when audio is on AirPods or the volume is 0. The takeover window
         // unmounts off the isConnected flip; the model is kept, paused, for the return pill.
@@ -279,16 +325,46 @@ final class GlassesCoordinator {
         GlassesSession.shared.setVideo(player.externalRenderView)
     }
 
-    /// Back to the rails (BROWSE chip, or end-of-video). Focus lands on the scene that was playing.
+    /// Re-arm `rehost()` on every readiness flip, owned HERE rather than in the phone remote's body.
+    /// `externalRenderView` is vended by the engine and replaced on every rebuild (HLS fallback,
+    /// far-seek reinit); the remote's `.onChange` dies with the takeover window, so after EXIT a
+    /// mid-playback fallback left the glasses black with nothing able to recover them.
+    /// Same self-re-arming pattern as `GlassesRootController.armLockObservation`.
+    private func armRehost() {
+        withObservationTracking { _ = player?.isReady } onChange: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.player != nil else { return }
+                self.rehost()
+                self.armRehost()
+            }
+        }
+    }
+
+    /// Back to the rails (BROWSE chip, or end-of-video). Focus lands on the scene that was playing —
+    /// on the rail it was LAUNCHED from. Searching top-down instead dropped a wearer who started from
+    /// Downloaded two shelves up, because the same scene also sits in Recently Played.
     func returnToBrowse() {
         if let played = playingScene {
-            for (r, rail) in rails.enumerated() {
-                if let i = rail.scenes.firstIndex(where: { $0.id == played.id }) {
+            let preferred = playedFromRailID.flatMap { id in rails.firstIndex { $0.id == id } }
+            let searchOrder = (preferred.map { [$0] } ?? []) + rails.indices.filter { $0 != preferred }
+            for r in searchOrder {
+                if let i = rails[r].scenes.firstIndex(where: { $0.id == played.id }) {
                     railIndex = r; itemIndex = i; break
                 }
             }
         }
+        playedFromRailID = nil
         stopPlayback()
+    }
+
+    /// Move `scene` to the head of Recently Played immediately. `refreshRails()` runs ONLY on the
+    /// cable-connect edge, so without this the shelf stays byte-identical for the whole session —
+    /// you watch something, press Browse, and the wall disagrees with what you just did.
+    private func promotePlayed(_ scene: StashScene) {
+        var played = rails.first { $0.id == "played" }?.scenes ?? []
+        played.removeAll { $0.id == scene.id }
+        played.insert(scene, at: 0)
+        upsertRail(id: "played", title: "Recently Played", scenes: played)
     }
 
     private func stopPlayback() {
