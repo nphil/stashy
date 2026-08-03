@@ -127,6 +127,8 @@ final class GlassesCoordinator {
     private(set) var gridReconnecting = false
     @ObservationIgnored private var gridTask: Task<Void, Never>?
     @ObservationIgnored private var gridPage = 1
+    /// The server has no more pages. Needed because `gridTotal` is unfiltered while `gridItems` is not.
+    @ObservationIgnored private var gridExhausted = false
     /// Playback was launched from the grid, so BROWSE/end-of-video returns there rather than the wall.
     @ObservationIgnored private var gridReturn = false
 
@@ -190,6 +192,7 @@ final class GlassesCoordinator {
         gridTotal = 0
         gridIndex = 0
         gridLoading = false
+        gridExhausted = false
         gridReconnecting = false
         gridReturn = false
     }
@@ -271,6 +274,12 @@ final class GlassesCoordinator {
         // the ring, the title block and playFocused() on a different video with no input from the
         // wearer. That is the "carousel doesn't match" complaint in its second form.
         let focusedSceneID = focusedScene?.id
+        // The tile has NO scene, so `focusedSceneID` is nil there by design and the restore below
+        // can't fire — leaving a bare ordinal, exactly the failure this function exists to prevent.
+        // (First paint: 3 scenes + tile, cursor at 3. Server pass: 12 scenes + tile — index 3 is now
+        // poster #4, with no wearer input.)
+        let wasOnTile = rails.indices.contains(railIndex) && rails[railIndex].id == id
+            && focusedScene == nil && focusedMoreSource != nil
         let order = ["played", "added", "downloads"]
         rails.removeAll { $0.id == id }
         if !scenes.isEmpty {
@@ -281,8 +290,10 @@ final class GlassesCoordinator {
         if let focusedID, let idx = rails.firstIndex(where: { $0.id == focusedID }) {
             railIndex = idx
         }
-        if let focusedSceneID, rails.indices.contains(railIndex),
-           let i = rails[railIndex].scenes.firstIndex(where: { $0.id == focusedSceneID }) {
+        if wasOnTile, rails.indices.contains(railIndex), rails[railIndex].more != nil {
+            itemIndex = rails[railIndex].scenes.count      // stay on the tile, wherever it moved to
+        } else if let focusedSceneID, rails.indices.contains(railIndex),
+                  let i = rails[railIndex].scenes.firstIndex(where: { $0.id == focusedSceneID }) {
             itemIndex = i
         }
         clampFocus()
@@ -366,6 +377,7 @@ final class GlassesCoordinator {
         gridTotal = 0
         gridIndex = 0
         gridPage = 1
+        gridExhausted = false
         gridReturn = false
         gridReconnecting = false
         mode = .grid
@@ -381,6 +393,7 @@ final class GlassesCoordinator {
         gridIndex = 0
         gridReturn = false
         gridLoading = false
+        gridExhausted = false
         gridReconnecting = false
         // Focus is already parked on the View More tile — leave railIndex/itemIndex alone.
         mode = .browse
@@ -423,7 +436,11 @@ final class GlassesCoordinator {
     }
 
     private func maybeLoadMoreGrid() {
-        guard gridSource == .added, !gridLoading, gridItems.count < gridTotal,
+        // `gridExhausted`, not just `count < total`: `gridTotal` is the server's UNFILTERED count while
+        // `gridItems` is edits.visible-filtered, so one locally-deleted scene makes that inequality
+        // permanently true — and then every focus step at the end of the list fires another findScenes
+        // at the server, forever.
+        guard gridSource == .added, !gridLoading, !gridExhausted, gridItems.count < gridTotal,
               gridRow >= gridRowCount - 2 else { return }
         gridPage += 1
         loadGrid(reset: false)
@@ -438,7 +455,17 @@ final class GlassesCoordinator {
         gridTask = Task { @MainActor [weak self] in
             var delay: Double = 2
             while !Task.isCancelled {
-                guard let self, GlassesSession.shared.isConnected, let env = GlassesSession.shared.env else { return }
+                // Only a dead coordinator ends this loop. A momentarily-missing session or env is
+                // TRANSIENT — returning there would strand `gridLoading = true` and leave the grid on
+                // "Loading…" forever with nothing re-arming it (the jobs-panel rule, and the exact
+                // shape of the v1.0.345 slow-mo regression).
+                guard let self else { return }
+                guard GlassesSession.shared.isConnected, let env = GlassesSession.shared.env else {
+                    self.gridReconnecting = true
+                    try? await Task.sleep(for: .seconds(delay))
+                    delay = min(30, delay * 1.6)
+                    continue
+                }
                 // Downloads need no network at all.
                 if source == .downloads {
                     let items = env.edits.visible(
@@ -459,19 +486,28 @@ final class GlassesCoordinator {
                         let page = self.gridPage
                         let result = try await client.findScenes(
                             SceneQuery(sort: .createdAt, direction: .desc), page: page, perPage: 60)
+                        // A superseded task's request fails as `.cancelled` and lands in `catch`, but if
+                        // the response BEAT the cancellation it would write a stale page over the live
+                        // one. Check after every await.
+                        guard !Task.isCancelled else { return }
                         let visible = (GlassesSession.shared.env?.edits.visible(result.scenes)) ?? result.scenes
                         var merged = reset ? [] : self.gridItems
                         let known = Set(merged.map(\.id))
                         merged.append(contentsOf: visible.filter { !known.contains($0.id) })
+                        if result.scenes.isEmpty || merged.count == self.gridItems.count {
+                            self.gridExhausted = true      // the server has no more to give
+                        }
                         self.gridItems = merged
                         self.gridTotal = result.count
                     case .played:
                         let ids = Array(Self.playHistory.prefix(Self.historyCap))
                         let scenes = ids.isEmpty ? [] : (try await client.findScenesByIDs(ids))
+                        guard !Task.isCancelled else { return }
                         // findScenesByIDs re-orders results to the ids passed, so recency survives.
                         let visible = (GlassesSession.shared.env?.edits.visible(scenes)) ?? scenes
                         self.gridItems = visible
                         self.gridTotal = visible.count
+                        self.gridExhausted = true
                     case .downloads:
                         break
                     }
@@ -480,6 +516,9 @@ final class GlassesCoordinator {
                     self.prefetchGridPosters()
                     return
                 } catch {
+                    // A cancelled request means a NEWER load replaced this one — not a connectivity
+                    // problem. Reporting it would light "Reconnecting…" on a perfectly healthy grid.
+                    if Task.isCancelled || (error as? URLError)?.code == .cancelled { return }
                     self.gridReconnecting = true
                     RemoteLog.shared.event("glasses-grid", [("src", source.rawValue),
                                                             ("err", String("\(error)".prefix(60)))])

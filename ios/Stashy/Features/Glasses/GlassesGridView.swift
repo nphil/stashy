@@ -17,7 +17,9 @@ struct GlassesGridView: View {
     private static let hPitch: CGFloat = 352
     private static let leftMargin: CGFloat = 96                  // row spans 96…1824, symmetric
     private static let vPitch: CGFloat = 290
-    private static let gridTop: CGFloat = 180
+    /// 205, not 180: the focused tile is drawn 270 tall inside a 180 slot and lifted, so its visual top
+    /// sits ~57 pt above the slot — at 180 it overlapped the 143 pt header block.
+    private static let gridTop: CGFloat = 205
 
     /// Focused row sits in the SECOND visible slot; row 0 over-scrolls, deliberately consistent with
     /// the wall's fixed gaze point.
