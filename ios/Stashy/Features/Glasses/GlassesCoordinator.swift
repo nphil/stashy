@@ -1,4 +1,5 @@
 import SwiftUI
+import QuartzCore   // CACurrentMediaTime for the shuttle integrator
 
 /// Handles to the phone tree's shared services, registered from ContentView so the external-scene
 /// hosting trees use the SAME instances. This is mandatory, not hygiene: the `\.imageCache` environment
@@ -709,10 +710,12 @@ final class GlassesCoordinator {
     @ObservationIgnored private var shuttleTarget: TimeInterval?
     @ObservationIgnored private var shuttleLastTick: CFTimeInterval = 0
 
-    /// Inner-zone jog. Forward rungs are {0.10, 0.25, 0.50}× — at or below the 0.5 threshold that
-    /// `ScenePlayerModel.updateSlowMo` engages on, so AI slow motion arrives by simply pushing the
-    /// stick, with no toggle and no new plumbing. Where the route cannot really slow down (remux), and
-    /// for every reverse rung, it degrades to a preview creep instead of silently doing nothing.
+    /// Inner-zone jog. Rungs are {0.10, 0.25, 0.50}× — at or below the 0.5 threshold that
+    /// `ScenePlayerModel.updateSlowMo` engages on, so pushing the stick right is all it takes to reach
+    /// AI slow motion, PROVIDED the player's AI slow-mo opt-in is on (it defaults off because
+    /// VTFrameProcessor can hard-crash on some inputs — the stick deliberately does not flip it).
+    /// Only ever called where the route can really slow down; reverse and the remux route creep via
+    /// `shuttleTick` instead, driven every tick by the stick.
     func setJog(rung: Int?, direction: Int) {
         guard let player else { return }
         guard let rung, JoystickMapping.jogRates.indices.contains(rung) else {
@@ -721,19 +724,11 @@ final class GlassesCoordinator {
                 player.setPlaybackRate(Self.speedRungs[speedIndex])
                 speedPulse += 1
             }
-            if direction == 0 { endShuttle(commit: true) }
             return
         }
-        let rate = JoystickMapping.jogRates[rung]
-        if direction > 0, player.canSlowForwardNow {
-            jogActive = true
-            player.setPlaybackRate(rate)
-            speedPulse += 1
-        } else {
-            // Creep: ±0.25 / 0.5 / 1.0 media-seconds per second, shown on the scrub strip.
-            jogActive = false
-            shuttleTick(rate: Double(direction < 0 ? -1 : 1) * [0.25, 0.5, 1.0][rung])
-        }
+        jogActive = true
+        player.setPlaybackRate(JoystickMapping.jogRates[rung])
+        speedPulse += 1
     }
 
     /// Outer-zone shuttle. The decoder is NEVER commanded at 36× — the target is integrated in wall

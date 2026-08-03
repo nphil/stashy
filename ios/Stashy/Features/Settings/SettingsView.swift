@@ -418,7 +418,7 @@ struct SettingsView: View {
                                 .onChange(of: remoteJoystick) { _, on in
                                     RemoteRootView.joystickEnabled = on
                                 }
-                            Text("Replaces the XR remote's drag gestures with an analog stick in the lower half of the screen: push right for slow motion (AI interpolation engages on the slow rungs), further for variable-speed shuttle, up/down for playback speed, and it pans the picture while zoomed. Taps, double-taps, two-finger tap and pinch are unchanged. Off restores the drag vocabulary exactly.")
+                            Text("Replaces the XR remote's drag gestures with an analog stick in the lower half of the screen: push right for slow motion, further for variable-speed shuttle, up/down for playback speed, and it pans the picture while zoomed. Slow rungs get AI frame interpolation only if \"AI slow motion\" is also on in the player settings — the stick will not enable it for you. Off restores the drag vocabulary exactly.")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }

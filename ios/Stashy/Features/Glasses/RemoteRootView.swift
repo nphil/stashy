@@ -114,6 +114,14 @@ struct RemoteRootView: View {
                 coordinator.selectFocused()
             },
             onTap: { coordinator.togglePlayPause() },
+            onTwoFingerTap: {
+                switch coordinator.mode {
+                case .playing: coordinator.toggleMute()
+                case .grid: coordinator.closeGrid()
+                case .browse: break
+                }
+                Haptics.tap()
+            },
             onJog: { rung, direction in coordinator.setJog(rung: rung, direction: direction) },
             onShuttle: { rate in
                 coordinator.shuttleTick(rate: rate)
@@ -125,6 +133,7 @@ struct RemoteRootView: View {
                 }
             },
             onShuttleCommit: { coordinator.endShuttle(commit: true); lastCue = -1 },
+            onShuttleAbort: { coordinator.endShuttle(commit: false); lastCue = -1 },
             onSpeedStep: { delta in
                 if coordinator.stepSpeed(delta) {
                     Haptics.step()

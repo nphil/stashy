@@ -43,10 +43,16 @@ struct RemoteJoystick: UIViewRepresentable {
     /// A tap inside the stick zone that never left the deadzone. The zone covers the lower half of the
     /// screen, so without this, tap-to-play would simply stop working down there.
     var onTap: () -> Void = {}
-    /// (rung index into `JoystickMapping.jogRates`, direction +1 forward / −1 reverse-creep). nil = off.
+    /// Two fingers landing in the stick's zone. The surface's own two-finger recognizer is on a
+    /// SIBLING and never sees these touches, so mute/back would simply die below the fold.
+    var onTwoFingerTap: () -> Void = {}
+    /// (rung index into `JoystickMapping.jogRates`, direction +1 forward). nil = off. Only ever sent
+    /// when the route can really slow down; otherwise the inner zone creeps via `onShuttle`.
     var onJog: (Int?, Int) -> Void = { _, _ in }
     var onShuttle: (Double) -> Void = { _ in }            // signed media-seconds per second, 0 = off
     var onShuttleCommit: () -> Void = {}
+    /// Discard the pending seek AND clear the on-glasses scrub strip (cancel, not commit).
+    var onShuttleAbort: () -> Void = {}
     var onSpeedStep: (Int) -> Void = { _ in }             // ±1 rung, latched
     var onPan: (CGVector, Double) -> Void = { _, _ in }   // canvas px/s, dt
     var onZoomStep: (Int) -> Void = { _ in }              // ±1 quarter-step, latched
@@ -61,8 +67,20 @@ struct RemoteJoystick: UIViewRepresentable {
     func updateUIView(_ uiView: JoystickHostView, context: Context) {
         context.coordinator.parent = self
         uiView.isUserInteractionEnabled = enabled
-        if !enabled { context.coordinator.abort() }
+        // `abort()` writes observed coordinator state, so it must not run INSIDE a view update —
+        // that is "Modifying state during view update". Defer it a tick.
+        if !enabled, context.coordinator.down {
+            Task { @MainActor in context.coordinator.abort() }
+        }
         uiView.apply(mode: mode)
+    }
+
+    /// The runloop retains a `CADisplayLink`, so a view torn down mid-gesture (glasses unplugged, the
+    /// takeover window unmounting) would otherwise leave it firing at 30 Hz for the rest of the
+    /// process. Never do this in a `deinit` — a deinit touching @MainActor state is the documented
+    /// Swift 6 failure class.
+    static func dismantleUIView(_ uiView: JoystickHostView, coordinator: Driver) {
+        coordinator.abort()
     }
 
     func makeCoordinator() -> Driver { Driver(parent: self) }
@@ -84,6 +102,10 @@ struct RemoteJoystick: UIViewRepresentable {
 
         // Gesture state
         private(set) var down = false
+        /// Latched at touch-down. The derived mode can flip MID-GESTURE (zooming out past 1x turns
+        /// frame into transport), and without a latch that gesture slides straight from "zoom out"
+        /// into "slow the video down" with the finger never having moved.
+        private var activeMode: StickMode = .browse
         private var offset: CGVector = .zero          // clamped deflection, points
         private var axis: JoystickMapping.Axis?
         private var pastGate = false
@@ -93,18 +115,23 @@ struct RemoteJoystick: UIViewRepresentable {
         private var repeatStep = 0
         private var nextRepeat: CFTimeInterval = 0
         private var atRim = false
+        private var creeping = false
         private var fallbackNextTick: CFTimeInterval = 0
+        /// Preview-creep, media-seconds per second, one per jog rung.
+        static let creepRates: [Double] = [0.25, 0.5, 1.0]
 
         // MARK: Touch phases (called by the host)
 
         func began() {
             down = true
+            activeMode = parent.mode
             offset = .zero
             axis = nil
             pastGate = false
             jogRung = nil
             shuttleRung = nil
             shuttleActive = false
+            creeping = false
             repeatStep = 0
             nextRepeat = 0
             atRim = false
@@ -115,7 +142,7 @@ struct RemoteJoystick: UIViewRepresentable {
 
         func moved(_ v: CGVector) {
             offset = v
-            if axis == nil, parent.mode != .frame { axis = JoystickMapping.axis(of: v) }
+            if axis == nil, activeMode != .frame { axis = JoystickMapping.axis(of: v) }
         }
 
         func ended() {
@@ -129,12 +156,13 @@ struct RemoteJoystick: UIViewRepresentable {
                 Haptics.tap()
             }
             if jogRung != nil { parent.onJog(nil, 1) }
-            if parent.mode == .frame { parent.onPan(.zero, 0) }
+            if activeMode == .frame { parent.onPan(.zero, 0) }
             offset = .zero
             axis = nil
             jogRung = nil
             shuttleRung = nil
             shuttleActive = false
+            creeping = false
         }
 
         /// A second finger, a lock flip, a disconnect: zero everything and commit nothing.
@@ -143,22 +171,27 @@ struct RemoteJoystick: UIViewRepresentable {
             down = false
             stopLink()
             StickHaptics.shared.abort()
-            if shuttleActive { parent.onShuttle(0) }      // no commit — the seek target is discarded
+            // B2: `onShuttle(0)` alone does NOT clear the pending target — it just stops advancing
+            // it, leaving the glasses scrub strip frozen on screen and poisoning the next shuttle.
+            if shuttleActive { parent.onShuttle(0); parent.onShuttleAbort() }
             if jogRung != nil { parent.onJog(nil, 1) }
-            if parent.mode == .frame { parent.onPan(.zero, 0) }
+            if activeMode == .frame { parent.onPan(.zero, 0) }
             offset = .zero
             axis = nil
             jogRung = nil
             shuttleRung = nil
             shuttleActive = false
+            creeping = false
         }
 
         func tapped() {
-            switch parent.mode {
+            switch activeMode {
             case .browse: parent.onSelect()
             case .transport, .frame: parent.onTap()
             }
         }
+
+        func twoFingerTapped() { parent.onTwoFingerTap() }
 
         // MARK: 30 Hz emit loop
 
@@ -197,7 +230,7 @@ struct RemoteJoystick: UIViewRepresentable {
                 if rim { StickHaptics.shared.dip(); Haptics.step() }
             }
 
-            switch parent.mode {
+            switch activeMode {
             case .browse:
                 emitFocus(distance: d, now: now)
             case .transport:
@@ -246,12 +279,28 @@ struct RemoteJoystick: UIViewRepresentable {
                 } else {
                     // JOG — the inner zone. This is where AI slow motion lives: the rungs sit at or
                     // below 0.5×, which is exactly the engage gate in ScenePlayerModel.updateSlowMo.
-                    if shuttleActive { shuttleActive = false; parent.onShuttle(0); parent.onShuttleCommit() }
                     let rung = JoystickMapping.jogRung(distance: d, previous: jogRung)
+                    // Reverse is never real playback (no route here can play backwards), and the
+                    // remux route cannot play below 1× either — both CREEP by seeking instead. That
+                    // path must be fed EVERY tick, not only when a rung changes, or it advances one
+                    // lurch per boundary and then sits dead with the scrub strip stuck on screen.
+                    let mustCreep = direction < 0 || parent.slowUnavailable
                     if rung != jogRung {
                         jogRung = rung
                         if rung != nil { StickHaptics.shared.dip(); Haptics.step() }
-                        parent.onJog(rung, direction)
+                        if !mustCreep { parent.onJog(rung, direction) }
+                    }
+                    if mustCreep, let rung {
+                        if !shuttleActive { shuttleActive = true }
+                        creeping = true
+                        parent.onShuttle(Double(direction) * Self.creepRates[rung])
+                    } else {
+                        creeping = false
+                        if shuttleActive, rung == nil {
+                            shuttleActive = false
+                            parent.onShuttle(0)
+                            parent.onShuttleCommit()
+                        }
                     }
                 }
                 if !pastGate, d > JoystickMapping.gate { pastGate = true; Haptics.step() }
@@ -287,10 +336,10 @@ struct RemoteJoystick: UIViewRepresentable {
         // MARK: Haptic bed
 
         private func bedTexture(u: Float) -> StickHaptics.Texture {
-            switch parent.mode {
+            switch activeMode {
             case .browse:    return .off                       // clicks only — absence IS the mode tell
             case .frame:     return .frame
-            case .transport: return jogRung != nil ? .viscous : .transport
+            case .transport: return (jogRung != nil || creeping) ? .viscous : .transport
             }
         }
 
@@ -341,6 +390,10 @@ final class JoystickHostView: UIView {
     private var grabBias: CGVector = .zero
     private var maxDeflection: CGFloat = 0
     private var downAt: CFTimeInterval = 0
+    /// Set only by a touchesBegan we actually accepted. Without it, a REJECTED multi-touch landing
+    /// evaluates `wasTap` against the previous gesture's values and fires a phantom tap.
+    private var tracking = false
+    private var multiTouch = false
     private var returnAnimator: UIViewPropertyAnimator?
     private var mode: RemoteJoystick.StickMode = .browse
 
@@ -351,7 +404,7 @@ final class JoystickHostView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
-        isMultipleTouchEnabled = false
+        isMultipleTouchEnabled = true
         buildLayers()
     }
 
@@ -429,9 +482,13 @@ final class JoystickHostView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        if centre == .zero { centre = homeCentre }
+        // Not `centre == .zero`: a first layout pass with zero bounds yields (0, −254), which is not
+        // zero, so the assembly would stay off-screen until the first touch.
+        if coordinator?.down != true, returnAnimator == nil {
+            centre = homeCentre
+            dome.position = centre
+        }
         redrawSocket()
-        if returnAnimator == nil && coordinator?.down != true { dome.position = centre }
         applyGlyph()
     }
 
@@ -485,10 +542,17 @@ final class JoystickHostView: UIView {
     // MARK: Touches
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let touch = touches.first, touches.count == 1, event?.allTouches?.count == 1 else {
+        // A second finger is a MUTE (playback) or BACK (browse/grid) gesture — the surface's own
+        // two-finger recognizer is on a sibling and never sees these touches, so if we merely dropped
+        // it both would silently die in the whole lower half.
+        if (event?.allTouches?.count ?? 1) > 1 {
+            multiTouch = true
             coordinator?.abort()
             return
         }
+        guard let touch = touches.first, !tracking else { return }
+        tracking = true
+        multiTouch = false
         returnAnimator?.stopAnimation(true)
         returnAnimator = nil
 
@@ -514,7 +578,7 @@ final class JoystickHostView: UIView {
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let touch = touches.first else { return }
+        guard tracking, !multiTouch, let touch = touches.first else { return }
         let p = touch.location(in: self)
         var v = CGVector(dx: p.x - centre.x - grabBias.dx, dy: p.y - centre.y - grabBias.dy)
         let d = hypot(v.dx, v.dy)
@@ -544,6 +608,9 @@ final class JoystickHostView: UIView {
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        // Wait for the LAST finger up so a two-finger tap resolves once, not twice.
+        guard (event?.allTouches?.filter { $0.phase != .ended && $0.phase != .cancelled }.count ?? 0) == 0
+        else { return }
         finish(cancelled: false)
     }
 
@@ -551,12 +618,22 @@ final class JoystickHostView: UIView {
         finish(cancelled: true)
     }
 
+    /// Teardown while a finger is still down (glasses unplugged, takeover window unmounting).
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil { coordinator?.abort() }
+    }
+
     private func finish(cancelled: Bool) {
-        let wasTap = !cancelled
+        let quick = tracking && CACurrentMediaTime() - downAt < 0.4
             && maxDeflection < JoystickMapping.deadzone
-            && CACurrentMediaTime() - downAt < 0.4
+        let wasTap = !cancelled && !multiTouch && quick
+        let wasTwoFinger = multiTouch && quick && !cancelled
         if cancelled { coordinator?.abort() } else { coordinator?.ended() }
         if wasTap { coordinator?.tapped(); Haptics.tap() }
+        if wasTwoFinger { coordinator?.twoFingerTapped(); Haptics.tap() }
+        tracking = false
+        multiTouch = false
         springHome()
         setAssemblyOpacity(0.35, duration: 0.5)
     }
@@ -585,9 +662,19 @@ final class JoystickHostView: UIView {
                                                               height: self.rDome * 2 + 3)).cgPath
         }
         animator.addCompletion { [weak self] _ in
-            self?.returnAnimator = nil
-            self?.centre = self?.homeCentre ?? target
-            self?.redrawSocket()
+            guard let self else { return }
+            self.returnAnimator = nil
+            // Move the socket AND the dome back to the rest position together. Moving only the socket
+            // left the dome visibly orphaned beside its own well until the next touch.
+            self.centre = self.homeCentre
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            self.dome.position = self.centre
+            self.occlusion.path = UIBezierPath(ovalIn: CGRect(x: self.centre.x - self.rDome - 1.5,
+                                                              y: self.centre.y - self.rDome - 1.5,
+                                                              width: self.rDome * 2 + 3,
+                                                              height: self.rDome * 2 + 3)).cgPath
+            CATransaction.commit()
+            self.redrawSocket()
         }
         returnAnimator = animator
         animator.startAnimation()
