@@ -47,6 +47,14 @@ targets:
           NSAllowsArbitraryLoads: true
         NSFaceIDUsageDescription: Unlock Stashy with Face ID.
         NSSupportsLiveActivities: true
+        # REQUIRED for the glasses (external display) scene. Without multi-scene support iOS never
+        # creates a separate scene for a connected display — it silently system-mirrors the phone and
+        # `configurationForConnecting` is never called for the external role (device-observed
+        # 2026-08-03: v1.0.346 shipped the whole pipe and the Viture just mirrored; zero `glasses-*`
+        # log lines because the delegate was unreachable). On iPhone this flag adds no user-facing
+        # multi-window UI; it exists solely to make the external scene deliverable.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
         # BackgroundTasks: opportunistic idle-time resume for the in-process download path.
         # BOTH keys are RUNTIME requirements with no compile-time signal — CI goes green and the IPA
         # publishes even if they are wrong. Without the permitted identifier, BGTaskScheduler.register

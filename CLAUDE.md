@@ -218,11 +218,14 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   run: 290 s unbroken background runtime, 18.9 MB → 744 MB while backgrounded, 29/29 ticks, zero
   refusals, Live Activity live throughout. Long unattended downloads now work. Do not re-open the
   question of whether iOS permits this — it does, and the recipe is in ENGINEERING_NOTES §3.
-- **XR glasses (Viture Pro) pipe SHIPPED v1.0.346 — AWAITING FIRST DEVICE TEST.** Video routes to the
-  glasses as a SECOND `AVPlayerLayer` on the same player (`PlaybackEngine.externalRenderView`); the phone
-  hides its surface in place (opacity only — the never-reparent rule stands) and shows a minimal
-  tap-to-play/pause remote. The open -3000-class question: does a SIDELOADED app receive the external
-  scene at all? Verdict = `glasses-connect bounds= maxfps=` in the log on plug-in. Glasses rules:
+- **XR glasses (Viture Pro) pipe shipped v1.0.346; first device test found system MIRRORING, fixed in
+  v1.0.347: `UIApplicationSupportsMultipleScenes` was absent**, so iOS never created an external scene
+  and `configurationForConnecting` was never called (zero `glasses-*` log lines — the delegate was
+  unreachable, not broken). The flag is REQUIRED for external-display scenes; on iPhone it adds no
+  multi-window UI. Video routes to the glasses as a SECOND `AVPlayerLayer` on the same player
+  (`PlaybackEngine.externalRenderView`); the phone hides its surface in place (opacity only — the
+  never-reparent rule stands) and shows a minimal tap-to-play/pause remote. Retest verdict =
+  `scene-config role=` then `glasses-connect bounds= maxfps=` on plug-in. Glasses rules:
   **no `beginBackgroundTask` and no audio-session writes anywhere in glasses code** (pins the window,
   kills the keep-alive); AI slow-mo is intent-gated off while connected (renders on a phone-hosted
   overlay); `ScreenAwake` arbiters the idle timer (locking the phone kills DP output); scene pickers

@@ -49,6 +49,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         configurationForConnecting connectingSceneSession: UISceneSession,
         options: UIScene.ConnectionOptions
     ) -> UISceneConfiguration {
+        // Role visibility for the trace: with `UIApplicationSupportsMultipleScenes` absent this method
+        // was never called for the external role at all (the v1.0.346 mirroring bug) — so a missing
+        // `scene-config` line IS the diagnosis, not an instrumentation gap.
+        RemoteLog.shared.event("scene-config", [("role", connectingSceneSession.role.rawValue)])
         if connectingSceneSession.role == .windowExternalDisplayNonInteractive {
             let config = UISceneConfiguration(name: "Glasses", sessionRole: connectingSceneSession.role)
             config.delegateClass = ExternalSceneDelegate.self
