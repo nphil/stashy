@@ -229,8 +229,14 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   method for role discovery. DP alt-mode is 60 Hz (not 120). The `screen-notify` diagnostic answered
   its question and can be removed. Video = second `AVPlayerLayer` on the same player
   (`externalRenderView`); phone surface hides in place; glasses code must never take
-  `beginBackgroundTask` or touch the audio session. **Glasses-FIRST mode (10-foot UI on glasses +
-  full-time phone remote) is the active build.** Glasses rules:
+  `beginBackgroundTask` or touch the audio session. **Glasses-FIRST mode SHIPPED v1.0.349, awaiting
+  device test:** plug in → 10-foot home on glasses (Downloaded + Recent rails, fixed focus slot,
+  content slides) + the phone becomes a fullscreen takeover remote (a WINDOW over the app tree — nav
+  state survives unplug). `GlassesCoordinator` owns glasses-first playback (no phone player view);
+  volume restores the persisted `glassesVolume` (owner decision; 40% first run). Interim gaps,
+  deliberate: v1 per-player routing still exists behind EXIT; scrub preview thumbs + end-countdown
+  next. Landmines already hit in review: `ImageCache` is an ACTOR (explicit hop from @MainActor);
+  built-but-unwired seams (`didReachEnd`, rehost-on-ready) — wire the reaction when you build the seam. Glasses rules:
   **no `beginBackgroundTask` and no audio-session writes anywhere in glasses code** (pins the window,
   kills the keep-alive); AI slow-mo is intent-gated off while connected (renders on a phone-hosted
   overlay); `ScreenAwake` arbiters the idle timer (locking the phone kills DP output); scene pickers
