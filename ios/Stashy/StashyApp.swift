@@ -99,6 +99,11 @@ struct ContentView: View {
         // scroll view (grids, lists, and presented sheets/covers) app-wide.
         .scrollIndicators(.hidden)
         .debugScreenshotOverlay()
+        // Glasses-first mode: register the shared services for the external scene's hosting trees,
+        // drive the phone-side takeover window, and offer the way back after an EXIT.
+        .background(GlassesEnvRegistrar())
+        .background(GlassesTakeoverDriver())
+        .modifier(GlassesReturnPill())
         .onChange(of: colorScheme, initial: true) { _, scheme in
             themeManager.systemIsDark = (scheme == .dark)
         }

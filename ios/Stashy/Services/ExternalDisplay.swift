@@ -31,6 +31,11 @@ final class GlassesSession {
 
     @ObservationIgnored fileprivate weak var rootController: GlassesRootController?
 
+    /// Shared-service handles for the external hosting trees, registered from ContentView. OBSERVED
+    /// (not ignored) so a glasses screen built before the phone tree registered — cold launch with the
+    /// cable in — re-renders the moment the handles arrive.
+    var env: GlassesEnv?
+
     /// Host a video view on the glasses (nil clears it). The view is the engine's dedicated external
     /// host — never the phone-side render view.
     func setVideo(_ view: UIView?) {
@@ -106,12 +111,39 @@ final class GlassesRootController: UIViewController {
     /// state still reads `.active`, which would defeat the whole point of covering on resign.
     private var appActive = true
 
+    /// SwiftUI layers: the screen root (idle card / 10-foot home) sits BELOW the video container so
+    /// attached video naturally covers it and `setVideo(nil)` reveals it — zero mode plumbing. The
+    /// playback OSD sits ABOVE the video, below the blackout.
+    private var screenHost: UIHostingController<GlassesScreenRoot>?
+    private var osdHost: UIHostingController<GlassesOSDRoot>?
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
+
+        let screen = UIHostingController(rootView: GlassesScreenRoot())
+        screen.view.backgroundColor = .black
+        addChild(screen)
+        screen.view.frame = view.bounds
+        screen.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(screen.view)
+        screen.didMove(toParent: self)
+        screenHost = screen
+
         videoContainer.frame = view.bounds
         videoContainer.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(videoContainer)
+
+        let osd = UIHostingController(rootView: GlassesOSDRoot())
+        osd.view.backgroundColor = .clear
+        addChild(osd)
+        osd.view.frame = view.bounds
+        osd.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(osd.view)
+        osd.didMove(toParent: self)
+        osdHost = osd
+
+        RemoteLog.shared.event("glasses-ui", [("host", "ok")])
 
         blackout.backgroundColor = .black
         blackout.frame = view.bounds

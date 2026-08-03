@@ -1346,6 +1346,11 @@ final class DownloadManager {
     }
 
     /// Local sprite sheet downloaded alongside the video, so scrub previews work offline / instantly.
+    /// On-disk thumbnail for a downloaded scene (offline poster), or nil.
+    func localThumb(sceneID: String) -> URL? {
+        items.first { $0.id == sceneID && $0.state == .completed }?.localThumb
+    }
+
     func localSprite(sceneID: String) -> URL? {
         let url = metaDir.appendingPathComponent("\(sceneID)-sprite.jpg")
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
