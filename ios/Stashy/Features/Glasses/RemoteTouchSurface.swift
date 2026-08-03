@@ -74,10 +74,26 @@ struct RemoteTouchSurface: UIViewRepresentable {
 
             let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
             pan.maximumNumberOfTouches = 1
+            pan.delegate = self
             view.addGestureRecognizer(pan)
 
             let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+            pinch.delegate = self
             view.addGestureRecognizer(pinch)
+            panGR = pan
+            pinchGR = pinch
+        }
+
+        private weak var panGR: UIPanGestureRecognizer?
+        private weak var pinchGR: UIPinchGestureRecognizer?
+
+        /// Pan↔pinch ONLY: a second finger landing mid-drag must start the zoom instead of dying
+        /// behind the pan's exclusive claim (default UIKit exclusion starved the pinch whenever one
+        /// finger moved ~10 pt first). Taps keep their require(toFail:) ordering untouched.
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            (gestureRecognizer === panGR && other === pinchGR)
+                || (gestureRecognizer === pinchGR && other === panGR)
         }
 
         @objc func handlePinch(_ gr: UIPinchGestureRecognizer) {

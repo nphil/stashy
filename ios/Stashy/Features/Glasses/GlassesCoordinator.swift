@@ -172,12 +172,18 @@ final class GlassesCoordinator {
     /// Insert/update a rail while preserving the FIXED order played → added → downloads. Empty rails
     /// are removed entirely (no dead shelf headers).
     private func upsertRail(id: String, title: String, scenes: [StashScene]) {
+        // Focus follows the rail's IDENTITY, not its position: a server rail landing ABOVE the one
+        // being browsed must not silently shift the wearer onto a different shelf.
+        let focusedID = rails.indices.contains(railIndex) ? rails[railIndex].id : nil
         let order = ["played", "added", "downloads"]
         rails.removeAll { $0.id == id }
         if !scenes.isEmpty {
             let rail = Rail(id: id, title: title, scenes: scenes)
             let pos = rails.firstIndex { (order.firstIndex(of: $0.id) ?? 99) > (order.firstIndex(of: id) ?? 99) }
             rails.insert(rail, at: pos ?? rails.count)
+        }
+        if let focusedID, let idx = rails.firstIndex(where: { $0.id == focusedID }) {
+            railIndex = idx
         }
         clampFocus()
     }
@@ -237,7 +243,7 @@ final class GlassesCoordinator {
         }
         stopPlayback()
         let model = ScenePlayerModel(route: route, sceneID: scene.id)
-        model.glassesActive = true          // slow-mo stays gated off in glasses mode
+        model.glassesActive = true          // AI slow-mo hosts on the glasses overlay (see ScenePlayerModel.glassesActive)
         player = model
         playingScene = scene
         mode = .playing
