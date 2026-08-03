@@ -33,4 +33,14 @@ enum Haptics {
         generator.impactOccurred()
         generator.prepare()
     }
+
+    private static let notifier = UINotificationFeedbackGenerator()
+
+    /// A MODE boundary (remote lock/unlock, exit, browse→play commit): the heavier patterned feedback,
+    /// deliberately distinct from the tick/tap vocabulary so the hand can tell state changes from
+    /// actions without looking.
+    static func notify(_ type: UINotificationFeedbackGenerator.FeedbackType) {
+        notifier.notificationOccurred(type)
+        notifier.prepare()
+    }
 }

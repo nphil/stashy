@@ -36,23 +36,8 @@ struct SceneDetailView: View {
     private var shown: StashScene { fullScene ?? scene }
 
     private var route: PlaybackRoute? {
-        // Manual server-quality override (gear menu) wins over everything — force the Stash HLS transcode
-        // at the chosen resolution.
-        if quality != .auto, let client = appState.client,
-           let q = scene.serverQualityRoute(quality: quality, apiKey: client.apiKey) {
-            return q
-        }
-        // Prefer a completed download: play the local file offline. Route it through the same codec/
-        // container capability check as the server stream, so a downloaded HEVC / foreign-container file
-        // goes through the on-device remux (of the local file) instead of a bare AVPlayer that can't
-        // decode it.
-        if let local = downloads.localFile(sceneID: scene.id) {
-            return scene.localPlaybackRoute(localURL: local, apiKey: appState.client?.apiKey ?? "",
-                                            nativeMP4: downloads.wasTranscoded(sceneID: scene.id))
-        }
-        guard let client = appState.client else { return nil }
-        return scene.playbackRoute(apiKey: client.apiKey,
-                                   pluginNeedsTranscode: PlayabilityStore.shared.needsTranscode(scene.id))
+        PlaybackRouteResolver.resolve(scene: scene, quality: quality,
+                                      client: appState.client, downloads: downloads)
     }
 
     var body: some View {

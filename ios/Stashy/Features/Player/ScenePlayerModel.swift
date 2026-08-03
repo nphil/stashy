@@ -87,6 +87,9 @@ final class ScenePlayerModel {
 
     /// True once playback has run to the end (player parked there). The next play() restarts from 0.
     @ObservationIgnored private var reachedEnd = false
+    /// Observable mirror of `reachedEnd` for surfaces that need to REACT to the end of playback (the
+    /// glasses coordinator returns to browse). The private flag stays the source of truth for play().
+    var didReachEnd = false
 
     @ObservationIgnored private var engine: PlaybackEngine?
     /// True while a glasses session is showing this player's video. INTENT, not readiness (the v1.0.345
@@ -411,6 +414,7 @@ final class ScenePlayerModel {
         engine.onEnded = { [weak self] in
             guard let self else { return }
             self.reachedEnd = true
+            self.didReachEnd = true
             self.isPlaying = false
         }
         engine.onPresentationSize = { [weak self] size in
@@ -579,6 +583,7 @@ final class ScenePlayerModel {
         if reachedEnd {
             // Playback was parked at the end — restart from the beginning instead of no-opping at EOF.
             reachedEnd = false
+            didReachEnd = false
             seek(to: 0)
         }
         engine?.play()
@@ -720,6 +725,7 @@ final class ScenePlayerModel {
         suspendSlowMo()
         scheduleSlowMoReengage()
         reachedEnd = false   // any seek means we're no longer parked at EOF
+        didReachEnd = false
         // Mark this (and any re-buffer it triggers) as a warm seek so the loading donut fills on the
         // per-seek estimate/curve. Purely bookkeeping — it does NOT affect the seekTarget hold below that
         // keeps the scrub thumb pinned where the finger released.
