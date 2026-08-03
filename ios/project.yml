@@ -34,8 +34,8 @@ targets:
         CFBundleDisplayName: Stashy
         CFBundleName: Stashy
         CFBundleIdentifier: com.nphil.stashy
-        CFBundleShortVersionString: "1.0.355"
-        CFBundleVersion: "356"
+        CFBundleShortVersionString: "1.0.356"
+        CFBundleVersion: "357"
         CFBundlePackageType: APPL
         CFBundleExecutable: $(EXECUTABLE_NAME)
         LSRequiresIPhoneOS: true
@@ -109,8 +109,8 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         SWIFT_STRICT_CONCURRENCY: complete
         ENABLE_USER_SCRIPT_SANDBOXING: NO
-        MARKETING_VERSION: "1.0.355"
-        CURRENT_PROJECT_VERSION: "356"
+        MARKETING_VERSION: "1.0.356"
+        CURRENT_PROJECT_VERSION: "357"
       configs:
         Release:
           SWIFT_OPTIMIZATION_LEVEL: -O
@@ -136,8 +136,8 @@ targets:
       properties:
         CFBundleDisplayName: Stashy Activity
         CFBundleIdentifier: com.nphil.stashy.liveactivity
-        CFBundleShortVersionString: "1.0.355"
-        CFBundleVersion: "356"
+        CFBundleShortVersionString: "1.0.356"
+        CFBundleVersion: "357"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
     settings:
@@ -146,6 +146,6 @@ targets:
         SWIFT_VERSION: 6.0
         SWIFT_STRICT_CONCURRENCY: complete
         APPLICATION_EXTENSION_API_ONLY: YES
-        MARKETING_VERSION: "1.0.355"
-        CURRENT_PROJECT_VERSION: "356"
+        MARKETING_VERSION: "1.0.356"
+        CURRENT_PROJECT_VERSION: "357"
         SKIP_INSTALL: YES
