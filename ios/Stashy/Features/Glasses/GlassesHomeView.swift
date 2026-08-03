@@ -63,7 +63,7 @@ struct GlassesHomeView: View {
             .padding(.leading, Self.sideMargin)
             .offset(x: -CGFloat(focusItem) * Self.pitch)
             .animation(.spring(response: 0.32, dampingFraction: 0.86), value: focusItem)
-            .opacity(isFocusedRail ? 1 : 0.55)
+            .opacity(isFocusedRail ? 1 : 0.30)
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: coordinator.railIndex)
     }
@@ -118,11 +118,15 @@ private struct GlassesPosterCard: View {
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay {
             RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(.white.opacity(focused ? 0.92 : 0), lineWidth: 3)
+                .strokeBorder(.white.opacity(focused ? 0.92 : 0), lineWidth: 5)
         }
-        .shadow(color: .white.opacity(focused ? 0.18 : 0), radius: 24)
-        .scaleEffect(focused ? 1.08 : 1.0)
-        .opacity(focused ? 1.0 : 0.72)
+        .shadow(color: .white.opacity(focused ? 0.30 : 0), radius: 34)
+        // 1.08 was device-tested and read as ambiguous at cinema distance — the selection must be
+        // unmistakable in peripheral vision, not a detail you check. 18% pop + a lift + a deep dim on
+        // everything unfocused makes the focused card the only bright thing on the shelf.
+        .scaleEffect(focused ? 1.18 : 1.0)
+        .offset(y: focused ? -10 : 0)
+        .opacity(focused ? 1.0 : 0.45)
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: focused)
         .task(id: scene.id) {
             if let localThumb {

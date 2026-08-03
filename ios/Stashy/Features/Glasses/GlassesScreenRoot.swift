@@ -9,7 +9,12 @@ struct GlassesScreenRoot: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            if coordinator.takeoverSuppressed {
+            if coordinator.mode == .playing {
+                // NOTHING while playing. This layer sits BELOW the video, and an AVPlayerLayer renders
+                // no pixels until its first decoded frame — so during load/buffering the home rails
+                // showed straight through the "video". Black here, loading hint on the OSD above.
+                Color.black.ignoresSafeArea()
+            } else if coordinator.takeoverSuppressed {
                 GlassesIdleCard(hint: "Remote closed — resume from your phone")
             } else if let env = session.env, env.appState.isAuthenticated, !coordinator.rails.isEmpty {
                 GlassesHomeView(
