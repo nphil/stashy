@@ -17,6 +17,10 @@ protocol PlaybackEngine: AnyObject {
     var renderView: UIView? { get }
     /// A live blurred-backdrop view vended from the engine's decoded frames.
     var liveBlurView: UIView? { get }
+    /// A SECOND render view for an external display (XR glasses) — the same player drawn through a second
+    /// AVPlayerLayer, so phone and glasses share one decode clock and the phone view is never re-parented.
+    /// nil = this engine can't drive an external screen; glasses mode is then unavailable, not broken.
+    var externalRenderView: UIView? { get }
     /// The engine's live decoded-frame output (the same `AVPlayerItemVideoOutput` the blur taps), for
     /// on-device frame interpolation / analysis — or nil if the backend doesn't vend one. Read-only; the
     /// buffers it hands out are treated as immutable (never write them).
@@ -80,4 +84,9 @@ protocol PlaybackEngine: AnyObject {
     var decodeDescription: String { get }
     /// Backend-specific live diagnostics (buffer, throughput, dropped frames, …) for the Stats overlay.
     func liveStats() -> [StatLine]
+}
+
+extension PlaybackEngine {
+    /// Default for engines that can't (or don't yet) drive an external display.
+    var externalRenderView: UIView? { nil }
 }

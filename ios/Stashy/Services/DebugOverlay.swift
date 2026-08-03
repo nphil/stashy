@@ -24,7 +24,9 @@ final class DebugOverlayController {
 
     private func install() {
         guard window == nil else { return }
+        // Phone scenes only — the overlay must never install on (or capture) the glasses scene.
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .filter { $0.session.role == .windowApplication }
         guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first
         else { return }
         let w = DebugOverlayWindow(windowScene: scene)
@@ -44,6 +46,7 @@ final class DebugOverlayController {
     static func captureAppWindowJPEG() -> Data? {
         let windows = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
+            .filter { $0.session.role == .windowApplication }   // never screenshot the glasses window
             .flatMap { $0.windows }
             .filter { !($0 is DebugOverlayWindow) }
         guard let target = windows.first(where: { $0.isKeyWindow }) ?? windows.first else { return nil }

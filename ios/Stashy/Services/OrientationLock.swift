@@ -40,6 +40,23 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         AppDelegate.orientationLock
     }
 
+    /// The UIKit bridge that lets a SwiftUI-lifecycle app own an external display: for the glasses scene,
+    /// return a configuration with our delegate; for every other role, return a bare configuration with
+    /// no delegate class, which hands the scene straight back to SwiftUI (the documented pass-through —
+    /// the phone window keeps working exactly as before).
+    func application(
+        _ application: UIApplication,
+        configurationForConnecting connectingSceneSession: UISceneSession,
+        options: UIScene.ConnectionOptions
+    ) -> UISceneConfiguration {
+        if connectingSceneSession.role == .windowExternalDisplayNonInteractive {
+            let config = UISceneConfiguration(name: "Glasses", sessionRole: connectingSceneSession.role)
+            config.delegateClass = ExternalSceneDelegate.self
+            return config
+        }
+        return UISceneConfiguration(name: nil, sessionRole: connectingSceneSession.role)
+    }
+
     /// iOS relaunched the app (often straight into the background) to finish queued background downloads.
     /// Stash the completion handler; `DownloadManager`'s session delegate calls it once every event has
     /// been delivered (`urlSessionDidFinishEvents`), letting the system suspend us again.
@@ -62,8 +79,12 @@ enum OrientationController {
     @MainActor
     static func lock(_ mask: UIInterfaceOrientationMask) {
         AppDelegate.orientationLock = mask
+        // The PHONE scene only — an unfiltered `.first` can be the glasses scene once one is
+        // connected, aiming the geometry request at a screen that doesn't rotate and silently
+        // breaking fullscreen.
         guard let scene = UIApplication.shared.connectedScenes
-            .compactMap({ $0 as? UIWindowScene }).first else { return }
+            .compactMap({ $0 as? UIWindowScene })
+            .first(where: { $0.session.role == .windowApplication }) else { return }
         scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { _ in }
         scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
     }

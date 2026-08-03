@@ -57,6 +57,18 @@ final class AVPlaybackEngine: PlaybackEngine {
     var renderView: UIView? { hostView }
     var liveBlurView: UIView? { blurBackdrop }
 
+    /// Second AVPlayerLayer on the SAME player, for the glasses window (Apple's AVLoupe pattern —
+    /// multiple layers per player are supported and stay frame-locked). Lazy: costs nothing until a
+    /// glasses session asks for it.
+    private var externalHostView: AVPlayerHostView?
+    var externalRenderView: UIView? {
+        if let externalHostView { return externalHostView }
+        let v = AVPlayerHostView()
+        v.player = player
+        externalHostView = v
+        return v
+    }
+
     init(url: URL, normalizationGain: Float = 1) {
         self.normalizationGain = normalizationGain
         // Claim the session so sound plays through the ringer switch. The category is re-asserted
@@ -205,6 +217,9 @@ final class AVPlaybackEngine: PlaybackEngine {
         // removeFromSuperview calls are idempotent no-ops if the view was already swapped out.
         hostView.player = nil
         hostView.removeFromSuperview()
+        externalHostView?.player = nil   // AVPlayerLayer.player is a strong ref — same as hostView above
+        externalHostView?.removeFromSuperview()
+        externalHostView = nil
         blurBackdrop.invalidate()
         blurBackdrop.removeFromSuperview()
     }

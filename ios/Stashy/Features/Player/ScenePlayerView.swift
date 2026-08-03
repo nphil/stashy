@@ -21,6 +21,9 @@ struct ScenePlayerView: View {
     @Environment(DownloadManager.self) private var downloads
     @State private var model: ScenePlayerModel
     @State private var sprites = SpriteThumbnails()
+    /// Observable glasses session — reading `isConnected` in body re-renders on plug/unplug.
+    @State private var glasses = GlassesSession.shared
+    @Environment(\.scenePhase) private var scenePhase
     /// After exiting fullscreen while the phone is still physically landscape, suppress re-entering
     /// fullscreen until the device returns to portrait (so ✕ doesn't immediately bounce back to landscape).
     @State private var suppressReentry = false
@@ -196,6 +199,18 @@ struct ScenePlayerView: View {
                 }
             }
             .frame(width: avail.width, height: avail.height)
+            // Glasses routing: video plays on the external window (a second AVPlayerLayer on the same
+            // player), so the phone surface hides IN PLACE — opacity only, never removed, never
+            // re-parented (the never-reparent rule above stays intact) — and a minimal eyes-free remote
+            // takes the touch surface. Dead code when no glasses are connected.
+            .opacity(glasses.isConnected ? 0 : 1)
+            .allowsHitTesting(!glasses.isConnected)
+            .overlay {
+                if glasses.isConnected {
+                    GlassesRemoteSurface(model: model, title: scene.title ?? "")
+                        .frame(width: avail.width, height: avail.height)
+                }
+            }
             // NB: no `.animation(value: isFullscreen)` here. Animating this subtree animated the
             // ZoomablePlayerSurface's frame during fullscreen entry, racing the scroll view's zoom /
             // contentSize setup — which settled correctly only *sometimes*, so pinch-zoom died on ~8 of 10
@@ -245,6 +260,28 @@ struct ScenePlayerView: View {
                 if UIDevice.current.orientation.isLandscape { suppressReentry = true }
             }
         }
+        // Glasses attach/detach. Re-run on readiness too: a quality switch or far-seek rebuilds the
+        // engine, and the external view dies with its engine — the new one must be re-hosted.
+        .onChange(of: glasses.isConnected, initial: true) { _, connected in
+            syncGlassesRouting(connected)
+        }
+        .onChange(of: model.isReady) { _, ready in
+            if ready, glasses.isConnected { syncGlassesRouting(true) }
+        }
+        // Backgrounding while the glasses are up: iOS takes the external screen back, so pause in place
+        // (never stop — that's the navigation path). The blackout cover in GlassesRootController has
+        // already drawn by this point. No beginBackgroundTask and no audio-session writes here — either
+        // would pin the background window open and kill DownloadKeepAlive's renewal at ~26 s.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background, model.glassesActive { model.pause() }
+        }
+        .onDisappear {
+            if model.glassesActive {
+                GlassesSession.shared.setVideo(nil)
+                GlassesSession.shared.onDisconnect = nil
+                model.glassesActive = false
+            }
+        }
         .onAppear {
             UIDevice.current.beginGeneratingDeviceOrientationNotifications()
             // First open auto-plays; a re-appear (returned from a pushed performer / external link) resumes
@@ -268,6 +305,24 @@ struct ScenePlayerView: View {
             // quality switch, and resetting to portrait here would kick fullscreen landscape back to
             // portrait mid-switch. Restoring portrait on a real exit is owned by SceneDetailView.
             model.stop()
+        }
+    }
+
+    /// Route (or stop routing) this player's video to the glasses. Idempotent; called on connect,
+    /// on readiness changes (engine rebuilds vend a fresh external view), and never when disconnected.
+    private func syncGlassesRouting(_ connected: Bool) {
+        if connected {
+            GlassesSession.shared.setVideo(model.externalRenderView)
+            model.glassesActive = true
+            GlassesSession.shared.onDisconnect = { [weak model] in
+                // Cable pulled. Explicit unconditional pause — do NOT rely on the OS route-loss
+                // auto-pause, which doesn't fire when audio was on AirPods or still at start-muted 0.
+                // The phone surface (which never moved) un-hides at the same playhead; one tap resumes.
+                model?.glassesActive = false
+                model?.pause()
+            }
+        } else {
+            model.glassesActive = false
         }
     }
 

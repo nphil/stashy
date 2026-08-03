@@ -1,0 +1,137 @@
+import UIKit
+import SwiftUI
+
+/// XR-glasses (external display) support. The Viture Pro connects over USB-C DisplayPort alt-mode and
+/// appears to iOS as a plain external display; iOS mirrors the phone until the app provides a window for
+/// the external scene, at which point the app owns the glasses' full canvas.
+///
+/// ARCHITECTURE. One `GlassesSession` singleton tracks connection state (it is `@Observable`, so SwiftUI
+/// bodies that read `isConnected` re-render on plug/unplug). The scene arrives through UIKit — SwiftUI has
+/// no native external-display scene type — via `AppDelegate.application(_:configurationForConnecting:)`
+/// returning a configuration whose `delegateClass` is `ExternalSceneDelegate`. Video reaches the glasses
+/// as a SECOND `AVPlayerLayer` on the SAME `AVPlayer` (`PlaybackEngine.externalRenderView`): one decode
+/// clock, perfect sync, and the phone's own layer is never re-parented — the repo's never-reparent rule
+/// (ScenePlayerView) stays intact, and `ZoomablePlayerSurface` keeps its view. Every playback route ends
+/// at an AVPlayer (direct, server HLS, FFmpeg via the loopback m3u8), so one mechanism covers them all.
+///
+/// iOS 27 NOTE: external accessory displays move to `UISceneAccessory` registration there; this delegate
+/// class carries over, only the discovery half changes. Availability-gate when the SDK lands.
+@MainActor
+@Observable
+final class GlassesSession {
+    static let shared = GlassesSession()
+    private init() {}
+
+    /// True while an external (glasses) scene is connected — whether or not video is attached.
+    private(set) var isConnected = false
+
+    /// Fired exactly once when the cable is pulled / scene disconnects, so the active player can pause
+    /// and reclaim its on-phone surface. Set by whoever attached video; cleared after firing.
+    @ObservationIgnored var onDisconnect: (@MainActor () -> Void)?
+
+    @ObservationIgnored fileprivate weak var rootController: GlassesRootController?
+
+    /// Host a video view on the glasses (nil clears it). The view is the engine's dedicated external
+    /// host — never the phone-side render view.
+    func setVideo(_ view: UIView?) {
+        rootController?.setVideo(view)
+    }
+
+    fileprivate func attach(_ controller: GlassesRootController) {
+        rootController = controller
+        isConnected = true
+        ScreenAwake.set(.glassesSession, true)
+    }
+
+    fileprivate func detach() {
+        rootController = nil
+        isConnected = false
+        ScreenAwake.set(.glassesSession, false)
+        let handler = onDisconnect
+        onDisconnect = nil
+        handler?()
+    }
+}
+
+/// Delegate for the external-display scene. UIKit instantiates it (from
+/// `UISceneConfiguration.delegateClass`) and does NOT retain the window — the strong `window` here is
+/// load-bearing.
+@MainActor
+final class ExternalSceneDelegate: NSObject, UIWindowSceneDelegate {
+    var window: UIWindow?
+
+    func scene(_ scene: UIScene, willConnectTo session: UISceneSession,
+               options connectionOptions: UIScene.ConnectionOptions) {
+        guard let windowScene = scene as? UIWindowScene else { return }
+        let controller = GlassesRootController()
+        let w = UIWindow(windowScene: windowScene)
+        w.rootViewController = controller
+        // Visible WITHOUT `makeKey` — the phone window must stay key or hardware events (volume keys,
+        // keyboard focus) route to a non-interactive screen. Same reasoning as `DebugOverlayWindow`.
+        w.isHidden = false
+        window = w
+        GlassesSession.shared.attach(controller)
+
+        let screen = windowScene.screen
+        RemoteLog.shared.event("glasses-connect", [
+            ("bounds", "\(Int(screen.bounds.width))×\(Int(screen.bounds.height))"),
+            ("scale", screen.scale),
+            ("maxfps", screen.maximumFramesPerSecond),
+            // `.zero` here means no overscan cropping; a non-zero value is the ONLY reliable overscan
+            // signal (the `.scale` compensation mode does not shrink bounds).
+            ("overscan", "\(screen.overscanCompensationInsets)"),
+        ])
+    }
+
+    func sceneDidDisconnect(_ scene: UIScene) {
+        RemoteLog.shared.event("glasses-disconnect", [])
+        GlassesSession.shared.detach()
+        window = nil
+    }
+}
+
+/// Root of the glasses window: pure black (micro-OLED black = pixels off — the themed mesh would glow
+/// behind letterbox bars in a dark room) with a full-bleed video container.
+@MainActor
+final class GlassesRootController: UIViewController {
+    private let videoContainer = UIView()
+    /// Opaque cover shown whenever the app isn't active (app switcher, Face ID sheet, phone lock while
+    /// output persists). The external window sits OUTSIDE the phone tree's `.appLock()` /
+    /// `.snapshotPrivacy()` modifiers, so it needs its own blackout — applied UN-animated, same frame,
+    /// for the same reason the snapshot-privacy cover is.
+    private let blackout = UIView()
+    private var resignObserver: NSObjectProtocol?
+    private var activeObserver: NSObjectProtocol?
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+        videoContainer.frame = view.bounds
+        videoContainer.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(videoContainer)
+
+        blackout.backgroundColor = .black
+        blackout.frame = view.bounds
+        blackout.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        blackout.isHidden = true
+        view.addSubview(blackout)
+
+        let nc = NotificationCenter.default
+        resignObserver = nc.addObserver(forName: UIApplication.willResignActiveNotification,
+                                        object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.blackout.isHidden = false }
+        }
+        activeObserver = nc.addObserver(forName: UIApplication.didBecomeActiveNotification,
+                                       object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.blackout.isHidden = true }
+        }
+    }
+
+    func setVideo(_ videoView: UIView?) {
+        for sub in videoContainer.subviews { sub.removeFromSuperview() }
+        guard let videoView else { return }
+        videoView.frame = videoContainer.bounds
+        videoView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        videoContainer.addSubview(videoView)
+    }
+}

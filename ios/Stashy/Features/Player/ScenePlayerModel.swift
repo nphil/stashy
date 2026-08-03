@@ -89,6 +89,17 @@ final class ScenePlayerModel {
     @ObservationIgnored private var reachedEnd = false
 
     @ObservationIgnored private var engine: PlaybackEngine?
+    /// True while a glasses session is showing this player's video. INTENT, not readiness (the v1.0.345
+    /// lesson): it gates AI slow-mo — the interpolated stream renders on a phone-hosted overlay, so with
+    /// glasses connected the wearer would see raw 0.25×/0.5× frames while the hidden phone interpolates.
+    /// Raw slow rates still work on glasses; interpolation re-arms on disconnect.
+    var glassesActive = false {
+        didSet {
+            guard glassesActive != oldValue else { return }
+            if glassesActive { updateSlowMo() }        // engage-gate now fails → suspends the runner
+            else { scheduleSlowMoReengage() }
+        }
+    }
     @ObservationIgnored private let route: PlaybackRoute
     /// Plugin-free descriptor of how heavy this file is to start/seek — scales the loading-donut estimate
     /// (see LoadProfile). Constant for the model's lifetime, so the load and seek weights match.
@@ -582,6 +593,10 @@ final class ScenePlayerModel {
     }
     func togglePlayPause() { isPlaying ? pause() : play() }
 
+    /// The engine's external-display render view (a second layer on the same player), or nil when the
+    /// engine can't drive one. Re-read after any engine rebuild — the view dies with its engine.
+    var externalRenderView: UIView? { engine?.externalRenderView }
+
     /// Suspend AI slow-mo across a user interaction (seek/pause): tear the runner down exactly like the
     /// manual toggle-off does, keeping the playback rate. Re-engagement goes through
     /// `scheduleSlowMoReengage` — a FRESH runner on stabilised playback is the one proven-smooth path;
@@ -612,7 +627,8 @@ final class ScenePlayerModel {
                 guard let self, !Task.isCancelled, !self.stopped else { return }
                 // Abandon only when the INTENT is gone (toggle off, rate raised), never because the player
                 // is momentarily unready.
-                guard self.aiSlowMoEnabled, self.playbackRate > 0, self.playbackRate <= 0.5 else { return }
+                guard self.aiSlowMoEnabled, self.playbackRate > 0, self.playbackRate <= 0.5,
+                      !self.glassesActive else { return }
                 guard self.slowMoRunner == nil else { return }
                 // `canSlowForward` is part of the gate here, not just inside `updateSlowMo`. It reads the
                 // item's live capability, which is transiently false after a seek — sampling it once and
@@ -675,7 +691,8 @@ final class ScenePlayerModel {
     private func updateSlowMo() {
         // Engage only when the user has opted in, at ≤0.5×, AND the item can actually slow-play. The opt-in
         // is required because VTFrameProcessor can hard-crash on some inputs (see `aiSlowMoEnabled`).
-        let engage = aiSlowMoEnabled && playbackRate > 0 && playbackRate <= 0.5 && (engine?.canSlowForward ?? false)
+        let engage = aiSlowMoEnabled && playbackRate > 0 && playbackRate <= 0.5 && !glassesActive
+            && (engine?.canSlowForward ?? false)
         if engage {
             guard slowMoRunner == nil else { return }
             let runner = SlowMoRunner(
