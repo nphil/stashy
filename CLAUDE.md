@@ -203,7 +203,7 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.341** (`b8b48c3`). The -3000 investigation is closed and must not be reopened.
+- Latest release: **v1.0.346** (`6a33db0`). The -3000 investigation is closed and must not be reopened.
 - **What works:** app open → ~100 MB/s, resumes byte-exact through crashes, relaunches and suspension.
   Backgrounded → keeps going indefinitely (keep-alive, ON by default since v1.0.340). Downloads run
   **one at a time** with Start All / Pause Queue in the Downloads toolbar; a queued card's play button
@@ -218,6 +218,17 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   run: 290 s unbroken background runtime, 18.9 MB → 744 MB while backgrounded, 29/29 ticks, zero
   refusals, Live Activity live throughout. Long unattended downloads now work. Do not re-open the
   question of whether iOS permits this — it does, and the recipe is in ENGINEERING_NOTES §3.
+- **XR glasses (Viture Pro) pipe SHIPPED v1.0.346 — AWAITING FIRST DEVICE TEST.** Video routes to the
+  glasses as a SECOND `AVPlayerLayer` on the same player (`PlaybackEngine.externalRenderView`); the phone
+  hides its surface in place (opacity only — the never-reparent rule stands) and shows a minimal
+  tap-to-play/pause remote. The open -3000-class question: does a SIDELOADED app receive the external
+  scene at all? Verdict = `glasses-connect bounds= maxfps=` in the log on plug-in. Glasses rules:
+  **no `beginBackgroundTask` and no audio-session writes anywhere in glasses code** (pins the window,
+  kills the keep-alive); AI slow-mo is intent-gated off while connected (renders on a phone-hosted
+  overlay); `ScreenAwake` arbiters the idle timer (locking the phone kills DP output); scene pickers
+  must filter `.windowApplication` (OrientationController/DebugOverlay do). iOS 27 moves discovery to
+  `UISceneAccessory` — availability-gate then. Full design (jog-dial gesture vocabulary, glasses OSD,
+  guards) is specced in the session plan; built incrementally on top of a proven pipe.
 - Diagnostics built for the saga were removed once they answered (`TransferBenchmark`, the -3000
   probe/census, `dl-identity`, the retest button) — recover from git history, don't rewrite them.
 - Next candidates: **the VMAF map fix (plugin v0.3.1) is DONE — shipped, deployed, and live-verified**
