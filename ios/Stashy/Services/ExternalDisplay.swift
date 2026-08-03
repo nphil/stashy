@@ -102,6 +102,9 @@ final class GlassesRootController: UIViewController {
     private let blackout = UIView()
     private var resignObserver: NSObjectProtocol?
     private var activeObserver: NSObjectProtocol?
+    /// Tracked explicitly rather than read from `applicationState`: during `willResignActive` the
+    /// state still reads `.active`, which would defeat the whole point of covering on resign.
+    private var appActive = true
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -119,11 +122,35 @@ final class GlassesRootController: UIViewController {
         let nc = NotificationCenter.default
         resignObserver = nc.addObserver(forName: UIApplication.willResignActiveNotification,
                                         object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.blackout.isHidden = false }
+            MainActor.assumeIsolated { self?.appActive = false; self?.syncBlackout() }
         }
         activeObserver = nc.addObserver(forName: UIApplication.didBecomeActiveNotification,
                                        object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.blackout.isHidden = true }
+            MainActor.assumeIsolated { self?.appActive = true; self?.syncBlackout() }
+        }
+        armLockObservation()
+        syncBlackout()
+    }
+
+    /// The blackout covers whenever the app isn't active OR the app lock is up. The lock half is what
+    /// stops the Face ID return-transition lifting the glasses cover before authentication passes —
+    /// `didBecomeActive` fires the moment the prompt appears, not when it succeeds.
+    private func syncBlackout() {
+        blackout.isHidden = appActive && !AppLockState.shared.isLocked
+    }
+
+    /// Re-evaluate on every lock flip. `withObservationTracking`'s onChange fires on the mutating
+    /// thread — AppLockState is @MainActor, so `assumeIsolated` is correct, and it must act before any
+    /// suspension (the same reasoning as the snapshot-privacy cover).
+    private func armLockObservation() {
+        withObservationTracking {
+            _ = AppLockState.shared.isLocked
+        } onChange: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.syncBlackout()
+                self.armLockObservation()
+            }
         }
     }
 

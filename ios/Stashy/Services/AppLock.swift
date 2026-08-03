@@ -21,6 +21,19 @@ enum AppLock {
     }
 }
 
+/// Cross-window mirror of the app-lock cover state. The glasses (external display) window sits OUTSIDE
+/// the phone tree's `.appLock()` modifier, so its blackout must be driven from here — otherwise the
+/// Face ID prompt would lift the glasses cover while the phone was still locked, leaking the frame to
+/// the wearer's screen before authentication.
+@MainActor
+@Observable
+final class AppLockState {
+    static let shared = AppLockState()
+    private init() {}
+    private(set) var isLocked = false
+    fileprivate func set(_ locked: Bool) { if isLocked != locked { isLocked = locked } }
+}
+
 /// Covers the app with a lock screen and requires authentication whenever app lock is enabled and
 /// the app returns to the foreground.
 private struct AppLockModifier: ViewModifier {
@@ -37,6 +50,10 @@ private struct AppLockModifier: ViewModifier {
             }
         }
         .onAppear(perform: evaluate)
+        // Mirror the cover state for the external (glasses) window, which this modifier cannot reach.
+        .onChange(of: appLockEnabled && !isUnlocked, initial: true) { _, locked in
+            AppLockState.shared.set(locked)
+        }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active: evaluate()
