@@ -204,8 +204,8 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.351** (`07ac71a`, glasses v2). The -3000 investigation is closed and must not
-  be reopened.
+- Latest release: **v1.0.352** (`f786b8d`, glasses v2 + review polish). The -3000 investigation is
+  closed and must not be reopened.
 - **What works:** app open → ~100 MB/s, resumes byte-exact through crashes, relaunches and suspension.
   Backgrounded → keeps going indefinitely (keep-alive, ON by default since v1.0.340). Downloads run
   **one at a time** with Start All / Pause Queue in the Downloads toolbar; a queued card's play button
