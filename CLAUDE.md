@@ -220,21 +220,28 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   run: 290 s unbroken background runtime, 18.9 MB → 744 MB while backgrounded, 29/29 ticks, zero
   refusals, Live Activity live throughout. Long unattended downloads now work. Do not re-open the
   question of whether iOS permits this — it does, and the recipe is in ENGINEERING_NOTES §3.
-- **XR glasses (Viture Pro): pipe device-proven (v1.0.348), glasses-first v2 SHIPPED v1.0.351 (+
-  review-polish follow-up), awaiting device test. THE deep reference is ENGINEERING_NOTES §9** (pipe recipe — static
-  `UISceneConfigurations` entry is mandatory, `configurationForConnecting` never consulted; hosting
-  rules; gesture/haptics map; 10-foot design tokens). v2 = Netflix-style wall (Recently Played /
-  Recently Added / Downloaded, focus restored by rail IDENTITY), poster parity (server screenshot
-  first everywhere — local grab was the glasses/phone mismatch), speed ladder on vertical drag
-  (volume → hardware buttons), pinch zoom 1–4× + 2D pan + double-tap reset (pan↔pinch delegate-paired
-  or the pinch starves), sprite scrub-preview thumbs + speed/zoom pills on the glasses OSD, and **AI
-  slow-mo now hosts ON the glasses** (overlay inside the zoom transform; phone contract
-  `overlayActive` gated on `!glassesActive` — ONE-superview rule, §9). Hard rules: **no
-  `beginBackgroundTask`, no audio-session writes in glasses code**; teardown clears the overlay
-  UNCONDITIONALLY (didSet ordering); `ScreenAwake` arbiters the idle timer; scene pickers filter
-  `.windowApplication`; glasses posters deliberately unblurred under Privacy Mode (remote is the
-  gated surface). Interim, deliberate: v1 EXIT routing retained; end-countdown card not built;
-  `screen-notify` removable; iOS 27 `UISceneAccessory` migration when available.
+- **XR glasses (Viture Pro): pipe device-proven (v1.0.348), glasses-first v2+v3 SHIPPED (wall
+  geometry/centred 1.5× focus + View More grid v1.0.353–357; owner-feedback pass 2026-08-04). THE
+  deep reference is ENGINEERING_NOTES §9** (pipe recipe — static `UISceneConfigurations` entry is
+  mandatory, `configurationForConnecting` never consulted; hosting rules; gesture map; 10-foot design
+  tokens). Current remote vocabulary (owner-pruned): drag/flick focus + tap play + two-finger tap =
+  back (grid) in browse; tap play/pause, double-tap-half ±10 s, H-drag scrub, V-drag speed ladder,
+  pinch zoom 1–4× + drag-pan + double-tap reset in playback; **HARDWARE volume buttons are the ONE
+  volume control** (glasses model gain pinned 1.0 — a stored 40% model volume multiplying UNDER
+  system volume made the buttons feel dead; read-only `outputVolume` KVO pulses the glasses volume
+  pill — never write the audio session). **The analog JOYSTICK, two-finger MUTE and hold-2× were
+  REMOVED 2026-08-04 (owner: not intuitive)** — recover from git history, do not rewrite, do not
+  re-add. Remote draws a CALayer glow trail under the finger (raw touches; recognizers run
+  `cancelsTouchesInView=false`). **ALL glasses OSD pills are transient (~1 s, coordinator-owned
+  cancellable expiry tasks — never `.task + .id(pulse)` in the view: `try? await Task.sleep` swallows
+  CancellationError and a re-keyed task cleared the pulse anyway); nothing may persist over the
+  video** (the always-on mode chips are gone). AI slow-mo hosts ON the glasses (ONE-superview rule,
+  §9). Hard rules: **no `beginBackgroundTask`, no audio-session writes in glasses code**; teardown
+  clears the overlay UNCONDITIONALLY; `ScreenAwake` arbiters the idle timer; scene pickers filter
+  `.windowApplication`; glasses posters deliberately unblurred under Privacy Mode; the PHONE remote
+  shows NO scene identity (posters/titles), not even gated on Privacy Mode. Interim, deliberate: v1
+  EXIT routing retained; end-countdown card not built; iOS 27 `UISceneAccessory` migration when
+  available.
 - Diagnostics built for the saga were removed once they answered (`TransferBenchmark`, the -3000
   probe/census, `dl-identity`, the retest button) — recover from git history, don't rewrite them.
 - Next candidates: **the VMAF map fix (plugin v0.3.1) is DONE — shipped, deployed, and live-verified**

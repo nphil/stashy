@@ -664,11 +664,16 @@ final class GlassesCoordinator {
                                 player.currentTime + seconds))
         skipBadge = (skipBadge ?? 0) + Int(seconds)
         player.seek(to: target)
-        Task { @MainActor [weak self] in
+        // Same cancellable-expiry shape as the pills: the old fire-and-forget task wiped an
+        // ACCUMULATING badge 900 ms after the FIRST tap of a rapid run.
+        skipBadgeTask?.cancel()
+        skipBadgeTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(900))
+            guard !Task.isCancelled else { return }
             self?.skipBadge = nil
         }
     }
+    @ObservationIgnored private var skipBadgeTask: Task<Void, Never>?
 
     /// One rung up/down the speed ladder [0.25, 0.5, 1, 1.5, 2] — the ONLY speed control (the
     /// hold-for-2× gesture was removed, owner 2026-08-04). Slow rungs get AI interpolation when the
@@ -726,7 +731,7 @@ final class GlassesCoordinator {
     }
 
     private func clearPills() {
-        speedPillTask?.cancel(); volumePillTask?.cancel(); zoomPillTask?.cancel()
+        speedPillTask?.cancel(); volumePillTask?.cancel(); zoomPillTask?.cancel(); skipBadgeTask?.cancel()
         speedPulse = 0
         volumePulse = 0
         zoomPulse = 0

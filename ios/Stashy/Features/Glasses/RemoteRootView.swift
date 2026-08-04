@@ -135,7 +135,14 @@ struct RemoteRootView: View {
             isZoomed: { coordinator.isZoomed },
             onPinch: { scale, ended in
                 guard !remoteLocked else { return }
-                if pinchBase == nil { pinchBase = coordinator.zoomScale; Haptics.tap(soft: true) }
+                if pinchBase == nil {
+                    pinchBase = coordinator.zoomScale
+                    // A pinch landing MID-SCRUB strands the scrub session: once isZoomed flips, the
+                    // pan handler returns before ever delivering ended=true, so the strip would pin
+                    // over the video and the next drag would commit a stale seek. Abort it — no seek.
+                    coordinator.scrubTarget = nil
+                    Haptics.tap(soft: true)
+                }
                 coordinator.setZoom(scale: (pinchBase ?? 1) * scale, offset: coordinator.zoomOffset)
                 if ended { pinchBase = nil; if !coordinator.isZoomed { Haptics.tap(soft: true) } }
             },

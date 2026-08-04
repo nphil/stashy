@@ -1658,3 +1658,31 @@ container may host, never both:
   OrientationController/DebugOverlay do this).
 - Known gaps, deliberate: end-of-video countdown card not built (didReachEnd currently returns to
   browse); v1 EXIT routing retained; `screen-notify` diagnostic answered its question, removable.
+
+### v3 owner-feedback pass (2026-08-04) — the remote's settled shape
+- **The analog joystick was built, shipped, and REMOVED same-day** (owner: "not very intuitive").
+  `RemoteJoystick.swift`, `JoystickMapping.swift`, `StickHaptics.swift` and their Settings toggles
+  live in git history around v1.0.357 — recover, don't rewrite, and don't re-add without being asked.
+  The CoreHaptics research stands if ever needed: nil-session `CHHapticEngine()` +
+  `playsHapticsOnly = true` BEFORE `start()` is the audio-session-safe construction; a continuous
+  event caps at 30 s (loop a short pattern on an advanced player); engine handlers fire OFF-main
+  (`Task { @MainActor }`, never `assumeIsolated` — it traps).
+- **Volume on the glasses = the HARDWARE buttons, nothing else.** The glasses player's model gain is
+  pinned at 1.0. The original design (persisted 40% model volume) multiplied UNDER system volume, so
+  with system volume near max the buttons changed nothing audible — "volume doesn't work". The pill
+  on the glasses is driven by a READ-ONLY KVO observation of `AVAudioSession.outputVolume`
+  (armed on sessionBegan, invalidated on sessionEnded; fires only while the session is active, which
+  playback guarantees). The no-audio-session-WRITES rule stands — reads are fine.
+- **Every OSD pill/badge is transient (~1 s) and the expiry lives in the COORDINATOR**, one
+  cancellable task per pill re-armed on each change. The in-view `.task + .id(pulse)` pattern is a
+  TRAP: `try? await Task.sleep` swallows the CancellationError, so the cancelled (re-keyed) task
+  falls through and clears the pulse anyway. Nothing may render persistently over the video (the
+  old always-on zoom/rate mode chips are deleted). Also applies to the skip badge.
+- **Finger trail:** `GestureTrailView` (the touch surface's host view) drops a fading radial-gradient
+  CALayer per touch sample (6 pt spacing gate, ~0.45 s fade, self-removing). Raw `touches*`
+  overrides coexist with the recognizers because every recognizer sets
+  `cancelsTouchesInView = false` — without that, the trail dies 12 pt into every drag when the pan
+  recognises. Zero SwiftUI involvement, so zero re-render cost.
+- **A pinch landing mid-scrub must ABORT the scrub** (`scrubTarget = nil`, no seek) — once
+  `isZoomed` flips, the pan handler returns before delivering `ended: true`, which would pin the
+  scrub strip over the video and commit a stale seek on the next drag.
