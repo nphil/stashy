@@ -5,6 +5,11 @@ import UIKit
 /// reasons the player surface uses them (deterministic require-to-fail chains, dominant-axis locks).
 /// Deliberately its OWN view rather than an extension of ZoomablePlayerSurface (documented
 /// gesture-lifecycle landmine). The surface reports semantic events; policy lives in RemoteRootView.
+///
+/// The host view also draws a GLOWING FINGER TRAIL (owner, 2026-08-04: "show a glowing trail
+/// following my finger so it's clear what I'm doing") — pure CALayer work fed by raw touch events,
+/// so it costs no SwiftUI re-renders. Recognizers run with `cancelsTouchesInView = false` so the
+/// trail keeps flowing after a pan/pinch recognises; nothing else reads the raw touches.
 struct RemoteTouchSurface: UIViewRepresentable {
     enum Mode { case browse, playback }
     var mode: Mode
@@ -17,27 +22,26 @@ struct RemoteTouchSurface: UIViewRepresentable {
     /// site's labelled arguments must match it exactly — Swift won't reorder them.)
     var onBack: () -> Void = {}
 
-    // Playback events
+    // Playback events. Mute and hold-2× are deliberately GONE (owner, 2026-08-04): hardware buttons
+    // own volume, and speed changes only via the vertical swipe ladder.
     var onTogglePlay: () -> Void = {}
     var onSkip: (Int) -> Void = { _ in }                   // ±1 per double-tap rep; side by tap half
     var onScrub: (CGFloat, CGFloat, Bool) -> Void = { _, _, _ in }   // dx pts since last, |vertical|, ended
     var onSpeedStep: (Int) -> Void = { _ in }              // vertical drag: ±1 ladder rung per step
-    var onHoldSpeed: (Bool) -> Void = { _ in }             // long-press 2× while held
-    var onMute: () -> Void = {}
     // Zoom (playback only). Pinch reports absolute gesture scale; pans report deltas while zoomed.
     var isZoomed: () -> Bool = { false }
     var onPinch: (CGFloat, Bool) -> Void = { _, _ in }     // scale factor since gesture start, ended
     var onZoomPan: (CGFloat, CGFloat) -> Void = { _, _ in }   // dx, dy deltas
     var onZoomToggle: () -> Void = {}                      // double-tap while zoomed = reset/engage
 
-    func makeUIView(context: Context) -> UIView {
-        let v = UIView()
+    func makeUIView(context: Context) -> GestureTrailView {
+        let v = GestureTrailView()
         v.backgroundColor = .clear
         context.coordinator.attach(to: v)
         return v
     }
 
-    func updateUIView(_ uiView: UIView, context: Context) {
+    func updateUIView(_ uiView: GestureTrailView, context: Context) {
         context.coordinator.parent = self
     }
 
@@ -71,10 +75,6 @@ struct RemoteTouchSurface: UIViewRepresentable {
             twoFinger.numberOfTouchesRequired = 2
             view.addGestureRecognizer(twoFinger)
 
-            let hold = UILongPressGestureRecognizer(target: self, action: #selector(handleHold(_:)))
-            hold.minimumPressDuration = 0.5
-            view.addGestureRecognizer(hold)
-
             let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
             pan.maximumNumberOfTouches = 1
             pan.delegate = self
@@ -85,6 +85,11 @@ struct RemoteTouchSurface: UIViewRepresentable {
             view.addGestureRecognizer(pinch)
             panGR = pan
             pinchGR = pinch
+
+            // The trail lives on raw touch events. By default a recognising pan/pinch CANCELS the
+            // view's touches and the trail dies 12 pt into every drag — exactly the gestures the
+            // trail exists to visualise.
+            for gr in view.gestureRecognizers ?? [] { gr.cancelsTouchesInView = false }
         }
 
         private weak var panGR: UIPanGestureRecognizer?
@@ -124,22 +129,10 @@ struct RemoteTouchSurface: UIViewRepresentable {
         }
 
         @objc func handleTwoFingerTap(_ gr: UITapGestureRecognizer) {
-            // Mute in playback; back out of a full list while browsing. The gesture is free in browse
-            // and "up from the top row" is deliberately NOT an exit — an eyes-free drift would fling
-            // the wearer out of the list.
-            switch parent.mode {
-            case .playback: parent.onMute()
-            case .browse: parent.onBack()
-            }
-        }
-
-        @objc func handleHold(_ gr: UILongPressGestureRecognizer) {
-            guard parent.mode == .playback else { return }
-            switch gr.state {
-            case .began: parent.onHoldSpeed(true)
-            case .ended, .cancelled, .failed: parent.onHoldSpeed(false)
-            default: break
-            }
+            // Back out of a full list while browsing — its ONLY remaining job. The mute binding was
+            // removed (owner, 2026-08-04): hardware volume buttons own sound entirely.
+            guard parent.mode == .browse else { return }
+            parent.onBack()
         }
 
         @objc func handlePan(_ gr: UIPanGestureRecognizer) {
@@ -152,7 +145,7 @@ struct RemoteTouchSurface: UIViewRepresentable {
                 stepAccumulator = .zero
             case .changed:
                 // Dominant-axis intent lock at 12 pt, then the axis holds for the whole gesture — an
-                // eyes-free hand drifts, and re-deciding mid-drag turns a scrub into a volume jump.
+                // eyes-free hand drifts, and re-deciding mid-drag turns a scrub into a speed jump.
                 if panAxis == nil {
                     if abs(t.x) >= 12 || abs(t.y) >= 12 {
                         panAxis = abs(t.x) >= abs(t.y) ? .horizontal : .vertical
@@ -209,5 +202,84 @@ struct RemoteTouchSurface: UIViewRepresentable {
         private func emitStep(_ dx: Int, _ dy: Int) {
             parent.onFocusStep(dx, dy)
         }
+    }
+}
+
+// MARK: - Finger trail
+
+/// Draws a comet of soft glow dots under every touch. Pure CALayer: one small radial-gradient layer
+/// per sample, animated to fade-and-shrink and removed on completion — no @State, no SwiftUI
+/// invalidation, no display link. At 120 Hz touch delivery with the 6 pt spacing gate this tops out
+/// around ~50 live layers, which is nothing.
+@MainActor
+final class GestureTrailView: UIView {
+    /// Last emitted point per active touch, so a resting finger doesn't pile up dots.
+    private var lastDot: [ObjectIdentifier: CGPoint] = [:]
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isMultipleTouchEnabled = true      // both pinch fingers get trails
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesBegan(touches, with: event)
+        for t in touches {
+            let p = t.location(in: self)
+            lastDot[ObjectIdentifier(t)] = p
+            addGlow(at: p)
+        }
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesMoved(touches, with: event)
+        for t in touches {
+            let p = t.location(in: self)
+            let key = ObjectIdentifier(t)
+            if let last = lastDot[key], hypot(p.x - last.x, p.y - last.y) < 6 { continue }
+            lastDot[key] = p
+            addGlow(at: p)
+        }
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesEnded(touches, with: event)
+        for t in touches { lastDot.removeValue(forKey: ObjectIdentifier(t)) }
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesCancelled(touches, with: event)
+        for t in touches { lastDot.removeValue(forKey: ObjectIdentifier(t)) }
+    }
+
+    private func addGlow(at p: CGPoint) {
+        let glow = CAGradientLayer()
+        glow.type = .radial
+        glow.colors = [UIColor.white.withAlphaComponent(0.40).cgColor,
+                       UIColor.white.withAlphaComponent(0.10).cgColor,
+                       UIColor.white.withAlphaComponent(0).cgColor]
+        glow.locations = [0, 0.45, 1]
+        glow.startPoint = CGPoint(x: 0.5, y: 0.5)
+        glow.endPoint = CGPoint(x: 1, y: 1)
+        glow.frame = CGRect(x: p.x - 18, y: p.y - 18, width: 36, height: 36)
+        layer.addSublayer(glow)
+
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 1
+        fade.toValue = 0
+        let shrink = CABasicAnimation(keyPath: "transform.scale")
+        shrink.fromValue = 1
+        shrink.toValue = 0.35
+        let group = CAAnimationGroup()
+        group.animations = [fade, shrink]
+        group.duration = 0.45
+        group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { glow.removeFromSuperlayer() }
+        glow.opacity = 0                    // model value = the animation's end state, no flash-back
+        glow.add(group, forKey: "trail")
+        CATransaction.commit()
     }
 }

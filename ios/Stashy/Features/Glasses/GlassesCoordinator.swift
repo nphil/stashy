@@ -1,5 +1,7 @@
 import SwiftUI
-import QuartzCore   // CACurrentMediaTime for the shuttle integrator
+// READ-ONLY use of AVAudioSession (outputVolume KVO for the glasses volume pill). The standing rule
+// stands: no setCategory/setActive anywhere in glasses code.
+import AVFoundation
 
 /// Handles to the phone tree's shared services, registered from ContentView so the external-scene
 /// hosting trees use the SAME instances. This is mandatory, not hygiene: the `\.imageCache` environment
@@ -138,19 +140,6 @@ final class GlassesCoordinator {
     var gridRow: Int { gridIndex / Self.gridColumns }
     var gridRowCount: Int { (gridItems.count + Self.gridColumns - 1) / Self.gridColumns }
 
-    // MARK: - Volume (owner decision 2026-08-03: restore last glasses volume, persistently)
-
-    private static let volumeKey = "glassesVolume"
-    /// Last volume used on the glasses. First-ever glasses playback lands at a modest 40% — silence
-    /// looks broken on a cinema screen and full volume into the Harman speakers is the wrong surprise.
-    static var storedVolume: Double {
-        get {
-            let v = UserDefaults.standard.double(forKey: volumeKey)
-            return v > 0 ? min(1, v) : 0.4
-        }
-        set { if newValue > 0 { UserDefaults.standard.set(min(1, newValue), forKey: volumeKey) } }
-    }
-
     // MARK: - Recently Played (persisted, most-recent-first, capped)
 
     private static let historyKey = "glassesPlayHistory"
@@ -171,6 +160,7 @@ final class GlassesCoordinator {
     func sessionBegan() {
         takeoverSuppressed = false
         mode = .browse
+        armVolumeObservation()
         refreshRails()
     }
 
@@ -181,6 +171,7 @@ final class GlassesCoordinator {
         railTask = nil
         gridTask?.cancel()
         gridTask = nil
+        disarmVolumeObservation()
         stopPlayback()
         takeoverSuppressed = false
         rails = []
@@ -574,9 +565,12 @@ final class GlassesCoordinator {
             let sprites = self.sprites
             Task { await sprites.load(vttURL: vtt, spriteURL: sheet, imageCache: cache) }
         }
-        // Owner decision: glasses playback restores the last glasses volume (models start muted by
-        // design — that rule is the PHONE's; the wearer expects sound in their ears).
-        model.setVolume(Self.storedVolume)
+        // Model gain pinned at 1.0 so the HARDWARE buttons act on the full range. The old stored-40%
+        // model volume multiplied UNDER the system volume, which made the buttons feel dead — with
+        // system volume already high, up-presses changed nothing audible (owner, 2026-08-04: "volume
+        // controls don't seem to be working"). System volume is the one control, and iOS persists it.
+        // (Models start muted by design — that rule is the PHONE's; the wearer expects sound.)
+        model.setVolume(1.0)
         rehost()
         armRehost()
         // Cable pull while we own playback: pause explicitly and unconditionally — the OS route-loss
@@ -649,13 +643,12 @@ final class GlassesCoordinator {
 
     private func stopPlayback() {
         resetZoom()
-        shuttleTarget = nil
-        jogActive = false
         player?.stop()
         player = nil
         playingScene = nil
         scrubTarget = nil
         skipBadge = nil
+        clearPills()
         GlassesSession.shared.setVideo(nil)
         GlassesSession.shared.onDisconnect = nil
         mode = .browse
@@ -677,14 +670,9 @@ final class GlassesCoordinator {
         }
     }
 
-    func toggleMute() {
-        player?.toggleMute()
-        volumePulse += 1
-    }
-
-    /// One rung up/down the speed ladder [0.25, 0.5, 1, 1.5, 2]. Slow rungs get AI interpolation
-    /// automatically when the AI slow-mo toggle is on — the runner hosts its frames on the glasses.
-    /// Returns false at ladder ends (remote double-ticks).
+    /// One rung up/down the speed ladder [0.25, 0.5, 1, 1.5, 2] — the ONLY speed control (the
+    /// hold-for-2× gesture was removed, owner 2026-08-04). Slow rungs get AI interpolation when the
+    /// AI slow-mo toggle is on. Returns false at ladder ends (remote double-ticks).
     @discardableResult
     func stepSpeed(_ delta: Int) -> Bool {
         guard let player else { return false }
@@ -692,95 +680,92 @@ final class GlassesCoordinator {
         guard Self.speedRungs.indices.contains(target) else { return false }
         speedIndex = target
         player.setPlaybackRate(Self.speedRungs[target])
-        speedPulse += 1
+        pulseSpeedPill()
         return true
     }
 
-    /// Temporary 2× while held (long-press); restores the ladder rung on release.
-    func holdSpeed(_ holding: Bool) {
-        guard let player else { return }
-        player.setPlaybackRate(holding ? 2.0 : Self.speedRungs[speedIndex])
+    // MARK: - OSD pills (all transient — owner 2026-08-04: nothing may persist over the video)
+
+    /// Every pill/badge on the playback OSD auto-hides ~1 s after its last change. The expiry lives
+    /// HERE, in one cancellable task per pill, not in the view: the old `.task + .id(pulse)` pattern
+    /// had a trap — `try? await Task.sleep` swallows the CancellationError, so a cancelled (re-keyed)
+    /// task fell through and cleared the pulse anyway.
+    var zoomPulse = 0
+    @ObservationIgnored private var speedPillTask: Task<Void, Never>?
+    @ObservationIgnored private var volumePillTask: Task<Void, Never>?
+    @ObservationIgnored private var zoomPillTask: Task<Void, Never>?
+
+    private func pulseSpeedPill() {
         speedPulse += 1
+        speedPillTask?.cancel()
+        speedPillTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            self?.speedPulse = 0
+        }
     }
 
-    // MARK: - Analog stick transport
+    private func pulseVolumePill() {
+        volumePulse += 1
+        volumePillTask?.cancel()
+        volumePillTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            self?.volumePulse = 0
+        }
+    }
 
-    /// True while the jog zone is holding a slow rate (drives the OSD's AI-pending state).
-    private(set) var jogActive = false
-    @ObservationIgnored private var shuttleTarget: TimeInterval?
-    @ObservationIgnored private var shuttleLastTick: CFTimeInterval = 0
+    private func pulseZoomPill() {
+        zoomPulse += 1
+        zoomPillTask?.cancel()
+        zoomPillTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            self?.zoomPulse = 0
+        }
+    }
 
-    /// Inner-zone jog. Rungs are {0.10, 0.25, 0.50}× — at or below the 0.5 threshold that
-    /// `ScenePlayerModel.updateSlowMo` engages on, so pushing the stick right is all it takes to reach
-    /// AI slow motion, PROVIDED the player's AI slow-mo opt-in is on (it defaults off because
-    /// VTFrameProcessor can hard-crash on some inputs — the stick deliberately does not flip it).
-    /// Only ever called where the route can really slow down; reverse and the remux route creep via
-    /// `shuttleTick` instead, driven every tick by the stick.
-    func setJog(rung: Int?, direction: Int) {
-        guard let player else { return }
-        guard let rung, JoystickMapping.jogRates.indices.contains(rung) else {
-            if jogActive {
-                jogActive = false
-                player.setPlaybackRate(Self.speedRungs[speedIndex])
-                speedPulse += 1
+    private func clearPills() {
+        speedPillTask?.cancel(); volumePillTask?.cancel(); zoomPillTask?.cancel()
+        speedPulse = 0
+        volumePulse = 0
+        zoomPulse = 0
+    }
+
+    // MARK: - Hardware volume (the one volume control on the glasses)
+
+    /// Mirrors the system output volume for the OSD pill. READ-ONLY observation — the standing rule
+    /// forbids audio-session WRITES in glasses code (no setCategory/setActive), and this makes none.
+    private(set) var systemVolume: Double = 0
+    var systemVolumePercent: Int { Int((systemVolume * 100).rounded()) }
+    @ObservationIgnored private var volumeObservation: NSKeyValueObservation?
+
+    /// KVO on `outputVolume` fires while our session is active (it is, during playback — the engine
+    /// asserts .playback and AVPlayer activates it). The handler arrives on an arbitrary thread;
+    /// capture only the Float and hop.
+    private func armVolumeObservation() {
+        systemVolume = Double(AVAudioSession.sharedInstance().outputVolume)
+        volumeObservation = AVAudioSession.sharedInstance()
+            .observe(\.outputVolume, options: [.new]) { _, change in
+                guard let v = change.newValue else { return }
+                Task { @MainActor in
+                    let coordinator = GlassesCoordinator.shared
+                    coordinator.systemVolume = Double(v)
+                    guard coordinator.mode == .playing else { return }
+                    coordinator.pulseVolumePill()
+                }
             }
-            return
-        }
-        jogActive = true
-        player.setPlaybackRate(JoystickMapping.jogRates[rung])
-        speedPulse += 1
     }
 
-    /// Outer-zone shuttle. The decoder is NEVER commanded at 36× — the target is integrated in wall
-    /// time and shown on the existing scrub strip (sprite preview and all), then committed with ONE
-    /// seek on release. That is the only mechanism that works on both engines and every route.
-    func shuttleTick(rate: Double) {
-        guard let player else { return }
-        let now = CACurrentMediaTime()
-        if shuttleTarget == nil {
-            shuttleTarget = player.currentTime
-            shuttleLastTick = now
-            Haptics.prepareSelection()
-        }
-        let dt = min(0.25, max(0, now - shuttleLastTick))
-        shuttleLastTick = now
-        guard rate != 0 else { return }
-        // Finite ceiling always — an indefinite stream reports duration 0, and an unbounded target
-        // meets Int() downstream (the greatestFiniteMagnitude-is-finite landmine).
-        let ceiling = player.duration > 0 ? player.duration - 0.3 : (shuttleTarget ?? 0) + 7200
-        let next = max(0, min((shuttleTarget ?? 0) + rate * dt, ceiling))
-        shuttleTarget = next
-        scrubTarget = next
-    }
-
-    func endShuttle(commit: Bool) {
-        guard let player, let target = shuttleTarget else { return }
-        shuttleTarget = nil
-        scrubTarget = nil
-        if commit { player.seek(to: target) }
-    }
-
-    /// Velocity pan while zoomed — the stick's real advantage over a finger drag, which cannot hold a
-    /// slow constant creep.
-    func panTick(_ v: CGVector, dt: Double) {
-        guard isZoomed else { return }
-        guard v != .zero else { return }
-        setZoom(scale: zoomScale,
-                offset: CGPoint(x: zoomOffset.x + v.dx * dt, y: zoomOffset.y + v.dy * dt))
-    }
-
-    /// One quarter-step of zoom, latched. Refuses at the ends so the remote can double-tick.
-    @discardableResult
-    func zoomStep(_ delta: Int) -> Bool {
-        let target = zoomScale + CGFloat(delta) * 0.25
-        guard target >= 1, target <= 4 else { return false }
-        setZoom(scale: target, offset: zoomOffset)
-        return true
+    private func disarmVolumeObservation() {
+        volumeObservation?.invalidate()
+        volumeObservation = nil
     }
 
     // MARK: - Zoom (pinch on the remote, rendered on the glasses)
 
     func setZoom(scale: CGFloat, offset: CGPoint) {
+        let previous = zoomScale
         zoomScale = max(1, min(4, scale))
         // Clamp the pan so the video can't be pushed fully off-screen: at scale s the content half-
         // overhang is (s-1)/2 of the 1920×1080 canvas.
@@ -788,6 +773,8 @@ final class GlassesCoordinator {
         zoomOffset = CGPoint(x: max(-maxX, min(maxX, offset.x)),
                              y: max(-maxY, min(maxY, offset.y)))
         if zoomScale <= 1.02 { zoomOffset = .zero }
+        // Pulse only on SCALE changes, not pans, so panning doesn't keep a badge pinned on screen.
+        if abs(zoomScale - previous) > 0.01 { pulseZoomPill() }
         GlassesSession.shared.setZoom(scale: zoomScale, offset: zoomOffset)
     }
 

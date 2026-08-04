@@ -7,6 +7,12 @@ import SwiftUI
 struct GlassesPlaybackOSD: View {
     @Bindable var coordinator: GlassesCoordinator
 
+    // Every pill here is TRANSIENT (owner, 2026-08-04: nothing may stay over the video). The views
+    // are pure renderers of `*Pulse > 0`; the ~1 s expiry lives in the coordinator as one cancellable
+    // task per pill. The old in-view `.task + .id(pulse)` expiry had a real trap: `try? await
+    // Task.sleep` swallows the CancellationError, so a re-keyed (cancelled) task fell through and
+    // cleared the pulse anyway — and the separate ALWAYS-ON `modeChips` (zoom + rate, top right) that
+    // duplicated the speed pill is deleted outright.
     var body: some View {
         ZStack {
             if let player = coordinator.player {
@@ -14,8 +20,8 @@ struct GlassesPlaybackOSD: View {
                 skipBadge
                 scrubStrip(player)
                 speedPill(player)
-                modeChips(player)
-                volumePill(player)
+                zoomPill
+                volumePill
                 loadingHint(player)
             }
         }
@@ -23,7 +29,7 @@ struct GlassesPlaybackOSD: View {
         .animation(.easeOut(duration: 0.18), value: coordinator.scrubTarget != nil)
         .animation(.easeOut(duration: 0.18), value: coordinator.speedPulse)
         .animation(.easeOut(duration: 0.18), value: coordinator.volumePulse)
-        .animation(.easeOut(duration: 0.18), value: coordinator.isZoomed)
+        .animation(.easeOut(duration: 0.18), value: coordinator.zoomPulse)
     }
 
     // MARK: - Paused
@@ -125,10 +131,10 @@ struct GlassesPlaybackOSD: View {
         }
     }
 
-    // MARK: - Speed pill (top-centre, transient)
+    // MARK: - Speed pill (top-centre, ~1 s)
 
-    /// Answers the remote's vertical speed-drag: the actual engine rate (truthful during 2×-hold),
-    /// plus an AI badge once the interpolation runner is live on the slow rungs.
+    /// Answers the vertical speed swipe: the actual engine rate, plus an AI badge while the
+    /// interpolation runner is live on the slow rungs. Expiry is coordinator-owned.
     @ViewBuilder
     private func speedPill(_ player: ScenePlayerModel) -> some View {
         if coordinator.speedPulse > 0 {
@@ -148,56 +154,8 @@ struct GlassesPlaybackOSD: View {
                 .padding(.top, 64)
                 Spacer()
             }
-            .id(coordinator.speedPulse)                        // restart the fade on every step
-            .task {
-                try? await Task.sleep(for: .milliseconds(1400))
-                coordinator.speedPulse = 0
-            }
             .transition(.opacity)
         }
-    }
-
-    // MARK: - Mode chips (top-right, persistent while a mode is on)
-
-    /// Quiet standing indicators for the two easy-to-forget states: digital zoom and a non-1× rate.
-    /// Dim and small so they read as status, not chrome; gone entirely in the normal case.
-    @ViewBuilder
-    private func modeChips(_ player: ScenePlayerModel) -> some View {
-        let offSpeed = abs(player.playbackRate - 1.0) > 0.001
-        if coordinator.isZoomed || offSpeed {
-            VStack {
-                HStack(spacing: 14) {
-                    Spacer()
-                    if coordinator.isZoomed {
-                        chip {
-                            Image(systemName: "plus.magnifyingglass")
-                                .font(.system(size: 22, weight: .medium))
-                            Text(String(format: "%.1f×", coordinator.zoomScale))
-                                .font(.system(size: 24, weight: .semibold).monospacedDigit())
-                        }
-                    }
-                    if offSpeed {
-                        chip {
-                            Text(Self.rate(player.playbackRate))
-                                .font(.system(size: 24, weight: .semibold).monospacedDigit())
-                            if player.slowMoActive {
-                                aiBadge
-                            }
-                        }
-                    }
-                }
-                .padding(.trailing, 96).padding(.top, 64)
-                Spacer()
-            }
-            .transition(.opacity)
-        }
-    }
-
-    private func chip(@ViewBuilder _ content: () -> some View) -> some View {
-        HStack(spacing: 10, content: content)
-            .foregroundStyle(.white.opacity(0.7))
-            .padding(.horizontal, 20).padding(.vertical, 10)
-            .background(Color.black.opacity(0.35), in: Capsule())
     }
 
     private var aiBadge: some View {
@@ -208,20 +166,50 @@ struct GlassesPlaybackOSD: View {
             .background(Color.white.opacity(0.16), in: Capsule())
     }
 
-    // MARK: - Volume pill (bottom-right)
+    // MARK: - Zoom pill (top-right, ~1 s)
 
+    /// Shows on every SCALE change — including the reset to 1×, so "zoom is off" gets confirmed too —
+    /// then fades. Panning doesn't re-arm it (the coordinator pulses on scale changes only).
     @ViewBuilder
-    private func volumePill(_ player: ScenePlayerModel) -> some View {
+    private var zoomPill: some View {
+        if coordinator.zoomPulse > 0 {
+            VStack {
+                HStack {
+                    Spacer()
+                    HStack(spacing: 10) {
+                        Image(systemName: coordinator.isZoomed ? "plus.magnifyingglass" : "1.magnifyingglass")
+                            .font(.system(size: 24, weight: .medium))
+                        Text(String(format: "%.1f×", coordinator.zoomScale))
+                            .font(.system(size: 28, weight: .semibold).monospacedDigit())
+                    }
+                    .foregroundStyle(.white.opacity(0.92))
+                    .padding(.horizontal, 24).padding(.vertical, 14)
+                    .background(Color.black.opacity(0.40), in: Capsule())
+                    .padding(.trailing, 96).padding(.top, 64)
+                }
+                Spacer()
+            }
+            .transition(.opacity)
+        }
+    }
+
+    // MARK: - Volume pill (bottom-right, ~1 s)
+
+    /// Driven by the HARDWARE volume buttons — the one volume control on the glasses. Shows the
+    /// system output volume (the model's gain is pinned at 1.0 in glasses playback).
+    @ViewBuilder
+    private var volumePill: some View {
         if coordinator.volumePulse > 0 {
             VStack {
                 Spacer()
                 HStack {
                     Spacer()
                     HStack(spacing: 16) {
-                        Image(systemName: player.volume <= 0.001 ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        Image(systemName: coordinator.systemVolume <= 0.001
+                              ? "speaker.slash.fill" : "speaker.wave.2.fill")
                             .font(.system(size: 30, weight: .medium))
-                        segments(level: player.volume)
-                        Text("\(player.volumePercent)%")
+                        segments(level: coordinator.systemVolume)
+                        Text("\(coordinator.systemVolumePercent)%")
                             .font(.system(size: 30, weight: .semibold).monospacedDigit())
                             .frame(width: 90, alignment: .trailing)
                     }
@@ -230,11 +218,6 @@ struct GlassesPlaybackOSD: View {
                     .background(Color.black.opacity(0.40), in: Capsule())
                     .padding(.trailing, 96).padding(.bottom, 54)
                 }
-            }
-            .id(coordinator.volumePulse)                       // restart the fade on every change
-            .task {
-                try? await Task.sleep(for: .milliseconds(1400))
-                coordinator.volumePulse = 0
             }
             .transition(.opacity)
         }
