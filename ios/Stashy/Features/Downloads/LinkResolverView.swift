@@ -8,13 +8,21 @@ import WebKit
 /// cookies/Referer/User-Agent that made it valid, cancel the local download, and hand the whole
 /// bundle to the server to do the transfer.
 ///
-/// Ad armor (owner 2026-08-09: "when I click the download button, the window goes to the ad site
-/// and there's no way to go back"):
-///  * Popups/new tabs NEVER replace the visible page. Each gets an OFFSCREEN web view wired to the
-///    same delegates — a popup that turns out to be the file is captured exactly like the main
-///    view (hosts love serving the download via the popup), while an ad page renders to nowhere.
-///  * The visible page can still be same-tab-redirected by a click; the ‹ › toolbar arrows are the
-///    way back. Non-web schemes (App Store, market://, custom apps) are refused outright.
+/// Capture surfaces, broadest first (owner 2026-08-09: "instead of downloading, the video starts
+/// playing on the browser window" + "capture streaming only links"):
+///  * Main-frame MEDIA responses (video/*, HLS manifests…) are captured, never played — WKWebView
+///    would happily show them inline (`canShowMIMEType` is true for video), which is exactly the
+///    reported bug.
+///  * Responses the web view can't display (octet-stream, attachment) become WKDownloads — the
+///    original path.
+///  * A JS sniffer watches every frame's fetch/XHR/<video> for stream URLs (.m3u8/.mpd/.mp4…), so
+///    embedded players that stream via MSE/blob still yield their real manifest.
+///  * The **Send** toolbar button ships the sniffed stream — or, with nothing sniffed, the page URL
+///    itself for server-side yt-dlp extraction (hundreds of site extractors + generic).
+///
+/// Ad armor (owner 2026-08-09): popups NEVER replace the visible page — each gets an OFFSCREEN web
+/// view wired to the same delegates (a file-serving popup is captured; an ad renders to nowhere),
+/// and the ‹ › toolbar arrows escape same-tab redirects. Non-web schemes are refused.
 ///
 /// Caveat by design: hosts that sign file URLs to the requesting IP work when phone and server share
 /// an egress IP (home wifi) and can fail away from home — the server-side fetch then errors visibly
@@ -44,18 +52,23 @@ struct LinkResolverSheet: View {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Cancel") { dismiss() }
                 }
-                // The escape hatch from same-tab ad redirects: real browser back/forward.
+                // ‹ › = the escape hatch from same-tab ad redirects. "Send Stream/Page" = the manual
+                // capture: the sniffed stream if the player gave one up, else the page URL for
+                // server-side yt-dlp extraction.
                 ToolbarItemGroup(placement: .bottomBar) {
                     Button { page.goBack() } label: { Image(systemName: "chevron.backward") }
                         .disabled(!page.canGoBack)
                     Button { page.goForward() } label: { Image(systemName: "chevron.forward") }
                         .disabled(!page.canGoForward)
                     Spacer()
+                    Button(page.sniffedCount > 0 ? "Send Stream" : "Send Page") { page.sendCurrent?() }
+                        .fontWeight(.semibold)
+                    Spacer()
                     Button { page.reload() } label: { Image(systemName: "arrow.clockwise") }
                 }
             }
             .safeAreaInset(edge: .top, spacing: 0) {
-                Text("Tap the site's download button — popup ads are contained automatically; use ‹ if the page jumps away.")
+                Text("Tap the site's download button, or press play and use Send Stream — Stashy grabs the video link for your server. Popup ads are contained; ‹ goes back if the page jumps away.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
@@ -67,16 +80,40 @@ struct LinkResolverSheet: View {
 }
 
 /// Toolbar ↔ web view bridge: mirrors the main web view's back/forward state for SwiftUI (synced
-/// from the navigation-delegate callbacks — no KVO on the MainActor-isolated WKWebView) and relays
-/// the button verbs.
+/// from the navigation-delegate callbacks — no KVO on the MainActor-isolated WKWebView), relays the
+/// button verbs, and accumulates sniffed stream URLs.
 @MainActor @Observable
 final class ResolverPageState {
     var canGoBack = false
     var canGoForward = false
+    /// Drives the Send button's label; bumped as the sniffer reports.
+    private(set) var sniffedCount = 0
     @ObservationIgnored weak var webView: WKWebView?
+    @ObservationIgnored var sendCurrent: (@MainActor () -> Void)?
+    @ObservationIgnored private var sniffed: [URL] = []
+
     func goBack() { webView?.goBack() }
     func goForward() { webView?.goForward() }
     func reload() { webView?.reload() }
+
+    func noteSniffed(_ url: URL) {
+        guard !sniffed.contains(url) else { return }
+        sniffed.append(url)
+        sniffedCount = sniffed.count
+    }
+
+    /// A new main-page navigation invalidates what the old page's player was fetching.
+    func clearSniffed() {
+        sniffed.removeAll()
+        sniffedCount = 0
+    }
+
+    /// The URL the Send button ships: prefer the newest MANIFEST (the active stream a player is
+    /// actually using), then the newest direct file, else nil (caller falls back to the page URL).
+    var bestSniffed: URL? {
+        let manifests = sniffed.filter { ["m3u8", "mpd"].contains($0.pathExtension.lowercased()) }
+        return manifests.last ?? sniffed.last
+    }
 }
 
 private struct ResolverWebView: UIViewRepresentable {
@@ -90,17 +127,66 @@ private struct ResolverWebView: UIViewRepresentable {
     static let userAgent =
         "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1"
 
+    /// Injected into every frame at document start (page world, so the PAGE's fetch/XHR get hooked):
+    /// reports any URL that looks like a stream manifest or a video file. This is how "streaming
+    /// only" sites give up their real .m3u8 — the player has to fetch it, and we're watching.
+    static let snifferJS = """
+    (function () {
+      if (window.__stashySniff) { return; } window.__stashySniff = true;
+      var seen = {};
+      function report(u) {
+        try {
+          if (!u || typeof u !== 'string' || u.indexOf('blob:') === 0) { return; }
+          var abs = new URL(u, location.href).href;
+          if (!/\\.(m3u8|mpd|mp4|m4v|webm|mov)([?#]|$)/i.test(abs)) { return; }
+          if (seen[abs]) { return; } seen[abs] = 1;
+          window.webkit.messageHandlers.stashyMedia.postMessage(abs);
+        } catch (e) {}
+      }
+      var of = window.fetch;
+      if (of) {
+        window.fetch = function (input) {
+          try { report(typeof input === 'string' ? input : (input && input.url)); } catch (e) {}
+          return of.apply(this, arguments);
+        };
+      }
+      var oo = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function (m, u) {
+        try { report(u); } catch (e) {}
+        return oo.apply(this, arguments);
+      };
+      setInterval(function () {
+        try {
+          var els = document.querySelectorAll('video, source');
+          for (var i = 0; i < els.length; i++) {
+            report(els[i].currentSrc || els[i].src);
+          }
+        } catch (e) {}
+      }, 2000);
+    })();
+    """
+
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         // Non-persistent: the session's cookies exist to be CAPTURED, not to accumulate a browsing
         // profile inside the app. Each resolve starts clean.
         config.websiteDataStore = .nonPersistent()
+        config.userContentController.addUserScript(
+            WKUserScript(source: Self.snifferJS, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+        // Weak relay, not the coordinator itself: WKUserContentController retains its handler
+        // STRONGLY, and a popup's controller can reach back through the coordinator to the popup —
+        // the weak hop makes the cycle impossible by construction.
+        let relay = ScriptRelay()
+        relay.target = context.coordinator
+        config.userContentController.add(relay, name: "stashyMedia")
         let web = WKWebView(frame: .zero, configuration: config)
         web.customUserAgent = Self.userAgent
         web.navigationDelegate = context.coordinator
         web.uiDelegate = context.coordinator
         context.coordinator.webView = web
         page.webView = web
+        let coordinator = context.coordinator
+        page.sendCurrent = { [weak coordinator] in coordinator?.sendCurrentToServer() }
         web.load(URLRequest(url: startURL))
         return web
     }
@@ -111,6 +197,16 @@ private struct ResolverWebView: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
+    /// The sniffer's message hop. Weak target only — see the comment at the `add(_:name:)` site.
+    @MainActor
+    private final class ScriptRelay: NSObject, WKScriptMessageHandler {
+        weak var target: Coordinator?
+        func userContentController(_ userContentController: WKUserContentController,
+                                   didReceive message: WKScriptMessage) {
+            target?.handleSniffedMedia(message)
+        }
+    }
+
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
         var parent: ResolverWebView
@@ -120,15 +216,31 @@ private struct ResolverWebView: UIViewRepresentable {
         private var popups: [WKWebView] = []
         init(parent: ResolverWebView) { self.parent = parent }
 
-        // MARK: Route file responses into a WKDownload
+        // MARK: Route file AND media responses into the capture
 
         func webView(_ webView: WKWebView,
                      decidePolicyFor navigationResponse: WKNavigationResponse,
                      decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {
-            // A response the web view can't display inline IS the file being served (video/*,
-            // octet-stream, attachment disposition all land here). Fires for popups too — they
-            // share this delegate — which is how a popup-served download still gets captured.
+            // A main-frame navigation to MEDIA is the file being served — but `canShowMIMEType` is
+            // TRUE for video (WKWebView would play it inline), so it needs its own check before the
+            // generic gate. `.download` routes it into the capture; main-frame only, or ad iframes
+            // with autoplaying teasers would fire it.
+            if navigationResponse.isForMainFrame,
+               Self.isMediaMIME(navigationResponse.response.mimeType) {
+                decisionHandler(.download)
+                return
+            }
+            // A response the web view can't display inline IS the file being served (octet-stream,
+            // attachment disposition land here). Fires for popups too — they share this delegate —
+            // which is how a popup-served download still gets captured.
             decisionHandler(navigationResponse.canShowMIMEType ? .allow : .download)
+        }
+
+        private static func isMediaMIME(_ mime: String?) -> Bool {
+            guard let mime = mime?.lowercased() else { return false }
+            return mime.hasPrefix("video/")
+                || ["application/vnd.apple.mpegurl", "application/x-mpegurl", "audio/mpegurl",
+                    "application/dash+xml"].contains(mime)
         }
 
         func webView(_ webView: WKWebView,
@@ -188,6 +300,9 @@ private struct ResolverWebView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+            if webView === self.webView {
+                parent.page.clearSniffed()   // the old page's player streams are history now
+            }
             syncPageState(webView)
         }
 
@@ -206,7 +321,33 @@ private struct ResolverWebView: UIViewRepresentable {
             syncPageState(webView)
         }
 
-        // MARK: The capture point
+        // MARK: Sniffed streams + the Send button
+
+        func handleSniffedMedia(_ message: WKScriptMessage) {
+            guard let raw = message.body as? String,
+                  let url = URL(string: raw),
+                  let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https"
+            else { return }
+            parent.page.noteSniffed(url)
+        }
+
+        /// Manual capture: the sniffed stream if there is one, else the page URL itself — the
+        /// server's yt-dlp resolves pages with its site extractors + generic extraction.
+        func sendCurrentToServer() {
+            guard let target = parent.page.bestSniffed ?? webView?.url,
+                  let scheme = target.scheme?.lowercased(), scheme == "http" || scheme == "https"
+            else { return }
+            // A direct file keeps its own name; manifests and pages get "" so yt-dlp's title
+            // template names the output (naming an HLS download "master.m3u8" would be wrong).
+            let ext = target.pathExtension.lowercased()
+            let filename = ["mp4", "m4v", "webm", "mov"].contains(ext) ? target.lastPathComponent : ""
+            Task { @MainActor in
+                let headers = await self.replayHeaders(for: target)
+                self.parent.onResolved(target, filename, headers)
+            }
+        }
+
+        // MARK: The download capture point
 
         func download(_ download: WKDownload,
                       decideDestinationUsing response: URLResponse,
@@ -218,30 +359,34 @@ private struct ResolverWebView: UIViewRepresentable {
                 completionHandler(nil)
                 return
             }
-            let referer = webView?.url?.absoluteString
-            let store = webView?.configuration.websiteDataStore.httpCookieStore
-            Task { @MainActor [parent] in
-                var headers: [String: String] = ["User-Agent": ResolverWebView.userAgent]
-                if let referer { headers["Referer"] = referer }
-                if let store {
-                    let cookies = await store.allCookies()
-                    let host = fileURL.host() ?? ""
-                    // Send the cookies a browser would: this host and its parent domains.
-                    let matching = cookies.filter { cookie in
-                        let d = cookie.domain.hasPrefix(".") ? String(cookie.domain.dropFirst()) : cookie.domain
-                        return host == d || host.hasSuffix("." + d)
-                    }
-                    if !matching.isEmpty {
-                        headers["Cookie"] = matching.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
-                    }
-                }
-                parent.onResolved(fileURL, suggestedFilename, headers)
+            Task { @MainActor in
+                let headers = await self.replayHeaders(for: fileURL)
+                self.parent.onResolved(fileURL, suggestedFilename, headers)
                 completionHandler(nil)   // nil destination = cancel the LOCAL download — the server does it
             }
         }
 
         func download(_ download: WKDownload, didFailWithError error: any Error, resumeData: Data?) {
             // Expected: cancelling via a nil destination reports as a failure. Nothing to do.
+        }
+
+        /// The headers that make the captured URL valid for the server: this session's cookies for
+        /// the target's domain (and parents), the current page as Referer, and the shared UA.
+        private func replayHeaders(for target: URL) async -> [String: String] {
+            var headers: [String: String] = ["User-Agent": ResolverWebView.userAgent]
+            if let referer = webView?.url?.absoluteString { headers["Referer"] = referer }
+            if let store = webView?.configuration.websiteDataStore.httpCookieStore {
+                let cookies = await store.allCookies()
+                let host = target.host() ?? ""
+                let matching = cookies.filter { cookie in
+                    let d = cookie.domain.hasPrefix(".") ? String(cookie.domain.dropFirst()) : cookie.domain
+                    return host == d || host.hasSuffix("." + d)
+                }
+                if !matching.isEmpty {
+                    headers["Cookie"] = matching.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+                }
+            }
+            return headers
         }
     }
 }
