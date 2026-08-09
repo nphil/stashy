@@ -1594,10 +1594,19 @@ Newest first.
     `download(_:decideDestinationUsing:)` — `response.url` is the post-redirect signed file URL;
     cookies filtered by domain suffix + Referer + UA are handed to the plugin (`--add-header`);
     `completionHandler(nil)` cancels the local download. Both `decidePolicyFor` decisionHandlers are
-    `@escaping @MainActor @Sendable` (SDK-exact — verified via doc-JSON). A WKUIDelegate
-    `createWebViewWith` witness loads `target="_blank"` requests back into the same web view and
-    returns nil — without it, new-tab download buttons do NOTHING. IP-signed URLs work where phone
-    and server share egress (home wifi); away they fail visibly on the card.
+    `@escaping @MainActor @Sendable` (SDK-exact — verified via doc-JSON). **Popups NEVER touch the
+    visible page** (v1.0.362; the v1.0.361 version loaded them into the main view and ad popups
+    hijacked it with no way back — owner report): WKUIDelegate `createWebViewWith` returns an
+    OFFSCREEN web view (MUST use the provided configuration — also what shares the cookie store)
+    wired to the same delegates, so a file-serving popup is captured while an ad renders to nowhere;
+    capped at 4, evicted ones stopLoading, `webViewDidClose` prunes. Same-tab redirects are escaped
+    via real back/forward toolbar arrows (`ResolverPageState`, synced in the nav-delegate callbacks —
+    deliberately NOT KVO: `canGoBack` is a MainActor-isolated property, and a key path to it in
+    `observe()` is strict-concurrency quicksand). Non-web schemes (itms-apps, market:// …) are
+    refused in the action policy. IP-signed URLs work where phone and server share egress (home
+    wifi); away they fail visibly on the card. Known gap, deliberate: a popup that itself needs a
+    HUMAN interaction (second button/captcha INSIDE the popup) dead-ends invisibly — iterate only
+    if the owner actually hits one.
   - **Packaging rule bites here**: `stash-plugin/**` pushes don't trigger CI, but the zip is FLAT
     (yml + py at zip root) and `index.yml`'s sha256 must match byte-for-byte — rebuild both together
     (`cd stashy-companion && zip -X ../stashy-companion.zip stashy-companion.yml stashy_companion.py`).
