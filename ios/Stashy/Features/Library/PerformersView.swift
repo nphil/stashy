@@ -121,6 +121,11 @@ struct PerformersView: View {
         }
         .onChange(of: query.sort) { _, s in UserDefaults.standard.set(s.rawValue, forKey: "sort.performers.field") }
         .onChange(of: query.direction) { _, dir in UserDefaults.standard.set(dir.rawValue, forKey: "sort.performers.dir") }
+        // A scrape/edit sheet saved somewhere — silently re-fetch so browsing back never shows the
+        // pre-scrape card (same code path as the initial load; stable ids keep the scroll position).
+        .onChange(of: edits.metadataRevision) { _, _ in
+            Task { await reload() }
+        }
         .task {
             guard loader.items.isEmpty else { return }
             await reload()

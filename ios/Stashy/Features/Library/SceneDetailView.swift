@@ -145,7 +145,18 @@ struct SceneDetailView: View {
         }
         // Metadata mini-window: a medium-detent glass sheet floating over the (still playing) video.
         // The sheet refetches the scene after saving and hands it back, so the header/tags update in place.
-        .sheet(item: $metadataMode) { mode in
+        .sheet(item: $metadataMode, onDismiss: {
+            // Belt and braces over onSaved: whatever the sheet did — full save, a partial save that
+            // errored late, entity creates — the screen refetches ONCE on close so it can never sit
+            // stale, and the list behind is told to quietly refresh its cards too.
+            Task {
+                if let client = appState.client,
+                   let fresh = try? await client.findScene(id: scene.id) {
+                    fullScene = fresh
+                }
+            }
+            edits.noteMetadataChanged()
+        }) { mode in
             SceneMetadataSheet(sceneID: scene.id, mode: mode) { fresh in
                 if let fresh { fullScene = fresh }
             }

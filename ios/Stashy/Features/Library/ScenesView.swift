@@ -460,6 +460,12 @@ struct ScenesView: View {
                 }
             }
             .refreshable { await reload() }
+            // A scrape/edit sheet saved somewhere — silently re-fetch so browsing back never shows
+            // the pre-scrape card. Same code path as pull-to-refresh; ids are stable so the scroll
+            // position survives.
+            .onChange(of: edits.metadataRevision) { _, _ in
+                Task { await reload() }
+            }
             .onScrollPhaseChange { _, phase in
                 setBrowseScrolling(
                     phase != .idle,

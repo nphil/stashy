@@ -23,6 +23,13 @@ final class LibraryEdits {
     /// server delete fails. On relaunch the server is authoritative and these start empty.
     private var deletedScenes: Set<String> = []
     private var deletedPerformers: Set<String> = []
+    /// Bumped whenever server-side metadata changed under the app's feet (a scrape/edit sheet saved).
+    /// The scenes/performers LISTS observe it and silently re-fetch, so browsing back from a freshly
+    /// scraped detail never shows the pre-scrape card (owner, 2026-08-10: "I have to go back to the
+    /// main menu and refresh").
+    private(set) var metadataRevision = 0
+
+    func noteMetadataChanged() { metadataRevision += 1 }
 
     /// Set briefly when a save fails, for optional UI surfacing; cleared after it's shown.
     var lastError: String?
