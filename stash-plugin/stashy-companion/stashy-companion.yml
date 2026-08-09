@@ -10,7 +10,7 @@ description: >-
   phone model), ffprobe-based codec + HDR stats, and auto-tagging of
   direct-play-ready scenes — capabilities vanilla Stash lacks. Output is served
   back to the app over Stash's own HTTP with real Job progress.
-version: 0.3.8
+version: 0.4.0
 url: https://github.com/nphil/stashy/tree/main/stash-plugin
 exec:
   - python
@@ -102,6 +102,10 @@ settings:
     displayName: Auto codec-report new scenes (on scan)
     description: "When a Stash scan creates a new scene, automatically ffprobe it and append it to the served playability report (no scene writes) — so the app's routing + filter stay current without re-running the Library Codec Report. Default on. Turn off if you'd rather run the report manually."
     type: BOOLEAN
+  fetchDir:
+    displayName: Fetch destination folder
+    description: "Where 'Fetch URL to Library' saves downloads — an absolute path INSIDE a Stash library (the post-fetch scan can only see library paths). Blank = <first video library>/stashy-fetch, created automatically."
+    type: STRING
   autoThumbhashNewScenes:
     displayName: Auto ThumbHash new scenes (on scan)
     description: "When a Stash scan creates a new scene, automatically compute its ThumbHash blur placeholder and append it to the served thumbhashes.json (no scene writes) — so the app has an instant blur for freshly-scanned scenes without re-running Compute ThumbHash Map. Default on. A light ffmpeg decode per new scene; turn off if you'd rather hash on-device / by task."
@@ -175,6 +179,14 @@ tasks:
     description: "One-time cleanup for installs that ran plugin v0.1.16/0.1.17 (which tagged scenes): DELETE the Stashy:* tag definitions. Stash cascade-removes them from every scene with NO per-scene sceneUpdate, so this fires no Scene.Update hooks and queues NO Sync tasks. Your own tags are untouched. (A residual stashy_probe custom field, if present, is left as harmless dead data — clearing it would be a per-scene write = a Sync-task storm.)"
     defaultArgs:
       mode: untag
+  - name: Fetch URL to Library
+    description: "Download a video from a URL straight into the Stash library and scan it in — the phone submits the link, the SERVER carries the bytes. Handles direct file links AND page links (yt-dlp: hundreds of sites + generic extraction; a plain-HTTP fallback for anything it refuses). Live Job progress; destination set by the 'Fetch destination folder' setting. Args (from runPluginTask): url. Run from this UI without args to self-check the fetch engine."
+    defaultArgs:
+      mode: fetch
+  - name: Update Fetch Engine (yt-dlp)
+    description: "Refresh the bundled yt-dlp (kept in the plugin's cache/, survives plugin updates; auto-installed on first fetch). Run when a site that used to resolve stops working — hosts change constantly and yt-dlp updates near-weekly."
+    defaultArgs:
+      mode: fetch_update
   - name: Purge Transcode Cache
     description: "Delete the companion HEVC/AV1 cache (or trim it to the size cap if one is set)."
     defaultArgs:

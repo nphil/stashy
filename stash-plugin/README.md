@@ -15,7 +15,10 @@ direct-play first, minimal server load, privacy*:
 | **Playability filter (app)** | The served report powers the app's Any / Direct-play / Needs-transcode scene filter and smarter playback routing — no tags involved. (Installs that ran plugin ≤0.1.17 — which DID tag scenes — get a one-time **Remove Stashy Tags (cleanup)** task that deletes the `Stashy:*` tag definitions via cascade, no per-scene writes.) | — |
 | **Purge Transcode Cache** | Deletes the companion cache, or trims it to a size cap (LRU). | — |
 
-Other tasks: **Delete Cache File** (per-scene; the app invokes it automatically the moment a
+| **Fetch URL to Library** (v0.4.0) | Paste a link in the Stashy app → the **server** downloads it straight into a library folder and scans it in. Direct file links and page links both work — the bundled **yt-dlp** (auto-installed into `cache/`, refresh via **Update Fetch Engine**) handles hundreds of hosts plus generic extraction, with a plain-HTTP fallback for anything it refuses. Live Job progress; destination = the *Fetch destination folder* setting (default `<first library>/stashy-fetch`). | Stash can only scan what's already on disk — it has no way to pull a remote URL into the library. |
+
+Other tasks: **Update Fetch Engine (yt-dlp)** (refresh the bundled downloader when a site stops
+resolving — auto-installed on first fetch); **Delete Cache File** (per-scene; the app invokes it automatically the moment a
 server-transcoded download finishes, so served proxies don't accumulate — added v0.1.21); **Rebuild
 Codec Report (full)** / **Rebuild VMAF Map (full)** / **Rebuild ThumbHash Map (full)** (force
 re-analysis from scratch — e.g. files changed in place or targets changed — ignoring the incremental

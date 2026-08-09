@@ -2854,6 +2854,243 @@ def run_untag(stash):
 # ----------------------------------------------------------------------------
 # Entry point.
 # ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Fetch URL → library (v0.4.0). The phone submits a URL; the SERVER carries the
+# bytes. yt-dlp does the heavy lifting: direct file links download as-is, page
+# links go through its extractors (hundreds of hosts) or generic sniffing. The
+# zipapp lives in cache/ — pure Python, ~3 MB, and cache/ survives plugin
+# updates (same guarantee the settings backup relies on).
+# ----------------------------------------------------------------------------
+YTDLP_PATH = os.path.join(CACHE_DIR, "yt-dlp")
+YTDLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
+FETCH_SUBDIR = "stashy-fetch"
+_FETCH_PROGRESS_PREFIX = "stashy-dl "
+
+
+def _ensure_ytdlp(force=False):
+    """Download the yt-dlp zipapp into cache/ if absent (or force-refresh it)."""
+    if not force and os.path.isfile(YTDLP_PATH) and os.path.getsize(YTDLP_PATH) > 1_000_000:
+        return YTDLP_PATH
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    log_info("downloading yt-dlp → {}".format(YTDLP_PATH))
+    tmp = YTDLP_PATH + ".tmp"
+    req = urllib.request.Request(YTDLP_URL, headers={"User-Agent": "stashy-companion"})
+    with urllib.request.urlopen(req, timeout=120) as resp, open(tmp, "wb") as out:
+        while True:
+            chunk = resp.read(1 << 16)
+            if not chunk:
+                break
+            out.write(chunk)
+    if os.path.getsize(tmp) < 1_000_000:   # the zipapp is ~3 MB; a tiny file is an error page
+        _safe_unlink(tmp)
+        raise RuntimeError("yt-dlp download looks truncated — try again")
+    os.replace(tmp, YTDLP_PATH)
+    os.chmod(YTDLP_PATH, 0o755)
+    return YTDLP_PATH
+
+
+def _library_paths(stash):
+    data = stash.call("query { configuration { general { stashes { path excludeVideo } } } }")
+    stashes = ((data.get("configuration") or {}).get("general") or {}).get("stashes") or []
+    return [s.get("path") for s in stashes if s.get("path") and not s.get("excludeVideo")]
+
+
+def _fetch_dir(settings, library_paths):
+    """Destination folder: the fetchDir setting, else <first video library>/stashy-fetch.
+    MUST sit inside a Stash library — otherwise the post-download scan can never see the file,
+    which reads as 'the fetch worked but nothing appeared'. Fail loudly instead."""
+    configured = (settings.get("fetchDir") or "").strip()
+    if configured:
+        root = configured.rstrip("/")
+        if library_paths and not any(
+                root == p.rstrip("/") or root.startswith(p.rstrip("/") + "/")
+                for p in library_paths):
+            raise RuntimeError(
+                "fetchDir {} is not inside any Stash library ({}) — the scan would never pick the "
+                "file up. Fix the plugin's 'Fetch destination folder' setting.".format(
+                    root, ", ".join(library_paths) or "none configured"))
+        return root
+    if not library_paths:
+        raise RuntimeError(
+            "no video library configured in Stash and no 'Fetch destination folder' setting — "
+            "nowhere to put the file")
+    return os.path.join(library_paths[0], FETCH_SUBDIR)
+
+
+def _parse_fetch_progress(line):
+    """'stashy-dl <downloaded> <total>' → fraction 0..1, else None (unknown total, or not ours)."""
+    if not line.startswith(_FETCH_PROGRESS_PREFIX):
+        return None
+    parts = line[len(_FETCH_PROGRESS_PREFIX):].split()
+    if len(parts) != 2:
+        return None
+    try:
+        done, total = float(parts[0]), float(parts[1])
+    except ValueError:
+        return None   # "NA" when the host reports no length → indeterminate
+    if total <= 0 or done < 0:
+        return None
+    return min(1.0, done / total)
+
+
+def _cd_filename(header):
+    """Content-Disposition (RFC 6266-ish) → bare filename, else None. filename* wins over filename."""
+    if not header:
+        return None
+    name = None
+    for part in header.split(";"):
+        part = part.strip()
+        low = part.lower()
+        if low.startswith("filename*="):
+            val = part.split("=", 1)[1].strip().strip('"')
+            if "''" in val:            # RFC 5987: charset'lang'percent-encoded
+                val = val.split("''", 1)[1]
+            name = urllib.parse.unquote(val)
+            break
+        if low.startswith("filename=") and name is None:
+            name = part.split("=", 1)[1].strip().strip('"')
+    if not name:
+        return None
+    name = os.path.basename(name.replace("\\", "/")).strip()
+    return name or None
+
+
+def _plain_fetch(url, dest_dir):
+    """Fallback for URLs yt-dlp refuses (odd hosts, plain non-media files): a streamed HTTP
+    download named from Content-Disposition or the final URL. Returns the saved path."""
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (stashy-companion)"})
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        name = _cd_filename(resp.headers.get("Content-Disposition"))
+        if not name:
+            name = urllib.parse.unquote(
+                os.path.basename(urllib.parse.urlparse(resp.url or url).path)) or "download"
+        name = name.replace("/", "_")[:200] or "download"
+        dest = os.path.join(dest_dir, name)
+        base, ext = os.path.splitext(dest)
+        n = 1
+        while os.path.exists(dest):
+            dest = "{} ({}){}".format(base, n, ext)
+            n += 1
+        total = 0
+        try:
+            total = int(resp.headers.get("Content-Length") or 0)
+        except ValueError:
+            pass
+        tmp = dest + ".part"
+        done, last = 0, 0.0
+        with open(tmp, "wb") as out:
+            while True:
+                chunk = resp.read(1 << 18)
+                if not chunk:
+                    break
+                out.write(chunk)
+                done += len(chunk)
+                now = time.time()
+                if total > 0 and now - last > 1:
+                    last = now
+                    log_progress(0.05 + 0.90 * min(1.0, done / total))
+        os.replace(tmp, dest)
+    return dest
+
+
+def run_fetch(stash, args, settings):
+    url = (args.get("url") or "").strip()
+    if not url:
+        # Run from the Stash UI with no args → a self-check of the fetch engine, not an error.
+        path = _ensure_ytdlp()
+        out = subprocess.run([sys.executable, path, "--version"],
+                             capture_output=True, text=True, timeout=120)
+        log_info("fetch engine OK — yt-dlp {} at {}".format((out.stdout or "").strip(), path))
+        log_info("to fetch, pass args_map {url: …} (the Stashy app does this)")
+        return
+    scheme = urllib.parse.urlparse(url).scheme.lower()
+    if scheme not in ("http", "https"):
+        raise RuntimeError("only http(s) URLs are supported (got '{}')".format(scheme or "none"))
+
+    dest_dir = _fetch_dir(settings, _library_paths(stash))
+    os.makedirs(dest_dir, exist_ok=True)
+    # Sweep stale .part clutter from a previously killed job. The scan ignores .part (wrong
+    # extension), so this is tidiness, not correctness.
+    cutoff = time.time() - 2 * 86400
+    for f in os.listdir(dest_dir):
+        if f.endswith(".part"):
+            p = os.path.join(dest_dir, f)
+            with contextlib.suppress(OSError):
+                if os.path.getmtime(p) < cutoff:
+                    os.unlink(p)
+
+    log_info("fetching {} → {}".format(url, dest_dir))
+    ytdlp = _ensure_ytdlp()
+    log_progress(0.05)
+    before = time.time()
+
+    cmd = [
+        sys.executable, ytdlp,
+        "--no-playlist",
+        "--newline",
+        "--windows-filenames",   # the library rides an SMB share on unRAID — keep names portable
+        "--no-warnings",
+        # Machine-readable progress on stdout; %(a,b)s falls through to the estimate, "NA" if neither.
+        "--progress-template",
+        "download:" + _FETCH_PROGRESS_PREFIX
+        + "%(progress.downloaded_bytes)s %(progress.total_bytes,progress.total_bytes_estimate)s",
+        # [id] keeps re-fetches of the same title from colliding; .180B/.32B are BYTE truncations.
+        "-o", os.path.join(dest_dir, "%(title).180B [%(id).32B].%(ext)s"),
+        url,
+    ]
+    tail = []
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            frac = _parse_fetch_progress(line)
+            if frac is not None:
+                log_progress(0.05 + 0.90 * frac)
+                continue
+            tail.append(line)
+            if len(tail) > 12:
+                tail.pop(0)
+            if line.startswith("[download] Destination:") or line.startswith("[Merger]"):
+                log_info(line)
+        proc.wait()
+        rc = proc.returncode
+    except OSError as e:
+        raise RuntimeError("could not launch yt-dlp: {}".format(e))
+
+    if rc != 0:
+        blob = " / ".join(tail[-5:])
+        if "unsupported url" in blob.lower():
+            log_info("yt-dlp does not recognise this URL — trying a direct download")
+            dest = _plain_fetch(url, dest_dir)
+            log_info("saved {} ({:,} bytes)".format(os.path.basename(dest), os.path.getsize(dest)))
+        else:
+            raise RuntimeError("yt-dlp failed: {}".format(blob or "exit {}".format(rc)))
+    else:
+        got = [f for f in os.listdir(dest_dir)
+               if not f.endswith(".part")
+               and os.path.getmtime(os.path.join(dest_dir, f)) >= before - 1]
+        for f in sorted(got):
+            log_info("saved {} ({:,} bytes)".format(f, os.path.getsize(os.path.join(dest_dir, f))))
+
+    # Scan JUST the fetch folder so the new file materialises as a scene (covers/sprites/phash per
+    # the server's scan settings). The auto-report hook then folds it into playability/thumbhash maps.
+    log_progress(0.97)
+    data = stash.call(
+        "mutation Scan($input: ScanMetadataInput!) { metadataScan(input: $input) }",
+        {"input": {"paths": [dest_dir]}})
+    log_info("library scan queued (job {}) for {}".format(data.get("metadataScan"), dest_dir))
+    log_progress(1.0)
+
+
+def run_fetch_update():
+    path = _ensure_ytdlp(force=True)
+    out = subprocess.run([sys.executable, path, "--version"],
+                         capture_output=True, text=True, timeout=120)
+    log_info("yt-dlp refreshed — {} at {}".format((out.stdout or "").strip(), path))
+
+
 def load_settings(conn):
     """Plugin settings arrive on server_connection or must be fetched. Fetch the
     saved values via GraphQL configuration so free-typed dirs/toggles apply."""
@@ -2915,6 +3152,10 @@ def main():
             run_stats(stash, settings)
         elif mode == "untag":
             run_untag(stash)
+        elif mode == "fetch":
+            run_fetch(stash, args, settings)
+        elif mode == "fetch_update":
+            run_fetch_update()
         elif mode == "purge":
             run_purge(settings)
         elif mode == "delete":

@@ -33,6 +33,9 @@ struct StashCompanion: Sendable {
         case vmafMap      = "Compute VMAF Map"
         case thumbhashMap = "Compute ThumbHash Map"
         case loudnessMap  = "Compute Loudness Map"
+        /// v0.4.0: server-side URL fetch — the phone submits a link, the SERVER downloads it straight
+        /// into the library and scans it in.
+        case fetch        = "Fetch URL to Library"
     }
 
     /// Output codecs the plugin can produce. HEVC = GPU (hevc_nvenc) — the default; AV1 = CPU (SVT-AV1),
@@ -80,6 +83,17 @@ struct StashCompanion: Sendable {
             throw StashError.graphqlError("job \(id) not found")
         }
         return job
+    }
+
+    // MARK: - Fetch URL → library (plugin v0.4.0+)
+
+    /// Ask the SERVER to download `url` into the Stash library (yt-dlp: direct links and page links
+    /// alike) and scan it in. Returns the Job id — poll `job(_:)`; the file lands as a new scene.
+    /// Requires companion plugin ≥0.4.0; an older plugin fails the job with "unknown mode: fetch",
+    /// which surfaces through the job's error string.
+    @discardableResult
+    func requestFetch(url: String) async throws -> String {
+        try await run(.fetch, args: ["url": url])
     }
 
     // MARK: - Transcode

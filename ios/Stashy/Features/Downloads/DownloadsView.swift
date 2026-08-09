@@ -10,7 +10,9 @@ struct DownloadsView: View {
     var compact = false
     @Environment(DownloadManager.self) private var downloads
     @Environment(ThemeManager.self) private var themeManager
+    @Environment(AppState.self) private var appState
     @State private var playing: DownloadItem?
+    @State private var showFetchSheet = false
 
     var body: some View {
         Group {
@@ -46,6 +48,12 @@ struct DownloadsView: View {
         // when the last staged item starts.
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
+                // Server-side fetch: paste a link, the SERVER downloads it into the library.
+                Button { showFetchSheet = true } label: { Image(systemName: "link.badge.plus") }
+                    .disabled(appState.client == nil)
+                    .accessibilityLabel("Fetch a link to the server")
+            }
+            ToolbarItem(placement: .topBarTrailing) {
                 Button { downloads.startAll() } label: { Image(systemName: "arrow.down.to.line") }
                     .disabled(downloads.startableCount == 0)
                     .accessibilityLabel("Start all downloads")
@@ -70,6 +78,163 @@ struct DownloadsView: View {
         .onDisappear { downloads.clearFinishedTranscodeLogs(); downloads.downloadsScreenVisible = false }
         .fullScreenCover(item: $playing) { item in
             DownloadPlayerCover(item: item)
+        }
+        .sheet(isPresented: $showFetchSheet) {
+            if let client = appState.client {
+                FetchLinkSheet(companion: StashCompanion(client: client))
+                    .presentationDetents([.medium])
+            }
+        }
+    }
+}
+
+// MARK: - Fetch a link to the server
+
+/// Paste a URL → the SERVER downloads it straight into the Stash library and scans it in (companion
+/// plugin ≥0.4.0, "Fetch URL to Library"). The phone never carries the bytes — it submits the link,
+/// then watches the Stash job. Dismissing the sheet does NOT cancel the server-side fetch.
+private struct FetchLinkSheet: View {
+    let companion: StashCompanion
+    @Environment(\.dismiss) private var dismiss
+    @Environment(ThemeManager.self) private var themeManager
+
+    private enum Phase: Equatable {
+        case idle
+        case running(progress: Double?, note: String)
+        case done
+        case failed(String)
+    }
+
+    @State private var url = ""
+    @State private var phase: Phase = .idle
+    @State private var watcher: Task<Void, Never>?
+
+    private var isRunning: Bool { if case .running = phase { return true }; return false }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    HStack(spacing: 10) {
+                        TextField("https://…", text: $url)
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .disabled(isRunning)
+                        if url.isEmpty {
+                            Button {
+                                if let s = UIPasteboard.general.string { url = s.trimmingCharacters(in: .whitespacesAndNewlines) }
+                            } label: { Image(systemName: "doc.on.clipboard") }
+                            .accessibilityLabel("Paste link")
+                        } else if !isRunning {
+                            Button { url = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                                .accessibilityLabel("Clear")
+                        }
+                    }
+                } footer: {
+                    Text("The server downloads the link directly into your library — direct file links and most video pages both work. The phone only submits the URL, so you can close this or leave the app once it starts.")
+                }
+
+                switch phase {
+                case .idle:
+                    EmptyView()
+                case .running(let progress, let note):
+                    Section {
+                        VStack(alignment: .leading, spacing: 8) {
+                            if let progress {
+                                ProgressView(value: progress)
+                            } else {
+                                ProgressView()   // indeterminate: host didn't report a size
+                            }
+                            Text(note)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                case .done:
+                    Section {
+                        Label("Fetched — library scan queued. The scene appears once the scan finishes.",
+                              systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    }
+                case .failed(let message):
+                    Section {
+                        Label(message, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                            .font(.callout)
+                    }
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .themedBackground()
+            .navigationTitle("Fetch to Server")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(phase == .done ? "Done" : "Close") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Fetch") { submit() }
+                        .fontWeight(.semibold)
+                        .disabled(isRunning || !urlLooksValid)
+                }
+            }
+        }
+        .onDisappear { watcher?.cancel() }   // stop POLLING only — the server job runs on
+    }
+
+    private var urlLooksValid: Bool {
+        guard let u = URL(string: url.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = u.scheme?.lowercased() else { return false }
+        return (scheme == "http" || scheme == "https") && u.host() != nil
+    }
+
+    private func submit() {
+        let target = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        phase = .running(progress: nil, note: "Submitting to the server…")
+        watcher?.cancel()
+        watcher = Task { @MainActor in
+            let jobID: String
+            do {
+                jobID = try await companion.requestFetch(url: target)
+            } catch {
+                phase = .failed("Couldn't start the fetch: \(error.localizedDescription)")
+                return
+            }
+            // Watch the job. Transient poll errors RETRY (a poll behind visible UI never
+            // self-terminates); only a terminal job status ends the loop.
+            var misses = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled else { return }
+                let job: CompanionJob
+                do {
+                    job = try await companion.job(jobID)
+                    misses = 0
+                } catch {
+                    misses += 1
+                    if misses > 3 { phase = .running(progress: nil, note: "Reconnecting…") }
+                    continue
+                }
+                switch job.status {
+                case "FINISHED":
+                    phase = .done
+                    Haptics.notify(.success)
+                    return
+                case "FAILED", "CANCELLED":
+                    // The plugin's real reason (unsupported URL, bad fetchDir…) rides job.error.
+                    let reason = (job.error?.isEmpty == false) ? job.error! : "The server job \(job.status.lowercased())."
+                    phase = .failed(reason)
+                    Haptics.notify(.error)
+                    return
+                default:
+                    let pct = job.progress.flatMap { $0 >= 0 ? $0 : nil }
+                    phase = .running(progress: pct,
+                                     note: pct == nil ? "Downloading on the server…"
+                                                      : "Downloading on the server — \(Int((pct ?? 0) * 100))%")
+                }
+            }
         }
     }
 }

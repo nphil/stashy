@@ -596,3 +596,68 @@ class TestLoudnessParse(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFetchHelpers(unittest.TestCase):
+    """v0.4.0 'Fetch URL to Library' — the pure helpers the fetch task leans on."""
+
+    # --- progress-template parsing -------------------------------------------------
+    def test_progress_line_parses_fraction(self):
+        self.assertAlmostEqual(sc._parse_fetch_progress("stashy-dl 50 200"), 0.25)
+
+    def test_progress_line_clamps_over_100(self):
+        self.assertEqual(sc._parse_fetch_progress("stashy-dl 300 200"), 1.0)
+
+    def test_progress_line_unknown_total_is_none(self):
+        self.assertIsNone(sc._parse_fetch_progress("stashy-dl 12345 NA"))
+
+    def test_progress_line_foreign_lines_are_none(self):
+        self.assertIsNone(sc._parse_fetch_progress("[download] Destination: /x/y.mp4"))
+        self.assertIsNone(sc._parse_fetch_progress("stashy-dl garbage"))
+        self.assertIsNone(sc._parse_fetch_progress("stashy-dl 1 2 3"))
+
+    def test_progress_line_zero_total_is_none(self):
+        self.assertIsNone(sc._parse_fetch_progress("stashy-dl 0 0"))
+
+    # --- Content-Disposition parsing ----------------------------------------------
+    def test_cd_plain_filename(self):
+        self.assertEqual(sc._cd_filename('attachment; filename="movie.mp4"'), "movie.mp4")
+
+    def test_cd_rfc5987_wins_and_unquotes(self):
+        header = "attachment; filename=\"fallback.mp4\"; filename*=UTF-8''sp%C3%A9cial%20cut.mp4"
+        self.assertEqual(sc._cd_filename(header), "spécial cut.mp4")
+
+    def test_cd_strips_path_components(self):
+        self.assertEqual(sc._cd_filename('attachment; filename="../../etc/passwd"'), "passwd")
+        self.assertEqual(sc._cd_filename('attachment; filename="C:\\evil\\name.mp4"'), "name.mp4")
+
+    def test_cd_absent_or_empty_is_none(self):
+        self.assertIsNone(sc._cd_filename(None))
+        self.assertIsNone(sc._cd_filename("attachment"))
+        self.assertIsNone(sc._cd_filename('attachment; filename=""'))
+
+    # --- destination-folder resolution ---------------------------------------------
+    def test_fetch_dir_defaults_to_first_library_subdir(self):
+        self.assertEqual(sc._fetch_dir({}, ["/data/media", "/data/other"]),
+                         os.path.join("/data/media", sc.FETCH_SUBDIR))
+
+    def test_fetch_dir_honours_setting_inside_library(self):
+        self.assertEqual(sc._fetch_dir({"fetchDir": "/data/media/incoming/"}, ["/data/media"]),
+                         "/data/media/incoming")
+
+    def test_fetch_dir_setting_outside_library_raises(self):
+        with self.assertRaises(RuntimeError):
+            sc._fetch_dir({"fetchDir": "/tmp/elsewhere"}, ["/data/media"])
+
+    def test_fetch_dir_prefix_confusion_rejected(self):
+        # /data/media-two is NOT inside /data/media — the boundary must be a path separator.
+        with self.assertRaises(RuntimeError):
+            sc._fetch_dir({"fetchDir": "/data/media-two/in"}, ["/data/media"])
+
+    def test_fetch_dir_no_libraries_no_setting_raises(self):
+        with self.assertRaises(RuntimeError):
+            sc._fetch_dir({}, [])
+
+    def test_fetch_dir_setting_with_no_libraries_is_trusted(self):
+        # Library list unavailable (query shape change) — trust the explicit setting.
+        self.assertEqual(sc._fetch_dir({"fetchDir": "/data/media/in"}, []), "/data/media/in")
