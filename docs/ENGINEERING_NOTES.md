@@ -1631,6 +1631,15 @@ Newest first.
     wifi); away they fail visibly on the card. Known gap, deliberate: a popup that itself needs a
     HUMAN interaction (second button/captcha INSIDE the popup) dead-ends invisibly — iterate only
     if the owner actually hits one.
+  - **DRM is a hard wall, by design** (plugin 0.5.3): once Origin+cookies get yt-dlp PAST the 403,
+    some hosts return a SAMPLE-AES / FairPlay / Widevine manifest and yt-dlp reports "This format
+    is DRM protected". The bytes are encrypted with a key only a licensed player obtains — no
+    header/cookie/format tweak downloads them, and the plugin does NOT attempt a bypass
+    (`_is_drm_error` just surfaces an honest card message). Not a bug to reopen; DRM-protected
+    streams are out of scope. The resolver still works on the many hosts that serve clear HLS/MP4.
+  - **Resolver chrome is deliberately minimal** (owner 2026-08-09: "treat it as a real browser,
+    immersive fullscreen"): the top instruction banner was removed — `‹ › + Send + reload` in one
+    thin `.bottomBar` group over a full-height WKWebView is the whole UI.
   - **Packaging rule bites here**: `stash-plugin/**` pushes don't trigger CI, but the zip is FLAT
     (yml + py at zip root) and `index.yml`'s sha256 must match byte-for-byte — rebuild both together
     (`cd stashy-companion && zip -X ../stashy-companion.zip stashy-companion.yml stashy_companion.py`).

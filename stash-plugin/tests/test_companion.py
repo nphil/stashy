@@ -701,6 +701,17 @@ class TestFetchHelpers(unittest.TestCase):
         with self.assertRaises(ValueError):
             sc._netscape_jar(json.dumps({"name": "sid"}))
 
+    # --- DRM detection (v0.5.3: honest card message, no bypass) ----------------------
+    def test_drm_error_detected(self):
+        self.assertTrue(sc._is_drm_error(
+            "[hlsnative] Downloading m3u8 manifest / ERROR: This format is DRM protected; Try …"))
+        self.assertTrue(sc._is_drm_error("video is drm-protected"))
+
+    def test_non_drm_error_not_flagged(self):
+        self.assertFalse(sc._is_drm_error("HTTP Error 403: Forbidden"))
+        self.assertFalse(sc._is_drm_error(""))
+        self.assertFalse(sc._is_drm_error(None))
+
 
 class TestFetchStatusAndDelete(unittest.TestCase):
     """v0.5.0 — the live-status prune policy and the card-delete path jail."""

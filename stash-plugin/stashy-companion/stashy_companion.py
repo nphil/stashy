@@ -3096,6 +3096,15 @@ def _delete_within(dest_dir, name):
     return removed
 
 
+def _is_drm_error(text):
+    """True when yt-dlp refused a stream because it's DRM-protected (FairPlay / Widevine /
+    PlayReady / SAMPLE-AES). This is a hard wall — the bytes are encrypted with a key only a
+    licensed player can obtain; no header, cookie or format tweak downloads them, and the plugin
+    does not try to. We only detect it to show the card an honest reason instead of a raw dump."""
+    low = (text or "").lower()
+    return "drm protected" in low or "drm-protected" in low
+
+
 def _netscape_jar(raw):
     """Netscape cookie-file text from the resolver's structured cookie list (JSON: [{name, value,
     domain, path}]). A real jar — vs a flattened Cookie header — keeps each cookie's own domain, so
@@ -3333,6 +3342,11 @@ def run_fetch(stash, args, settings):
 
     if rc != 0:
         blob = " / ".join(tail[-5:])
+        if _is_drm_error(blob):
+            msg = ("This video is DRM-protected — the site encrypts the stream so only its own "
+                   "player can decode it, and it can't be downloaded.")
+            _update_fetch_status(fetch_id, status="failed", error=msg)
+            raise RuntimeError(msg)
         if "unsupported url" in blob.lower():
             log_info("yt-dlp does not recognise this URL — trying a direct download")
             _update_fetch_status(fetch_id, status="downloading", filename=None)
