@@ -565,19 +565,25 @@ blocks, both first-class iOS APIs:
 
 ## Downloads & offline
 
-- **★ Fetch URL → Stash server (owner-requested 2026-08-09). Slice 1 SHIPPED**: paste a link in the
-  app (Downloads → link button) → companion plugin ≥0.4.0 downloads it ON THE SERVER straight into a
-  library folder (yt-dlp: direct links + page links, auto-installed into the plugin's persistent
-  `cache/`; plain-HTTP fallback) and queues a scan. Live job progress in the sheet; the phone never
-  carries the bytes. Planned follow-up slices, in order:
-  1. **In-app resolver for stubborn hosts** — open the page in a `WKWebView`, the owner taps the
-     host's download button (captchas/waits solved by a human), `WKDownloadDelegate` intercepts the
-     real file response, and the app sends the RESOLVED URL + cookies/Referer/UA to the plugin.
-     Caveat to design for: hosts that sign URLs by IP work at home (phone and server share the public
-     IP) but not away — fall back to phone-side download then.
-  2. **Share-sheet extension** — Share from Safari → Stashy → fetch starts. Same second-target
-     mechanics as the Live Activity extension.
-  3. Only if a host the owner actually uses defeats both: JDownloader-headless integration.
+- **★ Fetch URL → Stash server (owner-requested 2026-08-09). v2 SHIPPED v1.0.361 + plugin 0.5.0**:
+  paste a link in the app (Downloads → link button) → companion plugin downloads it ON THE SERVER
+  straight into a library folder (yt-dlp: direct links + page links, auto-installed into the plugin's
+  persistent `cache/`; plain-HTTP fallback) and queues a scan. The phone never carries the bytes.
+  v2 (owner: "critical feature") added:
+  - **In-app resolver for button-gated hosts** (`LinkResolverView`): open the page in a `WKWebView`,
+    the owner taps the host's own download button (captchas/waits solved by a human),
+    `WKDownloadDelegate` intercepts the real file response and the app sends the RESOLVED URL +
+    cookies/Referer/UA to the plugin, which replays them via `--add-header`. New-window
+    (`target="_blank"`) download buttons are routed back into the same web view (WKUIDelegate).
+    Known caveat: hosts that sign URLs by IP work at home (phone/server share egress IP), can fail
+    away — the failure shows on the card.
+  - **Live server-download cards in Downloads** ("On Server" section, `ServerFetchStore`): filename /
+    bytes / speed / ETA live-synced at 1 Hz from the plugin's served `fetch-status.json`, with
+    pause (stopJob, `.part` kept) / resume (resubmit same fetch_id → byte-exact continue) / cancel
+    (partial deleted) / remove. Queue multiple — Stash's job queue is serial and drains in order.
+    The fetch sheet is submit-only, per the owner.
+  Remaining slices (unbuilt): share-sheet extension (Share from Safari → fetch); JDownloader-headless
+  only if a host the owner actually uses defeats both.
 
 - **★ Resumable (checkpointed) on-device transcode — owner-requested 2026-07-04. ✅ SHIPPED the same day**
   (`f421ecd`/`d3c0108`/`960ac90`: `Services/FFmpegResumableTranscoder.swift`, wired into `DownloadManager`

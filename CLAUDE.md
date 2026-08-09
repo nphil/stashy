@@ -204,8 +204,14 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.352** (`f786b8d`, glasses v2 + review polish). The -3000 investigation is
+- Latest release: **v1.0.361** (`ed68a3a`, fetch v2 + plugin 0.5.0). The -3000 investigation is
   closed and must not be reopened.
+- **Fetch URL → server (v2) SHIPPED** (v1.0.359–361 + plugin 0.5.0): Downloads → link button submits a
+  URL; the SERVER downloads it (yt-dlp) into the library and scans it in. Live "On Server" cards
+  (bytes/speed/ETA off served `fetch-status.json`) with pause/resume (byte-exact via `.part` +
+  same fetch_id resubmit)/cancel/queue-multiple; an in-app WKWebView resolver captures the real file
+  URL + cookies on button-gated hosts. Deep reference + landmines: ENGINEERING_NOTES §8 (fetch entry).
+  Plugin zip + index.yml sha256 MUST be rebuilt together (`stash-plugin/**` pushes don't trigger CI).
 - **What works:** app open → ~100 MB/s, resumes byte-exact through crashes, relaunches and suspension.
   Backgrounded → keeps going indefinitely (keep-alive, ON by default since v1.0.340). Downloads run
   **one at a time** with Start All / Pause Queue in the Downloads toolbar; a queued card's play button

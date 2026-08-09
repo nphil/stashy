@@ -1561,6 +1561,46 @@ Newest first.
   rebuild (seek-reinit / quality / fallback). Persisted **"Mute when slowed"** toggle in the same menu
   (mute vs. pitch-corrected audio below 1×; `slowMute` is a separate output-volume gate so it never
   clobbers the user's volume). Fully-decoupled *normal-speed audio under slow video* stays deferred.
+- **Fetch URL → server pipeline shipped (v1.0.359–361 + plugin 0.4.0→0.5.0, 2026-08-09).** Phone
+  submits intent; the SERVER carries the bytes. The moving parts and their sharp edges:
+  - **Plugin (`run_fetch`)**: yt-dlp zipapp self-bootstraps into the plugin's persistent `cache/`
+    (survives plugin updates; "Update Fetch Engine" task refreshes it). Destination = `fetchDir`
+    setting, must be INSIDE a Stash library (validated) — default `<first lib>/stashy-fetch`. On
+    finish it queues a `metadataScan` of just that folder. URLs yt-dlp refuses fall back to a plain
+    streamed HTTP GET. Failed tasks print `{"error": ...}` on stdout so `Job.error` carries the real
+    reason. **yt-dlp's `-o` is a TEMPLATE**: literal `%` in the dest dir or a filename hint must be
+    doubled on the command line only (filesystem checks use the raw path) or the parser eats it.
+  - **Live telemetry**: Stash's job API can't carry bytes/speed, so the plugin writes a served
+    `cache/fetch-status.json` (~1 Hz, flock + atomic replace, pruned 7 d/50 entries) keyed by the
+    app-generated `fetch_id`; parsed from yt-dlp's `--progress-template` (4 fields, per-field NA
+    tolerance). The app merges it over job status in `ServerFetchStore.pollOnce` — job status is
+    authoritative for PHASE, the served file for NUMBERS, and a served "done"/"failed" also closes
+    the hole where Stash GC'd the finished job.
+  - **Pause/resume semantics**: pause = `stopJob`. The plugin process is KILLED by Stash, so the
+    yt-dlp child holds `PR_SET_PDEATHSIG` (`_LIBC.prctl`, resolved at module import — an import
+    inside `preexec_fn` runs between fork and exec and can deadlock on the import lock) → child dies
+    too, the `.part` STAYS. Resume = resubmit the SAME `fetch_id` + URL + headers → yt-dlp continues
+    the `.part` byte-exact (a filename hint whose `.part` exists keeps its name; a completed same
+    name dedups with `(n)`). Cancel additionally runs the `fetch_delete` task (realpath-jailed to the
+    fetch folder). Removing a DONE card passes `entry_only=1` — without it the plugin resolves the
+    recorded filename and would delete LIBRARY content.
+  - **App (`ServerFetchStore`, "On Server" cards in Downloads)**: @MainActor @Observable singleton,
+    persisted in UserDefaults; 1 Hz poll only while Downloads is visible, backoff ×1.7 cap 10 s,
+    never self-terminates (house rule). **Every verb re-resolves the item index by id AFTER each
+    `await`** — MainActor reentrancy means a cancel tap mid-request shrinks the array and a
+    pre-suspension index traps. Queueing = just submit again; Stash's job queue is serial.
+  - **Resolver (`LinkResolverView`) for button-gated hosts**: WKWebView (non-persistent store, fixed
+    Safari UA shared with the server fetch) + `WKDownloadDelegate`. Capture point =
+    `download(_:decideDestinationUsing:)` — `response.url` is the post-redirect signed file URL;
+    cookies filtered by domain suffix + Referer + UA are handed to the plugin (`--add-header`);
+    `completionHandler(nil)` cancels the local download. Both `decidePolicyFor` decisionHandlers are
+    `@escaping @MainActor @Sendable` (SDK-exact — verified via doc-JSON). A WKUIDelegate
+    `createWebViewWith` witness loads `target="_blank"` requests back into the same web view and
+    returns nil — without it, new-tab download buttons do NOTHING. IP-signed URLs work where phone
+    and server share egress (home wifi); away they fail visibly on the card.
+  - **Packaging rule bites here**: `stash-plugin/**` pushes don't trigger CI, but the zip is FLAT
+    (yml + py at zip root) and `index.yml`'s sha256 must match byte-for-byte — rebuild both together
+    (`cd stashy-companion && zip -X ../stashy-companion.zip stashy-companion.yml stashy_companion.py`).
 
 ## 9. XR glasses (Viture Pro) — external-display mode, remote, and the hosting rules
 
