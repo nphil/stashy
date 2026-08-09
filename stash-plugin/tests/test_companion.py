@@ -601,23 +601,33 @@ if __name__ == "__main__":
 class TestFetchHelpers(unittest.TestCase):
     """v0.4.0 'Fetch URL to Library' — the pure helpers the fetch task leans on."""
 
-    # --- progress-template parsing -------------------------------------------------
-    def test_progress_line_parses_fraction(self):
-        self.assertAlmostEqual(sc._parse_fetch_progress("stashy-dl 50 200"), 0.25)
+    # --- progress-template parsing (v0.5.0: downloaded total speed eta) ---------------
+    def test_progress_line_parses_all_fields(self):
+        out = sc._parse_fetch_progress("stashy-dl 50 200 1048576 12")
+        self.assertAlmostEqual(out["frac"], 0.25)
+        self.assertEqual(out["done"], 50)
+        self.assertEqual(out["total"], 200)
+        self.assertEqual(out["speed"], 1048576)
+        self.assertEqual(out["eta"], 12)
 
     def test_progress_line_clamps_over_100(self):
-        self.assertEqual(sc._parse_fetch_progress("stashy-dl 300 200"), 1.0)
+        self.assertEqual(sc._parse_fetch_progress("stashy-dl 300 200 NA NA")["frac"], 1.0)
 
-    def test_progress_line_unknown_total_is_none(self):
-        self.assertIsNone(sc._parse_fetch_progress("stashy-dl 12345 NA"))
+    def test_progress_line_unknown_total_still_reports_bytes_and_speed(self):
+        out = sc._parse_fetch_progress("stashy-dl 12345 NA 5000 NA")
+        self.assertNotIn("frac", out)
+        self.assertNotIn("total", out)
+        self.assertEqual(out["done"], 12345)
+        self.assertEqual(out["speed"], 5000)
 
     def test_progress_line_foreign_lines_are_none(self):
         self.assertIsNone(sc._parse_fetch_progress("[download] Destination: /x/y.mp4"))
         self.assertIsNone(sc._parse_fetch_progress("stashy-dl garbage"))
-        self.assertIsNone(sc._parse_fetch_progress("stashy-dl 1 2 3"))
+        self.assertIsNone(sc._parse_fetch_progress("stashy-dl 1 2"))          # old 2-field shape
+        self.assertIsNone(sc._parse_fetch_progress("stashy-dl NA NA NA NA"))  # no bytes at all
 
-    def test_progress_line_zero_total_is_none(self):
-        self.assertIsNone(sc._parse_fetch_progress("stashy-dl 0 0"))
+    def test_progress_line_zero_total_has_no_frac(self):
+        self.assertNotIn("frac", sc._parse_fetch_progress("stashy-dl 0 0 NA NA"))
 
     # --- Content-Disposition parsing ----------------------------------------------
     def test_cd_plain_filename(self):
@@ -661,3 +671,43 @@ class TestFetchHelpers(unittest.TestCase):
     def test_fetch_dir_setting_with_no_libraries_is_trusted(self):
         # Library list unavailable (query shape change) — trust the explicit setting.
         self.assertEqual(sc._fetch_dir({"fetchDir": "/data/media/in"}, []), "/data/media/in")
+
+
+class TestFetchStatusAndDelete(unittest.TestCase):
+    """v0.5.0 — the live-status prune policy and the card-delete path jail."""
+
+    def test_prune_drops_old_entries(self):
+        now = 1_000_000_000
+        entries = {"fresh": {"updated": now - 60}, "stale": {"updated": now - 8 * 86400}}
+        kept = sc._prune_fetch_status(entries, now=now)
+        self.assertIn("fresh", kept)
+        self.assertNotIn("stale", kept)
+
+    def test_prune_caps_count_keeping_newest(self):
+        now = 1_000_000_000
+        entries = {f"e{i}": {"updated": now - i} for i in range(sc.FETCH_STATUS_KEEP + 10)}
+        kept = sc._prune_fetch_status(entries, now=now)
+        self.assertEqual(len(kept), sc.FETCH_STATUS_KEEP)
+        self.assertIn("e0", kept)                                  # newest survives
+        self.assertNotIn(f"e{sc.FETCH_STATUS_KEEP + 9}", kept)     # oldest dropped
+
+    def test_prune_drops_malformed_entries(self):
+        kept = sc._prune_fetch_status({"bad": "not-a-dict"}, now=1_000_000_000)
+        self.assertEqual(kept, {})
+
+    def test_delete_within_removes_file_and_part(self):
+        with tempfile.TemporaryDirectory() as d:
+            for n in ("a.mp4", "a.mp4.part"):
+                open(os.path.join(d, n), "w").write("x")
+            self.assertTrue(sc._delete_within(d, "a.mp4"))
+            self.assertEqual([f for f in os.listdir(d)], [])
+
+    def test_delete_within_rejects_escape(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(RuntimeError):
+                sc._delete_within(d, "../../etc/passwd")
+
+    def test_delete_within_missing_is_false(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertFalse(sc._delete_within(d, "ghost.mp4"))
+            self.assertFalse(sc._delete_within(d, ""))

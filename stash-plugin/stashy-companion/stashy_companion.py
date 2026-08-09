@@ -2918,19 +2918,37 @@ def _fetch_dir(settings, library_paths):
 
 
 def _parse_fetch_progress(line):
-    """'stashy-dl <downloaded> <total>' → fraction 0..1, else None (unknown total, or not ours)."""
+    """'stashy-dl <downloaded> <total> <speed> <eta>' → dict {done, total?, speed?, eta?, frac?},
+    else None (not one of ours). Individual "NA" fields simply come back absent, so an unknown-size
+    host still reports bytes + speed."""
     if not line.startswith(_FETCH_PROGRESS_PREFIX):
         return None
     parts = line[len(_FETCH_PROGRESS_PREFIX):].split()
-    if len(parts) != 2:
+    if len(parts) != 4:
         return None
-    try:
-        done, total = float(parts[0]), float(parts[1])
-    except ValueError:
-        return None   # "NA" when the host reports no length → indeterminate
-    if total <= 0 or done < 0:
+
+    def num(s):
+        try:
+            v = float(s)
+        except ValueError:
+            return None
+        return v if v >= 0 else None
+
+    done = num(parts[0])
+    if done is None:
         return None
-    return min(1.0, done / total)
+    out = {"done": done}
+    total = num(parts[1])
+    if total and total > 0:
+        out["total"] = total
+        out["frac"] = min(1.0, done / total)
+    speed = num(parts[2])
+    if speed is not None:
+        out["speed"] = speed
+    eta = num(parts[3])
+    if eta is not None:
+        out["eta"] = eta
+    return out
 
 
 def _cd_filename(header):
@@ -2955,10 +2973,127 @@ def _cd_filename(header):
     return name or None
 
 
-def _plain_fetch(url, dest_dir):
+# --- live status side-channel -------------------------------------------------------------------
+# The app's Downloads screen shows server fetches as live cards (speed / bytes / filename), which
+# Job.progress alone can't carry. Each running fetch maintains one entry in the served
+# cache/fetch-status.json, keyed by the app-supplied fetch_id — same locked-served-file pattern as
+# playability.json. Entries are pruned by age/count, so a killed job's stale entry ages out.
+
+FETCH_STATUS_KEEP = 50
+FETCH_STATUS_MAX_AGE = 7 * 86400
+
+
+def _fetch_status_path():
+    return os.path.join(CACHE_DIR, "fetch-status.json")
+
+
+@contextlib.contextmanager
+def _fetch_status_lock():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    lockf = open(_fetch_status_path() + ".lock", "w")
+    try:
+        if fcntl:
+            try:
+                fcntl.flock(lockf, fcntl.LOCK_EX)
+            except OSError:
+                pass
+        yield
+    finally:
+        try:
+            if fcntl:
+                fcntl.flock(lockf, fcntl.LOCK_UN)
+        finally:
+            lockf.close()
+
+
+def _load_fetch_status():
+    try:
+        with open(_fetch_status_path()) as fh:
+            data = json.load(fh)
+        entries = data.get("entries")
+        return entries if isinstance(entries, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _prune_fetch_status(entries, now=None):
+    """Age out dead entries and cap the count (newest win). Pure — unit-tested."""
+    now = time.time() if now is None else now
+    kept = {k: v for k, v in entries.items()
+            if isinstance(v, dict) and now - (v.get("updated") or 0) <= FETCH_STATUS_MAX_AGE}
+    if len(kept) > FETCH_STATUS_KEEP:
+        newest = sorted(kept, key=lambda k: kept[k].get("updated") or 0, reverse=True)[:FETCH_STATUS_KEEP]
+        kept = {k: kept[k] for k in newest}
+    return kept
+
+
+def _update_fetch_status(fetch_id, **fields):
+    """Merge `fields` into this fetch's entry (under the lock) and stamp `updated`."""
+    with _fetch_status_lock():
+        entries = _load_fetch_status()
+        entry = entries.get(fetch_id) or {}
+        entry.update(fields)
+        entry["updated"] = int(time.time())
+        entries[fetch_id] = entry
+        entries = _prune_fetch_status(entries)
+        blob = {"generated": int(time.time()), "entries": entries}
+        tmp = _fetch_status_path() + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(blob, fh)
+        os.replace(tmp, _fetch_status_path())
+
+
+def _remove_fetch_status(fetch_id):
+    with _fetch_status_lock():
+        entries = _load_fetch_status()
+        if fetch_id in entries:
+            del entries[fetch_id]
+            blob = {"generated": int(time.time()), "entries": entries}
+            tmp = _fetch_status_path() + ".tmp"
+            with open(tmp, "w") as fh:
+                json.dump(blob, fh)
+            os.replace(tmp, _fetch_status_path())
+
+
+def _pdeathsig():
+    """preexec_fn: SIGTERM the yt-dlp child the moment this plugin process dies. Stash's stopJob
+    KILLS the plugin, and without this the child kept downloading, unstoppable, to a file nothing
+    would scan. With it, the app's Cancel/Pause (= stopJob) is clean: child dies, the .part stays,
+    and a resubmit of the same URL resumes from it. musl and glibc both export prctl; if the call
+    is unavailable we silently do without (the old orphan behaviour, no crash)."""
+    try:
+        import ctypes
+        import signal as _signal
+        ctypes.CDLL(None, use_errno=True).prctl(1, _signal.SIGTERM, 0, 0, 0)   # PR_SET_PDEATHSIG
+    except Exception:
+        pass
+
+
+def _delete_within(dest_dir, name):
+    """Delete dest_dir/name with a realpath jail — the name came over the wire, so it must not be
+    able to escape the fetch folder. Returns True if something was removed."""
+    if not name:
+        return False
+    root = os.path.realpath(dest_dir)
+    target = os.path.realpath(os.path.join(dest_dir, name))
+    if target != root and not target.startswith(root + os.sep):
+        raise RuntimeError("refusing to delete outside the fetch folder: {}".format(name))
+    removed = False
+    for path in (target, target + ".part"):
+        if os.path.isfile(path):
+            with contextlib.suppress(OSError):
+                os.unlink(path)
+                removed = True
+    return removed
+
+
+def _plain_fetch(url, dest_dir, headers=None):
     """Fallback for URLs yt-dlp refuses (odd hosts, plain non-media files): a streamed HTTP
-    download named from Content-Disposition or the final URL. Returns the saved path."""
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (stashy-companion)"})
+    download named from Content-Disposition or the final URL. Returns the saved path.
+    `headers` (resolver-captured Cookie/Referer/User-Agent) are passed through verbatim."""
+    merged = {"User-Agent": "Mozilla/5.0 (stashy-companion)"}
+    merged.update(headers or {})
+    req = urllib.request.Request(url, headers=merged)
     with urllib.request.urlopen(req, timeout=60) as resp:
         name = _cd_filename(resp.headers.get("Content-Disposition"))
         if not name:
@@ -3007,86 +3142,186 @@ def run_fetch(stash, args, settings):
     if scheme not in ("http", "https"):
         raise RuntimeError("only http(s) URLs are supported (got '{}')".format(scheme or "none"))
 
+    # App-supplied correlation id for the live status card; a URL digest when absent so a fetch
+    # kicked from the Stash UI still gets an entry. Resubmitting the same fetch_id REUSES the entry —
+    # that is what makes pause (stopJob) → resubmit read as one continuing download in the app.
+    fetch_id = (args.get("fetch_id") or "").strip() or \
+        __import__("hashlib").sha256(url.encode()).hexdigest()[:16]
+
+    # Resolver-captured headers (Cookie / Referer / User-Agent): what makes a host's signed,
+    # session-bound file URL valid from the server. args_map values are strings, so this arrives as
+    # a JSON object string; accept a dict too for robustness.
+    raw_headers = args.get("headers")
+    headers = {}
+    if isinstance(raw_headers, dict):
+        headers = {str(k): str(v) for k, v in raw_headers.items()}
+    elif isinstance(raw_headers, str) and raw_headers.strip():
+        try:
+            parsed = json.loads(raw_headers)
+            if isinstance(parsed, dict):
+                headers = {str(k): str(v) for k, v in parsed.items()}
+        except ValueError:
+            log_warn("could not parse headers JSON — fetching without them")
+
     dest_dir = _fetch_dir(settings, _library_paths(stash))
     os.makedirs(dest_dir, exist_ok=True)
-    # Sweep stale .part clutter from a previously killed job. The scan ignores .part (wrong
-    # extension), so this is tidiness, not correctness.
     cutoff = time.time() - 2 * 86400
     for f in os.listdir(dest_dir):
         if f.endswith(".part"):
-            p = os.path.join(dest_dir, f)
+            fp = os.path.join(dest_dir, f)
             with contextlib.suppress(OSError):
-                if os.path.getmtime(p) < cutoff:
-                    os.unlink(p)
+                if os.path.getmtime(fp) < cutoff:
+                    os.unlink(fp)
 
     log_info("fetching {} → {}".format(url, dest_dir))
+    _update_fetch_status(fetch_id, url=url, status="starting", downloaded=0, dest_dir=dest_dir)
     ytdlp = _ensure_ytdlp()
     log_progress(0.05)
     before = time.time()
+
+    # Resolver filename hint (the host's own suggested name) wins over the title template. If a
+    # .part for that name exists this is a RESUME and the name must stay identical; a completed
+    # file of the same name dedups with (n).
+    out_template = os.path.join(dest_dir, "%(title).180B [%(id).32B].%(ext)s")
+    hint = os.path.basename((args.get("filename") or "").strip().replace("\\", "/")).strip() or None
+    if hint:
+        target = os.path.join(dest_dir, hint)
+        if not os.path.exists(target + ".part") and os.path.exists(target):
+            base, ext = os.path.splitext(target)
+            n = 1
+            while os.path.exists(target):
+                target = "{} ({}){}".format(base, n, ext)
+                n += 1
+        out_template = target
 
     cmd = [
         sys.executable, ytdlp,
         "--no-playlist",
         "--newline",
-        "--windows-filenames",   # the library rides an SMB share on unRAID — keep names portable
+        "--windows-filenames",
         "--no-warnings",
-        # Machine-readable progress on stdout; %(a,b)s falls through to the estimate, "NA" if neither.
         "--progress-template",
         "download:" + _FETCH_PROGRESS_PREFIX
-        + "%(progress.downloaded_bytes)s %(progress.total_bytes,progress.total_bytes_estimate)s",
-        # [id] keeps re-fetches of the same title from colliding; .180B/.32B are BYTE truncations.
-        "-o", os.path.join(dest_dir, "%(title).180B [%(id).32B].%(ext)s"),
-        url,
+        + "%(progress.downloaded_bytes)s %(progress.total_bytes,progress.total_bytes_estimate)s"
+        + " %(progress.speed)s %(progress.eta)s",
+        "-o", out_template,
     ]
+    for k, v in headers.items():
+        cmd += ["--add-header", "{}:{}".format(k, v)]
+    cmd.append(url)
+
     tail = []
+    filename_seen = None
+    last_status_write = 0.0
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, errors="replace")   # a stray non-UTF-8 byte must not kill the job
+                                text=True, errors="replace", preexec_fn=_pdeathsig)
         for line in proc.stdout:
             line = line.strip()
             if not line:
                 continue
-            frac = _parse_fetch_progress(line)
-            if frac is not None:
-                log_progress(0.05 + 0.90 * frac)
+            prog = _parse_fetch_progress(line)
+            if prog is not None:
+                if "frac" in prog:
+                    log_progress(0.05 + 0.90 * prog["frac"])
+                now = time.time()
+                if now - last_status_write >= 1.0:   # 1 Hz is plenty for a phone card
+                    last_status_write = now
+                    _update_fetch_status(
+                        fetch_id, status="downloading",
+                        downloaded=int(prog.get("done") or 0),
+                        total=int(prog["total"]) if prog.get("total") else None,
+                        speed=int(prog["speed"]) if prog.get("speed") else None,
+                        eta=int(prog["eta"]) if prog.get("eta") is not None else None,
+                        filename=filename_seen)
                 continue
-            # Unknown-size hosts emit "stashy-dl <n> NA" every tick — progress spam, not diagnostics.
-            # Keep it out of the error tail or a mid-download failure's report is mostly noise.
             if line.startswith(_FETCH_PROGRESS_PREFIX):
-                continue
+                continue   # unparseable progress tick — not a diagnostic
             tail.append(line)
             if len(tail) > 12:
                 tail.pop(0)
-            if line.startswith("[download] Destination:") or line.startswith("[Merger]"):
+            if line.startswith("[download] Destination:"):
+                filename_seen = os.path.basename(line.split("Destination:", 1)[1].strip())
+                if filename_seen.endswith(".part"):
+                    filename_seen = filename_seen[:-5]
+                log_info(line)
+            elif line.startswith("[Merger]"):
                 log_info(line)
         proc.wait()
         rc = proc.returncode
     except OSError as e:
+        _update_fetch_status(fetch_id, status="failed", error="could not launch yt-dlp: {}".format(e))
         raise RuntimeError("could not launch yt-dlp: {}".format(e))
 
     if rc != 0:
         blob = " / ".join(tail[-5:])
         if "unsupported url" in blob.lower():
             log_info("yt-dlp does not recognise this URL — trying a direct download")
-            dest = _plain_fetch(url, dest_dir)
-            log_info("saved {} ({:,} bytes)".format(os.path.basename(dest), os.path.getsize(dest)))
+            _update_fetch_status(fetch_id, status="downloading", filename=None)
+            try:
+                dest = _plain_fetch(url, dest_dir, headers)
+            except Exception as e:
+                _update_fetch_status(fetch_id, status="failed", error=str(e))
+                raise
+            filename_seen = os.path.basename(dest)
+            log_info("saved {} ({:,} bytes)".format(filename_seen, os.path.getsize(dest)))
         else:
-            raise RuntimeError("yt-dlp failed: {}".format(blob or "exit {}".format(rc)))
+            reason = blob or "exit {}".format(rc)
+            _update_fetch_status(fetch_id, status="failed", error=reason)
+            raise RuntimeError("yt-dlp failed: {}".format(reason))
     else:
         got = [f for f in os.listdir(dest_dir)
                if not f.endswith(".part")
                and os.path.getmtime(os.path.join(dest_dir, f)) >= before - 1]
         for f in sorted(got):
             log_info("saved {} ({:,} bytes)".format(f, os.path.getsize(os.path.join(dest_dir, f))))
+        if got and not filename_seen:
+            filename_seen = sorted(got)[0]
 
-    # Scan JUST the fetch folder so the new file materialises as a scene (covers/sprites/phash per
-    # the server's scan settings). The auto-report hook then folds it into playability/thumbhash maps.
+    final_size = None
+    if filename_seen:
+        with contextlib.suppress(OSError):
+            final_size = os.path.getsize(os.path.join(dest_dir, filename_seen))
+
     log_progress(0.97)
     data = stash.call(
         "mutation Scan($input: ScanMetadataInput!) { metadataScan(input: $input) }",
         {"input": {"paths": [dest_dir]}})
     log_info("library scan queued (job {}) for {}".format(data.get("metadataScan"), dest_dir))
+    _update_fetch_status(fetch_id, status="done", filename=filename_seen,
+                         downloaded=final_size, total=final_size, speed=None, eta=None)
     log_progress(1.0)
+
+
+def run_fetch_delete(stash, args, settings):
+    """Delete a fetched file (and its .part) from the fetch folder — the app's card-delete — and drop
+    the status entry. `filename` comes over the wire, so deletion is realpath-jailed to the folder."""
+    fetch_id = (args.get("fetch_id") or "").strip()
+    # entry_only: retire the status entry WITHOUT touching disk — dismissing a finished card must
+    # never delete the file it fetched (that file is library content now).
+    if _truthy(args.get("entry_only")):
+        if fetch_id:
+            _remove_fetch_status(fetch_id)
+        log_info("status entry cleared for {} (file untouched)".format(fetch_id or "?"))
+        return
+    name = (args.get("filename") or "").strip()
+    entry = _load_fetch_status().get(fetch_id) or {}
+    name = name or (entry.get("filename") or "")
+    if fetch_id and not name:
+        # Nothing ever hit disk (queued/starting when cancelled) — just retire the card.
+        _remove_fetch_status(fetch_id)
+        log_info("no file recorded for {} — status entry cleared".format(fetch_id))
+        return
+    if not name:
+        raise RuntimeError("fetch_delete needs a fetch_id or filename")
+    dest_dir = entry.get("dest_dir") or _fetch_dir(settings, _library_paths(stash))
+    removed = _delete_within(dest_dir, name)
+    if fetch_id:
+        _remove_fetch_status(fetch_id)
+    if removed:
+        log_info("deleted {} from {}".format(name, dest_dir))
+    else:
+        log_info("nothing to delete for {} (already gone)".format(name))
 
 
 def run_fetch_update():
@@ -3161,6 +3396,8 @@ def main():
             run_fetch(stash, args, settings)
         elif mode == "fetch_update":
             run_fetch_update()
+        elif mode == "fetch_delete":
+            run_fetch_delete(stash, args, settings)
         elif mode == "purge":
             run_purge(settings)
         elif mode == "delete":

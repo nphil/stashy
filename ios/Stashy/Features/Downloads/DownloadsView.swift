@@ -11,22 +11,48 @@ struct DownloadsView: View {
     @Environment(DownloadManager.self) private var downloads
     @Environment(ThemeManager.self) private var themeManager
     @Environment(AppState.self) private var appState
+    @State private var serverFetches = ServerFetchStore.shared
     @State private var playing: DownloadItem?
     @State private var showFetchSheet = false
 
     var body: some View {
         Group {
-            if downloads.items.isEmpty {
+            if downloads.items.isEmpty && !serverFetches.hasItems {
                 ContentUnavailableView(
                     "No Downloads",
                     systemImage: "arrow.down.circle",
-                    description: Text("Download a scene from its ••• menu to see it here.")
+                    description: Text("Download a scene from its ••• menu, or fetch a link to the server with the link button above.")
                 )
             } else {
                 ScrollView {
                     LazyVStack(spacing: 12) {
                         if let error = downloads.liveActivityError {
                             LiveActivityDiagnostic(error: error)
+                        }
+                        if serverFetches.hasItems {
+                            // SERVER-side fetches — live-synced to the Stash job + the plugin's
+                            // served status file. No scene metadata yet by definition: these are
+                            // files becoming scenes.
+                            HStack {
+                                Text("On Server")
+                                    .font(.footnote.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 2)
+                            ForEach(serverFetches.items) { item in
+                                ServerFetchCard(item: item)
+                            }
+                            if !downloads.items.isEmpty {
+                                HStack {
+                                    Text("On This Phone")
+                                        .font(.footnote.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 2)
+                                .padding(.top, 6)
+                            }
                         }
                         ForEach(downloads.items) { item in
                             DownloadCard(item: item) { if item.scene != nil { playing = item } }
@@ -72,10 +98,17 @@ struct DownloadsView: View {
         .background(EnableSwipeBack())
         // Scene-pushed Downloads arrives with the tab bar auto-collapsed (Downloads TAB root keeps it full).
         .background(compact ? TabBarMinimizer() : nil)
-        .onAppear { downloads.pruneStopped(); downloads.downloadsScreenVisible = true }
+        .onAppear {
+            downloads.pruneStopped(); downloads.downloadsScreenVisible = true
+            serverFetches.configure(client: appState.client)
+            serverFetches.setVisible(true)
+        }
         // Leaving the screen wipes finished transcode diagnostics, so returning shows a clean card. An
         // in-flight transcode keeps its box.
-        .onDisappear { downloads.clearFinishedTranscodeLogs(); downloads.downloadsScreenVisible = false }
+        .onDisappear {
+            downloads.clearFinishedTranscodeLogs(); downloads.downloadsScreenVisible = false
+            serverFetches.setVisible(false)
+        }
         .fullScreenCover(item: $playing) { item in
             DownloadPlayerCover(item: item)
         }
@@ -88,28 +121,21 @@ struct DownloadsView: View {
     }
 }
 
-// MARK: - Fetch a link to the server
+// MARK: - Fetch a link to the server (submit-only — progress lives on the Downloads cards)
 
-/// Paste a URL → the SERVER downloads it straight into the Stash library and scans it in (companion
-/// plugin ≥0.4.0, "Fetch URL to Library"). The phone never carries the bytes — it submits the link,
-/// then watches the Stash job. Dismissing the sheet does NOT cancel the server-side fetch.
+/// Queue one or more URLs for the SERVER to download (companion plugin ≥0.5.0). This sheet only
+/// SUBMITS — each fetch becomes a live card in the Downloads list, so you can paste several links
+/// back-to-back and close the sheet. Page that needs its download button pressed? "Open in browser"
+/// runs the resolver: you tap the host's button, Stashy captures the real file URL + cookies and
+/// hands them to the server.
 private struct FetchLinkSheet: View {
-    let companion: StashCompanion
     @Environment(\.dismiss) private var dismiss
-    @Environment(ThemeManager.self) private var themeManager
-
-    private enum Phase: Equatable {
-        case idle
-        case running(progress: Double?, note: String)
-        case done
-        case failed(String)
-    }
-
+    @State private var serverFetches = ServerFetchStore.shared
     @State private var url = ""
-    @State private var phase: Phase = .idle
-    @State private var watcher: Task<Void, Never>?
-
-    private var isRunning: Bool { if case .running = phase { return true }; return false }
+    @State private var submitting = false
+    @State private var queuedCount = 0
+    @State private var lastError: String?
+    @State private var resolverURL: URL?
 
     var body: some View {
         NavigationStack {
@@ -120,47 +146,56 @@ private struct FetchLinkSheet: View {
                             .keyboardType(.URL)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
-                            .disabled(isRunning)
+                            .onSubmit { if urlLooksValid { submit() } }
                         if url.isEmpty {
                             Button {
-                                if let s = UIPasteboard.general.string { url = s.trimmingCharacters(in: .whitespacesAndNewlines) }
+                                if let s = UIPasteboard.general.string {
+                                    url = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                                }
                             } label: { Image(systemName: "doc.on.clipboard") }
                             .accessibilityLabel("Paste link")
-                        } else if !isRunning {
-                            Button { url = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
-                                .accessibilityLabel("Clear")
+                        } else {
+                            Button { url = "" } label: {
+                                Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                            }
+                            .accessibilityLabel("Clear")
                         }
                     }
+                    Button {
+                        submit()
+                    } label: {
+                        if submitting {
+                            HStack { Spacer(); ProgressView(); Spacer() }
+                        } else {
+                            Label("Fetch on Server", systemImage: "link.badge.plus")
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .disabled(!urlLooksValid || submitting)
                 } footer: {
-                    Text("The server downloads the link directly into your library — direct file links and most video pages both work. The phone only submits the URL, so you can close this or leave the app once it starts.")
+                    Text("The server downloads the link straight into your library — watch progress on the Downloads cards. Paste more links to queue them; they run one after another.")
                 }
 
-                switch phase {
-                case .idle:
-                    EmptyView()
-                case .running(let progress, let note):
-                    Section {
-                        VStack(alignment: .leading, spacing: 8) {
-                            if let progress {
-                                ProgressView(value: progress)
-                            } else {
-                                ProgressView()   // indeterminate: host didn't report a size
-                            }
-                            Text(note)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 4)
+                Section {
+                    Button {
+                        resolverURL = URL(string: url.trimmingCharacters(in: .whitespacesAndNewlines))
+                    } label: {
+                        Label("Open in browser to press the download button", systemImage: "safari")
                     }
-                case .done:
+                    .disabled(!urlLooksValid || submitting)
+                } footer: {
+                    Text("For sites that hide the file behind a download button, captcha or timer: tap the button yourself and Stashy captures the file link the site hands out — cookies and all — then fetches it on the server.")
+                }
+
+                if queuedCount > 0 {
                     Section {
-                        Label("Fetched — library scan queued. The scene appears once the scan finishes.",
-                              systemImage: "checkmark.circle.fill")
+                        Label("\(queuedCount) queued on the server", systemImage: "checkmark.circle.fill")
                             .foregroundStyle(.green)
                     }
-                case .failed(let message):
+                }
+                if let lastError {
                     Section {
-                        Label(message, systemImage: "exclamationmark.triangle.fill")
+                        Label(lastError, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
                             .font(.callout)
                     }
@@ -171,17 +206,14 @@ private struct FetchLinkSheet: View {
             .navigationTitle("Fetch to Server")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button(phase == .done ? "Done" : "Close") { dismiss() }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Fetch") { submit() }
-                        .fontWeight(.semibold)
-                        .disabled(isRunning || !urlLooksValid)
-                }
+                ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() } }
             }
         }
-        .onDisappear { watcher?.cancel() }   // stop POLLING only — the server job runs on
+        .fullScreenCover(item: $resolverURL) { pageURL in
+            LinkResolverSheet(startURL: pageURL) { fileURL, filename, headers in
+                submitResolved(fileURL, filename: filename, headers: headers)
+            }
+        }
     }
 
     private var urlLooksValid: Bool {
@@ -192,50 +224,188 @@ private struct FetchLinkSheet: View {
 
     private func submit() {
         let target = url.trimmingCharacters(in: .whitespacesAndNewlines)
-        phase = .running(progress: nil, note: "Submitting to the server…")
-        watcher?.cancel()
-        watcher = Task { @MainActor in
-            let jobID: String
+        submitting = true
+        lastError = nil
+        Task { @MainActor in
             do {
-                jobID = try await companion.requestFetch(url: target)
+                try await serverFetches.submit(url: target)
+                queuedCount += 1
+                url = ""
+                Haptics.notify(.success)
             } catch {
-                phase = .failed("Couldn't start the fetch: \(error.localizedDescription)")
-                return
+                lastError = "Couldn't queue: \(error.localizedDescription)"
+                Haptics.notify(.error)
             }
-            // Watch the job. Transient poll errors RETRY (a poll behind visible UI never
-            // self-terminates); only a terminal job status ends the loop.
-            var misses = 0
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1))
-                guard !Task.isCancelled else { return }
-                let job: CompanionJob
-                do {
-                    job = try await companion.job(jobID)
-                    misses = 0
-                } catch {
-                    misses += 1
-                    if misses > 3 { phase = .running(progress: nil, note: "Reconnecting…") }
-                    continue
+            submitting = false
+        }
+    }
+
+    private func submitResolved(_ fileURL: URL, filename: String, headers: [String: String]) {
+        lastError = nil
+        Task { @MainActor in
+            do {
+                try await serverFetches.submit(url: fileURL.absoluteString,
+                                               headers: headers, filenameHint: filename)
+                queuedCount += 1
+                url = ""
+                Haptics.notify(.success)
+            } catch {
+                lastError = "Couldn't queue the resolved link: \(error.localizedDescription)"
+                Haptics.notify(.error)
+            }
+        }
+    }
+}
+
+// URL is Identifiable-enough for fullScreenCover(item:) via its absoluteString.
+extension URL: @retroactive Identifiable {
+    public var id: String { absoluteString }
+}
+
+// MARK: - Server fetch card
+
+/// One server-side fetch, live-synced: filename (or host until known), progress, speed / bytes /
+/// ETA, and phase-appropriate controls. Deliberately metadata-free — this is a file becoming a
+/// scene, not a scene yet.
+private struct ServerFetchCard: View {
+    let item: ServerFetchStore.Item
+    @Environment(ThemeManager.self) private var themeManager
+    @State private var store = ServerFetchStore.shared
+    @State private var confirmCancel = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: symbol)
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(symbolColor)
+                    .frame(width: 34, height: 34)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.displayName)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(statusLine)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
                 }
-                switch job.status {
-                case "FINISHED":
-                    phase = .done
-                    Haptics.notify(.success)
-                    return
-                case "FAILED", "CANCELLED":
-                    // The plugin's real reason (unsupported URL, bad fetchDir…) rides job.error.
-                    let reason = (job.error?.isEmpty == false) ? job.error! : "The server job \(job.status.lowercased())."
-                    phase = .failed(reason)
-                    Haptics.notify(.error)
-                    return
-                default:
-                    let pct = job.progress.flatMap { $0 >= 0 ? $0 : nil }
-                    phase = .running(progress: pct,
-                                     note: pct == nil ? "Downloading on the server…"
-                                                      : "Downloading on the server — \(Int((pct ?? 0) * 100))%")
+                Spacer(minLength: 8)
+                controls
+            }
+            if item.phase == .running || item.phase == .paused {
+                ProgressView(value: fraction ?? 0, total: 1)
+                    .progressViewStyle(.linear)
+                    .tint(item.phase == .paused ? .secondary : themeManager.current.accentColor)
+                    .opacity(fraction == nil ? 0.35 : 1)   // dim = size unknown, still moving
+            }
+        }
+        .padding(12)
+        .background(themeManager.current.surfaceColor, in: RoundedRectangle(cornerRadius: 14))
+        .confirmationDialog("Cancel this server fetch?", isPresented: $confirmCancel, titleVisibility: .visible) {
+            Button("Cancel Fetch & Delete Partial", role: .destructive) {
+                Task { await store.cancel(item.id) }
+            }
+            Button("Keep Fetching", role: .cancel) {}
+        }
+    }
+
+    private var fraction: Double? {
+        guard let d = item.downloaded, let t = item.total, t > 0 else { return nil }
+        return min(1, Double(d) / Double(t))
+    }
+
+    private var symbol: String {
+        switch item.phase {
+        case .queued: return "clock"
+        case .running: return "arrow.down.circle"
+        case .paused: return "pause.circle"
+        case .done: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private var symbolColor: Color {
+        switch item.phase {
+        case .done: return .green
+        case .failed: return .orange
+        default: return .secondary
+        }
+    }
+
+    private var statusLine: String {
+        switch item.phase {
+        case .queued:
+            return "Queued on server"
+        case .running:
+            var parts: [String] = []
+            if let d = item.downloaded {
+                let done = ByteCountFormatter.string(fromByteCount: d, countStyle: .file)
+                if let t = item.total {
+                    parts.append("\(done) of \(ByteCountFormatter.string(fromByteCount: t, countStyle: .file))")
+                } else {
+                    parts.append(done)
+                }
+            }
+            if let s = item.speed, s > 0 {
+                parts.append("\(ByteCountFormatter.string(fromByteCount: s, countStyle: .file))/s")
+            }
+            if let e = item.eta, e > 0 { parts.append(Self.eta(e)) }
+            return parts.isEmpty ? "Downloading on server…" : parts.joined(separator: "  ·  ")
+        case .paused:
+            if let d = item.downloaded, d > 0 {
+                return "Paused — \(ByteCountFormatter.string(fromByteCount: d, countStyle: .file)) kept"
+            }
+            return "Paused"
+        case .done:
+            if let t = item.total, t > 0 {
+                return "In library once the scan finishes  ·  \(ByteCountFormatter.string(fromByteCount: t, countStyle: .file))"
+            }
+            return "In library once the scan finishes"
+        case .failed:
+            return item.error ?? "Failed"
+        }
+    }
+
+    @ViewBuilder
+    private var controls: some View {
+        HStack(spacing: 14) {
+            switch item.phase {
+            case .running, .queued:
+                Button { Task { await store.pause(item.id) } } label: {
+                    Image(systemName: "pause.fill")
+                }
+                Button { confirmCancel = true } label: {
+                    Image(systemName: "xmark")
+                }
+            case .paused:
+                Button { Task { await store.resume(item.id) } } label: {
+                    Image(systemName: "play.fill")
+                }
+                Button { confirmCancel = true } label: {
+                    Image(systemName: "trash")
+                }
+            case .failed:
+                Button { Task { await store.retry(item.id) } } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                Button { store.remove(item.id) } label: {
+                    Image(systemName: "xmark")
+                }
+            case .done:
+                Button { store.remove(item.id) } label: {
+                    Image(systemName: "xmark")
                 }
             }
         }
+        .buttonStyle(.plain)
+        .font(.system(size: 15, weight: .semibold))
+        .foregroundStyle(.secondary)
+    }
+
+    private static func eta(_ seconds: Int) -> String {
+        seconds >= 3600 ? String(format: "%d:%02d:%02d left", seconds / 3600, (seconds / 60) % 60, seconds % 60)
+                        : String(format: "%d:%02d left", seconds / 60, seconds % 60)
     }
 }
 

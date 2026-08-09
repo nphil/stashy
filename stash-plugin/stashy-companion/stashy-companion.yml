@@ -10,7 +10,7 @@ description: >-
   phone model), ffprobe-based codec + HDR stats, and auto-tagging of
   direct-play-ready scenes — capabilities vanilla Stash lacks. Output is served
   back to the app over Stash's own HTTP with real Job progress.
-version: 0.4.1
+version: 0.5.0
 url: https://github.com/nphil/stashy/tree/main/stash-plugin
 exec:
   - python
@@ -183,6 +183,10 @@ tasks:
     description: "Download a video from a URL straight into the Stash library and scan it in — the phone submits the link, the SERVER carries the bytes. Handles direct file links AND page links (yt-dlp: hundreds of sites + generic extraction; a plain-HTTP fallback for anything it refuses). Live Job progress; destination set by the 'Fetch destination folder' setting. Args (from runPluginTask): url. Run from this UI without args to self-check the fetch engine."
     defaultArgs:
       mode: fetch
+  - name: Delete Fetched File
+    description: "Delete one fetched file (and its partial) from the fetch folder and clear its live-status entry — invoked by the Stashy app's server-download cards. Args (from runPluginTask): fetch_id and/or filename. Deletion is jailed to the fetch folder."
+    defaultArgs:
+      mode: fetch_delete
   - name: Update Fetch Engine (yt-dlp)
     description: "Refresh the bundled yt-dlp (kept in the plugin's cache/, survives plugin updates; auto-installed on first fetch). Run when a site that used to resolve stops working — hosts change constantly and yt-dlp updates near-weekly."
     defaultArgs:

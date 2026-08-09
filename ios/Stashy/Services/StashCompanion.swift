@@ -36,6 +36,8 @@ struct StashCompanion: Sendable {
         /// v0.4.0: server-side URL fetch — the phone submits a link, the SERVER downloads it straight
         /// into the library and scans it in.
         case fetch        = "Fetch URL to Library"
+        /// v0.5.0: delete a fetched file (and its .part) from the fetch folder — the card-delete.
+        case fetchDelete  = "Delete Fetched File"
     }
 
     /// Output codecs the plugin can produce. HEVC = GPU (hevc_nvenc) — the default; AV1 = CPU (SVT-AV1),
@@ -89,11 +91,32 @@ struct StashCompanion: Sendable {
 
     /// Ask the SERVER to download `url` into the Stash library (yt-dlp: direct links and page links
     /// alike) and scan it in. Returns the Job id — poll `job(_:)`; the file lands as a new scene.
-    /// Requires companion plugin ≥0.4.0; an older plugin fails the job with "unknown mode: fetch",
-    /// which surfaces through the job's error string.
+    /// Requires companion plugin ≥0.4.0 (≥0.5.0 for fetchID/headers/filename and the live status
+    /// side-channel); an older plugin fails the job with "unknown mode", which rides the job error.
+    ///
+    /// `fetchID` keys the served `fetch-status.json` entry (live bytes/speed for the Downloads card)
+    /// and makes pause→resume read as ONE download. `headers` carry a resolver capture (Cookie /
+    /// Referer / User-Agent — what makes a host's signed URL valid from the server's IP); they cross
+    /// as a JSON string because `args` is string-valued. `filename` is the host's suggested name.
     @discardableResult
-    func requestFetch(url: String) async throws -> String {
-        try await run(.fetch, args: ["url": url])
+    func requestFetch(url: String, fetchID: String,
+                      headers: [String: String]? = nil, filename: String? = nil) async throws -> String {
+        var args = ["url": url, "fetch_id": fetchID]
+        if let headers, !headers.isEmpty,
+           let data = try? JSONSerialization.data(withJSONObject: headers),
+           let json = String(data: data, encoding: .utf8) {
+            args["headers"] = json
+        }
+        if let filename, !filename.isEmpty { args["filename"] = filename }
+        return try await run(.fetch, args: args)
+    }
+
+    /// Delete a fetched file (and its partial) from the server's fetch folder and clear its
+    /// status entry. Plugin ≥0.5.0.
+    func deleteFetched(fetchID: String, filename: String?) async throws {
+        var args = ["fetch_id": fetchID]
+        if let filename, !filename.isEmpty { args["filename"] = filename }
+        _ = try await run(.fetchDelete, args: args)
     }
 
     // MARK: - Transcode
