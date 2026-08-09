@@ -42,9 +42,11 @@ live `Job.progress` / log lines the app reads via findJob / loggingSubscribe.
 
 import base64
 import contextlib
+import ctypes
 import json
 import math
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -56,6 +58,13 @@ try:
     import fcntl   # POSIX advisory file lock (the plugin runs on the Linux Stash host)
 except ImportError:
     fcntl = None
+
+# Resolved at import time, NOT inside _pdeathsig: preexec_fn runs between fork and exec, where an
+# import can deadlock on the interpreter's import lock. None if libc can't be dlopen'd (non-POSIX).
+try:
+    _LIBC = ctypes.CDLL(None, use_errno=True)
+except Exception:
+    _LIBC = None
 
 PLUGIN_ID = "stashy-companion"
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -3062,9 +3071,8 @@ def _pdeathsig():
     and a resubmit of the same URL resumes from it. musl and glibc both export prctl; if the call
     is unavailable we silently do without (the old orphan behaviour, no crash)."""
     try:
-        import ctypes
-        import signal as _signal
-        ctypes.CDLL(None, use_errno=True).prctl(1, _signal.SIGTERM, 0, 0, 0)   # PR_SET_PDEATHSIG
+        if _LIBC is not None:
+            _LIBC.prctl(1, signal.SIGTERM, 0, 0, 0)   # PR_SET_PDEATHSIG
     except Exception:
         pass
 
@@ -3182,7 +3190,10 @@ def run_fetch(stash, args, settings):
     # Resolver filename hint (the host's own suggested name) wins over the title template. If a
     # .part for that name exists this is a RESUME and the name must stay identical; a completed
     # file of the same name dedups with (n).
-    out_template = os.path.join(dest_dir, "%(title).180B [%(id).32B].%(ext)s")
+    # yt-dlp's -o is a TEMPLATE — a literal % in a real path (dest_dir or a hint like "50%off.mp4")
+    # must be doubled or the template parser eats it. Escape ONLY what goes on the command line;
+    # every filesystem check here uses the raw path.
+    out_template = os.path.join(dest_dir.replace("%", "%%"), "%(title).180B [%(id).32B].%(ext)s")
     hint = os.path.basename((args.get("filename") or "").strip().replace("\\", "/")).strip() or None
     if hint:
         target = os.path.join(dest_dir, hint)
@@ -3192,7 +3203,7 @@ def run_fetch(stash, args, settings):
             while os.path.exists(target):
                 target = "{} ({}){}".format(base, n, ext)
                 n += 1
-        out_template = target
+        out_template = target.replace("%", "%%")
 
     cmd = [
         sys.executable, ytdlp,

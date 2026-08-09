@@ -180,7 +180,7 @@ tasks:
     defaultArgs:
       mode: untag
   - name: Fetch URL to Library
-    description: "Download a video from a URL straight into the Stash library and scan it in — the phone submits the link, the SERVER carries the bytes. Handles direct file links AND page links (yt-dlp: hundreds of sites + generic extraction; a plain-HTTP fallback for anything it refuses). Live Job progress; destination set by the 'Fetch destination folder' setting. Args (from runPluginTask): url. Run from this UI without args to self-check the fetch engine."
+    description: "Download a video from a URL straight into the Stash library and scan it in — the phone submits the link, the SERVER carries the bytes. Handles direct file links AND page links (yt-dlp: hundreds of sites + generic extraction; a plain-HTTP fallback for anything it refuses). Live Job progress + a served fetch-status.json entry the app's download cards read. Args (from runPluginTask): url; optional fetch_id (status key — resubmitting the same one RESUMES the .part), headers (JSON object: Cookie/Referer/User-Agent from the app's link resolver), filename (preferred output name). Run from this UI without args to self-check the fetch engine."
     defaultArgs:
       mode: fetch
   - name: Delete Fetched File
