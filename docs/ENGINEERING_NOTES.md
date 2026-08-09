@@ -1594,7 +1594,20 @@ Newest first.
     `download(_:decideDestinationUsing:)` — `response.url` is the post-redirect signed file URL;
     cookies filtered by domain suffix + Referer + UA are handed to the plugin (`--add-header`);
     `completionHandler(nil)` cancels the local download. Both `decidePolicyFor` decisionHandlers are
-    `@escaping @MainActor @Sendable` (SDK-exact — verified via doc-JSON). **Popups NEVER touch the
+    `@escaping @MainActor @Sendable` (SDK-exact — verified via doc-JSON). **Media plays ≠ media
+    captured** (v1.0.363; owner: "the video starts playing on the browser window"):
+    `canShowMIMEType` is TRUE for `video/*` and HLS, so the response policy needs an explicit
+    main-frame media-MIME check that routes them `.download` instead of letting the inline player
+    eat them (main-frame ONLY, or ad-iframe autoplay teasers fire it). **Streaming-only sites**: a
+    document-start user script in every frame (page world — it must hook the PAGE's `fetch`/XHR +
+    poll `<video>.currentSrc`) reports `.m3u8/.mpd/.mp4…` URLs through a `WKScriptMessageHandler`
+    (a WEAK relay object, never the coordinator — the content controller retains its handler
+    strongly and a shared popup configuration would cycle); the bottom-bar **Send Stream / Send
+    Page** button ships the best sniffed URL (newest MANIFEST preferred; filename hint only for
+    direct files — naming an HLS output `master.m3u8` would be wrong) or, with nothing sniffed, the
+    page URL for server-side yt-dlp extraction. Sniffed URLs clear on main-frame `didCommit`.
+    Plugin 0.5.1 guards the paired trap: `_plain_fetch` refuses `text/html` responses (a page
+    yt-dlp can't extract must FAIL on the card, not scan junk HTML into the library as a "video"). **Popups NEVER touch the
     visible page** (v1.0.362; the v1.0.361 version loaded them into the main view and ad popups
     hijacked it with no way back — owner report): WKUIDelegate `createWebViewWith` returns an
     OFFSCREEN web view (MUST use the provided configuration — also what shares the cookie store)

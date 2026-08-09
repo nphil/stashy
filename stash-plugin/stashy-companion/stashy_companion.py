@@ -3103,6 +3103,14 @@ def _plain_fetch(url, dest_dir, headers=None):
     merged.update(headers or {})
     req = urllib.request.Request(url, headers=merged)
     with urllib.request.urlopen(req, timeout=60) as resp:
+        # This path only runs after yt-dlp already refused the URL. If what's being served is a
+        # WEB PAGE, saving it would scan a junk .html into the library as a "video" — fail loudly
+        # instead so the app card shows why. (Real files come as video/*, octet-stream, etc.)
+        ctype = (resp.headers.get_content_type() or "").lower()
+        if ctype in ("text/html", "application/xhtml+xml"):
+            raise RuntimeError(
+                "no downloadable video found at this URL (it serves a web page, "
+                "and yt-dlp could not extract a stream from it)")
         name = _cd_filename(resp.headers.get("Content-Disposition"))
         if not name:
             name = urllib.parse.unquote(
