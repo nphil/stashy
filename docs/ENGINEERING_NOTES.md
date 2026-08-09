@@ -1227,6 +1227,17 @@ session needs. It lives here now, read on demand. `CLAUDE.md` keeps only the CUR
 and the work queue; the one-line "do not repeat this" lessons stay in its Landmines section.
 Newest first.
 
+- **Fetch URL → server (v1.0.359–365 + plugin 0.5.0→0.5.3), 2026-08-09.** Paste or resolve a link →
+  the SERVER (yt-dlp, self-bootstrapped into the plugin's `cache/`) downloads it into the library and
+  scans it; the phone never carries the bytes. Live "On Server" cards in Downloads read the plugin's
+  served `fetch-status.json` (speed/size/ETA) with pause (`stopJob`, `.part` kept) / resume (resubmit
+  same `fetch_id` → byte-exact) / cancel / queue. In-app WKWebView resolver (`LinkResolverView`) for
+  button-gated + streaming hosts: auto-captures download AND media responses, sniffs `.m3u8`/`.mpd`
+  stream URLs, contains popup ads offscreen, and replays Origin + a per-domain cookie jar (`--cookies`)
+  so token-gated CORS streams authenticate. **DRM streams (SAMPLE-AES/FairPlay/Widevine) are out of
+  scope — no bypass.** Full mechanics + landmines in the §8 "Fetch URL → server pipeline" entry above;
+  packaging rule: plugin zip + `index.yml` sha256 rebuilt together, `stash-plugin/**` pushes skip CI.
+
 - **Backgrounded-downloads round 3 (v1.0.307–308) — SIX defects, all "durable bytes thrown away or
   never committed"**: the owner's "% went 15→12→8, froze, restarted on reopen" was NOT one bug. See the
   new Landmines entries + ENGINEERING_NOTES §3 "Durability rules" for the full list; the headline is that
