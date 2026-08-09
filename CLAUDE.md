@@ -204,8 +204,8 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   re-analyzing perf or touching the flagged code paths.
 
 ## Current state (update as you go; keep this section short)
-- Latest release: **v1.0.361** (`ed68a3a`, fetch v2 + plugin 0.5.0). The -3000 investigation is
-  closed and must not be reopened.
+- Latest release: **v1.0.363** (`d012692`, resolver stream capture + plugin 0.5.1 — ad armor was
+  v1.0.362). The -3000 investigation is closed and must not be reopened.
 - **Fetch URL → server (v2) SHIPPED** (v1.0.359–361 + plugin 0.5.0): Downloads → link button submits a
   URL; the SERVER downloads it (yt-dlp) into the library and scans it in. Live "On Server" cards
   (bytes/speed/ETA off served `fetch-status.json`) with pause/resume (byte-exact via `.part` +
