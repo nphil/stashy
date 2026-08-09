@@ -108,12 +108,13 @@ struct PerformerDetailView: View {
             // Belt and braces over onSaved (same rationale as SceneDetailView): refetch once on
             // close so the header/portrait can never sit stale, and nudge the lists.
             Task {
-                if let client = appState.client,
-                   let fresh = try? await StashScraper(client: client).findPerformer(id: performer.id) {
-                    refreshed = fresh
+                var fresh: Performer?
+                if let client = appState.client {
+                    fresh = try? await StashScraper(client: client).findPerformer(id: performer.id)
                 }
+                if let fresh { refreshed = fresh }
+                edits.noteMetadataChanged(performer: fresh)
             }
-            edits.noteMetadataChanged()
         }) { mode in
             PerformerMetadataSheet(performerID: performer.id, mode: mode) { fresh in
                 if let fresh { refreshed = fresh }

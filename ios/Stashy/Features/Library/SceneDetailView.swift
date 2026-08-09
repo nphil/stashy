@@ -150,12 +150,15 @@ struct SceneDetailView: View {
             // errored late, entity creates — the screen refetches ONCE on close so it can never sit
             // stale, and the list behind is told to quietly refresh its cards too.
             Task {
-                if let client = appState.client,
-                   let fresh = try? await client.findScene(id: scene.id) {
-                    fullScene = fresh
+                var fresh: StashScene?
+                if let client = appState.client {
+                    fresh = try? await client.findScene(id: scene.id)
                 }
+                if let fresh { fullScene = fresh }
+                // Note AFTER the refetch so the lists get the payload and can patch in place
+                // (fetch-free, no pagination reset) instead of reloading page 1.
+                edits.noteMetadataChanged(scene: fresh)
             }
-            edits.noteMetadataChanged()
         }) { mode in
             SceneMetadataSheet(sceneID: scene.id, mode: mode) { fresh in
                 if let fresh { fullScene = fresh }

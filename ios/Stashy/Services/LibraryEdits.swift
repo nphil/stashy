@@ -28,8 +28,17 @@ final class LibraryEdits {
     /// scraped detail never shows the pre-scrape card (owner, 2026-08-10: "I have to go back to the
     /// main menu and refresh").
     private(set) var metadataRevision = 0
+    /// The fresh models the revision refers to, when known. Lists PATCH these in place (no fetch, no
+    /// pagination reset); only a bump with no matching payload forces a re-fetch — e.g. a scene
+    /// scrape that CREATED performers, where the performers list genuinely has new rows to learn.
+    private(set) var freshScene: StashScene?
+    private(set) var freshPerformer: Performer?
 
-    func noteMetadataChanged() { metadataRevision += 1 }
+    func noteMetadataChanged(scene: StashScene? = nil, performer: Performer? = nil) {
+        freshScene = scene
+        freshPerformer = performer
+        metadataRevision += 1
+    }
 
     /// Set briefly when a save fails, for optional UI surfacing; cleared after it's shown.
     var lastError: String?

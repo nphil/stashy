@@ -460,10 +460,12 @@ struct ScenesView: View {
                 }
             }
             .refreshable { await reload() }
-            // A scrape/edit sheet saved somewhere — silently re-fetch so browsing back never shows
-            // the pre-scrape card. Same code path as pull-to-refresh; ids are stable so the scroll
-            // position survives.
+            // A scrape/edit sheet saved somewhere. Fast path: PATCH the one fresh model in place —
+            // no fetch, no pagination reset, scroll untouched. Fallback (payload absent or the item
+            // isn't on a loaded page): a quiet page-1 reload, which also covers a scene scrape that
+            // CREATED performers.
             .onChange(of: edits.metadataRevision) { _, _ in
+                if let fresh = edits.freshScene, loader.patch(fresh) { return }
                 Task { await reload() }
             }
             .onScrollPhaseChange { _, phase in

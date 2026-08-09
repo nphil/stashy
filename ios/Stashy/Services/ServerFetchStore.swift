@@ -182,6 +182,7 @@ final class ServerFetchStore {
     private func pollOnce() async -> Bool {
         guard let companion, let client else { return false }
         var healthy = true
+        let before = items
 
         for idx in items.indices where items[idx].phase == .queued || items[idx].phase == .running {
             guard let jobID = items[idx].jobID else { continue }
@@ -230,7 +231,7 @@ final class ServerFetchStore {
                 }
             }
         }
-        save()
+        if items != before { save() }   // ~1 Hz of identical UserDefaults writes is pointless churn
         return healthy
     }
 

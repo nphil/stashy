@@ -19,6 +19,17 @@ final class PaginatedLoader<T: Identifiable & Sendable> where T.ID: Hashable {
     /// appended, so a grid can seed the newest page into its image cache without mapping all IDs per body.
     private(set) var contentRevision = 0
 
+    /// Replace one loaded item in place (matched by id). Returns false when the item isn't on any
+    /// loaded page — the caller falls back to a reload. This is the surgical path for "a detail
+    /// screen just refreshed this model": no fetch, no pagination reset, no scroll jump.
+    @discardableResult
+    func patch(_ item: T) -> Bool {
+        guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return false }
+        items[idx] = item
+        contentRevision &+= 1
+        return true
+    }
+
     let pageSize: Int
     private var page = 1
     private var hasMore = true
