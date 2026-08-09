@@ -3040,7 +3040,8 @@ def run_fetch(stash, args, settings):
     ]
     tail = []
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, errors="replace")   # a stray non-UTF-8 byte must not kill the job
         for line in proc.stdout:
             line = line.strip()
             if not line:
@@ -3048,6 +3049,10 @@ def run_fetch(stash, args, settings):
             frac = _parse_fetch_progress(line)
             if frac is not None:
                 log_progress(0.05 + 0.90 * frac)
+                continue
+            # Unknown-size hosts emit "stashy-dl <n> NA" every tick — progress spam, not diagnostics.
+            # Keep it out of the error tail or a mid-download failure's report is mostly noise.
+            if line.startswith(_FETCH_PROGRESS_PREFIX):
                 continue
             tail.append(line)
             if len(tail) > 12:
@@ -3168,6 +3173,10 @@ def main():
             raise RuntimeError("unknown mode: {}".format(mode))
     except Exception as e:
         log_error(str(e))
+        # Raw-plugin protocol: Job.error comes from a PluginOutput JSON on STDOUT. Without this,
+        # a failed job surfaces to clients as the Go exec error ("exit status 1") and the real
+        # reason (unsupported URL, fetchDir outside the library…) lives only in the Stash log.
+        print(json.dumps({"error": str(e)}))
         sys.exit(1)
 
 
