@@ -49,6 +49,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -3095,12 +3096,43 @@ def _delete_within(dest_dir, name):
     return removed
 
 
+def _netscape_jar(raw):
+    """Netscape cookie-file text from the resolver's structured cookie list (JSON: [{name, value,
+    domain, path}]). A real jar — vs a flattened Cookie header — keeps each cookie's own domain, so
+    yt-dlp scopes cookies correctly across a stream host's subdomain hops (and stops warning that
+    header cookies are deprecated). Any cookie whose fields could smuggle extra jar lines is
+    dropped, not escaped."""
+    entries = json.loads(raw) if isinstance(raw, str) else (raw or [])
+    if not isinstance(entries, list):
+        raise ValueError("cookie jar payload must be a list")
+    lines = ["# Netscape HTTP Cookie File"]
+    expiry = int(time.time()) + 2 * 86400   # session cookies need a horizon yt-dlp will still send
+    for c in entries:
+        if not isinstance(c, dict):
+            continue
+        name = str(c.get("name") or "").strip()
+        domain = str(c.get("domain") or "").strip()
+        value = str(c.get("value") or "")
+        path = str(c.get("path") or "/") or "/"
+        if not name or not domain:
+            continue
+        if any(ch in field for field in (name, domain, path, value) for ch in "\t\r\n"):
+            continue
+        include_sub = "TRUE" if domain.startswith(".") else "FALSE"
+        lines.append("\t".join([domain, include_sub, path, "FALSE", str(expiry), name, value]))
+    return "\n".join(lines) + "\n"
+
+
 def _plain_fetch(url, dest_dir, headers=None):
     """Fallback for URLs yt-dlp refuses (odd hosts, plain non-media files): a streamed HTTP
     download named from Content-Disposition or the final URL. Returns the saved path.
     `headers` (resolver-captured Cookie/Referer/User-Agent) are passed through verbatim."""
     merged = {"User-Agent": "Mozilla/5.0 (stashy-companion)"}
     merged.update(headers or {})
+    # Structured-jar sidecar (plugin-internal, run_fetch normally strips it) must never go on
+    # the wire as a literal header.
+    for k in [k for k in merged if k.lower() == "x-stashy-cookie-jar"]:
+        merged.pop(k)
     req = urllib.request.Request(url, headers=merged)
     with urllib.request.urlopen(req, timeout=60) as resp:
         # This path only runs after yt-dlp already refused the URL. If what's being served is a
@@ -3179,6 +3211,27 @@ def run_fetch(stash, args, settings):
         except ValueError:
             log_warn("could not parse headers JSON — fetching without them")
 
+    # The structured cookie sidecar (app ≥ v1.0.364) becomes a REAL Netscape jar for yt-dlp:
+    # correct per-cookie domain scoping, no deprecated Cookie-as-header warning. The flattened
+    # Cookie header stays only for the plain-HTTP fallback (and disappears from the yt-dlp
+    # command when the jar exists — sending both would be ambiguous).
+    jar_text = None
+    for k in [k for k in headers if k.lower() == "x-stashy-cookie-jar"]:
+        raw_jar = headers.pop(k)
+        try:
+            jar_text = _netscape_jar(raw_jar)
+        except Exception:
+            log_warn("could not parse the structured cookie list — using the Cookie header")
+    plain_headers = dict(headers)   # fallback headers: jar key gone, flattened Cookie kept
+    cookie_file = None
+    if jar_text and jar_text.strip() != "# Netscape HTTP Cookie File":
+        # NOT under cache/ — that directory is HTTP-served by Stash; session cookies must never
+        # have a URL. System tmp, 0600 by mkstemp default, deleted the moment yt-dlp exits.
+        fd, cookie_file = tempfile.mkstemp(prefix="stashy-fetch-cookies-", suffix=".txt")
+        with os.fdopen(fd, "w") as fh:
+            fh.write(jar_text)
+        headers.pop("Cookie", None)
+
     dest_dir = _fetch_dir(settings, _library_paths(stash))
     os.makedirs(dest_dir, exist_ok=True)
     cutoff = time.time() - 2 * 86400
@@ -3227,6 +3280,8 @@ def run_fetch(stash, args, settings):
     ]
     for k, v in headers.items():
         cmd += ["--add-header", "{}:{}".format(k, v)]
+    if cookie_file:
+        cmd += ["--cookies", cookie_file]
     cmd.append(url)
 
     tail = []
@@ -3271,6 +3326,10 @@ def run_fetch(stash, args, settings):
     except OSError as e:
         _update_fetch_status(fetch_id, status="failed", error="could not launch yt-dlp: {}".format(e))
         raise RuntimeError("could not launch yt-dlp: {}".format(e))
+    finally:
+        if cookie_file:
+            with contextlib.suppress(OSError):
+                os.unlink(cookie_file)   # yt-dlp is done with it either way; never leave cookies on disk
 
     if rc != 0:
         blob = " / ".join(tail[-5:])
@@ -3278,7 +3337,7 @@ def run_fetch(stash, args, settings):
             log_info("yt-dlp does not recognise this URL — trying a direct download")
             _update_fetch_status(fetch_id, status="downloading", filename=None)
             try:
-                dest = _plain_fetch(url, dest_dir, headers)
+                dest = _plain_fetch(url, dest_dir, plain_headers)
             except Exception as e:
                 _update_fetch_status(fetch_id, status="failed", error=str(e))
                 raise

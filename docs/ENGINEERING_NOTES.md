@@ -1607,7 +1607,18 @@ Newest first.
     direct files — naming an HLS output `master.m3u8` would be wrong) or, with nothing sniffed, the
     page URL for server-side yt-dlp extraction. Sniffed URLs clear on main-frame `didCommit`.
     Plugin 0.5.1 guards the paired trap: `_plain_fetch` refuses `text/html` responses (a page
-    yt-dlp can't extract must FAIL on the card, not scan junk HTML into the library as a "video"). **Popups NEVER touch the
+    yt-dlp can't extract must FAIL on the card, not scan junk HTML into the library as a "video").
+    **403 on a fresh tokenized manifest ≠ dead token** (owner hit it on a `master.m3u8?token=`
+    seconds old): the page's player fetches via CORS, so token-gated stream backends validate
+    `Origin` — the app now replays it (v1.0.364). Cookies ride a REAL Netscape jar since plugin
+    0.5.2: the app adds an `X-Stashy-Cookie-Jar` header (structured JSON with each cookie's own
+    domain/path) that `run_fetch` pops into a tempfile'd `--cookies` jar (NEVER under `cache/` —
+    that dir is HTTP-served) and deletes when yt-dlp exits; the flattened `Cookie` header stays
+    for the plain-HTTP fallback and is dropped from the yt-dlp command when the jar exists. Jar
+    lines with tab/newline in any field are dropped (line-forgery). If a stream STILL 403s with
+    Origin + jar: the token is IP-bound (retest with phone on the same egress as the server) or
+    the host TLS-fingerprints clients (would need yt-dlp `--impersonate` + curl_cffi — not
+    bundled in the zipapp; a deliberate non-feature until a real site demands it). **Popups NEVER touch the
     visible page** (v1.0.362; the v1.0.361 version loaded them into the main view and ad popups
     hijacked it with no way back — owner report): WKUIDelegate `createWebViewWith` returns an
     OFFSCREEN web view (MUST use the provided configuration — also what shares the cookie store)

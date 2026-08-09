@@ -672,6 +672,35 @@ class TestFetchHelpers(unittest.TestCase):
         # Library list unavailable (query shape change) — trust the explicit setting.
         self.assertEqual(sc._fetch_dir({"fetchDir": "/data/media/in"}, []), "/data/media/in")
 
+    # --- structured cookie jar (v0.5.2: yt-dlp --cookies instead of a raw header) ----
+    def test_netscape_jar_scopes_domains(self):
+        jar = sc._netscape_jar(json.dumps([
+            {"name": "sid", "value": "abc123", "domain": ".example.com", "path": "/"},
+            {"name": "hostonly", "value": "v", "domain": "stream.example.com", "path": "/stream"},
+        ]))
+        lines = jar.strip().split("\n")
+        self.assertEqual(lines[0], "# Netscape HTTP Cookie File")
+        self.assertEqual(len(lines), 3)
+        dot = lines[1].split("\t")
+        self.assertEqual((dot[0], dot[1], dot[2], dot[5], dot[6]),
+                         (".example.com", "TRUE", "/", "sid", "abc123"))
+        host = lines[2].split("\t")
+        self.assertEqual((host[0], host[1], host[2]), ("stream.example.com", "FALSE", "/stream"))
+
+    def test_netscape_jar_drops_injection_and_junk(self):
+        # A value smuggling tab/newline could forge extra jar lines — the cookie is dropped,
+        # as are nameless/domainless entries. An all-dropped list yields just the banner.
+        jar = sc._netscape_jar(json.dumps([
+            {"name": "bad", "value": "x\nevil.com\tTRUE\t/\tFALSE\t0\tn\tv", "domain": ".a.com"},
+            {"name": "", "value": "x", "domain": ".a.com"},
+            {"name": "ok", "value": "1", "domain": ""},
+        ]))
+        self.assertEqual(jar.strip(), "# Netscape HTTP Cookie File")
+
+    def test_netscape_jar_rejects_non_list(self):
+        with self.assertRaises(ValueError):
+            sc._netscape_jar(json.dumps({"name": "sid"}))
+
 
 class TestFetchStatusAndDelete(unittest.TestCase):
     """v0.5.0 — the live-status prune policy and the card-delete path jail."""
