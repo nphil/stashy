@@ -371,10 +371,19 @@ private struct ResolverWebView: UIViewRepresentable {
         }
 
         /// The headers that make the captured URL valid for the server: this session's cookies for
-        /// the target's domain (and parents), the current page as Referer, and the shared UA.
+        /// the target's domain (and parents), the current page as Referer + Origin, the shared UA.
         private func replayHeaders(for target: URL) async -> [String: String] {
             var headers: [String: String] = ["User-Agent": ResolverWebView.userAgent]
-            if let referer = webView?.url?.absoluteString { headers["Referer"] = referer }
+            if let pageURL = webView?.url {
+                headers["Referer"] = pageURL.absoluteString
+                // The page's player fetches streams via CORS, and token-gated stream backends
+                // VALIDATE the Origin it sends — a replay without one 403s (owner hit this on a
+                // tokenized master.m3u8 whose token was seconds old).
+                if let scheme = pageURL.scheme, let host = pageURL.host() {
+                    headers["Origin"] = pageURL.port.map { "\(scheme)://\(host):\($0)" }
+                        ?? "\(scheme)://\(host)"
+                }
+            }
             if let store = webView?.configuration.websiteDataStore.httpCookieStore {
                 let cookies = await store.allCookies()
                 let host = target.host() ?? ""
@@ -383,7 +392,19 @@ private struct ResolverWebView: UIViewRepresentable {
                     return host == d || host.hasSuffix("." + d)
                 }
                 if !matching.isEmpty {
+                    // Flattened header: what the plain-HTTP fallback (and plugin ≤0.5.1) replays.
                     headers["Cookie"] = matching.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+                    // Structured copy WITH each cookie's own domain/path: plugin ≥0.5.2 builds a
+                    // real Netscape jar from it (yt-dlp --cookies), so cookies scope correctly
+                    // across a stream host's subdomain hops instead of riding one raw header.
+                    let jar: [[String: String]] = matching.map {
+                        ["name": $0.name, "value": $0.value, "domain": $0.domain,
+                         "path": $0.path.isEmpty ? "/" : $0.path]
+                    }
+                    if let data = try? JSONSerialization.data(withJSONObject: jar),
+                       let json = String(data: data, encoding: .utf8) {
+                        headers["X-Stashy-Cookie-Jar"] = json
+                    }
                 }
             }
             return headers
