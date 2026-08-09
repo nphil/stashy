@@ -50,11 +50,12 @@ struct LinkResolverSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { dismiss() }
+                    Button("Done") { dismiss() }
                 }
-                // ‹ › = the escape hatch from same-tab ad redirects. "Send Stream/Page" = the manual
-                // capture: the sniffed stream if the player gave one up, else the page URL for
-                // server-side yt-dlp extraction.
+                // The whole browser chrome lives in one thin bottom bar (owner: "treat it as a real
+                // browser, immersive fullscreen" — the instruction banner that used to sit up top is
+                // gone). ‹ › escape same-tab ad redirects; the labelled button is the manual capture
+                // (sniffed stream if the player gave one up, else the page URL for server yt-dlp).
                 ToolbarItemGroup(placement: .bottomBar) {
                     Button { page.goBack() } label: { Image(systemName: "chevron.backward") }
                         .disabled(!page.canGoBack)
@@ -66,14 +67,6 @@ struct LinkResolverSheet: View {
                     Spacer()
                     Button { page.reload() } label: { Image(systemName: "arrow.clockwise") }
                 }
-            }
-            .safeAreaInset(edge: .top, spacing: 0) {
-                Text("Tap the site's download button, or press play and use Send Stream — Stashy grabs the video link for your server. Popup ads are contained; ‹ goes back if the page jumps away.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 16).padding(.vertical, 8)
-                    .background(.thinMaterial)
             }
         }
     }
