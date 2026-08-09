@@ -66,6 +66,7 @@ private struct ResolverWebView: UIViewRepresentable {
         let web = WKWebView(frame: .zero, configuration: config)
         web.customUserAgent = Self.userAgent
         web.navigationDelegate = context.coordinator
+        web.uiDelegate = context.coordinator
         context.coordinator.webView = web
         web.load(URLRequest(url: startURL))
         return web
@@ -78,7 +79,7 @@ private struct ResolverWebView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
     @MainActor
-    final class Coordinator: NSObject, WKNavigationDelegate, WKDownloadDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
         var parent: ResolverWebView
         weak var webView: WKWebView?
         init(parent: ResolverWebView) { self.parent = parent }
@@ -87,7 +88,7 @@ private struct ResolverWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView,
                      decidePolicyFor navigationResponse: WKNavigationResponse,
-                     decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+                     decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {
             // A response the web view can't display inline IS the file being served (video/*,
             // octet-stream, attachment disposition all land here).
             decisionHandler(navigationResponse.canShowMIMEType ? .allow : .download)
@@ -95,9 +96,20 @@ private struct ResolverWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView,
                      decidePolicyFor navigationAction: WKNavigationAction,
-                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+                     decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
             // Anchor tags with a `download` attribute skip the response phase entirely.
             decisionHandler(navigationAction.shouldPerformDownload ? .download : .allow)
+        }
+
+        // Download buttons that open in a new window/tab (`target="_blank"`, window.open) would
+        // otherwise go NOWHERE — there's no second web view to host them. Route the request back
+        // into this one; if it's a file, the response policy above catches it as usual.
+        func webView(_ webView: WKWebView,
+                     createWebViewWith configuration: WKWebViewConfiguration,
+                     for navigationAction: WKNavigationAction,
+                     windowFeatures: WKWindowFeatures) -> WKWebView? {
+            webView.load(navigationAction.request)
+            return nil
         }
 
         func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {

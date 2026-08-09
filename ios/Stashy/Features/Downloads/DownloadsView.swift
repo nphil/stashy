@@ -113,10 +113,8 @@ struct DownloadsView: View {
             DownloadPlayerCover(item: item)
         }
         .sheet(isPresented: $showFetchSheet) {
-            if let client = appState.client {
-                FetchLinkSheet(companion: StashCompanion(client: client))
-                    .presentationDetents([.medium])
-            }
+            FetchLinkSheet()
+                .presentationDetents([.medium])
         }
     }
 }

@@ -97,8 +97,11 @@ final class ServerFetchStore {
 
     /// Stop the server job, keep the partial. Resume continues it byte-exact.
     func pause(_ id: String) async {
-        guard let idx = items.firstIndex(where: { $0.id == id }), let companion else { return }
-        if let jobID = items[idx].jobID { _ = try? await companion.stopJob(jobID) }
+        guard let companion, let jobID = items.first(where: { $0.id == id })?.jobID else { return }
+        _ = try? await companion.stopJob(jobID)
+        // Re-resolve AFTER the await: MainActor reentrancy means the array can change under a
+        // suspension (a cancel tap mid-request), so a pre-await index is a trap waiting to fire.
+        guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
         items[idx].phase = .paused
         items[idx].speed = nil
         items[idx].eta = nil
@@ -108,18 +111,19 @@ final class ServerFetchStore {
     /// Resubmit — same fetchID, same URL, same captured headers → the plugin reuses the status entry
     /// and yt-dlp continues the .part.
     func resume(_ id: String) async {
-        guard let idx = items.firstIndex(where: { $0.id == id }), let companion else { return }
-        let item = items[idx]
+        guard let companion, let item = items.first(where: { $0.id == id }) else { return }
         do {
             let jobID = try await companion.requestFetch(url: item.url, fetchID: item.id,
                                                          headers: item.headers,
                                                          filename: item.filenameHint)
+            guard let idx = items.firstIndex(where: { $0.id == id }) else { return }   // re-resolve post-await
             items[idx].jobID = jobID
             items[idx].phase = .queued
             items[idx].error = nil
             save()
             startPolling()
         } catch {
+            guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
             items[idx].phase = .failed
             items[idx].error = "Couldn't resume: \(error.localizedDescription)"
             save()
@@ -184,10 +188,14 @@ final class ServerFetchStore {
         var healthy = true
         let before = items
 
-        for idx in items.indices where items[idx].phase == .queued || items[idx].phase == .running {
-            guard let jobID = items[idx].jobID else { continue }
+        // Sweep by ID, never by index: every job() call is a suspension, and MainActor reentrancy
+        // means a cancel tap can shrink `items` mid-sweep — a captured index would trap or hit the
+        // wrong card. Re-resolve after each await.
+        for id in items.filter({ $0.phase == .queued || $0.phase == .running }).map(\.id) {
+            guard let jobID = items.first(where: { $0.id == id })?.jobID else { continue }
             do {
                 let job = try await companion.job(jobID)
+                guard let idx = items.firstIndex(where: { $0.id == id }) else { continue }
                 switch job.status {
                 case "RUNNING", "STOPPING":
                     items[idx].phase = .running
@@ -225,7 +233,7 @@ final class ServerFetchStore {
                     // Covers the GC'd-job hole: the plugin's own record says it finished.
                     items[idx].phase = .done
                 }
-                if entry.status == "failed", items[idx].phase == .running {
+                if entry.status == "failed", items[idx].phase == .running || items[idx].phase == .queued {
                     items[idx].phase = .failed
                     items[idx].error = entry.error ?? items[idx].error
                 }
