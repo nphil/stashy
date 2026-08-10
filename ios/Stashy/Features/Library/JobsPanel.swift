@@ -30,14 +30,18 @@ struct JobsPanel: View {
 
             if showActions {
                 Divider().opacity(0.25)
-                // Four tasks as compact chips (two tight rows) instead of four full-width buttons — the
-                // caption above keeps them obviously actions, the icon + short name keeps each obvious.
+                // Compact chips in a flow (a few tight rows) instead of full-width buttons — the caption
+                // above keeps them obviously actions, the icon + short name keeps each obvious.
                 VStack(alignment: .leading, spacing: 7) {
                     Text("Library tasks")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.tertiary)
                     FlowLayout(spacing: 6) {
                         taskChip("Scan Library", "arrow.clockwise") { await monitor.scanLibrary() }
+                        // Scan ingests; Generate backfills. They are not two strengths of one task —
+                        // once a file has a scene, Stash never re-runs the scan-time generators for it,
+                        // so this is the only way to fix scenes that came in without sprites/phashes.
+                        taskChip("Generate", "wand.and.sparkles") { await monitor.generateMedia() }
                         taskChip("VMAF Map", "gauge.medium") {
                             await monitor.runCompanionTask(.vmafMap, title: "VMAF map")
                         }

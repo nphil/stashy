@@ -21,6 +21,9 @@ struct SceneDetailView: View {
     @State private var addedToQueue = false
     /// Metadata scrape/edit mini-sheet (••• menu). Item-driven so each mode opens in the right stage.
     @State private var metadataMode: SceneMetadataMode?
+    /// Transient confirmation for ••• → Generate Media (the task runs on the server, so there is nothing
+    /// on this screen to watch — the toast is the only feedback that the tap landed).
+    @State private var notice: String?
     /// Device (window) bounds + safe-area insets, independent of the nav bar. The screen's layout is
     /// derived from THESE, not the SwiftUI safe area — a visible nav bar shrinks the safe area, which
     /// shoved the whole video box down by the bar height (the v1.0.301 regression). Same proven reader
@@ -193,6 +196,27 @@ struct SceneDetailView: View {
             }
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: addedToQueue)
+        // Same capsule as the downloads toast so the two read as one language, but not tappable —
+        // there is nowhere to go; the jobs panel on the library screen shows the queued task's progress.
+        // Yields to the downloads toast, which shares this alignment and is the more actionable of the two.
+        .overlay(alignment: .bottom) {
+            if let text = notice, !addedToQueue, !isFullscreen {
+                Label(text, systemImage: "wand.and.sparkles")
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.black.opacity(0.82), in: Capsule())
+                    .shadow(color: .black.opacity(0.3), radius: 8, y: 3)
+                    .padding(.bottom, 78)   // clears the minimized tab bar this screen keeps visible
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .task(id: text) {
+                        try? await Task.sleep(for: .seconds(2))
+                        notice = nil
+                    }
+            }
+        }
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: notice)
         .confirmationDialog(
             "Delete this scene?",
             isPresented: $confirmDelete,
@@ -257,6 +281,9 @@ struct SceneDetailView: View {
                         },
                         PopupMenuAction(title: "Edit Metadata", systemImage: "square.and.pencil") {
                             metadataMode = .edit
+                        },
+                        PopupMenuAction(title: "Generate Media", systemImage: "wand.and.sparkles") {
+                            generateMedia()
                         },
                         PopupMenuAction(title: "Delete Scene", systemImage: "trash", isDestructive: true) {
                             confirmDelete = true
@@ -362,6 +389,25 @@ struct SceneDetailView: View {
             downloads.pruneStopped()
             downloads.stage(scene: fullScene ?? scene, apiKey: apiKey)
             path.openDownloads()
+        }
+    }
+
+    /// Queue Stash's Generate task for **this scene only** — the repair for a scene that scanned in
+    /// without a cover / preview / scrubber sprites / phash (the usual cause: it arrived via a fetch,
+    /// and the scan that ingested it carried no generation flags). Rescanning cannot fix it: once the
+    /// scene row exists Stash skips the scan-time generators for that file forever. `overwrite` stays
+    /// false inside `metadataGenerate`, so this only fills the gaps.
+    private func generateMedia() {
+        guard let client = appState.client else { return }
+        Haptics.tap(soft: true)
+        notice = "Generating media…"
+        Task {
+            let defaults = await StashTaskDefaultsCache.load(client: client)
+            do {
+                _ = try await client.metadataGenerate(defaults.generate, sceneIDs: [scene.id])
+            } catch {
+                notice = "Couldn't start Generate"
+            }
         }
     }
 
