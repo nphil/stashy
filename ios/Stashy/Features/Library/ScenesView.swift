@@ -635,7 +635,10 @@ struct SceneCard: View {
                 }
                 .clipped()
 
-            Text(scene.title ?? "Untitled")
+            // Falls back to the file name when the scene carries no metadata title. 52 chars is what
+            // two lines of this font hold in a half-width cell, so the middle ellipsis (not a hard clip
+            // at the line break) is what a long file name ends up showing.
+            Text(scene.displayTitle(maxLength: 52))
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.7))
                 .lineLimit(2)

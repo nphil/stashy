@@ -230,10 +230,13 @@ struct SceneDetailView: View {
                 // Title + studio + date (left) with the star rating anchored trailing.
                 HStack(alignment: .top, spacing: 10) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(shown.title ?? "Untitled")
+                        Text(shown.displayTitle)
                             .font(.headline)
                             .foregroundStyle(themeManager.current.foregroundColor)
                             .lineLimit(1)
+                            // File-name fallbacks are long: squeeze the middle so the head and the
+                            // extension survive instead of tail-clipping into nothing.
+                            .truncationMode(.middle)
                             .privacyTitleBlur()
                         // Rating stars sit under the title (replacing the old studio line); the date trails.
                         HStack(spacing: 8) {

@@ -99,6 +99,8 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
 - **Popovers:** host from a stable ZStack sibling (`FilterPopoverAnchor`), never a conditional/churning
   view. Bit us three times. §6.
 - Most CI failures were **Swift 6 strict-concurrency** — read the patterns before writing async code. §2.
+- **Scene names render through `StashScene.displayTitle`** (title → file basename → "Untitled"), never
+  `scene.title ?? "Untitled"`; file-name fallbacks truncate in the MIDDLE (the tail holds the extension). §6.
 - `AppDelegate` lives in `Services/OrientationLock.swift`. Ratings are `rating100` 0–100 (UI stars =
   value/20); favorites are booleans. Adding a `DownloadState` case = update the exhaustive switches in
   `DownloadsView`. FFmpeg = SPM package `nphil/stashy-videoengine` (LGPL-minimal, **no AV1 encode**;

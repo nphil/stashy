@@ -1008,6 +1008,23 @@ Filters reset on launch; **sort field+direction persist** (UserDefaults). Blur t
 thumbnails/titles. Face ID is immediate (minimal privacy blur, no splash). Videos start muted unless
 on AirPods/private audio route.
 
+### Scene names: `displayTitle`, never `scene.title ?? "Untitled"` (v1.0.366)
+Plenty of libraries have scenes with no metadata title, and a grid of "Untitled" cards is useless. The
+model owns the fallback — `StashScene.displayTitle` (title → file basename → "Untitled") and
+`fileDisplayName` (`Models/Scene.swift`). Every scene-name render site goes through it: grid card
+(`ScenesView.SceneCard`), detail header (`SceneDetailView.metadata`), glasses focused-title block and
+grid header. Rules:
+- **Truncate the middle, not the tail.** File names carry their identity in the head and their
+  extension in the tail; a tail clip drops both the resolution/group suffix and the `.mkv`, so every
+  fallback site uses `.truncationMode(.middle)`.
+- **The card additionally caps at 52 chars** via `displayTitle(maxLength:)` — that's what two lines of
+  `.system(size: 10)` hold in a half-width cell, so the ellipsis lands in the middle instead of the
+  layout hard-clipping at the line break. Real metadata titles are returned untouched by that
+  overload (they're short and hand-written; clipping them is the layout's job).
+- **Don't push the fallback into edit/sort paths.** `SceneMetadataSheet` still binds `data.title ?? ""`
+  (a filename must never be pre-filled into the editable title field, or the next save writes it to the
+  server), and client-side title sort still keys on `title` so it matches the server's ordering.
+
 ### Scrubbing (two gestures, one model) — v1.0.248-era
 There are **two** scrub gestures and they must feel identical:
 1. **Bar drag** — `ScrubBar.body` `DragGesture` in `PlayerControlsView.swift`. Touch anywhere on the

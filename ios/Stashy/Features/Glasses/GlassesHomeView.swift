@@ -120,12 +120,13 @@ struct GlassesHomeView: View {
             if coordinator.rails.indices.contains(coordinator.railIndex) {
                 let rail = coordinator.rails[coordinator.railIndex]
                 // Never collapses to empty: on the View More tile the block names the affordance.
-                Text(coordinator.focusedScene?.title ?? (coordinator.focusedMoreSource == nil
-                                                         ? "Untitled" : "View More"))
+                Text(coordinator.focusedScene?.displayTitle ?? (coordinator.focusedMoreSource == nil
+                                                               ? "Untitled" : "View More"))
                     .font(.system(size: 46, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.92))
                     .lineLimit(1)
-                    .truncationMode(.tail)
+                    // Middle, not tail: title fallbacks are file names, whose tail carries the extension.
+                    .truncationMode(.middle)
                     .frame(maxWidth: 1440)
                 Text(coordinator.focusedMoreSource == nil
                      ? "\(rail.title)  ·  \(coordinator.itemIndex + 1) of \(rail.slotCount)"

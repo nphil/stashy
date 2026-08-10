@@ -288,6 +288,35 @@ extension StashScene {
         return comps.url
     }
 
+    /// The primary file's name on disk (e.g. "Studio.Name.2024.1080p.mp4"), or nil when Stash didn't
+    /// return one. Whitespace-trimmed; an all-blank basename counts as absent.
+    var fileDisplayName: String? {
+        guard let name = files.first?.basename?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !name.isEmpty else { return nil }
+        return name
+    }
+
+    /// What to show as the scene's name anywhere in the UI: the metadata title when the scene has a
+    /// non-blank one, else the file name (so untitled files stay identifiable instead of reading as a
+    /// wall of "Untitled"), and only then the placeholder.
+    var displayTitle: String {
+        if let t = title?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty { return t }
+        return fileDisplayName ?? "Untitled"
+    }
+
+    /// `displayTitle` capped for tight spots (grid cards). File names routinely run past 100 characters
+    /// — squeezing the middle out keeps the informative head *and* the extension, which a plain tail
+    /// truncation would drop. Real metadata titles are left alone: they're short and hand-written, and a
+    /// clipped title is the layout's job (`lineLimit`), not the model's.
+    func displayTitle(maxLength: Int) -> String {
+        if let t = title?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty { return t }
+        guard let name = fileDisplayName else { return "Untitled" }
+        guard maxLength > 4, name.count > maxLength else { return name }
+        let keep = maxLength - 1                  // one slot for the ellipsis
+        let head = keep - keep / 3                // favour the head: that's where the identity lives
+        return String(name.prefix(head)) + "…" + String(name.suffix(keep - head))
+    }
+
     /// Lowercased container extension from the primary file's basename (e.g. "mp4", "mkv").
     var fileContainer: String {
         guard let basename = files.first?.basename,

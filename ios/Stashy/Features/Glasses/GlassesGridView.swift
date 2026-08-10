@@ -65,11 +65,12 @@ struct GlassesGridView: View {
                 .font(.system(size: 26, weight: .medium).monospacedDigit())
                 .foregroundStyle(.white.opacity(0.45))
                 .frame(height: 31, alignment: .leading)
-            Text(coordinator.gridFocusedScene?.title ?? "")
+            Text(coordinator.gridFocusedScene?.displayTitle ?? "")
                 .font(.system(size: 40, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.92))
                 .lineLimit(1)
-                .truncationMode(.tail)
+                // Middle, not tail: title fallbacks are file names, whose tail carries the extension.
+                .truncationMode(.middle)
                 .frame(maxWidth: 1728, alignment: .leading)
                 .frame(height: 48, alignment: .leading)
         }
