@@ -28,6 +28,19 @@ Still true:
   Package step's executable-present check + ~1 MB IPA-size floor. For those, read logs the old way:
   `get_job_logs` (`return_content:true`, `tail_lines: ~230`), look for `** BUILD FAILED **`.
 
+### A red run is not always a compile error — check WHICH step died
+Failure classes, and how to tell them apart from the job log:
+- **"Build (unsigned)" red with `::error file=…` annotations** → a real compile error. The usual case.
+- **"Resolve Swift packages" red with `failed downloading … downloadError("The request timed out.")`**
+  → infrastructure, not your commit. The videoengine package pulls SIX binary xcframework zips from a
+  GitHub release and they can all time out at once (2026-08-10, v1.0.367 push — nothing was ever
+  compiled). That step now retries 3× with 20/40 s backoff before failing, so this should be rare; if
+  it still fails, re-run the job rather than "fixing" code that never reached the compiler.
+- Read failures with `get_job_logs` (`failed_only: true`, `return_content: true`, `tail_lines: ~60`).
+  **`list_workflow_runs` returns ~375 KB and blows the tool-result limit** — it gets spilled to a file;
+  parse that file with python (`json.load` → `workflow_runs[i]['id' | 'head_sha' | 'conclusion']`)
+  instead of trying to read it.
+
 ### Verify Apple API signatures BEFORE you push (CI is the only compiler)
 Every unverified API guess is a ~6–8 min round trip. Before using an unfamiliar Apple symbol, fetch its
 exact Swift declaration from the **doc-JSON endpoint** (works from the sandbox; HTML doc pages are

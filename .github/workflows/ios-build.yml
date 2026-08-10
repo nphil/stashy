@@ -90,10 +90,23 @@ jobs:
       - name: Resolve Swift packages
         run: |
           cd ios
-          xcodebuild -resolvePackageDependencies \
-            -project "$PROJECT" \
-            -scheme  "$SCHEME" \
-            -derivedDataPath build/DD
+          # The videoengine package carries SIX binary xcframework zips fetched from a GitHub release,
+          # and that download times out often enough to redden a build whose code never even compiled
+          # (2026-08-10: all six timed out at once). A flaky download is not a broken commit — retry
+          # before failing, so a red Build IPA run keeps meaning "the code is wrong".
+          for attempt in 1 2 3; do
+            if xcodebuild -resolvePackageDependencies \
+                 -project "$PROJECT" \
+                 -scheme  "$SCHEME" \
+                 -derivedDataPath build/DD; then
+              echo "✅ Packages resolved (attempt $attempt)."
+              exit 0
+            fi
+            echo "⚠️ Package resolution failed (attempt $attempt of 3)."
+            sleep $((attempt * 20))
+          done
+          echo "❌ Package resolution failed 3 times — treat as infrastructure, not a compile error."
+          exit 1
 
       - name: Build (unsigned)
         run: |

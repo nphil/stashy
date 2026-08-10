@@ -20,6 +20,9 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   annotated errors = compile failure. On failure NO release publishes, so the installed IPA keeps
   working (broken push = low blast radius). Recurring failure class = **Swift 6 strict-concurrency** —
   self-review every diff before pushing (§2).
+- **A red run ≠ a compile error — check WHICH step died.** "Resolve Swift packages" times out fetching
+  the six FFmpeg xcframework zips (retries 3× since v1.0.367); that's infra, re-run, don't "fix" code
+  that never reached the compiler. §1.
 - On success CI pushes a version-bump `[skip ci]` commit + a tagged Release with the IPA, so
   `origin/main` moves without you: **always `git fetch origin main && git rebase origin/main` before
   `git push`.**
