@@ -86,6 +86,11 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   (`--cookies`). Submit sheet = one field + one button whose verb comes from `LinkProbe` (HEADERS decide
   file vs page, never the extension; never reads a body) — no instruction text, keep it that way. Plugin
   zip + `index.yml` sha256 MUST be rebuilt together; `stash-plugin/**` pushes don't trigger CI. §8.
+- **Stash sends NO defaults to `metadataScan`/`metadataGenerate` — an omitted flag is `false`** (the
+  Tasks-page ticks are applied by the BROWSER). A bare scan input ingests files and generates nothing,
+  and **no later scan can backfill it**: once a file has a scene, `handlerRequiredFilter` skips the
+  scan-time generators forever (only Generate, or `rescan`, repairs it). Always send
+  `StashTaskDefaultsCache.load(client:)`. §6. Fixed v1.0.369 / plugin 0.5.4.
 - **Verify Apple API signatures BEFORE pushing** (CI is the only compiler, ~6–8 min/guess): fetch the
   exact decl from `developer.apple.com/tutorials/data/documentation/<framework>/<symbol>.json`. Failable
   vs non-failable inits differ across sibling APIs. §1.
@@ -123,12 +128,16 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   do not re-apply). Check before re-analyzing perf.
 
 ## Current state (keep short — current release + work queue only)
-- **Latest release: v1.0.368** (plugin **0.5.3**). CI green. The -3000 investigation is closed.
+- **Latest release: v1.0.368** (plugin **0.5.4**). CI green. The -3000 investigation is closed.
 - **Scene names fall back to the file name** (v1.0.366): `StashScene.displayTitle` everywhere, middle
   truncation, card capped at 52 chars. §6.
 - **Downloads** work end-to-end: app-open ~100 MB/s, byte-exact resume through crashes / relaunch /
   suspension; **background runtime is solved** (`DownloadKeepAlive`, on by default). One-at-a-time queue
   with Start All / Pause Queue. Queue invariants in §3 — read before touching the queue manager.
+- **Scan vs Generate fixed** (v1.0.369 + plugin 0.5.4): every scan Stashy queued used to generate
+  NOTHING (covers/previews/sprites/phashes) because Stash applies no server-side defaults; the app and
+  the plugin now send `configuration.defaults.scan`. New **Generate** chip (jobs panel, library-wide)
+  and **Generate Media** (scene •••, one scene) backfill scenes that came in bare — a rescan can't. §6.
 - **Fetch URL → server SHIPPED** (v1.0.359–367 + plugin 0.5.0–0.5.3): paste or resolve a link → the
   server (yt-dlp) downloads into the library + scans it; live "On Server" cards (speed/size/ETA,
   pause/resume/cancel/queue). In-app immersive WKWebView resolver captures button-gated + streaming links

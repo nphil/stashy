@@ -958,8 +958,50 @@ churns.** History on the filter/sort panel:
   kept-for-instant-reopen snapshot survives.
 - Queue actions surface `actionError` inline (plugin missing / auth / network) and show an optimistic
   "Starting …" line with a 3-poll grace instead of `try?`-swallowing failures.
-- The four task buttons are compact caption2 icon+name chips in a `FlowLayout` (two short rows) under a
+- The task buttons are compact caption2 icon+name chips in a `FlowLayout` (a few short rows) under a
   "Library tasks" caption — solid fills on the glass panel, matching the filter panel's tag chips.
+
+### Scan vs Generate — Stash sends NO defaults, and a rescan can't repair a bare scene (v1.0.369)
+
+Verified against stashapp/stash `develop` (Aug 2026). Every claim below has a file behind it — do not
+re-derive, and do not "simplify" any of it back to an empty input.
+
+- **The two tasks are not two strengths of one thing.** `metadataScan` = *discovery*: walk the library
+  paths, hash + ffprobe new/changed files, create the scene rows; its toggles mean "while ingesting a
+  file I am **handling**, also make these". `metadataGenerate` = *production*: derived media for rows
+  **already in the DB**, ignoring disk entirely. Only Generate can do markers, marker screenshots,
+  transcodes, heatmaps, `overwrite`, or scope by `sceneIDs`. Only Scan can create the scene.
+- **THE LANDMINE: Stash applies no server-side defaults to either mutation.** The flags live in
+  `config.ScanMetadataOptions`, embedded in `manager.ScanMetadataInput` as plain Go `bool`s (not
+  `*bool`), and `MetadataScan` → `manager.Scan()` passes the input through untouched. **Every field the
+  caller omits arrives as `false`.** The ticks on Stash's Tasks page are the saved `defaults.scan` /
+  `defaults.generate` config, applied **by the browser** when it builds the mutation — an API client
+  gets nothing. Stashy shipped an empty `ScanMetadataInput()` (and the plugin `{"paths": […]}`) under a
+  comment claiming "server defaults", so every scan it ever queued was ingest-only: no cover, no
+  preview, no scrubber sprite, no phash. That was the owner's "fetched videos don't process" report.
+- **A later scan CANNOT backfill it** — the half that makes the bug permanent.
+  `handlerRequiredFilter.Accept` (`internal/manager/task_scan.go`) returns true only when
+  `CountByFileID == 0`; a video that already has a scene returns **false**, so `onUnchangedFile` skips
+  the handler and `sceneGenerators.Generate` never runs, no matter which toggles are ticked. The only
+  repairs are `metadataGenerate` or a scan with `rescan: true` (which routes through the
+  `forceRescan` branch of `onExistingFile`). This is why "sometimes it worked": those were files the
+  flag-less scan **missed** (still muxing / a `.part`), later ingested fresh by a UI scan with the
+  toggles on.
+- `sceneGenerators.Generate` runs with `const overwrite = false`, so scan-time generation never redoes
+  existing work — re-running is cheap and idempotent.
+- **The app's contract** (`Services/StashTaskDefaults.swift`): read `configuration.defaults.scan` /
+  `.generate` once per session (`StashTaskDefaultsCache`) and send them explicitly, so a Stashy-queued
+  task matches the same task started from the web UI. Every flag is `Bool?` because synthesised
+  `encode(to:)` uses `encodeIfPresent` — **a field the server's schema doesn't know fails the whole
+  mutation**, so `.fallback` (query failed / nothing saved) carries only long-standing fields, while
+  keys read back from a successful query are safe to send by construction. An all-off payload is
+  treated as "never saved" and swapped for the stock ticks — a task that generates nothing is the bug,
+  not a preference. `GenerateMetadataInput` is FLAT: `GenerateOptions.encode(to:)` is called on the
+  shared encoder so its keys merge alongside `overwrite` (pinned false) and the optional `sceneIDs`.
+- **Entry points:** jobs panel → *Scan Library* / *Generate* (library-wide); scene ••• → *Generate
+  Media* (`sceneIDs: [id]`, toast feedback). Plugin-side, `_scan_generate_options` does the same for
+  the post-fetch scan — but deliberately **never** takes `rescan` from the defaults, because that scan
+  is scoped to the fetch folder and would re-handle every file previously fetched into it.
 
 ### Metadata scrape/edit suite (v1.0.298 foundation; v1.0.299 auto-merge rework)
 - **`Services/StashScraper.swift` is the ONE typed gateway** for scraping + metadata editing (wraps
