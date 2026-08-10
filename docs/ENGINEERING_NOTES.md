@@ -1668,6 +1668,26 @@ Newest first.
   - **Resolver chrome is deliberately minimal** (owner 2026-08-09: "treat it as a real browser,
     immersive fullscreen"): the top instruction banner was removed — `‹ › + Send + reload` in one
     thin `.bottomBar` group over a full-height WKWebView is the whole UI.
+  - **The submit sheet is one field + one morphing button** (v1.0.367, owner 2026-08-10: "it's not
+    good UX… get rid of the instructions"). No footers, no prose, no em dashes in any visible string —
+    the BUTTON is the instruction. `Services/LinkProbe.swift` classifies the pasted link and the action
+    follows: `.direct` → **Fetch on Server**, anything else → **Open in Browser** (the resolver, whose
+    Send button still ships a page URL for yt-dlp). Rules that make it robust:
+    - **Headers decide, never the extension.** A `.mp4` that 302s onto a login wall serves `text/html`,
+      and submitting it scans junk HTML into the library (the exact trap plugin 0.5.1 guards
+      server-side). Verdict order: markup → `video/*`/`audio/*`/manifest → `text/*` (only `.m3u8`/`.mpd`
+      survive as streams) → attachment/octet-stream (unless the suggested NAME is markup) → empty type
+      falls back to the extension → **everything else is `.page`**. `.page` is the safe default: a
+      wrong `.page` costs one browser tap, a wrong `.direct` costs a junk file in the library.
+    - **Never read a body.** `URLSession.bytes(for:)` returns at the HEADERS, then `stream.task.cancel()`
+      — `data(for:)` would buffer the response, i.e. download the movie to decide whether to download it.
+      HEAD first, one ranged-GET retry ONLY when the host answered with a status (many 403/405 HEAD);
+      no answer at all is not retried, or the sheet sits on "Checking" for two 5 s timeouts.
+    - Probe runs from `.task(id: url)` (300 ms leading sleep debounces typing; task cancellation drops
+      stale verdicts). Redirects are followed, so `http.url` — not the typed URL — supplies the name.
+    - A verdict can still be wrong for the RIGHT reason (per-IP signed link, one-shot token), so the
+      primary button carries a `.contextMenu` with the opposite action. Deliberately invisible: it's an
+      escape hatch, not a second affordance competing with the button.
   - **Packaging rule bites here**: `stash-plugin/**` pushes don't trigger CI, but the zip is FLAT
     (yml + py at zip root) and `index.yml`'s sha256 must match byte-for-byte — rebuild both together
     (`cd stashy-companion && zip -X ../stashy-companion.zip stashy-companion.yml stashy_companion.py`).

@@ -121,15 +121,19 @@ struct DownloadsView: View {
 
 // MARK: - Fetch a link to the server (submit-only — progress lives on the Downloads cards)
 
-/// Queue one or more URLs for the SERVER to download (companion plugin ≥0.5.0). This sheet only
-/// SUBMITS — each fetch becomes a live card in the Downloads list, so you can paste several links
-/// back-to-back and close the sheet. Page that needs its download button pressed? "Open in browser"
-/// runs the resolver: you tap the host's button, Stashy captures the real file URL + cookies and
-/// hands them to the server.
+/// Queue URLs for the SERVER to download (companion plugin ≥0.5.0). This sheet only SUBMITS: each
+/// fetch becomes a live card in the Downloads list, so links can go in back-to-back.
+///
+/// One field, one button, no prose (owner 2026-08-10). The button IS the instruction: the pasted link
+/// is classified by `LinkProbe` (headers, not guesswork) the moment it settles, and the action becomes
+/// "Fetch on Server" for a real media stream or "Open in Browser" for anything else — which runs the
+/// resolver, where the host's own download button is pressed by hand and the file link it hands out
+/// (cookies and all) goes to the server.
 private struct FetchLinkSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var serverFetches = ServerFetchStore.shared
     @State private var url = ""
+    @State private var kind: LinkKind = .empty
     @State private var submitting = false
     @State private var queuedCount = 0
     @State private var lastError: String?
@@ -144,7 +148,7 @@ private struct FetchLinkSheet: View {
                             .keyboardType(.URL)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
-                            .onSubmit { if urlLooksValid { submit() } }
+                            .onSubmit { primaryAction() }
                         if url.isEmpty {
                             Button {
                                 if let s = UIPasteboard.general.string {
@@ -159,30 +163,32 @@ private struct FetchLinkSheet: View {
                             .accessibilityLabel("Clear")
                         }
                     }
+                    if urlLooksValid { verdictRow }
                     Button {
-                        submit()
+                        primaryAction()
                     } label: {
                         if submitting {
                             HStack { Spacer(); ProgressView(); Spacer() }
                         } else {
-                            Label("Fetch on Server", systemImage: "link.badge.plus")
+                            Label(primaryTitle, systemImage: primarySymbol)
                                 .frame(maxWidth: .infinity)
                         }
                     }
-                    .disabled(!urlLooksValid || submitting)
-                } footer: {
-                    Text("The server downloads the link straight into your library — watch progress on the Downloads cards. Paste more links to queue them; they run one after another.")
-                }
-
-                Section {
-                    Button {
-                        resolverURL = URL(string: url.trimmingCharacters(in: .whitespacesAndNewlines))
-                    } label: {
-                        Label("Open in browser to press the download button", systemImage: "safari")
+                    .disabled(!urlLooksValid || submitting || kind.isChecking)
+                    // Escape hatch, deliberately out of sight: a link the probe called direct can still
+                    // be gated (signed per-IP, one-shot token), and without this there'd be no way to
+                    // reach the browser for it.
+                    .contextMenu {
+                        if case .direct = kind {
+                            Button { resolverURL = validURL } label: {
+                                Label("Open in Browser", systemImage: "safari")
+                            }
+                        } else {
+                            Button { submit() } label: {
+                                Label("Fetch on Server", systemImage: "arrow.down.circle")
+                            }
+                        }
                     }
-                    .disabled(!urlLooksValid || submitting)
-                } footer: {
-                    Text("For sites that hide the file behind a download button, captcha or timer: tap the button yourself and Stashy captures the file link the site hands out — cookies and all — then fetches it on the server.")
                 }
 
                 if queuedCount > 0 {
@@ -207,6 +213,17 @@ private struct FetchLinkSheet: View {
                 ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() } }
             }
         }
+        // Re-runs on every keystroke; the leading sleep debounces typing, and the implicit cancellation
+        // of the previous task is what keeps only the newest verdict alive.
+        .task(id: url) {
+            guard let target = validURL else { kind = .empty; return }
+            kind = .checking
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            let verdict = await LinkProbe.classify(target)
+            guard !Task.isCancelled else { return }
+            kind = verdict
+        }
         .fullScreenCover(item: $resolverURL) { pageURL in
             LinkResolverSheet(startURL: pageURL) { fileURL, filename, headers in
                 submitResolved(fileURL, filename: filename, headers: headers)
@@ -214,11 +231,63 @@ private struct FetchLinkSheet: View {
         }
     }
 
-    private var urlLooksValid: Bool {
-        guard let u = URL(string: url.trimmingCharacters(in: .whitespacesAndNewlines)),
-              let scheme = u.scheme?.lowercased() else { return false }
-        return (scheme == "http" || scheme == "https") && u.host() != nil
+    /// The one line of feedback in the sheet: what the link turned out to be.
+    @ViewBuilder
+    private var verdictRow: some View {
+        HStack(spacing: 8) {
+            switch kind {
+            case .checking:
+                ProgressView().controlSize(.small)
+                Text("Checking link").foregroundStyle(.secondary)
+            case .direct(let filename, let verified):
+                Image(systemName: "film").foregroundStyle(.green)
+                Text(filename ?? (verified ? "Video file" : "Looks like a video file"))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            case .page:
+                Image(systemName: "globe").foregroundStyle(.secondary)
+                Text("Web page").foregroundStyle(.secondary)
+            case .empty:
+                EmptyView()
+            }
+        }
+        .font(.footnote)
     }
+
+    private var primaryTitle: String {
+        switch kind {
+        case .direct: return "Fetch on Server"
+        case .checking: return "Checking Link"
+        case .page, .empty: return "Open in Browser"
+        }
+    }
+
+    private var primarySymbol: String {
+        switch kind {
+        case .direct: return "arrow.down.circle"
+        case .checking: return "hourglass"
+        case .page, .empty: return "safari"
+        }
+    }
+
+    /// Direct links go straight to the server; everything else opens the resolver, which is where a
+    /// gated page can be worked through by hand (and where its page URL can still be sent on).
+    private func primaryAction() {
+        guard let target = validURL, !submitting, !kind.isChecking else { return }
+        switch kind {
+        case .direct: submit()
+        case .page, .empty, .checking: resolverURL = target
+        }
+    }
+
+    private var validURL: URL? {
+        guard let u = URL(string: url.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = u.scheme?.lowercased(),
+              scheme == "http" || scheme == "https", u.host() != nil else { return nil }
+        return u
+    }
+
+    private var urlLooksValid: Bool { validURL != nil }
 
     private func submit() {
         let target = url.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -352,7 +421,7 @@ private struct ServerFetchCard: View {
             return parts.isEmpty ? "Downloading on server…" : parts.joined(separator: "  ·  ")
         case .paused:
             if let d = item.downloaded, d > 0 {
-                return "Paused — \(ByteCountFormatter.string(fromByteCount: d, countStyle: .file)) kept"
+                return "Paused  ·  \(ByteCountFormatter.string(fromByteCount: d, countStyle: .file)) kept"
             }
             return "Paused"
         case .done:

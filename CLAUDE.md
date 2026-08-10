@@ -80,8 +80,9 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   itself checks. Stash's `jobQueue` returns `null` (not `[]`) for an empty queue — decode optionally. §6.
 - **Fetch URL→server (plugin ≥0.5.0):** DRM streams (SAMPLE-AES/FairPlay/Widevine) CANNOT be downloaded
   — not a bug, don't build a bypass; clear HLS/MP4 works. Resolver replays Origin + a cookie jar
-  (`--cookies`). Plugin zip + `index.yml` sha256 MUST be rebuilt together; `stash-plugin/**` pushes don't
-  trigger CI. §8.
+  (`--cookies`). Submit sheet = one field + one button whose verb comes from `LinkProbe` (HEADERS decide
+  file vs page, never the extension; never reads a body) — no instruction text, keep it that way. Plugin
+  zip + `index.yml` sha256 MUST be rebuilt together; `stash-plugin/**` pushes don't trigger CI. §8.
 - **Verify Apple API signatures BEFORE pushing** (CI is the only compiler, ~6–8 min/guess): fetch the
   exact decl from `developer.apple.com/tutorials/data/documentation/<framework>/<symbol>.json`. Failable
   vs non-failable inits differ across sibling APIs. §1.
