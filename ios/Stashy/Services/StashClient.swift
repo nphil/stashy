@@ -360,13 +360,73 @@ struct StashClient: Sendable {
         return resp.jobQueue ?? []
     }
 
-    /// Kick Stash's native library scan with server defaults (all configured paths). Returns the Job id.
+    /// Read the ticks the server has saved for its own Tasks forms (`configuration.defaults`), so a task
+    /// queued from Stashy behaves exactly like the same task started from the Stash web UI. Both halves
+    /// fall back to Stash's stock ticks when the server saved nothing — see `StashTaskDefaults` for why
+    /// sending these explicitly is mandatory rather than cosmetic.
+    func taskDefaults() async throws -> StashTaskDefaults {
+        struct Response: Decodable, Sendable {
+            struct Configuration: Decodable, Sendable {
+                struct Defaults: Decodable, Sendable {
+                    let scan: ScanOptions?
+                    let generate: GenerateOptions?
+                }
+                let defaults: Defaults
+            }
+            let configuration: Configuration
+        }
+        let gql = """
+        query TaskDefaults {
+          configuration { defaults {
+            scan { rescan scanGenerateCovers scanGeneratePreviews scanGenerateImagePreviews
+                   scanGenerateSprites scanGeneratePhashes scanGenerateImagePhashes
+                   scanGenerateThumbnails scanGenerateClipPreviews }
+            generate { covers sprites previews imagePreviews markers markerImagePreviews
+                       markerScreenshots transcodes phashes interactiveHeatmapsSpeeds
+                       imageThumbnails clipPreviews }
+          } }
+        }
+        """
+        let resp: Response = try await query(gql)
+        let saved = resp.configuration.defaults
+        // `defaults.scan` / `defaults.generate` are nullable, and an all-off payload means the owner
+        // never saved that form — either way a task that generates nothing is the bug, not a
+        // preference, so substitute Stash's stock ticks instead of shipping a dud button.
+        var scan = ScanOptions.fallback
+        if let savedScan = saved.scan, savedScan.generatesAnything { scan = savedScan }
+        var generate = GenerateOptions.fallback
+        if let savedGenerate = saved.generate, savedGenerate.generatesAnything { generate = savedGenerate }
+        return StashTaskDefaults(scan: scan, generate: generate)
+    }
+
+    /// Kick Stash's native library scan over all configured paths. Returns the Job id.
+    ///
+    /// `options` is NOT optional decoration: Stash treats every flag the caller omits as `false`, so a
+    /// bare input ingests files and generates nothing (no cover, no preview, no sprite, no phash) —
+    /// and once the scene row exists, no later scan can backfill it. `StashTaskDefaults` has the
+    /// receipts; pass `StashTaskDefaultsCache.load(client:).scan`.
     @discardableResult
-    func metadataScan() async throws -> String {
+    func metadataScan(_ options: ScanOptions) async throws -> String {
         struct Response: Decodable, Sendable { let metadataScan: String }
         let gql = "mutation MetadataScan($input: ScanMetadataInput!) { metadataScan(input: $input) }"
-        let resp: Response = try await query(gql, variables: ScanMetadataVariables(input: ScanMetadataInput()))
+        let resp: Response = try await query(gql, variables: ScanMetadataVariables(input: options))
         return resp.metadataScan
+    }
+
+    /// Kick Stash's native **Generate** task — the one that produces derived media (covers, previews,
+    /// scrubber sprites, phashes, marker images…) for scenes ALREADY in the library. This is the only
+    /// way to repair a scene that scanned in bare, because Stash skips the scan-time generators for any
+    /// file that already has a scene.
+    ///
+    /// `sceneIDs` scopes it to specific scenes; nil runs the whole library. `overwrite` is always false,
+    /// so it fills gaps and skips what already exists — safe to run repeatedly. Returns the Job id.
+    @discardableResult
+    func metadataGenerate(_ options: GenerateOptions, sceneIDs: [String]? = nil) async throws -> String {
+        struct Response: Decodable, Sendable { let metadataGenerate: String }
+        let gql = "mutation MetadataGenerate($input: GenerateMetadataInput!) { metadataGenerate(input: $input) }"
+        let input = GenerateMetadataInput(options: options, sceneIDs: sceneIDs)
+        let resp: Response = try await query(gql, variables: GenerateMetadataVariables(input: input))
+        return resp.metadataGenerate
     }
 
     /// Ask Stash to stop a running/queued job (the jobs panel's cancel button). `stopJob(job_id:)` returns
@@ -390,8 +450,27 @@ struct JobInfo: Decodable, Sendable, Identifiable, Equatable {
     let progress: Double?
 }
 
-private struct ScanMetadataInput: Encodable, Sendable {}   // empty = scan all library paths, server defaults
-private struct ScanMetadataVariables: Encodable, Sendable { let input: ScanMetadataInput }
+// No `paths` → every configured library path, which is what the panel's chip means by "Scan Library".
+private struct ScanMetadataVariables: Encodable, Sendable { let input: ScanOptions }
+
+/// `GenerateMetadataInput` is FLAT, so the saved option flags are encoded into the same keyed container
+/// as the two fields the call site owns: `overwrite` (pinned false — backfill, never rebuild) and the
+/// optional scene scope. Encoding `options` into the shared encoder merges its keys in alongside.
+private struct GenerateMetadataInput: Encodable, Sendable {
+    let options: GenerateOptions
+    let sceneIDs: [String]?
+
+    private enum CallerKeys: String, CodingKey { case overwrite, sceneIDs }
+
+    func encode(to encoder: any Encoder) throws {
+        try options.encode(to: encoder)
+        var container = encoder.container(keyedBy: CallerKeys.self)
+        try container.encode(false, forKey: .overwrite)
+        try container.encodeIfPresent(sceneIDs, forKey: .sceneIDs)
+    }
+}
+
+private struct GenerateMetadataVariables: Encodable, Sendable { let input: GenerateMetadataInput }
 private struct StopJobVariables: Encodable, Sendable { let job_id: String }
 
 // MARK: - Scene query model

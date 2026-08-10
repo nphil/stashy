@@ -120,13 +120,33 @@ final class JobMonitor {
 
     // MARK: Actions (the panel's buttons)
 
-    /// Queue Stash's native library scan (server defaults).
+    /// Queue Stash's native library scan, carrying the generation toggles the server has saved for its
+    /// own Scan form. Sending them is mandatory, not cosmetic: Stash treats every omitted flag as
+    /// `false`, so the old bare input scanned files in and generated nothing — see `StashTaskDefaults`.
     func scanLibrary() async {
         guard let client else { return }
         actionError = nil
         do {
-            _ = try await client.metadataScan()
+            let defaults = await StashTaskDefaultsCache.load(client: client)
+            _ = try await client.metadataScan(defaults.scan)
             noteQueued("library scan")
+        } catch {
+            actionError = Self.message(error)
+        }
+        await refreshNow()
+    }
+
+    /// Queue Stash's native **Generate** task over the whole library, with the server's saved Generate
+    /// ticks. This is the backfill for scenes that were scanned in without covers / previews / scrubber
+    /// sprites / phashes — a scan can't repair those (Stash skips the scan-time generators once a file
+    /// has a scene), and `overwrite` is pinned false, so it only fills gaps and is safe to re-run.
+    func generateMedia() async {
+        guard let client else { return }
+        actionError = nil
+        do {
+            let defaults = await StashTaskDefaultsCache.load(client: client)
+            _ = try await client.metadataGenerate(defaults.generate)
+            noteQueued("generate")
         } catch {
             actionError = Self.message(error)
         }
