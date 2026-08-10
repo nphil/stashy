@@ -123,14 +123,19 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   do not re-apply). Check before re-analyzing perf.
 
 ## Current state (keep short — current release + work queue only)
-- **Latest release: v1.0.365** (plugin **0.5.3**). CI green. The -3000 investigation is closed.
+- **Latest release: v1.0.368** (plugin **0.5.3**). CI green. The -3000 investigation is closed.
+- **Scene names fall back to the file name** (v1.0.366): `StashScene.displayTitle` everywhere, middle
+  truncation, card capped at 52 chars. §6.
 - **Downloads** work end-to-end: app-open ~100 MB/s, byte-exact resume through crashes / relaunch /
   suspension; **background runtime is solved** (`DownloadKeepAlive`, on by default). One-at-a-time queue
   with Start All / Pause Queue. Queue invariants in §3 — read before touching the queue manager.
-- **Fetch URL → server SHIPPED** (v1.0.359–365 + plugin 0.5.0–0.5.3): paste or resolve a link → the
+- **Fetch URL → server SHIPPED** (v1.0.359–367 + plugin 0.5.0–0.5.3): paste or resolve a link → the
   server (yt-dlp) downloads into the library + scans it; live "On Server" cards (speed/size/ETA,
   pause/resume/cancel/queue). In-app immersive WKWebView resolver captures button-gated + streaming links
-  (Origin + cookie-jar replay); **DRM streams are out of scope** (§8 fetch entry).
+  (Origin + cookie-jar replay); **DRM streams are out of scope** (§8 fetch entry). The submit sheet is
+  one field + one `LinkProbe`-driven button (v1.0.367) — no instruction text, don't add any back.
+- **CI can no longer redden for non-code reasons** (v1.0.367–368): package-resolution retries, runs
+  queue instead of overlapping, version comes from tags, bump commits build on current `main`. §1.
 - **XR glasses (Viture Pro) SHIPPED** (v1.0.348–357): glasses-first browse + playback, transient OSD
   pills, hardware-volume-only. §9 is the deep reference. Joystick / two-finger-mute / hold-2× were
   removed — don't re-add.
