@@ -13,6 +13,14 @@ on:
 permissions:
   contents: write
 
+# Two overlapping runs both compute their version from their own (pinned, therefore identical)
+# checkout, so they race for the same tag and the loser's bump commit conflicts on `apps.json`
+# (2026-08-10: a push landed mid-build and the second run went red AFTER compiling clean). Queue
+# runs instead of cancelling: every push to main is meant to produce a release.
+concurrency:
+  group: ios-build
+  cancel-in-progress: false
+
 jobs:
   release:
     name: Build and release
@@ -35,6 +43,15 @@ jobs:
           cd ios
           CURRENT=$(python3 -c "import plistlib; print(plistlib.load(open('Info.plist','rb'))['CFBundleShortVersionString'])")
           BUILD=$(python3 -c "import plistlib; print(plistlib.load(open('Info.plist','rb'))['CFBundleVersion'])")
+          # The checkout is pinned to the PUSHED commit, whose plist predates the bump commit CI
+          # itself lands afterwards — so on a second push in the same window the plist reads stale and
+          # this run would try to republish a version that already exists. Tags are the authority on
+          # what has actually shipped; take whichever is higher.
+          LATEST_TAG=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sed 's/^v//' | sort -V | tail -1)
+          if [ -n "$LATEST_TAG" ]; then
+            CURRENT=$(printf '%s\n%s\n' "$CURRENT" "$LATEST_TAG" | sort -V | tail -1)
+          fi
+          echo "Base version: $CURRENT (plist + tags)"
           IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
           NEW_VER="$MAJOR.$MINOR.$((PATCH + 1))"
           NEW_BUILD="$((BUILD + 1))"
@@ -214,6 +231,17 @@ jobs:
           DOWNLOAD_URL="https://github.com/nphil/stashy/releases/download/$TAG/Stashy.ipa"
           RELEASE_NOTES="Unsigned IPA — sideload with Feather/AltStore. Built from \`$SHORT_SHA\` on $(date -u +'%Y-%m-%d %H:%M UTC')"
 
+          # Re-base the bump onto whatever main is NOW, before writing anything. `reset` (mixed) moves
+          # the branch pointer and the index but leaves the worktree — so the version files this run
+          # edited survive, while everything main gained since checkout stays intact. The old
+          # "commit, then rebase" order conflicted instead: two runs each inserting at the head of
+          # `apps.json`'s versions array touch the same lines. Taking main's copy of apps.json HERE and
+          # patching it below means the entry is appended to the CURRENT list, so there is nothing to
+          # rebase and nothing to conflict.
+          git fetch origin main
+          git reset origin/main
+          git checkout origin/main -- apps.json
+
           VERSION="$VERSION" PUBLISHED_DATE="$PUBLISHED_DATE" DOWNLOAD_URL="$DOWNLOAD_URL" \
           IPA_SIZE="$IPA_SIZE" RELEASE_NOTES="$RELEASE_NOTES" \
           python3 - <<'PYEOF'
@@ -252,13 +280,13 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           # XcodeGen also materializes the bumped version into the embedded Live Activity extension plist.
-          # Stage every version source so the following rebase never sees a dirty worktree.
+          # Stage every version source, or the reset above leaves one behind and the next run reads a
+          # version that disagrees with the tag.
           git add ios/Info.plist ios/StashyLiveActivity/Info.plist ios/project.yml apps.json
           git commit -m "chore: bump version to $VERSION [skip ci]"
 
-          git fetch origin main
-          git rebase origin/main
-          git push origin main
+          # Already sitting on current main (the reset above), so this is a plain fast-forward.
+          git push origin HEAD:main
 
           git tag "$TAG"
           git push origin "$TAG"

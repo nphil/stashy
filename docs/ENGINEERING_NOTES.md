@@ -36,6 +36,8 @@ Failure classes, and how to tell them apart from the job log:
   GitHub release and they can all time out at once (2026-08-10, v1.0.367 push — nothing was ever
   compiled). That step now retries 3× with 20/40 s backoff before failing, so this should be rare; if
   it still fails, re-run the job rather than "fixing" code that never reached the compiler.
+- **Release step red with `CONFLICT (content): Merge conflict in apps.json`** → two runs overlapped.
+  Also not your code: both compiled fine. See below.
 - Read failures with `get_job_logs` (`failed_only: true`, `return_content: true`, `tail_lines: ~60`).
   **`list_workflow_runs` returns ~375 KB and blows the tool-result limit** — it gets spilled to a file;
   parse that file with python (`json.load` → `workflow_runs[i]['id' | 'head_sha' | 'conclusion']`)
@@ -74,6 +76,23 @@ git fetch origin main -q && git rebase origin/main && git push -u origin main
 **Verify every push** via `get_latest_release`: a *changed* IPA byte size confirms your code actually
 shipped. Calibration: v1.0.100 ≈ 7.63 MB, v1.0.107 = 7,733,141 B ≈ 7.73 MB (FFmpeg is statically
 linked + dead-stripped, so size creeps up as more of it gets called).
+
+**Don't push while a build is in flight** — and since that rule got broken the moment it mattered
+(2026-08-10), the pipeline now defends itself three ways. Understand all three before touching this
+step; each one alone leaves a hole:
+1. `concurrency: {group: ios-build, cancel-in-progress: false}` — runs QUEUE instead of overlapping.
+   Not `cancel-in-progress`: every push to main is meant to produce a release.
+2. The version is `max(checkout's plist, highest `v*` tag)` + 1. The checkout is pinned to the pushed
+   commit, so its plist predates the bump commit CI lands afterwards — a second push in the same
+   window reads a stale version and would republish a tag that already exists. Tags are the authority.
+3. The bump commit is BUILT ON current main, not rebased onto it: `git fetch origin main` →
+   `git reset origin/main` (mixed — moves branch + index, leaves the edited version files in the
+   worktree) → `git checkout origin/main -- apps.json` → patch → commit → `git push origin HEAD:main`.
+   The old commit-then-rebase order conflicted, because two runs each insert at the head of
+   `apps.json`'s `versions` array and that's the same lines. Patching main's copy means there is
+   nothing to rebase.
+The symptom this cures, so it's recognisable if it ever returns: `CONFLICT (content): Merge conflict
+in apps.json` at the release step, on a run whose code compiled perfectly.
 
 ### XcodeGen
 The Xcode project is generated in CI from `ios/project.yml`, which **globs `Stashy/`** — new `.swift`
