@@ -713,6 +713,59 @@ class TestFetchHelpers(unittest.TestCase):
         self.assertFalse(sc._is_drm_error(None))
 
 
+class TestScanGenerateOptions(unittest.TestCase):
+    """v0.5.4 — the post-fetch scan must carry generation flags explicitly.
+
+    Stash applies NO defaults server-side (the flags are plain Go bools; an omitted one arrives as
+    False), and once a file has a scene row the scan-time generators are skipped for it forever, so a
+    flag-less scan means a video that can never get sprites or a phash from a scan again."""
+
+    class _Stash:
+        def __init__(self, answer=None, boom=False):
+            self.answer, self.boom, self.queries = answer, boom, []
+
+        def call(self, query, variables=None):
+            self.queries.append(query)
+            if self.boom:
+                raise RuntimeError("Cannot query field \"scanGenerateClipPreviews\"")
+            return {"configuration": {"defaults": {"scan": self.answer}}}
+
+    def test_saved_defaults_are_mirrored_verbatim(self):
+        saved = {"scanGenerateCovers": True, "scanGeneratePreviews": False,
+                 "scanGenerateSprites": True, "scanGeneratePhashes": True,
+                 "scanGenerateClipPreviews": False}
+        self.assertEqual(sc._scan_generate_options(self._Stash(saved)), saved)
+
+    def test_only_known_flags_survive(self):
+        # Anything not in the schema tuple (or not a bool) must never reach the mutation.
+        got = sc._scan_generate_options(self._Stash(
+            {"scanGenerateSprites": True, "bogusFlag": True, "scanGeneratePhashes": None}))
+        self.assertEqual(got, {"scanGenerateSprites": True})
+
+    def test_query_failure_falls_back_to_stock_ticks(self):
+        # An older schema rejects a newer field — the fallback must stay valid there, so it carries
+        # only long-standing flags. Sprites + phashes are the whole point, so they must be on.
+        got = sc._scan_generate_options(self._Stash(boom=True))
+        self.assertEqual(got, sc._SCAN_FALLBACK)
+        self.assertTrue(got["scanGenerateSprites"] and got["scanGeneratePhashes"])
+        self.assertTrue(set(got) <= set(sc._SCAN_FLAGS))
+
+    def test_missing_or_empty_defaults_fall_back(self):
+        # `defaults.scan` is nullable, and an all-off answer means nothing was ever saved — either way
+        # a scan that generates nothing is the bug, not a preference.
+        self.assertEqual(sc._scan_generate_options(self._Stash(None)), sc._SCAN_FALLBACK)
+        self.assertEqual(sc._scan_generate_options(self._Stash({})), sc._SCAN_FALLBACK)
+        self.assertEqual(sc._scan_generate_options(
+            self._Stash({"scanGenerateSprites": False, "scanGeneratePhashes": False})),
+            sc._SCAN_FALLBACK)
+
+    def test_rescan_is_never_taken_from_defaults(self):
+        # The post-fetch scan is scoped to the fetch folder; a rescan there re-handles every file
+        # previously fetched into it.
+        got = sc._scan_generate_options(self._Stash({"rescan": True, "scanGenerateSprites": True}))
+        self.assertNotIn("rescan", got)
+
+
 class TestFetchStatusAndDelete(unittest.TestCase):
     """v0.5.0 — the live-status prune policy and the card-delete path jail."""
 

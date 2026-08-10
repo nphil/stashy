@@ -2905,6 +2905,49 @@ def _library_paths(stash):
     return [s.get("path") for s in stashes if s.get("path") and not s.get("excludeVideo")]
 
 
+# Every generation flag Stash's Scan form exposes, and the ticks it ships with. See
+# _scan_generate_options for why sending them is mandatory rather than cosmetic.
+_SCAN_FLAGS = ("scanGenerateCovers", "scanGeneratePreviews", "scanGenerateImagePreviews",
+               "scanGenerateSprites", "scanGeneratePhashes", "scanGenerateImagePhashes",
+               "scanGenerateThumbnails", "scanGenerateClipPreviews")
+# The degraded set: only flags that predate the newest schema additions, so it stays valid against an
+# older Stash (a field the server's schema doesn't know fails the WHOLE mutation, which would leave the
+# fetched file unscanned — far worse than missing a thumbnail).
+_SCAN_FALLBACK = {"scanGenerateCovers": True, "scanGeneratePreviews": True,
+                  "scanGenerateSprites": True, "scanGeneratePhashes": True}
+
+
+def _scan_generate_options(stash):
+    """The generation flags to send with the post-fetch `metadataScan`, read from the server's saved
+    Scan defaults (`configuration.defaults.scan` — exactly what Stash's own Tasks page shows ticked).
+
+    This is not optional polish. **Stash applies no defaults of its own**: the flags are plain Go bools
+    inside `manager.ScanMetadataInput`, and the resolver passes the input straight to `manager.Scan()`,
+    so every field the caller omits arrives as False. The ticks in the web UI are applied BY THE BROWSER
+    when it builds the mutation. Posting `{"paths": [...]}` — what this plugin did through 0.5.3 — is
+    therefore an ingest-only scan: no cover, no preview, no scrubber sprite, no phash.
+
+    Worse, it cannot be repaired by scanning again: `handlerRequiredFilter.Accept` only returns True for
+    a file with ZERO related objects, so once the scene row exists the scan-time generators are skipped
+    for that file forever. Only `metadataGenerate` (the app's Generate action) backfills it.
+
+    `rescan` is deliberately NOT taken from the saved defaults: this scan is scoped to the fetch folder,
+    and a rescan there would re-handle every file previously fetched into it."""
+    try:
+        data = stash.call("query { configuration { defaults { scan { %s } } } }"
+                          % " ".join(_SCAN_FLAGS))
+        saved = ((data.get("configuration") or {}).get("defaults") or {}).get("scan") or {}
+    except Exception as e:
+        # Most likely an older schema rejecting one of the newer fields. Fall back to the safe subset.
+        log_debug("could not read Stash's scan defaults (using stock ticks): {}".format(e))
+        return dict(_SCAN_FALLBACK)
+    # Keys that came back are valid against THIS server's schema by construction, so they're safe to
+    # send. An all-off answer means nothing was ever saved — a scan that generates nothing is the very
+    # bug this function exists to fix, so use the stock ticks instead.
+    opts = {k: bool(saved[k]) for k in _SCAN_FLAGS if isinstance(saved.get(k), bool)}
+    return opts if any(opts.values()) else dict(_SCAN_FALLBACK)
+
+
 def _fetch_dir(settings, library_paths):
     """Destination folder: the fetchDir setting, else <first video library>/stashy-fetch.
     MUST sit inside a Stash library — otherwise the post-download scan can never see the file,
@@ -3376,10 +3419,18 @@ def run_fetch(stash, args, settings):
             final_size = os.path.getsize(os.path.join(dest_dir, filename_seen))
 
     log_progress(0.97)
+    # Scan the fetch folder WITH the server's saved generation flags — a bare input would scan the file
+    # in and generate nothing, and no later scan could ever backfill it (_scan_generate_options).
+    scan_input = {"paths": [dest_dir]}
+    generate = _scan_generate_options(stash)
+    scan_input.update(generate)
     data = stash.call(
         "mutation Scan($input: ScanMetadataInput!) { metadataScan(input: $input) }",
-        {"input": {"paths": [dest_dir]}})
-    log_info("library scan queued (job {}) for {}".format(data.get("metadataScan"), dest_dir))
+        {"input": scan_input})
+    log_info("library scan queued (job {}) for {} — generating {}".format(
+        data.get("metadataScan"), dest_dir,
+        ", ".join(sorted(k[len("scanGenerate"):].lower() for k, v in generate.items() if v))
+        or "nothing (Stash's Scan defaults have every generator off)"))
     _update_fetch_status(fetch_id, status="done", filename=filename_seen,
                          downloaded=final_size, total=final_size, speed=None, eta=None)
     log_progress(1.0)
