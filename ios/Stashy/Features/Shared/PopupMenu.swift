@@ -38,6 +38,11 @@ struct PopupMenu: View {
                 .foregroundStyle(themeManager.current.foregroundColor)
                 .frame(width: 34, height: 34)
                 .contentShape(Rectangle())
+                // The system highlight behind an open menu's label defaults to a square-cornered slab
+                // (it reads the layer's corner radius, which a SwiftUI-drawn shape doesn't set). This
+                // button is a round glyph in a square frame, so declare a circle — see
+                // `menuHighlightShape()` for the full story.
+                .contentShape(.contextMenuPreview, Circle())
         }
     }
 }
