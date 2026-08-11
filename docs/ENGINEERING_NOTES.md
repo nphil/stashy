@@ -958,8 +958,47 @@ churns.** History on the filter/sort panel:
   kept-for-instant-reopen snapshot survives.
 - Queue actions surface `actionError` inline (plugin missing / auth / network) and show an optimistic
   "Starting …" line with a 3-poll grace instead of `try?`-swallowing failures.
-- The task buttons are compact caption2 icon+name chips in a `FlowLayout` (a few short rows) under a
-  "Library tasks" caption — solid fills on the glass panel, matching the filter panel's tag chips.
+- **Status readout = Stash's own Tasks row (v1.0.370).** A bare percentage doesn't answer "what is it
+  doing?", so `jobQueue` also selects `startTime` + `error` and `runningStatus(_:)` renders title →
+  progress bar → meta line (`79% · 3m 12s · +1 queued`, each part dropped when the server doesn't
+  report it) → **up to two live `subTasks`** → the job's error. `subTasks` is the payload that matters:
+  Stash names every unit of work it queues (`taskQueue.Add("Generating sprites for <path>", …)`), and
+  the panel was already fetching the field but only used it as a title fallback. Those lines are mostly
+  paths, so they truncate in the **MIDDLE** (same reason as `displayTitle` — the tail carries the file
+  name). Two lines max: the generate queue is concurrent, and an unbounded list grows the popover
+  every time the server gets busy.
+- Stash titles every plugin job `Running plugin task: <name>`; the prefix is trimmed (it cost two lines
+  and said nothing the panel doesn't imply).
+- **Elapsed:** Stash marshals `Time` as RFC3339 with a Go-length fraction (up to 9 digits) and
+  `ISO8601DateFormatter` accepts **exactly 3** — so `parseTimestamp` retries with the fraction stripped
+  and returns nil on anything else. No elapsed line beats a wrong one. Formatters are built per call
+  (they're not `Sendable`, and this runs once per 1.5 s poll) — the same pattern as `Performer.age`.
+- The task buttons are icon+name chips in a **2-column `Grid`** (equal columns via
+  `.frame(maxWidth: .infinity)` on each chip; the odd fifth spans both with `.gridCellColumns(2)`) under
+  a "Library tasks" caption — solid fills on the glass panel, matching the filter panel's tag chips. A
+  `FlowLayout` was wrong here: five chips of five natural widths left a ragged right edge with dead
+  space beside the short ones (owner: "not eye pleasing"). Equal columns also bought room for `.caption`
+  over `.caption2`. Panel is 340 wide so a sub-task line has somewhere to go.
+
+### The system menu highlight is a SQUARE unless you declare otherwise (v1.0.370)
+
+Owner report: picking a new sort ("Date" → "Date Added") flashed a grey square-cornered slab over the
+pill for a frame or two before it settled back into a capsule.
+
+- **It is not our view and not our animation.** The slab is the highlight iOS draws over a `Menu`'s
+  label while the menu opens/dismisses. It is derived from the label's **`contentShape`**, and a shape
+  painted by SwiftUI's `.background(_:in:)` is invisible to it — nothing sets a layer corner radius, so
+  the system assumes a plain rectangle. Chasing it with animation, layout or `.clipShape` changes gets
+  you nowhere.
+- **Fix:** `.contentShape(.contextMenuPreview, Capsule())` (iOS 15+; the two-argument form takes a
+  `ContentShapeKinds` and does NOT affect hit-testing — that's the `.interaction` kind). Lives in
+  `DesignSystem/FilterPill.swift` as `menuHighlightShape()`, applied inside **`filterPill`** and
+  **`capsuleField`**, so every sort/filter chip in both filter panels and the performer form's gender
+  menu are covered by construction. `PopupMenu`'s ••• button declares a `Circle()` to match its glyph.
+- **Why it surfaced on that control first:** a longer label also RESIZES the label under the highlight,
+  which makes the wrong corners obvious. Every capsule-shaped menu in the app had the artifact; only the
+  resizing one advertised it. **Any new capsule/circular `Menu` label needs this** — if you're not going
+  through `filterPill`/`capsuleField`, call `menuHighlightShape()` yourself.
 
 ### Scan vs Generate — Stash sends NO defaults, and a rescan can't repair a bare scene (v1.0.369)
 

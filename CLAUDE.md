@@ -107,6 +107,10 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   `@State` re-renders every cell at 120 Hz); store it in a reference box if you only need it later. §6.
 - **Popovers:** host from a stable ZStack sibling (`FilterPopoverAnchor`), never a conditional/churning
   view. Bit us three times. §6.
+- **A `Menu` label's system highlight is a SQUARE unless you declare the shape** — it reads
+  `contentShape`, and a `.background(_:in:)` shape is invisible to it (grey slab flashes on dismiss,
+  v1.0.370). Any capsule/round menu label needs `menuHighlightShape()` /
+  `.contentShape(.contextMenuPreview, <shape>)`; `filterPill` + `capsuleField` already do it. §6.
 - Most CI failures were **Swift 6 strict-concurrency** — read the patterns before writing async code. §2.
 - **Scene names render through `StashScene.displayTitle`** (title → file basename → "Untitled"), never
   `scene.title ?? "Untitled"`; file-name fallbacks truncate in the MIDDLE (the tail holds the extension). §6.
@@ -128,7 +132,7 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   do not re-apply). Check before re-analyzing perf.
 
 ## Current state (keep short — current release + work queue only)
-- **Latest release: v1.0.369** (plugin **0.5.4**). CI green. The -3000 investigation is closed.
+- **Latest release: v1.0.370** (plugin **0.5.4**). CI green. The -3000 investigation is closed.
 - **Scene names fall back to the file name** (v1.0.366): `StashScene.displayTitle` everywhere, middle
   truncation, card capped at 52 chars. §6.
 - **Downloads** work end-to-end: app-open ~100 MB/s, byte-exact resume through crashes / relaunch /
@@ -138,6 +142,9 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   NOTHING (covers/previews/sprites/phashes) because Stash applies no server-side defaults; the app and
   the plugin now send `configuration.defaults.scan`. New **Generate** chip (jobs panel, library-wide)
   and **Generate Media** (scene •••, one scene) backfill scenes that came in bare — a rescan can't. §6.
+- **Jobs panel is a real status readout** (v1.0.370): title (plugin boilerplate trimmed) → bar → `79% ·
+  3m 12s · +1 queued` → the live `subTasks` Stash is working on right now → the job's error. Task chips
+  are a 2-column grid, not a flow. §6.
 - **Fetch URL → server SHIPPED** (v1.0.359–367 + plugin 0.5.0–0.5.3): paste or resolve a link → the
   server (yt-dlp) downloads into the library + scans it; live "On Server" cards (speed/size/ETA,
   pause/resume/cancel/queue). In-app immersive WKWebView resolver captures button-gated + streaming links
