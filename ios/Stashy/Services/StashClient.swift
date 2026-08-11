@@ -356,7 +356,7 @@ struct StashClient: Sendable {
     func jobQueue() async throws -> [JobInfo] {
         struct Response: Decodable, Sendable { let jobQueue: [JobInfo]? }
         let resp: Response = try await query(
-            "query JobQueue { jobQueue { id status description subTasks progress } }")
+            "query JobQueue { jobQueue { id status description subTasks progress startTime error } }")
         return resp.jobQueue ?? []
     }
 
@@ -442,12 +442,23 @@ struct StashClient: Sendable {
 
 /// One entry in Stash's job queue. `progress` is 0…1 (nil = indeterminate); `status` is one of
 /// READY / RUNNING / STOPPING / FINISHED / CANCELLED / FAILED.
+///
+/// `subTasks` is the live detail Stash's own Tasks page prints under the bar — the individual units of
+/// work in flight right now ("Generating sprites for …", "Scanning …"). It's what makes the jobs panel a
+/// status readout rather than a bare percentage.
+///
+/// Only `id` / `status` / `description` / `addTime` are non-null on Stash's `Job` type, so everything
+/// else here stays optional — a non-optional decode of a null field fails the WHOLE poll, which is the
+/// bug that froze this panel mid-scan once already.
 struct JobInfo: Decodable, Sendable, Identifiable, Equatable {
     let id: String
     let status: String
     let description: String
     let subTasks: [String]?
     let progress: Double?
+    /// RFC3339 from Stash's `Time` scalar; nil until the job leaves the queue and starts running.
+    let startTime: String?
+    let error: String?
 }
 
 // No `paths` → every configured library path, which is what the panel's chip means by "Scan Library".
