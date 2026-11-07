@@ -74,12 +74,19 @@ struct GlassesEnvRegistrar: View {
 /// Observation-driven mount: reading these observables in `body` re-evaluates on every flip, and the
 /// `.onChange(initial: true)` covers the cold-launch case where the glasses scene connected first.
 struct GlassesTakeoverDriver: View {
+    @Environment(\.scenePhase) private var scenePhase
+
     var body: some View {
         let session = GlassesSession.shared
         let coordinator = GlassesCoordinator.shared
         let authenticated = session.env?.appState.isAuthenticated ?? false
         let should = session.isConnected && authenticated && !coordinator.takeoverSuppressed
         return Color.clear
+            // iOS 27 glasses registration needs the phone window's root controller, which may not exist
+            // yet on a cold launch. Retry on every activation; it is a no-op once registered.
+            .onChange(of: scenePhase, initial: true) { _, phase in
+                if phase == .active { GlassesSession.shared.registerAccessory() }
+            }
             .onChange(of: should, initial: true) { _, now in
                 RemoteTakeover.shared.sync(shouldShow: now)
             }
