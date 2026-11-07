@@ -8,7 +8,8 @@ here was verified against the repo on 2026-07-01; full re-audit against code + g
 
 ## 1. Build / CI detail
 
-Workflow: `.github/workflows/ios-build.yml`, runs on `macos-15`, triggered on every push to `main`.
+Workflow: `.github/workflows/ios-build.yml`, runs on the `xcode-27` runner (Xcode 27, iOS 27 SDK, since
+2026-11-06; was `macos-15`/Xcode 26), triggered on every push to `main`.
 `paths-ignore` skips `**/*.md`, `android/**`, `stash-plugin/**`, and `.github/workflows/android.yml` —
 doc-only AND plugin-only commits do **not** trigger an app build.
 
@@ -125,7 +126,7 @@ not logic:
 - **Non-Sendable Apple objects across a boundary** (`URLSessionTask`, `AVAssetWriterInput`,
   `AVAssetReaderTrackOutput`): wrap in a tiny `@unchecked Sendable` box struct when handing them to
   `@Sendable` closures (e.g. `getAllTasks`'s completion, `requestMediaDataWhenReady`).
-  `DownloadManager` has `UncheckedSendableBox`, `VideoTranscoder` has `UncheckedTranscodeBox`.
+  `DownloadManager` has `UncheckedSendableBox`.
 - **`Task { @MainActor in … }` created inside a `@MainActor` method:** calls to other `@MainActor`
   methods inside are same-actor → **no `await`** (adding one warns "no async operations occur within
   await"). But you still need explicit `self.` for escaping-closure captures.
@@ -855,22 +856,23 @@ because ranged-single items legitimately run foreground data tasks with multiThr
 
 ---
 
-## 4. On-device download transcode — three engines, FFmpeg-first
+## 4. On-device download transcode — the engine's two transcoders
 
-`DownloadManager.transcode()` (~line 987–1029) routes each job across three engines (all conform to
-`OnDeviceTranscoder`, declared in `VideoTranscoder.swift`):
+`DownloadManager.transcode()` routes each job to a `MediaTranscoder` from the video engine (§5);
+the app's presets live in `Services/EngineAdapters.swift` (`OnDeviceTranscodeSettings`, mapped to the
+engine's `TranscodeSettings`):
 
-- **Lossless stream copy** — same codec + same-or-smaller target size → `FFmpegTranscoder` remux-only
-  fast path (incl. hev1→hvc1 retag). Near-instant.
-- **Short clips (< 90 s)** — `VideoTranscoder` (`AVAssetReader` → `AVAssetWriter`, hardware
-  VideoToolbox) when the container is AV-native AND the codec is H.264; otherwise `FFmpegTranscoder`
-  (universal FFmpeg decode → VideoToolbox encode, commit `151e707`). **MKV/WebM/VP9/AV1 no longer throw
-  `.unreadable`** — the old AVFoundation-only limitation is gone.
-- **Long re-encodes (everything else)** → `FFmpegResumableTranscoder(workDir:)`
-  (`f421ecd`/`d3c0108`/`960ac90`, 2026-07-04): checkpointed keyframe-aligned standalone chunk MP4s
-  (`chunk_NNNN.mp4`, atomic-rename commit, `plan.json` + `settings.json` so even a cold relaunch
-  resumes from the last committed chunk), finalized by a stream-copy concat remux with single-pass
-  audio. **Deliberately chosen over single-file fragmented-MP4 append** (see the file header).
+- **Lossless stream copy or short clip (< 90 s)** → `FileTranscoder`: one pass, FFmpeg demux →
+  VideoToolbox decode/encode, audio copied. Same codec + same-or-smaller size is detected inside the
+  engine and becomes a near-instant stream copy (incl. hev1→hvc1 retag). The old AVFoundation path for
+  short native H.264 is gone with the engine switch (2026-11-06).
+- **Long re-encodes (everything else)** → `ChunkedTranscoder(workDirectory:planKey:)`: checkpointed
+  keyframe-aligned ~20 s chunk MP4s in `TranscodeWork/<id>/` (`plan.json` + `settings.json`, so a cold
+  relaunch resumes from the last committed chunk), joined with single-pass audio. **`planKey` keeps the
+  pre-engine spelling `<resolution>-<quality>-<codec>`** — change it and every interrupted transcode
+  restarts from zero.
+- Audio is copied only for AAC/AC-3/E-AC-3/MP3/ALAC; anything else throws `audioNotCopyable`. A cancel
+  is Swift's `CancellationError`.
 - Presets: resolution (Original/2160/1080/720/480) × quality (Low/Med/High bitrate ladder) × codec
   (HEVC default / H.264). Produces a faststart MP4, **replaces the offline file in place**, updates the
   item's spec chips.
@@ -888,16 +890,31 @@ because ranged-single items legitimately run foreground data tasks with multiThr
 - **Routing:** direct-play H.264-in-mp4/mov/m4v (native HW decode, instant seeks) → **on-device
   linear remux over loopback HLS** for HEVC / foreign-container H.264 (MKV etc.) → Stash server HLS
   for anything Apple can't decode.
-- **FFmpeg** comes from the SPM package **`nphil/stashy-videoengine`** (product `FFmpeg`; Swift
-  modules `Libavformat`, `Libavcodec`, `Libavutil`, …), pinned in `ios/project.yml` (`from: "1.0.0"`,
-  resolving ~1.2.0). **LGPL-minimal + VideoToolbox**: broad decoders (h264/hevc/vp9/av1/…), demuxers
-  (matroska/mov/…), but **encoders only h264_videotoolbox / hevc_videotoolbox / aac**. The app **only
-  links** it; CI never compiles FFmpeg. To change FFmpeg capabilities, rebuild and publish a new
-  `stashy-videoengine` release, then bump the version constraint — a separate macOS-CI project.
-- Key files: `FFmpegRemuxer.swift` (custom AVIO read/write, demux→fMP4 stream-copy,
-  `frag_keyframe+empty_moov`, 4 MB read-ahead, playhead pacing, seek-by-reinit), `FMP4Index.swift`
-  (walks growing fMP4 → HLS byte-range playlist), `LoopbackServer.swift`, `LocalRemuxStream.swift`,
-  `FFmpegSource.swift`.
+- **The video engine is the SPM package `nphil/stashy-videoengine`, product `VideoEngine`, pinned
+  `exactVersion` in `ios/project.yml`** (2.0.0 since 2026-11-06; any public API change is a major version,
+  so a bump is a deliberate edit). It owns FFmpeg (9.0.2, LGPL + VideoToolbox; encoders only
+  h264/hevc_videotoolbox + AAC), the remux, both transcoders, the hardware snapshot and the diagnostics
+  report. Its `docs/ENGINE.md` is the API reference + device test sheets. The app imports only
+  `VideoEngine` — no `Libav*` modules. App-side glue: `Services/EngineAdapters.swift`.
+- **Remux (`ScenePlayerModel`):** one `RemuxSession` per playback (`RemuxSession.stash(source:)` moves
+  the `apikey` query item into the `ApiKey` header — Stash accepts either). `start(at: 0)`, then each far
+  seek is `seek(to:)` — a new run with its own loopback URL. Launches are chained and generation-checked
+  so runs swap in request order (two seeks in flight could otherwise leave AVPlayer on a stopped run).
+  **Timeline contract:** a run starts at the keyframe at or before the request; its output time `t` is
+  movie time `t + origin`. `timeOffset` is provisional until `remux.timelineOrigin` appears in `onTime`,
+  then the item is moved to `target − origin` (frame-exact landing). `events`: `.opened` runs the
+  4:2:2/4:4:4/12-bit check (`isAppleDecodable`, cached in `AppleDecodeCache`) — there is no separate
+  pre-probe any more; `.failed` falls back to server HLS. Temp files: `RemuxSession.sweepStaleFiles` at
+  launch. **Engine-claimed, not yet device-verified (its F/T/S test sheets):** HDR10/HLG/Dolby Vision
+  survive the remux (hvc1/dvh1; DV P7 → HDR10 base), AC-3/E-AC-3 copy, DTS/TrueHD/Opus → AAC, text
+  subtitles appear as AVPlayer legible options (picture subtitles are `SubtitleOverlayTrack`s the app
+  doesn't draw yet).
+- **Hardware:** `EngineHardware.refresh()` takes the engine's `LiveHardwareCapabilityProvider` snapshot
+  at launch; routing reads `EngineHardware.av1HardwareDecode` synchronously. Settings → Diagnostics →
+  **Share Video Engine Report** = `EngineDiagnostics.report()` (`hw-*`, `perf-remux`, `perf-run` lines)
+  — the receipt the engine's device test sheets ask for. Engine events also reach `RemoteLog` when on.
+- **Toolchain:** 2.0.0 does NOT compile with Xcode 26 (`Subtitles.swift:203`, ambiguous
+  `withUnsafeMutableBytes`) — one reason CI moved to Xcode 27. Don't move CI back without a fixed engine.
 - Player: `PlaybackEngine` protocol; `AVPlaybackEngine` (`onEnded` via
   `.AVPlayerItemDidPlayToEndTime`, route-based mute default); `ScenePlayerModel` (facade;
   `reachedEnd`/replay-from-0, time clamped to duration); `ScenePlayerView` (sprite `.task` prefers

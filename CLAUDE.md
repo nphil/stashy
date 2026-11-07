@@ -13,7 +13,7 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
 `android/` is empty (later).
 
 ## Build loop — internalize this first
-- CI: `.github/workflows/ios-build.yml` (macos-15), every push to `main`. **`.md`-only AND
+- CI: `.github/workflows/ios-build.yml` (`xcode-27` runner, iOS 27 SDK), every push to `main`. **`.md`-only AND
   `stash-plugin/**`-only pushes do NOT trigger a build** (`paths-ignore`) — those commits are free.
 - **The Build step fails FAST on compile errors**: it greps the raw xcodebuild output for
   `file:line:col: error:`, prints them + GitHub annotations, then `exit 1`. A red Build step with
@@ -116,8 +116,9 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   `scene.title ?? "Untitled"`; file-name fallbacks truncate in the MIDDLE (the tail holds the extension). §6.
 - `AppDelegate` lives in `Services/OrientationLock.swift`. Ratings are `rating100` 0–100 (UI stars =
   value/20); favorites are booleans. Adding a `DownloadState` case = update the exhaustive switches in
-  `DownloadsView`. FFmpeg = SPM package `nphil/stashy-videoengine` (LGPL-minimal, **no AV1 encode**;
-  rebuild the package to change capability). §7.
+  `DownloadsView`. The video engine (FFmpeg + remux + transcoders) = SPM package
+  `nphil/stashy-videoengine`, product `VideoEngine`, **`exactVersion` pin** — bumping it is a deliberate
+  edit (majors break API); glue in `Services/EngineAdapters.swift`; no AV1 encode. §5.
 
 ## Docs map — what to read when
 - **`docs/ENGINEERING_NOTES.md`** — deep reference: §1 CI, §2 Swift 6 concurrency, §3 downloads +
@@ -133,11 +134,10 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
 
 ## Current state (keep short — current release + work queue only)
 - **Latest release: v1.0.370** (plugin **0.5.4**). CI green. The -3000 investigation is closed.
-- **Video engine 2.0.0 adoption is written and parked** (`f32199a`, reverted by `b4bfdd8`): Stashy's
-  remux/transcoders/device facts move to `nphil/stashy-videoengine` product `VideoEngine` (`exactVersion`).
-  Blocked on the engine: 2.0.0 doesn't compile with Xcode 26 (Stashy's CI), `Subtitles.swift:203`
-  "ambiguous use of 'withUnsafeMutableBytes'". When a fixed engine release exists: `git revert b4bfdd8`,
-  set the pin to that version, push, and update §4/§5 of ENGINEERING_NOTES to describe the engine.
+- **CI builds with Xcode 27 / the iOS 27 SDK** (`xcode-27` runner, 2026-11-06); deployment target stays
+  26. Glasses register via `UISceneAccessory` on iOS 27 (`GlassesSession.registerAccessory`), the plist
+  route still serves iOS 26. **Video engine 2.0.0 adopted** (Stashy's remux/transcoders/device facts now
+  come from `VideoEngine`); its HDR/audio/subtitle claims await the engine's device test sheets. §5.
 - **Scene names fall back to the file name** (v1.0.366): `StashScene.displayTitle` everywhere, middle
   truncation, card capped at 52 chars. §6.
 - **Downloads** work end-to-end: app-open ~100 MB/s, byte-exact resume through crashes / relaunch /

@@ -97,10 +97,11 @@ open Stashy.xcodeproj
 ```
 
 - **Deployment target:** iOS 26.0 · **Language:** Swift 6 with `SWIFT_STRICT_CONCURRENCY: complete`.
-- **Video engine:** FFmpeg comes from the Swift package
-  [`nphil/stashy-videoengine`](https://github.com/nphil/stashy-videoengine) (LGPL-minimal:
-  VideoToolbox H.264/HEVC + AAC encoders) — the app only links it.
-- **CI is the canonical build.** GitHub Actions (`macos-15`) builds an unsigned IPA on every push to
+- **Video engine:** the Swift package
+  [`nphil/stashy-videoengine`](https://github.com/nphil/stashy-videoengine) (product `VideoEngine`,
+  pinned to an exact version) supplies FFmpeg (LGPL: VideoToolbox H.264/HEVC + AAC encoders), the
+  on-device remux, the download transcoders and the hardware report. The app imports only that product.
+- **CI is the canonical build.** GitHub Actions (`xcode-27` runner, iOS 27 SDK) builds an unsigned IPA on every push to
   `main` and publishes a tagged Release with the IPA asset. Documentation-only and plugin-only pushes
   skip the build. See [`.github/workflows/ios-build.yml`](.github/workflows/ios-build.yml).
 

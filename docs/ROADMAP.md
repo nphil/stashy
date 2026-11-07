@@ -50,9 +50,9 @@ for AAC/AC3/EAC3/MP3/ALAC). That class survives as the Downloads-flow encode cor
 
 - **M-A — Streaming on-device transcode tier.** Insert **between remux and the Stash server fallback**:
   `direct-play → remux → on-device streaming transcode → Stash server (final fallback)`. Needs a
-  *streaming* variant of `FFmpegTranscoder` — transcode-ahead into fragmented MP4 served over the
-  loopback with **seek-by-reinit** and pacing, analogous to `LocalRemuxStream` (reuse `LoopbackServer`
-  + `FMP4Index`). Only fires for the "Apple can't decode it at all" bucket (VP9, 10-bit 4:2:2/4:4:4
+  *streaming* variant of the engine's `FileTranscoder` — transcode-ahead into fragmented MP4 served over
+  the loopback with **seek-by-reinit** and pacing, analogous to the engine's `RemuxSession` (reuse its
+  `LoopbackHLS` server + fragment index). Only fires for the "Apple can't decode it at all" bucket (VP9, 10-bit 4:2:2/4:4:4
   HEVC, exotic) — everything else already remuxes. **Gate it**: attempt on-device ≤1080p always, ≤4K
   only for lighter codecs; heavy 4K software-decode → skip straight to the server (a server GPU is
   faster and won't thermally throttle the phone). **Auto-fallback**: if the on-device transcode can't
@@ -701,8 +701,8 @@ blocks, both first-class iOS APIs:
       PSNR/SSIM from decoded frames) is the planned feedback loop to catch when the HW encoder underperforms.
       **✅ App side shipped (`VmafMapStore`):** fetches the served map (refreshed alongside `PlayabilityStore`
       in `ScenesView`), resolves (sceneID, output height, quality) → bitrate, and `DownloadManager.transcode`
-      sets it as `VideoTranscoder.Settings.bitrateOverride` for **HEVC** on-device encodes (all three engines
-      honour it — `VideoTranscoder`/`FFmpegTranscoder`/`FFmpegResumableTranscoder`); any miss ⇒ the existing
+      sets it as `OnDeviceTranscodeSettings.bitrateOverride` for **HEVC** on-device encodes (both engine
+      transcoders honour it — `FileTranscoder`/`ChunkedTranscoder`); any miss ⇒ the existing
       preset ladder. Original resolves to the source height (matching the v0.3.3 map fix). SSIM feedback guard
       still the next enhancement.
       **✅ FIXED in v0.3.1 (2026-07-16) — the map run used to FAIL mid-run (~20.7% observed). ROOT CAUSE
