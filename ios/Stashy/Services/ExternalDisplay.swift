@@ -14,8 +14,10 @@ import SwiftUI
 /// (ScenePlayerView) stays intact, and `ZoomablePlayerSurface` keeps its view. Every playback route ends
 /// at an AVPlayer (direct, server HLS, FFmpeg via the loopback m3u8), so one mechanism covers them all.
 ///
-/// iOS 27 NOTE: external accessory displays move to `UISceneAccessory` registration there; this delegate
-/// class carries over, only the discovery half changes. Availability-gate when the SDK lands.
+/// iOS 27: apps built with the iOS 27 SDK are no longer OFFERED the external scene automatically — the
+/// phone UI must register it (`registerAccessory()`, a `UISceneAccessory.externalNonInteractive` on the
+/// phone window's root controller). The scene that arrives is the same role with the same delegate, so
+/// everything below is unchanged. On iOS 26 the Info.plist `UISceneConfigurations` entry still does it.
 @MainActor
 @Observable
 final class GlassesSession {
@@ -52,6 +54,28 @@ final class GlassesSession {
     /// whole video container (video + slow-mo overlay together).
     func setZoom(scale: CGFloat, offset: CGPoint) {
         rootController?.setZoom(scale: scale, offset: offset)
+    }
+
+    /// Strong: the registration is the app's standing request for the glasses scene (iOS 27+).
+    @ObservationIgnored private var accessoryRegistration: AnyObject?
+
+    /// Ask iOS 27+ to offer the external (glasses) scene to `ExternalSceneDelegate`. Needs the phone
+    /// window's root controller, so it is called once the phone tree is on screen; idempotent.
+    func registerAccessory() {
+        guard #available(iOS 27.0, *), accessoryRegistration == nil else { return }
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .filter { $0.session.role == .windowApplication }
+        guard let root = scenes.lazy.compactMap({ $0.keyWindow ?? $0.windows.first }).first?.rootViewController
+        else {
+            RemoteLog.shared.event("glasses-accessory", [("registered", 0), ("reason", "no root")])
+            return
+        }
+        let config = UISceneConfiguration(name: "Glasses", sessionRole: .windowExternalDisplayNonInteractive)
+        config.delegateClass = ExternalSceneDelegate.self
+        let registration = root.registerSceneAccessory(.externalNonInteractive(sceneConfiguration: config))
+        accessoryRegistration = registration
+        RemoteLog.shared.event("glasses-accessory", [
+            ("registered", 1), ("available", registration.isAvailable ? 1 : 0)])
     }
 
     fileprivate func attach(_ controller: GlassesRootController) {

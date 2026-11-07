@@ -24,7 +24,9 @@ concurrency:
 jobs:
   release:
     name: Build and release
-    runs-on: macos-15
+    # iOS 27 SDK (owner decision 2026-11-06). The `xcode-27` image ships Xcode 27 as /Applications/Xcode.app.
+    # Building with this SDK changes how the glasses scene is offered — see GlassesSession.registerAccessory.
+    runs-on: xcode-27
 
     env:
       SCHEME:       Stashy
@@ -91,10 +93,9 @@ jobs:
 
       - name: Select Xcode
         run: |
-          LATEST=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
-          echo "Using: $LATEST"
-          sudo xcode-select -s "$LATEST"
+          sudo xcode-select -s /Applications/Xcode.app
           xcodebuild -version
+          echo "iphoneos SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
 
       - name: Install xcodegen
         run: brew install xcodegen

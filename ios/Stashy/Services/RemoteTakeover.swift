@@ -66,6 +66,7 @@ struct GlassesEnvRegistrar: View {
             .onAppear {
                 GlassesSession.shared.env = GlassesEnv(
                     appState: appState, downloads: downloads, edits: edits, imageCache: imageCache)
+                GlassesSession.shared.registerAccessory()
             }
     }
 }
