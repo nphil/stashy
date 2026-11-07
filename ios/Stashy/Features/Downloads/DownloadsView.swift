@@ -1,4 +1,5 @@
 import SwiftUI
+import VideoEngine
 
 /// The Downloader screen: a live list of download cards (thumbnail + multi-connection coloured progress
 /// + stats) and finished offline videos. Reached from a scene's 3-dot menu and from Settings. Tapping a
@@ -1074,7 +1075,7 @@ private struct DownloadCard: View {
 /// download, then kick it off.
 private struct TranscodePresetSheet: View {
     let item: DownloadItem
-    var onStart: (VideoTranscoder.Settings) -> Void
+    var onStart: (OnDeviceTranscodeSettings) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var resolution: TranscodeResolution = .fhd1080
     @State private var quality: TranscodeQuality = .medium
@@ -1088,8 +1089,7 @@ private struct TranscodePresetSheet: View {
     private var estimate: (size: String, time: String) {
         let srcW = item.width ?? 1280, srcH = item.height ?? 720
         let duration = item.scene?.files.first?.duration ?? 0
-        let out = VideoTranscoder.outputSize(naturalSize: CGSize(width: srcW, height: srcH),
-                                             maxDimension: resolution.maxDimension)
+        let out = TranscodeMath.outputSize(width: srcW, height: srcH, maxLongEdge: resolution.maxDimension)
         let srcCodec = (item.codec ?? "").lowercased()
         let sameCodec = codec == .hevc ? (srcCodec.contains("hevc") || srcCodec.contains("h265"))
                                        : (srcCodec.contains("h264") || srcCodec.contains("avc"))
@@ -1099,8 +1099,9 @@ private struct TranscodePresetSheet: View {
         if sameCodec && sameSize { return (item.sizeLabel ?? "—", "~a few seconds") }
 
         let fps = 30.0   // source fps isn't stored; 30 is a safe basis for the estimate
-        var vbps = Double(VideoTranscoder.videoBitrate(width: out.width, height: out.height, fps: fps,
-                                                       quality: quality, codec: codec))
+        let settings = OnDeviceTranscodeSettings(resolution: resolution, quality: quality, codec: codec)
+        var vbps = Double(TranscodeMath.videoBitrate(width: out.width, height: out.height, fps: fps,
+                                                     settings: settings.engine))
         if sameCodec, let sb = item.bitRate, sb > 100_000 { vbps = min(vbps, Double(sb)) }   // never inflate
         let audioBps = 128_000.0
         let bytes = duration > 0 ? (vbps + audioBps) * duration / 8 : Double(item.totalBytes)
@@ -1149,7 +1150,7 @@ private struct TranscodePresetSheet: View {
                 }
                 Section {
                     Button {
-                        onStart(VideoTranscoder.Settings(resolution: resolution, quality: quality, codec: codec))
+                        onStart(OnDeviceTranscodeSettings(resolution: resolution, quality: quality, codec: codec))
                         dismiss()
                     } label: {
                         VStack(spacing: 2) {

@@ -11,8 +11,9 @@ settings:
 
 packages:
   stashy-videoengine:
+    # Exact pin: every public API change in the engine is a major version (its docs/ENGINE.md).
     url: https://github.com/nphil/stashy-videoengine.git
-    from: "1.0.0"
+    exactVersion: "2.0.0"
 
 targets:
   Stashy:
@@ -25,7 +26,7 @@ targets:
           - "**/.DS_Store"
     dependencies:
       - package: stashy-videoengine
-        product: FFmpeg
+        product: VideoEngine
       - target: StashyLiveActivity
         embed: true
     info:

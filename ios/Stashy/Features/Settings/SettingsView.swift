@@ -27,6 +27,7 @@ struct SettingsView: View {
     @State private var debugTopic = RemoteLog.topic
     @State private var downloadTrace = RemoteLog.isDownloadTracingEnabled
     @State private var reclaimed = false
+    @State private var engineReport = ""
 
     private let swatchColumns = [GridItem(.adaptive(minimum: 64), spacing: 12)]
 
@@ -410,6 +411,16 @@ struct SettingsView: View {
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
+                    }
+                    Group {
+                        ShareLink(item: engineReport) {
+                            Label("Share Video Engine Report", systemImage: "square.and.arrow.up")
+                        }
+                        .disabled(engineReport.isEmpty)
+                        .task { engineReport = await EngineHardware.report() }
+                        Text("The video engine's FFmpeg version, this phone's decoders, display and heat, and the timings of recent on-device remuxes.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                 } header: {
                     Text("Diagnostics")
