@@ -133,7 +133,7 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   do not re-apply). Check before re-analyzing perf.
 
 ## Current state (keep short — current release + work queue only)
-- **Latest release: v1.0.370** (plugin **0.5.4**). CI green. The -3000 investigation is closed.
+- **Latest release: v1.0.372** (plugin **0.5.4**; first Xcode 27 + engine 2.0.0 build, untested on device). CI green. The -3000 investigation is closed.
 - **CI builds with Xcode 27 / the iOS 27 SDK** (`xcode-27` runner, 2026-11-06); deployment target stays
   26. Glasses register via `UISceneAccessory` on iOS 27 (`GlassesSession.registerAccessory`), the plist
   route still serves iOS 26. **Video engine 2.0.0 adopted** (Stashy's remux/transcoders/device facts now
