@@ -133,6 +133,11 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
 
 ## Current state (keep short — current release + work queue only)
 - **Latest release: v1.0.370** (plugin **0.5.4**). CI green. The -3000 investigation is closed.
+- **Video engine 2.0.0 adoption is written and parked** (`f32199a`, reverted by `b4bfdd8`): Stashy's
+  remux/transcoders/device facts move to `nphil/stashy-videoengine` product `VideoEngine` (`exactVersion`).
+  Blocked on the engine: 2.0.0 doesn't compile with Xcode 26 (Stashy's CI), `Subtitles.swift:203`
+  "ambiguous use of 'withUnsafeMutableBytes'". When a fixed engine release exists: `git revert b4bfdd8`,
+  set the pin to that version, push, and update §4/§5 of ENGINEERING_NOTES to describe the engine.
 - **Scene names fall back to the file name** (v1.0.366): `StashScene.displayTitle` everywhere, middle
   truncation, card capped at 52 chars. §6.
 - **Downloads** work end-to-end: app-open ~100 MB/s, byte-exact resume through crashes / relaunch /
