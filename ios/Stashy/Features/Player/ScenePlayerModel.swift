@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import VideoEngine
 
 /// Observable facade over a `PlaybackEngine`. Today that's `AVPlaybackEngine` (native AVPlayer); the
 /// on-device FFmpeg remux/transcode engine that will serve `.localFFmpeg` routes plugs in behind the
@@ -115,12 +116,23 @@ final class ScenePlayerModel {
     /// (see LoadProfile). Constant for the model's lifetime, so the load and seek weights match.
     @ObservationIgnored private let loadProfile: LoadProfile
     private var loadWeight: Double { loadProfile.weight }
-    /// Owns the on-device local stream (seekable HLS or linear remux) for a `.localFFmpeg` route.
-    @ObservationIgnored private var localStream: (any LocalPlaybackStream)?
+    /// The on-device remux (the engine's `RemuxSession`) for a `.localFFmpeg` route. One session per
+    /// playback; a far seek starts a new run inside it (`seek(to:)`), with its own loopback URL.
+    @ObservationIgnored private var remux: RemuxSession?
+    /// Reads `remux.events` for the session's lifetime: the open-time decode check and run failures.
+    @ObservationIgnored private var remuxEvents: Task<Void, Never>?
+    /// The latest remux start/seek. Each waits for the one before it, so runs swap in request order and a
+    /// superseded one (stale `remuxGeneration`) never launches.
+    @ObservationIgnored private var remuxLaunch: Task<Void, Never>?
+    @ObservationIgnored private var remuxGeneration = 0
+    /// Movie time the current remux run was asked to start at, until the run reports its timeline origin.
+    /// A run starts at the keyframe at or before the request, so the item is then moved to
+    /// `target - origin` to land on the exact frame.
+    @ObservationIgnored private var originTarget: TimeInterval?
     /// Set once if the local pipeline fails and we switch to the HLS fallback (so we never loop).
     @ObservationIgnored private var didFallback = false
-    /// Absolute time (seconds) the current local stream starts at. The linear remux is zero-based from a
-    /// seek point, so the player's local time + this offset = the real scrub position. 0 until a far seek.
+    /// Movie time at which the current remux output starts (its timeline origin): the player's local time +
+    /// this offset = the real scrub position. Provisionally the requested start until the run reports it.
     @ObservationIgnored private var timeOffset: TimeInterval = 0
     /// After a seek, hold the scrubber at the requested time until the player actually lands there — so
     /// time ticks reporting the pre-seek position don't make the thumb pop back then forward.
@@ -254,7 +266,7 @@ final class ScenePlayerModel {
         switch route.engine {
         case .avPlayer:
             loadingStage = route.streamType.localizedCaseInsensitiveContains("hls") ? "Transcoding on server…" : "Loading…"
-            adopt(makeEngine(url: route.url), stream: nil)
+            adopt(makeEngine(url: route.url))
             // AV1 direct play carries an HLS fallback (its pixel format isn't pre-probed like the remux
             // path). If a 4:2:2/4:4:4/12-bit AV1 renders no frames, fall back rather than sit on black.
             if engine != nil, route.fallbackURL != nil { armWatchdog() }
@@ -265,75 +277,97 @@ final class ScenePlayerModel {
     }
 
     private func beginLocalFFmpeg() {
-        let key = route.url.path
-        loadingStage = "Reading video…"
-        // A downloaded local file: remux straight away. The pixel-format probe below uses FFmpegSource,
-        // which reads over HTTP (URLSession range requests) and can't open a `file://` URL — running it
-        // here would hang/fail. The common downloaded case (8-bit 4:2:0 HEVC) remuxes fine; a rare
-        // undecodable pixel format has no server fallback offline anyway, so probing buys nothing.
-        if route.url.isFileURL {
-            buildLinear()
-            return
-        }
-        // Known-undecodable pixel format (cached): straight to HLS, skip opening the file entirely.
-        if AppleDecodeCache.shared.decision(forKey: key) == true {
+        // Known-undecodable pixel format (cached from an earlier open): straight to HLS without opening the
+        // file. The check itself runs when the remux opens the source (`observeRemux`, `.opened`).
+        if !route.url.isFileURL, AppleDecodeCache.shared.decision(forKey: route.url.path) == true {
             buildFallback(reason: "HLS (Apple can't decode this pixel format)")
             return
         }
-        // Probe the pixel format (off-main) for the decode decision, then play via the linear continuous
-        // remux. The on-demand *segmented* HLS path (buildHLS) gave great seeking but choppy playback
-        // across multiple files — independent per-segment muxing introduces frame-timing/audio-priming
-        // discontinuities. The linear continuous remux played smoothly, so it's the default again; fast
-        // seeking will be re-added on top of it (seek-by-reinit) rather than via per-segment muxing.
-        Task { [weak self] in
-            guard let self else { return }
-            let info = await FFmpegSource(url: self.route.url).probeVideoInfo()
-            let needsTranscode = info.map { ScenePlayerModel.needsTranscode(pixFmt: $0.pixFmt) } ?? false
-            if info != nil { AppleDecodeCache.shared.setDecision(needsTranscode, forKey: key) }
-            if needsTranscode {
-                self.buildFallback(reason: "HLS (Apple can't decode this pixel format)")
-            } else {
-                self.buildLinear()
+        loadingStage = "Remuxing on device…"
+        let session = RemuxSession.stash(source: route.url)
+        remux = session
+        observeRemux(session)
+        launchRemux(at: 0, restart: false)
+    }
+
+    /// Start the remux at `time` (or, for a far seek, replace the current run with one there) and point a
+    /// new AVPlayer at its loopback playlist. One continuous mux per run keeps playback smooth.
+    private func launchRemux(at time: TimeInterval, restart: Bool) {
+        guard let session = remux else { return }
+        remuxGeneration += 1
+        let generation = remuxGeneration
+        let previous = remuxLaunch
+        remuxLaunch = Task { [weak self] in
+            await previous?.value
+            guard let self, generation == self.remuxGeneration, !self.stopped else { return }
+            do {
+                let url: URL
+                if restart { url = try await session.seek(to: time) } else { url = try await session.start(at: time) }
+                guard generation == self.remuxGeneration, !self.stopped else { return }
+                self.activeStreamType = "On-device remux (linear)"
+                self.originTarget = time
+                self.adopt(self.makeEngine(url: url))
+                if self.engine != nil { self.armWatchdog() }
+            } catch {
+                guard generation == self.remuxGeneration, !self.stopped else { return }
+                self.buildFallback(reason: "HLS (fallback)")
             }
         }
     }
 
-    /// Linear continuous remux → byte-range HLS over the loopback. Plays smoothly (one continuous mux);
-    /// far seeks restart it at the target (seek-by-reinit). The default for the remux class.
-    private func buildLinear() {
-        guard !stopped else { return }
-        do {
-            loadingStage = "Remuxing on device…"
-            let stream = LocalRemuxStream(source: route.url, duration: route.duration)
-            let url = try stream.start()
-            activeStreamType = "On-device remux (linear)"
-            adopt(makeEngine(url: url), stream: stream)
-            if engine != nil { armWatchdog() }
-        } catch {
-            buildFallback(reason: "HLS (fallback)")
+    /// Engine events for the session: route an undecodable pixel format (4:2:2, 4:4:4, 12-bit) to the
+    /// server and remember it per stream, and fall back when a run fails.
+    private func observeRemux(_ session: RemuxSession) {
+        remuxEvents?.cancel()
+        let key = route.url.path
+        let remote = !route.url.isFileURL
+        remuxEvents = Task { [weak self] in
+            for await event in session.events {
+                guard let self, self.remux === session else { return }
+                switch event {
+                case .opened(let info):
+                    guard let video = info.video.first else { break }
+                    if remote { AppleDecodeCache.shared.setDecision(!video.isAppleDecodable, forKey: key) }
+                    if !video.isAppleDecodable {
+                        self.fallbackToHLS(error: "Apple can't decode \(video.pixelFormat ?? video.codec)")
+                    }
+                case .failed(let error, _):
+                    self.fallbackToHLS(error: error.localizedDescription)
+                default:
+                    break
+                }
+            }
         }
+    }
+
+    /// End the remux session and anything waiting on it.
+    private func stopRemux() {
+        remuxGeneration += 1
+        remuxLaunch?.cancel(); remuxLaunch = nil
+        remuxEvents?.cancel(); remuxEvents = nil
+        remux?.stop(); remux = nil
+        originTarget = nil
     }
 
     /// Give up on the local path and play the Stash HLS (server transcode) fallback.
     private func buildFallback(reason: String) {
         guard !stopped else { return }
         didFallback = true
+        stopRemux()
         loadingStage = "Transcoding on server…"
         activeStreamType = reason
-        adopt(makeEngine(url: route.fallbackURL ?? route.url), stream: nil)
+        adopt(makeEngine(url: route.fallbackURL ?? route.url))
     }
 
-    /// Commit a freshly-built engine + remux stream — unless the scene was left while we were starting
-    /// (then discard them so no stray player or loopback server survives).
-    private func adopt(_ engine: PlaybackEngine, stream: (any LocalPlaybackStream)?) {
+    /// Commit a freshly-built engine — unless the scene was left while we were starting (then discard it so
+    /// no stray player survives; `stop()` already ended the remux).
+    private func adopt(_ engine: PlaybackEngine) {
         startInProgress = false
         guard !stopped else {
             engine.teardown()
-            stream?.stop()
             return
         }
         self.engine = engine
-        self.localStream = stream
         // A return-from-navigation start adopts paused: keep the engine parked so the video resumes at the
         // remembered position (via the first-ready seek) but doesn't silently start playing. The user taps
         // play. Consumed here so any later engine rebuild (seek-reinit / quality / fallback) auto-plays.
@@ -344,12 +378,6 @@ final class ScenePlayerModel {
         } else {
             isPlaying = true
         }
-    }
-
-    /// Apple's H.264/HEVC decoders handle only 4:2:0 (8/10-bit); 4:2:2, 4:4:4 and 12-bit need transcode.
-    static func needsTranscode(pixFmt: String) -> Bool {
-        let f = pixFmt.lowercased()
-        return f.contains("422") || f.contains("444") || f.contains("12le") || f.contains("12be") || f.contains("gbr")
     }
 
     /// Build an AVPlayer engine for `url` and wire its callbacks into this facade.
@@ -366,8 +394,15 @@ final class ScenePlayerModel {
         engine.slowMute = playbackRate < 1 && muteWhenSlowed
         engine.onTime = { [weak self] current, duration in
             guard let self else { return }
+            // The remux run's timeline origin arrives with its first packets: adopt it as the offset and
+            // move from the keyframe the run starts on to the exact time that was asked for.
+            if let target = self.originTarget, let origin = self.remux?.timelineOrigin {
+                self.originTarget = nil
+                self.timeOffset = origin
+                if target - origin > 0.05 { self.engine?.seek(to: target - origin, precise: true) }
+            }
             let absolute = self.usesAbsoluteTime ? self.timeOffset + current : current
-            self.localStream?.updatePlayhead(current)   // lets the remux pace production to the playhead
+            self.remux?.updatePlayhead(current)   // lets the remux pace production to the playhead
             if current > 0 { self.watchdog?.cancel() }   // real frames are flowing — disarm the stall watchdog
             if !self.usesAbsoluteTime, duration > 0, self.duration != duration { self.duration = duration }
             if !self.isReady {
@@ -479,8 +514,7 @@ final class ScenePlayerModel {
         if let error { lastError = error }
         activeStreamType = "HLS (fallback)"
         engine?.teardown()
-        localStream?.stop()
-        localStream = nil
+        stopRemux()
         timeOffset = 0            // the Stash HLS fallback is the full video from 0 (absolute time)
         isReady = false
         loadingStage = "Transcoding on server…"
@@ -514,8 +548,7 @@ final class ScenePlayerModel {
         wasLoading = false
         engine?.teardown()
         engine = nil
-        localStream?.stop()
-        localStream = nil
+        stopRemux()
         timeOffset = 0
         seekTarget = nil
     }
@@ -773,15 +806,13 @@ final class ScenePlayerModel {
         }
     }
 
-    /// Restart the local linear remux from `time` (zero-based) and re-point AVPlayer at the new loopback
-    /// stream — the way far seeks stay fast without the per-segment muxing that made playback choppy.
+    /// Replace the remux run with one starting at `time` and re-point AVPlayer at it — the way far seeks
+    /// stay fast without per-segment muxing (which made playback choppy).
     private func reinitLocal(at time: TimeInterval) {
-        guard !stopped else { return }
+        guard !stopped, remux != nil else { return }
         RemoteLog.shared.log("↻ reinit local @\(Int(time))s")
         watchdog?.cancel()
         engine?.teardown()
-        localStream?.stop()
-        localStream = nil
         timeOffset = time
         currentTime = time
         isReady = false
@@ -789,16 +820,7 @@ final class ScenePlayerModel {
         loadingProgress = nil
         videoAspect = nil
         presentationSize = .zero
-        do {
-            // Rebuild the linear remux seeked to the target keyframe — seek-by-reinit keeps one continuous
-            // mux so playback stays smooth.
-            let stream: any LocalPlaybackStream = LocalRemuxStream(source: route.url, duration: route.duration, startTime: time)
-            let url = try stream.start()
-            adopt(makeEngine(url: url), stream: stream)
-            if engine != nil { armWatchdog() }
-        } catch {
-            buildFallback(reason: "HLS (fallback)")
-        }
+        launchRemux(at: time, restart: true)
     }
 
     /// Assemble a diagnostics snapshot for the Stats overlay: routing/backend facts + static media

@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import AVFoundation
 import BackgroundTasks
+import VideoEngine
 
 /// App delegate whose only job is to report the currently-allowed interface orientations. The whole
 /// app is portrait by default; only fullscreen video temporarily allows landscape.
@@ -43,8 +44,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             }
         }
         // Clear remux temps left by a prior crash/force-quit. Nothing is in use at launch, so run it off
-        // the main thread — it enumerates + unlinks tmp files and needn't block the first frame.
-        Task.detached(priority: .utility) { LocalRemuxStream.sweepStaleTempFiles() }
+        // the main thread — it enumerates + unlinks tmp files and needn't block the first frame. The
+        // `stashy-*` prefixes are the app's own remux from before the engine owned it.
+        Task.detached(priority: .utility) {
+            RemuxSession.sweepStaleFiles(prefixes: [RemuxOptions().tempFilePrefix, "stashy-stream-", "stashy-loopback-"])
+        }
+        // The engine's device snapshot (decoders, display, heat) for routing and the engine report.
+        Task { await EngineHardware.refresh() }
         // Configure the audio category once (constant for the app) — the player just activates it on play.
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         return true

@@ -4,6 +4,7 @@ import Network
 import Observation
 import BackgroundTasks
 import os
+import VideoEngine
 
 /// Process-wide handoff for the background `URLSession`. iOS relaunches the app (possibly straight into
 /// the background) when queued transfers finish while it was suspended, handing the app delegate a
@@ -1522,7 +1523,7 @@ final class DownloadManager {
 
     // MARK: - On-device transcode
 
-    @ObservationIgnored private var transcoders: [String: any OnDeviceTranscoder] = [:]
+    @ObservationIgnored private var transcoders: [String: any MediaTranscoder] = [:]
     /// Per-item transcode generation. A VideoToolbox call can wedge when the app is backgrounded (no GPU
     /// access) and won't return, so `cancel()` alone can't unstick the UI. Cancelling bumps this counter,
     /// which detaches the (possibly wedged) job: its late completion is ignored because its captured
@@ -1530,13 +1531,9 @@ final class DownloadManager {
     @ObservationIgnored private var transcodeGen: [String: Int] = [:]
     /// Settings of the currently-running transcode per item, so a background-interrupted transcode can be
     /// auto-restarted on return (VideoToolbox is foreground-only and has no mid-stream checkpoint).
-    @ObservationIgnored private var transcodeSettingsInFlight: [String: VideoTranscoder.Settings] = [:]
+    @ObservationIgnored private var transcodeSettingsInFlight: [String: OnDeviceTranscodeSettings] = [:]
     /// Items whose transcode was paused by backgrounding and should auto-resume when we return.
-    @ObservationIgnored private var transcodeResumeOnForeground: [String: VideoTranscoder.Settings] = [:]
-
-    /// Containers Apple's `AVAssetReader` can demux natively — everything else (MKV/WebM/AVI/…) has to go
-    /// through the FFmpeg transcoder.
-    private static let avNativeContainers: Set<String> = ["mp4", "m4v", "mov"]
+    @ObservationIgnored private var transcodeResumeOnForeground: [String: OnDeviceTranscodeSettings] = [:]
 
     /// After a relaunch, pick up any transcode the app was killed mid-way through (its chunk work dir +
     /// settings.json survived on disk). Resume immediately when foregrounded; otherwise defer to
@@ -1549,7 +1546,7 @@ final class DownloadManager {
             let id = dir.lastPathComponent
             guard let item = items.first(where: { $0.id == id }),
                   let data = try? Data(contentsOf: dir.appendingPathComponent("settings.json")),
-                  let settings = try? JSONDecoder().decode(VideoTranscoder.Settings.self, from: data) else {
+                  let settings = try? JSONDecoder().decode(OnDeviceTranscodeSettings.self, from: data) else {
                 // Orphaned (download gone), a leftover ".trash-*", or corrupt settings → reclaim off-thread
                 // so it can't linger forever or stall launch.
                 Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: dir) }
@@ -1583,8 +1580,8 @@ final class DownloadManager {
     }
 
     /// Re-encode a completed download in place to the chosen resolution/quality/codec (hardware
-    /// VideoToolbox), replacing the offline file with the smaller/normalised copy on success.
-    func transcode(_ item: DownloadItem, settings: VideoTranscoder.Settings) {
+    /// VideoToolbox, via the engine), replacing the offline file with the smaller/normalised copy on success.
+    func transcode(_ item: DownloadItem, settings: OnDeviceTranscodeSettings) {
         guard item.state == .completed, let src = item.localURL, !item.transcoding else { return }
         var settings = settings
         // VMAF-calibrated bitrate for on-device HEVC encodes: reuse the server's per-scene target bitrate
@@ -1606,14 +1603,13 @@ final class DownloadManager {
         transcodeSettingsInFlight[id] = settings   // remembered so backgrounding can auto-resume it
 
         // Engine routing (see the transcode-speed analysis):
-        //  • same codec + same size → FFmpegTranscoder does a near-instant lossless stream copy (incl.
+        //  • same codec + same size → `FileTranscoder` does a near-instant lossless stream copy (incl.
         //    hev1→hvc1), so chunked re-encoding would be pointlessly slow and lossy;
-        //  • short clip → the old fast engine (AVFoundation for native H.264, else FFmpeg) — checkpointing
-        //    is pointless for a job that finishes in seconds, and AVFoundation avoids the FFmpeg GPU
-        //    round-trip;
-        //  • otherwise → the resumable chunked engine (survives background/kill).
+        //  • short clip → `FileTranscoder` in one pass — checkpointing is pointless for a job that finishes
+        //    in seconds;
+        //  • otherwise → the resumable `ChunkedTranscoder` (survives background/kill).
         // Missing codec/size metadata falls through to the RESUMABLE path (a nil/unknown source is assumed
-        // possibly-huge), so an unknown-but-large file never silently loses resumability. The resumable
+        // possibly-huge), so an unknown-but-large file never silently loses resumability. The chunked
         // engine also self-checks the stream-copy case, so a metadata-driven misroute is self-corrected.
         let srcCodec = (item.codec ?? "").lowercased()
         let sameCodec = settings.codec == .hevc
@@ -1628,15 +1624,10 @@ final class DownloadManager {
         let streamCopyCase = sameCodec && keepsSize
         let shortEnough = duration > 0 && duration < 90
 
-        let transcoder: any OnDeviceTranscoder
-        if streamCopyCase {
+        let transcoder: any MediaTranscoder
+        if streamCopyCase || shortEnough {
             discardWorkDir(id)                       // no resume needed; drop any stale chunks off-thread
-            transcoder = FFmpegTranscoder()
-        } else if shortEnough {
-            discardWorkDir(id)
-            let native = Self.avNativeContainers.contains(src.pathExtension.lowercased())
-            let isH264 = srcCodec.contains("h264") || srcCodec.contains("avc")
-            transcoder = (native && isH264) ? VideoTranscoder() : FFmpegTranscoder()
+            transcoder = FileTranscoder(logger: .remoteLog)
         } else {
             // Resumable: chunk the re-encode into a persistent work dir so an interrupted transcode
             // (backgrounded, or the app killed) continues from the last committed chunk. Settings are
@@ -1646,7 +1637,7 @@ final class DownloadManager {
             if let data = try? JSONEncoder().encode(settings) {
                 try? data.write(to: workDir.appendingPathComponent("settings.json"), options: .atomic)
             }
-            transcoder = FFmpegResumableTranscoder(workDir: workDir)
+            transcoder = ChunkedTranscoder(workDirectory: workDir, planKey: settings.planKey, logger: .remoteLog)
         }
         transcoders[id] = transcoder
         let gen = (transcodeGen[id] ?? 0) + 1
@@ -1664,7 +1655,7 @@ final class DownloadManager {
         if !DownloadKeepAlive.shared.isRunning {
             bg = UIApplication.shared.beginBackgroundTask(withName: "transcode-\(id)") {
                 // Last-seconds notice before the watchdog kills us, not extra time. Capture `transcoder`
-                // directly (it's @unchecked Sendable with a lock-guarded cancel) so the handler needs no
+                // directly (Sendable; the engine's `cancel()` never blocks) so the handler needs no
                 // main-actor hop and makes no assumption about which thread it runs on.
                 transcoder.cancel()
                 if bg != .invalid { UIApplication.shared.endBackgroundTask(bg) }
@@ -1674,27 +1665,25 @@ final class DownloadManager {
             do {
                 // Capture `item` (a main-actor Sendable @Observable) directly so the progress callback
                 // never re-captures `self` across the concurrency boundary.
-                try await transcoder.run(input: src, output: dest, settings: settings) { p in
-                    Task { @MainActor in item.transcodeProgress = p }
-                } onLog: { line in
-                    Task { @MainActor in
-                        // Distinct event → append. Keep the tail bounded on a long transcode.
-                        var log = item.transcodeLog + line + "\n"
-                        if log.count > 4000 { log = String(log.suffix(4000)) }
-                        item.transcodeLog = log
-                    }
-                } onStatus: { line in
-                    Task { @MainActor in item.transcodeStatus = line }   // live line → replace in place
-                }
+                let observer = TranscodeObserver(
+                    progress: { p in Task { @MainActor in item.transcodeProgress = p } },
+                    log: { line in
+                        Task { @MainActor in
+                            // Distinct event → append. Keep the tail bounded on a long transcode.
+                            var log = item.transcodeLog + line + "\n"
+                            if log.count > 4000 { log = String(log.suffix(4000)) }
+                            item.transcodeLog = log
+                        }
+                    },
+                    status: { line in Task { @MainActor in item.transcodeStatus = line } }   // live line → replace in place
+                )
+                try await transcoder.run(input: src, output: dest, settings: settings.engine, observer: observer)
                 self.transcodeFinished(id: id, gen: gen, output: dest, src: src, settings: settings)
             } catch {
                 try? FileManager.default.removeItem(at: dest)
-                // A user cancel isn't an error to surface; anything else is. (VideoTranscoder throws its own
-                // .cancelled; FFmpegTranscoder throws Swift's CancellationError.)
-                let cancelled: Bool
-                if error is CancellationError { cancelled = true }
-                else if case VideoTranscoder.TranscodeError.cancelled = error { cancelled = true }
-                else { cancelled = false }
+                // A user cancel isn't an error to surface; anything else is. The engine reports a cancel
+                // as Swift's CancellationError.
+                let cancelled = error is CancellationError
                 let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 self.transcodeFailed(id: id, gen: gen, message: cancelled ? nil : message)
             }
@@ -1745,7 +1734,7 @@ final class DownloadManager {
         if message != nil { discardWorkDir(id) }
     }
 
-    private func transcodeFinished(id: String, gen: Int, output: URL, src: URL, settings: VideoTranscoder.Settings) {
+    private func transcodeFinished(id: String, gen: Int, output: URL, src: URL, settings: OnDeviceTranscodeSettings) {
         transcodeSettingsInFlight[id] = nil
         guard transcodeGen[id] == gen, let item = items.first(where: { $0.id == id }) else {
             try? FileManager.default.removeItem(at: output)   // detached/cancelled job — drop its temp output
