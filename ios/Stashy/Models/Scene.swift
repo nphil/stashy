@@ -136,7 +136,7 @@ extension StashScene {
         // AVPlayer decodes AV1 natively only with a hardware AV1 decoder (A17 Pro+). When present, AV1
         // behaves like H.264: direct-play from a native container, remux only for a foreign one. (HEVC is
         // different — even in MP4 the common hev1 tag renders black, so it always needs an hvc1 remux.)
-        let av1Native = isAV1 && EngineHardware.av1HardwareDecode
+        let av1Native = isAV1 && DeviceCapabilities.av1HardwareDecode
         let isDirectClass = isH264 || av1Native
 
         // Companion-plugin routing hint: the plugin's ffprobe verdict that Apple can't decode this stream
@@ -205,7 +205,7 @@ extension StashScene {
         let isH264 = codec.map { c in Self.directPlayCodecs.contains { c.contains($0) } } ?? false
         let isAV1 = codec.map { c in Self.av1Codecs.contains { c.contains($0) } } ?? false
         let isHEVC = codec.map { c in Self.remuxableCodecs.contains { c.contains($0) } } ?? false
-        let av1Native = isAV1 && EngineHardware.av1HardwareDecode
+        let av1Native = isAV1 && DeviceCapabilities.av1HardwareDecode
         let isDirectClass = isH264 || av1Native
 
         // Direct-playable local file (H.264 / native-AV1 in a native container).
