@@ -3624,6 +3624,7 @@ final class DownloadManager {
             }
         }
         sweepOrphanedParts()
+        let releasedBlobs = blobs   // an immutable copy: the handler below runs on another task
         let busy = items.contains { $0.state == .downloading || $0.state == .waitingForNetwork }
         let handler: @Sendable ([URLSessionTask]) -> Void = { [weak self] tasks in
             let box = UncheckedSendableBox(tasks)
@@ -3641,7 +3642,7 @@ final class DownloadManager {
                 let staged = (busy || !box.value.isEmpty) ? 0 : self.purgeSessionStagingArea()
                 RemoteLog.shared.event("dl-reclaim", [
                     ("before", before), ("after", self.availableBytesStrict()),
-                    ("blobs", blobs), ("tasks", cancelled), ("staged", staged),
+                    ("blobs", releasedBlobs), ("tasks", cancelled), ("staged", staged),
                     ("skipped", (busy || !box.value.isEmpty) ? 1 : nil)])
             }
         }

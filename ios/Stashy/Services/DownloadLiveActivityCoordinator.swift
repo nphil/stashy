@@ -56,7 +56,10 @@ final class DownloadLiveActivityCoordinator {
             relevanceScore: 100
         )
         if let activity {
-            Task { await activity.update(content) }
+            // A fresh local box, not the stored property: Xcode 27's region checker rejects sending the
+            // main-actor-owned `self.activity` into the task directly.
+            let box = ActivityBox(activity)
+            Task { await box.value.update(content) }
             return nil
         } else {
             do {
@@ -112,6 +115,13 @@ final class DownloadLiveActivityCoordinator {
         guard let activity else { return }
         self.activity = nil
         lastState = nil
-        Task { await activity.end(nil, dismissalPolicy: .immediate) }
+        let box = ActivityBox(activity)
+        Task { await box.value.end(nil, dismissalPolicy: .immediate) }
     }
+}
+
+/// `Activity` is safe to update from any task (ActivityKit serialises it), but isn't declared Sendable.
+private struct ActivityBox: @unchecked Sendable {
+    let value: Activity<DownloadActivityAttributes>
+    init(_ value: Activity<DownloadActivityAttributes>) { self.value = value }
 }
