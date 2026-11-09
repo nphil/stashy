@@ -17,16 +17,21 @@ final class ScenePlayerModel {
     var currentTime: TimeInterval = 0
     var duration: TimeInterval = 0
     var isPlaying = false
-    var isReady = false { didSet { if isReady != oldValue { syncLoadEstimate() } } }
+    var isReady = false { didSet { if isReady != oldValue { syncLoadEstimate(); syncStallWatch() } } }
     /// True while the player is waiting on data (start-up or a rebuffer) — drives the loading donut
     /// instead of a play/pause icon that flickers as the transport state toggles.
-    var isBuffering = false { didSet { if isBuffering != oldValue { syncLoadEstimate() } } }
+    var isBuffering = false { didSet { if isBuffering != oldValue { syncLoadEstimate(); syncStallWatch() } } }
     /// Short, human label for the current load stage (e.g. "Connecting…", "Remuxing on device…").
     var loadingStage = "Connecting…"
     /// Start-up buffer fill (0…1) for the donut; nil = indeterminate (pre-buffer stages).
     var loadingProgress: Double?
     /// Show the loading donut until the first frame is up *and* the player isn't waiting on data.
     var isLoading: Bool { !isReady || isBuffering }
+    /// A mid-playback wait on the network (Nitin's stall design, 2026-11-09): "Waiting for the network"
+    /// after 2 s, plus a "Play at lower quality" offer after 10 s. Never set for a local file, and never
+    /// for a remux that is stuck rather than waiting (that one restarts silently — `runStallWatch`).
+    enum NetworkWait { case none, waiting, offerLowerQuality }
+    var networkWait = NetworkWait.none
     /// The actual decoded video aspect (w/h), once the player reports a presentation size. Drives
     /// layout/orientation when the server's file metadata is missing or wrong.
     var videoAspect: CGFloat?
@@ -187,6 +192,11 @@ final class ScenePlayerModel {
     /// Fires a fallback if the local path produces no frames in time (covers stalls AVPlayer never
     /// reports as a hard failure).
     @ObservationIgnored private var watchdog: Task<Void, Never>?
+    /// Runs while the player waits for data mid-playback (`syncStallWatch`).
+    @ObservationIgnored private var stallWatch: Task<Void, Never>?
+    /// Silent remux restarts in the last minute (a fourth falls back to the server) and in this playback.
+    @ObservationIgnored private var recentStallRestarts: [Date] = []
+    @ObservationIgnored private var stallRestarts = 0
 
     /// The sharp-video render surface (re-parented into the zoom container).
     var renderView: UIView? { engine?.renderView }
@@ -450,6 +460,9 @@ final class ScenePlayerModel {
             if self.isPlaying != playing { self.isPlaying = playing }
             let buffering = phase == .waiting
             if self.isBuffering != buffering { self.isBuffering = buffering }
+            // The remux never holds production back for the playhead while the player waits on it
+            // (engine 2.0.3: a backward seek inside a paced run used to leave each waiting on the other).
+            self.remux?.setPlayerWaiting(buffering)
         }
         engine.onLoadProgress = { [weak self] progress in
             guard let self else { return }
@@ -543,6 +556,8 @@ final class ScenePlayerModel {
         slowMoRenderView = nil
         slowMoActive = false
         watchdog?.cancel()
+        stallWatch?.cancel(); stallWatch = nil
+        networkWait = .none
         loadTicker?.cancel(); loadTicker = nil
         loadStart = nil
         wasLoading = false
@@ -551,6 +566,70 @@ final class ScenePlayerModel {
         stopRemux()
         timeOffset = 0
         seekTarget = nil
+    }
+
+    // MARK: - Stall watch
+
+    /// Watch only a mid-playback wait: start-up and seek-reinit waits are the loading donut's and the
+    /// no-frames watchdog's.
+    private func syncStallWatch() {
+        let watch = isBuffering && isReady && !stopped && !didFail
+        if watch, stallWatch == nil {
+            stallWatch = Task { [weak self] in await self?.runStallWatch() }
+        } else if !watch, let task = stallWatch {
+            task.cancel()
+            stallWatch = nil
+            if networkWait != .none { networkWait = .none }
+        }
+    }
+
+    /// While the player waits: a remux run that neither fetches from its source nor adds output for 1 s is
+    /// waiting on nothing, so restart it at the playhead at once (no timer). Any other wait on a remote
+    /// source is the network: say so after 2 s and offer a lower quality after 10 s.
+    private func runStallWatch() async {
+        let began = Date()
+        let remote = !route.url.isFileURL || didFallback
+        var lastBytes = remux?.progress.bytesWritten ?? 0
+        var lastActivity = began
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled, isBuffering, isReady, !stopped else { return }
+            let now = Date()
+            if usesAbsoluteTime, let session = remux {
+                let progress = session.progress
+                if progress.isFetching || progress.bytesWritten != lastBytes {
+                    lastBytes = progress.bytesWritten
+                    lastActivity = now
+                } else if now.timeIntervalSince(lastActivity) >= 1,
+                          duration <= 0 || currentTime < duration - 1 {
+                    recoverStalledRemux(progress)
+                    return
+                }
+            }
+            guard remote else { continue }
+            let waited = now.timeIntervalSince(began)
+            if waited >= 10, networkWait != .offerLowerQuality {
+                networkWait = .offerLowerQuality
+            } else if waited >= 2, networkWait == .none {
+                networkWait = .waiting
+            }
+        }
+    }
+
+    /// Restart the remux at the playhead without any on-screen text. Four in a minute means restarting
+    /// doesn't help, so hand over to the server stream instead of looping.
+    private func recoverStalledRemux(_ progress: RemuxProgress) {
+        let now = Date()
+        recentStallRestarts = recentStallRestarts.filter { now.timeIntervalSince($0) < 60 } + [now]
+        stallRestarts += 1
+        RemoteLog.shared.event("stall-restart", [
+            ("at", Int(currentTime)), ("bytes", progress.bytesWritten), ("media_s", Int(progress.mediaSeconds)),
+            ("paced", progress.isPaced ? 1 : 0), ("n", stallRestarts)])
+        if recentStallRestarts.count > 3 {
+            fallbackToHLS(error: "on-device remux stalled 4 times in a minute")
+            return
+        }
+        reinitLocal(at: currentTime, silent: true)
     }
 
     // MARK: - Loading-donut estimate
@@ -807,16 +886,17 @@ final class ScenePlayerModel {
     }
 
     /// Replace the remux run with one starting at `time` and re-point AVPlayer at it — the way far seeks
-    /// stay fast without per-segment muxing (which made playback choppy).
-    private func reinitLocal(at time: TimeInterval) {
+    /// stay fast without per-segment muxing (which made playback choppy). `silent`: a stall recovery, so
+    /// the loading ring shows no caption.
+    private func reinitLocal(at time: TimeInterval, silent: Bool = false) {
         guard !stopped, remux != nil else { return }
-        RemoteLog.shared.log("↻ reinit local @\(Int(time))s")
+        RemoteLog.shared.log("↻ reinit local @\(Int(time))s\(silent ? " (stall recovery)" : "")")
         watchdog?.cancel()
         engine?.teardown()
         timeOffset = time
         currentTime = time
         isReady = false
-        loadingStage = "Seeking…"
+        loadingStage = silent ? "" : "Seeking…"
         loadingProgress = nil
         videoAspect = nil
         presentationSize = .zero
@@ -845,6 +925,12 @@ final class ScenePlayerModel {
             StatLine(label: "URL", value: Self.redactedURL(route.url)),
         ]
         if let lastError { playback.append(StatLine(label: "Error", value: lastError)) }
+        if let progress = remux?.progress {
+            let rate = progress.sourceBytesPerSecond.map { String(format: "%.1f MB/s", $0 / 1_000_000) } ?? "local"
+            playback.append(StatLine(label: "Remux source",
+                                     value: "\(rate)\(progress.isFetching ? " · fetching" : "")\(progress.isReconnecting ? " · reconnecting" : "")\(progress.isPaced ? " · paced" : "")"))
+        }
+        if stallRestarts > 0 { playback.append(StatLine(label: "Stall restarts", value: "\(stallRestarts)")) }
         sections.append(StatSection(title: "Playback", lines: playback))
 
         // AI slow-mo (VTFrameProcessor frame interpolation) — opt-in (see aiSlowMoEnabled). Shown whenever

@@ -449,10 +449,12 @@ struct VideoLoadingIndicator: View {
             }
             .frame(width: 62, height: 62)
 
-            Text(message)
-                .font(.system(size: 12, weight: .regular))
-                .foregroundStyle(.white.opacity(0.55))
-                .shadow(color: .black.opacity(0.5), radius: 3)
+            if !message.isEmpty {
+                Text(message)
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.55))
+                    .shadow(color: .black.opacity(0.5), radius: 3)
+            }
         }
         .onAppear { spin = true }
     }
