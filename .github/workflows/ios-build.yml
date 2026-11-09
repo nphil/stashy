@@ -1,8 +1,10 @@
 name: Build IPA
 
 on:
+  # Every branch builds. Only `main` bumps the version and publishes a release (the last step is gated);
+  # any other branch is a compile check, so a fix can be iterated on there and land on main once green.
   push:
-    branches: [main]
+    branches: ['**']   # branches only; release tags must not start a build
     paths-ignore:
       - 'android/**'
       - 'stash-plugin/**'
@@ -13,13 +15,14 @@ on:
 permissions:
   contents: write
 
-# Two overlapping runs both compute their version from their own (pinned, therefore identical)
+# Two overlapping main runs both compute their version from their own (pinned, therefore identical)
 # checkout, so they race for the same tag and the loser's bump commit conflicts on `apps.json`
-# (2026-08-10: a push landed mid-build and the second run went red AFTER compiling clean). Queue
-# runs instead of cancelling: every push to main is meant to produce a release.
+# (2026-08-10: a push landed mid-build and the second run went red AFTER compiling clean). Queue main
+# runs instead of cancelling: every push to main is meant to produce a release. A branch has its own
+# group, and a newer push to it supersedes the check still running.
 concurrency:
-  group: ios-build
-  cancel-in-progress: false
+  group: ios-build-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   release:
@@ -221,6 +224,7 @@ jobs:
           fi
 
       - name: Commit version bump, update apps.json, tag, and publish release
+        if: github.ref == 'refs/heads/main'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
