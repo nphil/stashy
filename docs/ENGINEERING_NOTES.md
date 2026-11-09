@@ -28,9 +28,13 @@ doc-only AND plugin-only commits do **not** trigger an app build.
   Batch related fixes into that one landing rather than releasing each.
 - **Docs for an unproven change** land with or after the green `main` run, never before it.
 - **Measured 2026-11-08:** branch check 136 s (compile + package, release skipped, no tag); recent
-  `main` releases 127–198 s. A parallel UI-test/accessibility setup like Marquee iPhone's
-  (`nphil/marquee-ios`, ~80 → 20–25 min target) only becomes relevant if Stashy gains a UI-test target;
-  then copy its sharding and keep the release step gated on every test job.
+  `main` releases 127–198 s. **If Stashy ever gains a UI-test target**, copy Marquee iPhone's setup
+  (`nphil/marquee-ios` `73a4f85`, `.github/workflows/ios.yml` + `tools/ui-shards.py`; ~80 → ~41 min): IPA
+  build as its own job, UI tests split over a matrix of runners (one simulator each, weighted by measured
+  seconds per test), accessibility pass only on `main` and on branches touching app/test code, per-shard
+  screenshots merged into one artifact, release `needs:` every shard. Measure the best shard count on the
+  runner — Marquee found 4 runners best, each test ~1.5× slower with 4 simulators, and 2 simulators per
+  runner slower overall.
 
 ### Fail-fast compile errors (since `f243d30`, 2026-07-08)
 The "Build (unsigned)" step tees raw xcodebuild output to `xcodebuild.log` (xcpretty is cosmetic only)
