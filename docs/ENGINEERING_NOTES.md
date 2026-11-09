@@ -9,9 +9,28 @@ here was verified against the repo on 2026-07-01; full re-audit against code + g
 ## 1. Build / CI detail
 
 Workflow: `.github/workflows/ios-build.yml`, runs on the `xcode-27` runner (Xcode 27, iOS 27 SDK, since
-2026-11-06; was `macos-15`/Xcode 26), triggered on every push to `main`.
+2026-11-06; was `macos-15`/Xcode 26), triggered on a push to **any branch** (tags excluded).
 `paths-ignore` skips `**/*.md`, `android/**`, `stash-plugin/**`, and `.github/workflows/android.yml` —
 doc-only AND plugin-only commits do **not** trigger an app build.
+
+### Testing and release procedure (2026-11-08)
+- **What CI checks:** compile (fail-fast, below) and package (executable present, IPA ≥ 1 MB). There is
+  **no test target** — no unit or UI tests, no simulator. The owner's device testing is the behaviour
+  check, so every release is a test build until he reports back.
+- **Branch runs are compile checks; only `main` releases.** The release step (`if: github.ref ==
+  'refs/heads/main'`) bumps the version, updates `apps.json`, tags and publishes. On any other branch it
+  is skipped. Each branch has its own concurrency group with `cancel-in-progress`, so a newer push
+  supersedes the running check; `main` runs still queue, never cancel (see the race note below).
+- **Agent loop:** small and confident → commit to `main`. Anything that may take more than one try →
+  `git checkout -b <topic>`, push, read that branch's run (`gh run list -b <topic>`), fix and re-push on
+  the branch, then `git checkout main && git merge --ff-only <topic>` (rebase the branch on
+  `origin/main` first if needed) and push `main` once → one release. Delete the branch afterwards.
+  Batch related fixes into that one landing rather than releasing each.
+- **Docs for an unproven change** land with or after the green `main` run, never before it.
+- **Measured 2026-11-08:** branch check 136 s (compile + package, release skipped, no tag); recent
+  `main` releases 127–198 s. A parallel UI-test/accessibility setup like Marquee iPhone's
+  (`nphil/marquee-ios`, ~80 → 20–25 min target) only becomes relevant if Stashy gains a UI-test target;
+  then copy its sharding and keep the release step gated on every test job.
 
 ### Fail-fast compile errors (since `f243d30`, 2026-07-08)
 The "Build (unsigned)" step tees raw xcodebuild output to `xcodebuild.log` (xcpretty is cosmetic only)

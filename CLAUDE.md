@@ -13,8 +13,9 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
 `android/` is empty (later).
 
 ## Build loop — internalize this first
-- CI: `.github/workflows/ios-build.yml` (`xcode-27` runner, iOS 27 SDK), every push to `main`. **`.md`-only AND
-  `stash-plugin/**`-only pushes do NOT trigger a build** (`paths-ignore`) — those commits are free.
+- CI: `.github/workflows/ios-build.yml` (`xcode-27` runner, iOS 27 SDK), every push to **any branch**;
+  only `main` publishes a release. **`.md`-only AND `stash-plugin/**`-only pushes do NOT trigger a build**
+  (`paths-ignore`) — those commits are free. No test target exists: CI = compile + package (~2–3 min).
 - **The Build step fails FAST on compile errors**: it greps the raw xcodebuild output for
   `file:line:col: error:`, prints them + GitHub annotations, then `exit 1`. A red Build step with
   annotated errors = compile failure. On failure NO release publishes, so the installed IPA keeps
@@ -34,7 +35,10 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   pushing; the owner tests each build on device.
 
 ## Standing rules (owner — do not violate)
-- Commit/push **direct to `main`** (CI releases from main; ignore feature-branch boilerplate).
+- **Releases come only from `main`.** A small, confident change goes straight to `main`. Anything that
+  may need more than one try (new Apple API, toolchain/engine bump, concurrency-heavy diff) goes to a
+  branch first: push, read the branch check (compile-only, never releases), fix there, then fast-forward
+  `main` once it's green — one release, no red `main` runs. No PRs unless asked. Procedure: §1.
 - Every commit ends with two trailers: `Co-Authored-By: <current Claude marketing name>
   <noreply@anthropic.com>`, plus `Claude-Session: <session URL>` when known. Committer email must be
   `noreply@anthropic.com` (a stop hook enforces it; `git commit --amend --no-edit --reset-author`).
