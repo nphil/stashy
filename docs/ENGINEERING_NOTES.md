@@ -914,7 +914,7 @@ engine's `TranscodeSettings`):
   linear remux over loopback HLS** for HEVC / foreign-container H.264 (MKV etc.) → Stash server HLS
   for anything Apple can't decode.
 - **The video engine is the SPM package `nphil/stashy-videoengine`, product `VideoEngine`, pinned
-  `exactVersion` in `ios/project.yml`** (2.0.0 since 2026-11-06; any public API change is a major version,
+  `exactVersion` in `ios/project.yml`** (2.0.3 since 2026-11-09, v1.0.375; any public API change is a major version,
   so a bump is a deliberate edit). It owns FFmpeg (9.0.2, LGPL + VideoToolbox; encoders only
   h264/hevc_videotoolbox + AAC), the remux, both transcoders, the hardware snapshot and the diagnostics
   report. Its `docs/ENGINE.md` is the API reference + device test sheets. The app imports only
@@ -932,6 +932,18 @@ engine's `TranscodeSettings`):
   survive the remux (hvc1/dvh1; DV P7 → HDR10 base), AC-3/E-AC-3 copy, DTS/TrueHD/Opus → AAC, text
   subtitles appear as AVPlayer legible options (picture subtitles are `SubtitleOverlayTrack`s the app
   doesn't draw yet).
+- **Stall recovery (v1.0.375, engine 2.0.3).** The freeze: after a backward seek inside a paced run,
+  production waited for the playhead while AVPlayer waited for production. Two layers fix it:
+  `remux.setPlayerWaiting(phase == .waiting)` from `AVPlaybackEngine.onState` (the run never paces while
+  the player waits), and `ScenePlayerModel.runStallWatch` while the player waits mid-playback (`isReady
+  && isBuffering`). A remux whose `progress` shows neither `isFetching` nor new `bytesWritten` for 1 s
+  is stuck → `reinitLocal(at: currentTime, silent: true)` (no caption), `stall-restart` in RemoteLog,
+  "Stall restarts" in Stats; a 4th within 60 s → `fallbackToHLS`. Any other wait on a remote source sets
+  `networkWait`: `.waiting` at 2 s ("Waiting for the network" on the phone ring and the glasses OSD),
+  `.offerLowerQuality` at 10 s (phone button → `ServerQuality.lower(than:playingShortSide:)` through the
+  gear-menu path). There is deliberately NO fixed stall timer (Nitin's design). While waiting, a phone
+  picture tap only shows the controls (the skip row is already hidden while loading) and the glasses
+  remote neither pauses nor skips. Device-unverified until the owner reports back.
 - **Hardware:** `EngineHardware.refresh()` takes the engine's `LiveHardwareCapabilityProvider` snapshot
   at launch; routing reads `EngineHardware.av1HardwareDecode` synchronously. Settings → Diagnostics →
   **Share Video Engine Report** = `EngineDiagnostics.report()` (`hw-*`, `perf-remux`, `perf-run` lines)

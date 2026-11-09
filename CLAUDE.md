@@ -85,6 +85,9 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
 - **Poll loops behind visible UI must NEVER self-terminate** (broke v1.0.296 jobs panel, again v1.0.345
   slow-mo): abandon only on loss of INTENT, and gate the poll on the FULL set of conditions the action
   itself checks. Stash's `jobQueue` returns `null` (not `[]`) for an empty queue — decode optionally. §6.
+- **A stuck remux is restarted, never waited out** (v1.0.375): the player reports waiting to the engine
+  (`setPlayerWaiting`), and the stall watch restarts a run that neither fetches nor grows for 1 s. No
+  fixed timers; "Waiting for the network" only for genuine network waits. Don't add a timeout. §5.
 - **Fetch URL→server (plugin ≥0.5.0):** DRM streams (SAMPLE-AES/FairPlay/Widevine) CANNOT be downloaded
   — not a bug, don't build a bypass; clear HLS/MP4 works. Resolver replays Origin + a cookie jar
   (`--cookies`). Submit sheet = one field + one button whose verb comes from `LinkProbe` (HEADERS decide
@@ -137,10 +140,10 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   do not re-apply). Check before re-analyzing perf.
 
 ## Current state (keep short — current release + work queue only)
-- **Latest release: v1.0.372** (plugin **0.5.4**; first Xcode 27 + engine 2.0.0 build, untested on device). CI green. The -3000 investigation is closed.
+- **Latest release: v1.0.375** (plugin **0.5.4**; engine 2.0.3 + stall recovery, untested on device). CI green. The -3000 investigation is closed.
 - **CI builds with Xcode 27 / the iOS 27 SDK** (`xcode-27` runner, 2026-11-06); deployment target stays
   26. Glasses register via `UISceneAccessory` on iOS 27 (`GlassesSession.registerAccessory`), the plist
-  route still serves iOS 26. **Video engine 2.0.0 adopted** (Stashy's remux/transcoders/device facts now
+  route still serves iOS 26. **Video engine 2.0.3** (v1.0.375: Stashy's remux/transcoders/device facts
   come from `VideoEngine`); its HDR/audio/subtitle claims await the engine's device test sheets. §5.
 - **Scene names fall back to the file name** (v1.0.366): `StashScene.displayTitle` everywhere, middle
   truncation, card capped at 52 chars. §6.
