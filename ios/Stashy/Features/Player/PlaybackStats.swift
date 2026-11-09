@@ -55,6 +55,22 @@ enum ServerQuality: String, CaseIterable, Identifiable, Hashable {
         case .p240: return "LOW"
         }
     }
+
+    /// The next rung down from what is playing, for the "Play at lower quality" offer; nil at the bottom.
+    /// Auto/Original step down from the picture's short side (0 = unknown → 720p).
+    static func lower(than current: ServerQuality, playingShortSide: Int) -> ServerQuality? {
+        switch current {
+        case .p1080: return .p720
+        case .p720: return .p480
+        case .p480: return .p240
+        case .p240: return nil
+        case .auto, .original:
+            if playingShortSide > 1080 { return .p1080 }
+            if playingShortSide > 720 || playingShortSide == 0 { return .p720 }
+            if playingShortSide > 480 { return .p480 }
+            return .p240
+        }
+    }
 }
 
 /// Playback-speed rungs offered in the player's speed menu (0.25×…2×). Driven via `AVPlayer` rate with

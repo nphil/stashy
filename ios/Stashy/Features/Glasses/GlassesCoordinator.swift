@@ -656,10 +656,17 @@ final class GlassesCoordinator {
 
     // MARK: - Remote transport (playback mode)
 
-    func togglePlayPause() { player?.togglePlayPause() }
+    /// True while playback waits for data mid-play. The picture is frozen then, and a tap means "is this
+    /// alive?", so remote taps neither pause nor skip; the OSD already shows the wait.
+    private var playerWaiting: Bool { player.map { $0.isReady && $0.isBuffering } ?? false }
+
+    func togglePlayPause() {
+        guard !playerWaiting else { return }
+        player?.togglePlayPause()
+    }
 
     func skip(_ seconds: Double) {
-        guard let player else { return }
+        guard let player, !playerWaiting else { return }
         let target = max(0, min(player.duration > 0 ? player.duration - 0.3 : player.currentTime + seconds,
                                 player.currentTime + seconds))
         skipBadge = (skipBadge ?? 0) + Int(seconds)

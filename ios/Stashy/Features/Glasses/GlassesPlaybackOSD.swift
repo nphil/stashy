@@ -242,9 +242,14 @@ struct GlassesPlaybackOSD: View {
                 Spacer()
                 HStack(spacing: 14) {
                     ProgressView().tint(.white.opacity(0.7)).scaleEffect(1.4)
-                    Text(player.isReady ? "Buffering…" : "Loading…")
-                        .font(.system(size: 24, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.55))
+                    let label = player.networkWait != .none ? "Waiting for the network"
+                        : player.isReady ? "Buffering…"
+                        : player.loadingStage.isEmpty ? "" : "Loading…"   // empty = a silent stall restart
+                    if !label.isEmpty {
+                        Text(label)
+                            .font(.system(size: 24, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.55))
+                    }
                 }
                 .padding(.horizontal, 24).padding(.vertical, 14)
                 .background(Color.black.opacity(0.40), in: Capsule())

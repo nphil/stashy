@@ -161,7 +161,8 @@ struct ScenePlayerView: View {
                     .allowsHitTesting(false)
                     .transition(.opacity)
                 } else if model.isLoading {
-                    VideoLoadingIndicator(progress: model.loadingProgress, message: model.loadingStage)
+                    VideoLoadingIndicator(progress: model.loadingProgress,
+                                          message: model.networkWait == .none ? model.loadingStage : "Waiting for the network")
                         .frame(width: avail.width, height: avail.height)
                         .allowsHitTesting(false)
                         .transition(.opacity)
@@ -187,6 +188,27 @@ struct ScenePlayerView: View {
                     onBack: onBack
                 )
                 .frame(width: avail.width, height: avail.height)
+
+                // A long genuine network wait: offer the next server quality down. Same path as the gear
+                // menu (the rebuilt player resumes at this second).
+                if model.networkWait == .offerLowerQuality, !model.didFail,
+                   let lower = ServerQuality.lower(than: quality, playingShortSide: Int(min(model.presentationSize.width, model.presentationSize.height))) {
+                    Button {
+                        Haptics.tap()
+                        resumeTime = model.currentTime
+                        quality = lower
+                    } label: {
+                        Text("Play at lower quality")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 16).padding(.vertical, 10)
+                            .background(.black.opacity(0.55), in: Capsule())
+                            .overlay(Capsule().strokeBorder(.white.opacity(0.2), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .position(x: avail.width / 2, y: avail.height / 2 + 78)
+                    .transition(.opacity)
+                }
 
                 if showStats && isFullscreen {
                     // Fullscreen-only debug overlay, anchored top-leading just below the back chevron.
@@ -347,6 +369,12 @@ struct ScenePlayerView: View {
     }
 
     private func toggleControls() {
+        // While playback waits for data the picture is frozen, and a tap there means "is this alive?",
+        // not "hide the controls": show them, never toggle them away.
+        if model.isReady, model.isBuffering {
+            showControls = true
+            return
+        }
         showControls.toggle()
         if showControls { scheduleHide() }
     }
