@@ -58,7 +58,7 @@ items from this session are listed at the bottom for context.
 
 ## FFmpeg iOS XCFrameworks (separate build project — enables M3/AV1/broader transcode)
 - [x] **DONE** (pre-dates this snapshot's re-audit) — shipped as the SPM package
-      **`nphil/stashy-videoengine`** (LGPL-minimal build: VideoToolbox H.264/HEVC + native `aac` encoders
+      **`nphil/videoengine`** (LGPL-minimal build: VideoToolbox H.264/HEVC + native `aac` encoders
       only; AV1 decode but **no AV1 encode**). The app's on-device transcode/remux features
       (FFmpegRemuxer/Transcoder/ResumableTranscoder/Probe) ride on it; capability changes = rebuild +
       republish that package and bump the pin in `ios/project.yml`, not this repo (ENGINEERING_NOTES §5).

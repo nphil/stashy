@@ -913,12 +913,15 @@ engine's `TranscodeSettings`):
 - **Routing:** direct-play H.264-in-mp4/mov/m4v (native HW decode, instant seeks) → **on-device
   linear remux over loopback HLS** for HEVC / foreign-container H.264 (MKV etc.) → Stash server HLS
   for anything Apple can't decode.
-- **The video engine is the SPM package `nphil/stashy-videoengine`, product `VideoEngine`, pinned
+- **The video engine is the SPM package `nphil/videoengine`, product `VideoEngine`, pinned
   `exactVersion` in `ios/project.yml`** (2.0.3 since 2026-11-09, v1.0.375; any public API change is a major version,
   so a bump is a deliberate edit). It owns FFmpeg (9.0.2, LGPL + VideoToolbox; encoders only
   h264/hevc_videotoolbox + AAC), the remux, both transcoders, the hardware snapshot and the diagnostics
   report. Its `docs/ENGINE.md` is the API reference + device test sheets. The app imports only
   `VideoEngine` — no `Libav*` modules. App-side glue: `Services/EngineAdapters.swift`.
+  **2026-11-09 migration:** The engine repository was renamed in place to
+  [`nphil/videoengine`](https://github.com/nphil/videoengine); its Swift package identity is `videoengine`.
+  The `VideoEngine` product, exact `2.0.3` pin and Stashy app name are unchanged.
 - **Remux (`ScenePlayerModel`):** one `RemuxSession` per playback (`RemuxSession.stash(source:)` moves
   the `apikey` query item into the `ApiKey` header — Stash accepts either). `start(at: 0)`, then each far
   seek is `seek(to:)` — a new run with its own loopback URL. Launches are chained and generation-checked

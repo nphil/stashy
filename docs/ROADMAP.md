@@ -147,7 +147,7 @@ nothing to switch between.
     is LGPL (present in BOTH the plugin ffmpeg and the on-device videoengine build).
   - **Representative-frame covers (sibling)** — ffmpeg's `thumbnail` filter picks the most informative
     frame in a window (skips black/blur/transition frames) → better auto-covers AND better strip frames.
-  - **On-device ffmpeg (stashy-videoengine) capability audit — recorded 2026-07-19** (so we don't re-derive
+  - **On-device ffmpeg (videoengine) capability audit — recorded 2026-07-19** (so we don't re-derive
     it). LGPL build, FFmpeg **8.1.2** + VideoToolbox, ships the FULL non-GPL set (all LGPL filters/decoders
     + libass, libdav1d, libzimg). **Available on-device:** loudnorm/dynaudnorm/ebur128, select/scene,
     silencedetect/blackdetect/freezedetect, thumbnail, subtitles (+ pgssub/dvdsub/dvbsub image-sub
@@ -697,7 +697,7 @@ blocks, both first-class iOS APIs:
       the search's sample encodes for new entries; existing entries backfill cheaply (`_backfill_bitrates` —
       encode-only at the preset-derived CQs, NO VMAF measure; box-verified: scenes 3/4/28/29… filled). Caveat
       (feed-forward): VideoToolbox at bitrate X ≠ x265/NVENC at X, so it's a calibrated *starting point* — an
-      on-device **SSIM guard** (needs a `stashy-videoengine` rebuild with `--enable-filter=ssim`, or a Metal
+      on-device **SSIM guard** (needs a `videoengine` rebuild with `--enable-filter=ssim`, or a Metal
       PSNR/SSIM from decoded frames) is the planned feedback loop to catch when the HW encoder underperforms.
       **✅ App side shipped (`VmafMapStore`):** fetches the served map (refreshed alongside `PlayabilityStore`
       in `ScenesView`), resolves (sceneID, output height, quality) → bitrate, and `DownloadManager.transcode`
@@ -787,7 +787,7 @@ blocks, both first-class iOS APIs:
       control, no CRF). So the on-device guard is: **structural checks** (output opens, expected duration/
       frame-count/resolution, bitrate/size ratio in a sane band — catches "garbage" for ~free) **+ optional
       sampled SSIM** (SSIM ≫ cheaper than VMAF, built into FFmpeg, no model/GPL; score ~3–5 short 2s
-      segments, not the whole file). **Blocked on a `stash-videoengine` rebuild** — the current lean build
+      segments, not the whole file). **Blocked on a `videoengine` rebuild** — the current lean build
       enables only `scale,format,aresample,anull,null`, so it has NO `ssim`/`psnr`/`libvmaf` filter; adding
       SSIM = enable `--enable-filter=ssim` (built-in, trivial), adding on-device VMAF = cross-compile
       libvmaf + bundle a model (heavier, not worth it vs. SSIM). Failing the guard → warn / offer re-encode

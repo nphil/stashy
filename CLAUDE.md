@@ -124,7 +124,7 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
 - `AppDelegate` lives in `Services/OrientationLock.swift`. Ratings are `rating100` 0–100 (UI stars =
   value/20); favorites are booleans. Adding a `DownloadState` case = update the exhaustive switches in
   `DownloadsView`. The video engine (FFmpeg + remux + transcoders) = SPM package
-  `nphil/stashy-videoengine`, product `VideoEngine`, **`exactVersion` pin** — bumping it is a deliberate
+  `nphil/videoengine`, product `VideoEngine`, **`exactVersion` pin** — bumping it is a deliberate
   edit (majors break API); glue in `Services/EngineAdapters.swift`; no AV1 encode. §5.
 
 ## Docs map — what to read when

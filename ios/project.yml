@@ -10,9 +10,9 @@ settings:
   SWIFT_VERSION: 6.0
 
 packages:
-  stashy-videoengine:
+  videoengine:
     # Exact pin: every public API change in the engine is a major version (its docs/ENGINE.md).
-    url: https://github.com/nphil/stashy-videoengine.git
+    url: https://github.com/nphil/videoengine.git
     exactVersion: "2.0.3"
 
 targets:
@@ -25,7 +25,7 @@ targets:
         excludes:
           - "**/.DS_Store"
     dependencies:
-      - package: stashy-videoengine
+      - package: videoengine
         product: VideoEngine
       - target: StashyLiveActivity
         embed: true

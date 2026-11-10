@@ -4,7 +4,7 @@ import os
 import VideoEngine
 import VideoToolbox
 
-// The app side of `nphil/stashy-videoengine` (product `VideoEngine`, pinned with `exactVersion` in
+// The app side of `nphil/videoengine` (product `VideoEngine`, pinned with `exactVersion` in
 // ios/project.yml). The engine owns remux, transcode, hardware facts and diagnostics; this file maps
 // Stashy's settings, logging and server auth onto it. See the engine's docs/ENGINE.md.
 
