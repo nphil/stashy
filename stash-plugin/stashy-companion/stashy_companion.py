@@ -27,6 +27,9 @@ capabilities vanilla Stash does not have, all aligned with the app's tenets
 
   * Purge Transcode Cache — delete the companion cache, or trim it to the cap.
 
+  * Re-attach Converted Files — when a converter (e.g. FileFlows) swaps a video for a re-encode with the
+    same name, fold the new scene back into the old one so its play history, tags, performers and rating survive.
+
 Zero third-party dependencies: talks to Stash over GraphQL with the stdlib
 `urllib`, so it installs and runs anywhere Stash's bundled Python does.
 
@@ -43,6 +46,7 @@ live `Job.progress` / log lines the app reads via findJob / loggingSubscribe.
 import base64
 import contextlib
 import ctypes
+import datetime
 import json
 import math
 import os
@@ -51,6 +55,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 import urllib.parse
@@ -2811,6 +2816,15 @@ def run_hook(stash, settings, hook_ctx):
     report_on = _hook_enabled(settings, "autoReportNewScenes")
     thumb_on = _hook_enabled(settings, "autoThumbhashNewScenes")
     if typ.startswith("Scene.Create"):
+        # A converted file (same name, new encode) arrives as a NEW scene next to the old scene whose file is
+        # gone. Fold it into the old scene FIRST: once merged this id no longer exists, so there is nothing to
+        # report or hash (the merge refreshed the destination's entries from the converted file).
+        if _hook_enabled(settings, "autoReattachConverted"):
+            try:
+                if _reattach_new_scene(stash, settings, sid):
+                    return
+            except Exception as e:
+                log_warn("re-attach check for new scene {} failed: {}".format(sid, e))
         if report_on:
             _report_scene_append(stash, settings, sid)
         if thumb_on:
@@ -2820,6 +2834,295 @@ def run_hook(stash, settings, hook_ctx):
             _report_scene_remove(sid)
         if thumb_on:
             _thumbhash_scene_remove(sid)
+
+
+# ----------------------------------------------------------------------------
+# Re-attach converted files. A converter (FileFlows) re-encodes a library video, writes the result into the
+# library under the SAME NAME and deletes the original. Stash then sees a brand-new scene (no play history,
+# tags, performers or rating) beside the old scene whose file is gone. This folds the new scene INTO the old
+# one: the old scene keeps everything and ends up with the converted file as its only file.
+#   * Scene.Create.Post hook  — merges the moment a scan creates the new scene.
+#   * "Re-attach Converted Files" task — scans converted files Stash has not seen yet (with the server's saved
+#     generation defaults) and merges any pair the hook missed. A host cron runs it every few minutes, so
+#     nothing waits for a human to press Scan. (It must NOT wait for its own scan: Stash runs jobs one at a
+#     time, so a plugin task waiting on a scan job it queued would never see it start.)
+# A pair is merged only when EXACTLY ONE stale scene has the same normalised file name and (within 1 s) the
+# same duration, and that stale scene is the older of the two. Anything else is logged and left alone.
+# ----------------------------------------------------------------------------
+REATTACH_EXTS = (".mp4", ".mkv", ".avi", ".mov", ".wmv", ".m4v", ".flv", ".webm", ".ts", ".mpg", ".mpeg",
+                 ".m2ts", ".mts")
+REATTACH_DURATION_TOL = 1.0   # seconds; FileFlows output differed from its input by <= 0.03 s over 53 conversions
+REATTACH_STABLE_SECS = 20     # a file still growing (the converter is mid-copy) is not scanned yet
+_REATTACH_FIELDS = "id created_at files { id path duration }"
+
+
+def _stem(path):
+    """File name without its video extension(s) — 'a.mp4.mkv' → 'a'."""
+    name = os.path.basename(str(path or ""))
+    while name.lower().endswith(REATTACH_EXTS):
+        name = name[:name.rfind(".")]
+    return name
+
+
+def _name_key(path):
+    """What a converted file and the scene it replaced have in common: the stem, lower-case, letters and digits only."""
+    return "".join(c for c in unicodedata.normalize("NFKC", _stem(path)).lower() if c.isalnum())
+
+
+def _parse_ts(value):
+    try:
+        return datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _present_files(scene):
+    return [f for f in scene.get("files") or [] if f.get("path") and os.path.exists(f["path"])]
+
+
+def _root_online(path, roots, cache):
+    """False when `path` sits under a library root that is missing or empty: an unmounted share must not make
+    every scene on it look lost."""
+    for root in roots:
+        if path == root or path.startswith(root.rstrip("/") + "/"):
+            if root not in cache:
+                try:
+                    cache[root] = os.path.isdir(root) and bool(os.listdir(root))
+                except OSError:
+                    cache[root] = False
+            return cache[root]
+    return True
+
+
+def _iter_reattach_scenes(stash, page_size=500):
+    page = 1
+    while True:
+        data = stash.call("query($f: FindFilterType!) { findScenes(filter: $f) { scenes { %s } } }" % _REATTACH_FIELDS,
+                          {"f": {"per_page": page_size, "page": page, "sort": "id", "direction": "ASC"}})
+        scenes = (data.get("findScenes") or {}).get("scenes") or []
+        for sc in scenes:
+            yield sc
+        if len(scenes) < page_size:
+            return
+        page += 1
+
+
+def _classify_scenes(stash, roots):
+    """→ (stale, live, known). stale: scenes whose EVERY file is gone from disk; live: scenes with a file on
+    disk; known: every file path Stash holds."""
+    stale, live, known, online = [], [], set(), {}
+    for sc in _iter_reattach_scenes(stash):
+        files = sc.get("files") or []
+        if not files:
+            continue
+        known.update(f["path"] for f in files if f.get("path"))
+        if _present_files(sc):
+            live.append(sc)
+        elif all(_root_online(f.get("path") or "", roots, online) for f in files):
+            stale.append(sc)
+    return stale, live, known
+
+
+def _pick_stale(new, stale):
+    """The ONE scene in `stale` that scene `new` replaces → (scene, why); otherwise (None, reason). A reason
+    starting 'ambiguous' deserves a human look; any other reason is the ordinary 'not a replacement'."""
+    new_files = _present_files(new)
+    keys = {_name_key(f["path"]) for f in new_files} - {""}
+    new_durs = [f["duration"] for f in new_files if f.get("duration")]
+    hits = []
+    for old in stale:
+        if str(old["id"]) == str(new["id"]):
+            continue
+        old_files = old.get("files") or []
+        if not keys & {_name_key(f.get("path")) for f in old_files}:
+            continue
+        if not any(abs(a - b) <= REATTACH_DURATION_TOL
+                   for a in (f.get("duration") for f in old_files) if a for b in new_durs):
+            continue
+        old_t, new_t = _parse_ts(old.get("created_at")), _parse_ts(new.get("created_at"))
+        try:
+            if old_t and new_t and old_t > new_t:
+                continue    # the stale scene must be the OLDER of the two
+        except TypeError:
+            pass
+        hits.append(old)
+    if len(hits) == 1:
+        return hits[0], "same name and length"
+    if hits:
+        return None, "ambiguous: {} stale scenes match ({})".format(len(hits), ", ".join(str(h["id"]) for h in hits))
+    return None, "no stale scene with the same name and length"
+
+
+# Generate flags a merge can invalidate (see _regenerate_scene).
+_REGEN_FLAGS = ("covers", "sprites", "previews", "imagePreviews", "markers", "markerImagePreviews",
+                "markerScreenshots", "phashes")
+
+
+def _regenerate_scene(stash, scene_id):
+    """Rebuild the surviving scene's generated files after a merge. Stash deletes a destroyed scene's preview,
+    scrubber sprite and vtt by FILE HASH — but here those belong to the converted file the surviving scene now
+    plays (seen live: a file scanned and generated first, then merged, lost its preview and sprite). Its markers
+    also point at the file's hash. So queue Generate for the surviving scene with the server's saved Generate
+    ticks and overwrite=false: only what is missing is built, nothing existing is redone."""
+    try:
+        data = stash.call("query { configuration { defaults { generate { %s } } } }" % " ".join(_REGEN_FLAGS))
+        saved = ((data.get("configuration") or {}).get("defaults") or {}).get("generate") or {}
+        flags = {k: bool(saved[k]) for k in _REGEN_FLAGS if isinstance(saved.get(k), bool)}
+    except Exception as e:
+        log_debug("could not read Stash's Generate defaults (using stock ticks): {}".format(e))
+        flags = {}
+    if not any(flags.values()):
+        flags = {"covers": True, "sprites": True, "previews": True, "phashes": True}
+    flags.update({"sceneIDs": [str(scene_id)], "overwrite": False})
+    stash.call("mutation($i: GenerateMetadataInput!) { metadataGenerate(input: $i) }", {"i": flags})
+
+
+def _merge_into(stash, settings, old, new):
+    """Fold scene `new` into scene `old`: the converted file joins `old`, becomes its primary file, and `old`'s
+    dead file record is dropped. No `values` are sent, so nothing on `old` (history, tags, performers, rating,
+    markers…) is overwritten."""
+    old_id, new_id = str(old["id"]), str(new["id"])
+    new_file = _present_files(new)[0]
+    stash.call("mutation($i: SceneMergeInput!) { sceneMerge(input: $i) { id } }",
+               {"i": {"source": [new_id], "destination": old_id, "play_history": True, "o_history": True}})
+    stash.call("mutation($i: SceneUpdateInput!) { sceneUpdate(input: $i) { id } }",
+               {"i": {"id": old_id, "primary_file_id": str(new_file["id"])}})
+    dead = [str(f["id"]) for f in old.get("files") or [] if not os.path.exists(f.get("path") or "")]
+    if dead:
+        # destroyFiles drops the DATABASE rows only (deleteFiles would remove files from disk).
+        stash.call("mutation($ids: [ID!]!) { destroyFiles(ids: $ids) }", {"ids": dead})
+    try:
+        _regenerate_scene(stash, old_id)
+    except Exception as e:
+        log_warn("scene {} re-attached, but queuing its Generate failed ({}) — run Generate Media on it".format(old_id, e))
+    log_info("Re-attached {} to scene {} (it was scene {}) — history, tags, performers and rating kept.".format(
+        os.path.basename(new_file["path"]), old_id, new_id))
+    # sceneMerge destroys `new` WITHOUT firing Scene.Destroy.Post (seen live), so drop its served-map entries
+    # here; the destination's entries describe the OLD file, so refresh them from the converted one.
+    try:
+        if _hook_enabled(settings, "autoReportNewScenes"):
+            _report_scene_remove(new_id)
+            _report_scene_append(stash, settings, old_id)
+        if _hook_enabled(settings, "autoThumbhashNewScenes"):
+            _thumbhash_scene_remove(new_id)
+            _thumbhash_scene_append(stash, settings, old_id)
+    except Exception as e:
+        log_warn("scene {} re-attached, but refreshing its served codec/thumbhash entry failed: {}".format(old_id, e))
+
+
+def _reattach_new_scene(stash, settings, scene_id):
+    """Scene.Create.Post: when this brand-new scene is a converted copy of a scene that lost its file, merge it
+    in. → True if the new scene was merged away."""
+    data = stash.call("query($id: ID!) { findScene(id: $id) { %s } }" % _REATTACH_FIELDS, {"id": str(scene_id)})
+    new = data.get("findScene")
+    if not new or not _present_files(new):
+        return False
+    cands = {}
+    for f in _present_files(new):
+        stem = _stem(f["path"])
+        if not stem:
+            continue
+        found = stash.call(
+            "query($f: FindFilterType, $s: SceneFilterType) { findScenes(filter: $f, scene_filter: $s) { scenes { %s } } }"
+            % _REATTACH_FIELDS,
+            # Stash's INCLUDES ORs the words of an unquoted value ('Foo Bar' finds 'Foo' OR 'Bar'); quotes make it the exact phrase.
+            {"f": {"per_page": 500}, "s": {"path": {"value": '"{}"'.format(stem), "modifier": "INCLUDES"}}})
+        for sc in (found.get("findScenes") or {}).get("scenes") or []:
+            if str(sc["id"]) != str(new["id"]) and sc.get("files") and not _present_files(sc):
+                cands[str(sc["id"])] = sc
+    if not cands:
+        return False
+    old, why = _pick_stale(new, list(cands.values()))
+    if not old:
+        if why.startswith("ambiguous"):
+            log_warn("new scene {} may replace an older scene, but {} — left alone".format(scene_id, why))
+        return False
+    _merge_into(stash, settings, old, new)
+    return True
+
+
+def _file_size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return None
+
+
+def run_reattach(stash, settings, args):
+    """Task: scan converted files Stash has not seen yet, and merge every converted scene into the scene it
+    replaced. args: dry_run (log what would happen, change nothing); auto (set by the cron — obey the
+    'autoReattachConverted' switch)."""
+    dry = _truthy(args.get("dry_run"))
+    if _truthy(args.get("auto")) and not _hook_enabled(settings, "autoReattachConverted"):
+        log_info("auto re-attach is switched off in the plugin settings")
+        return
+    roots = _library_paths(stash)
+    stale, live, known = _classify_scenes(stash, roots)
+    if not stale:
+        log_debug("re-attach: no scene has lost its file")
+        return
+    by_key = {}
+    for sc in stale:
+        for f in sc["files"]:
+            by_key.setdefault(_name_key(f.get("path")), {})[str(sc["id"])] = sc
+    by_key.pop("", None)
+
+    # 1) A converted file on disk that Stash has never scanned: a library's top-level folder holds a video
+    # whose name matches a lost scene. Scan just those files (with the saved generation defaults).
+    waiting = []
+    for root in roots:
+        try:
+            entries = list(os.scandir(root))
+        except OSError:
+            continue
+        waiting += [e.path for e in entries if e.name.lower().endswith(REATTACH_EXTS) and e.is_file()
+                    and e.path not in known and _name_key(e.name) in by_key]
+    if waiting:
+        sizes = {p: _file_size(p) for p in waiting}
+        time.sleep(REATTACH_STABLE_SECS)
+        ready = [p for p in waiting if sizes[p] and _file_size(p) == sizes[p]]
+        for p in waiting:
+            if p not in ready:
+                log_info("{} is still being written — will look again next run".format(p))
+        if ready and dry:
+            log_info("dry run: would scan {}".format(", ".join(ready)))
+        elif ready:
+            scan_input = {"paths": ready}
+            scan_input.update(_scan_generate_options(stash))
+            data = stash.call("mutation Scan($input: ScanMetadataInput!) { metadataScan(input: $input) }",
+                              {"input": scan_input})
+            log_info("queued scan (job {}) of {} converted file(s); the new scenes are merged as they appear".format(
+                data.get("metadataScan"), len(ready)))
+
+    # 2) Converted scenes already in Stash (the hook missed them, or they predate this feature).
+    merged = held = 0
+    for sc in live:
+        cands = {}
+        for k in {_name_key(f["path"]) for f in _present_files(sc)} - {""}:
+            cands.update(by_key.get(k, {}))
+        if not cands:
+            continue
+        old, why = _pick_stale(sc, list(cands.values()))
+        if not old:
+            if why.startswith("ambiguous"):
+                log_warn("scene {} may replace an older scene, but {} — left alone".format(sc["id"], why))
+                held += 1
+            continue
+        if dry:
+            log_info("dry run: would merge scene {} ({}) into scene {}".format(
+                sc["id"], os.path.basename(_present_files(sc)[0]["path"]), old["id"]))
+            continue
+        try:
+            _merge_into(stash, settings, old, sc)
+            merged += 1
+            for k in list(by_key):
+                by_key[k].pop(str(old["id"]), None)    # one converted file per lost scene
+        except Exception as e:
+            log_warn("could not merge scene {} into scene {}: {}".format(sc["id"], old["id"], e))
+            held += 1
+    if merged or held or waiting:
+        log_info("re-attach: {} merged, {} left alone, {} still waiting for a converted file".format(
+            merged, held, max(0, len(stale) - merged)))
 
 
 # Legacy Stashy:* tag names created by v0.1.16/0.1.17 (before playability moved to a served file). Kept
@@ -3541,6 +3844,8 @@ def main():
             run_fetch_update()
         elif mode == "fetch_delete":
             run_fetch_delete(stash, args, settings)
+        elif mode == "reattach":
+            run_reattach(stash, settings, args)
         elif mode == "purge":
             run_purge(settings)
         elif mode == "delete":

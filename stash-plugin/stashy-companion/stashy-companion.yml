@@ -10,7 +10,7 @@ description: >-
   phone model), ffprobe-based codec + HDR stats, and auto-tagging of
   direct-play-ready scenes — capabilities vanilla Stash lacks. Output is served
   back to the app over Stash's own HTTP with real Job progress.
-version: 0.5.4
+version: 0.6.0
 url: https://github.com/nphil/stashy/tree/main/stash-plugin
 exec:
   - python
@@ -110,15 +110,21 @@ settings:
     displayName: Auto ThumbHash new scenes (on scan)
     description: "When a Stash scan creates a new scene, automatically compute its ThumbHash blur placeholder and append it to the served thumbhashes.json (no scene writes) — so the app has an instant blur for freshly-scanned scenes without re-running Compute ThumbHash Map. Default on. A light ffmpeg decode per new scene; turn off if you'd rather hash on-device / by task."
     type: BOOLEAN
+  autoReattachConverted:
+    displayName: Re-attach converted files to their original scene
+    description: "When a converter (e.g. FileFlows) replaces a video with a re-encode of the same name, Stash sees a NEW scene beside the old scene whose file is gone. Merge the new scene INTO the old one so play history, tags, performers and rating are kept and there is no duplicate. Only merges when exactly one lost scene has the same file name and (within 1 s) the same length; anything else is left alone. Applies on scan and to the 'Re-attach Converted Files' task when a scheduler runs it. Default on."
+    type: BOOLEAN
 
-# Event hooks — fire the plugin automatically. These write ONLY served files (playability.json /
-# thumbhashes.json), never a scene, so they queue no Scene.Update/Sync tasks even on a big scan. Each served
-# map is maintained independently, gated by its own setting (autoReportNewScenes / autoThumbhashNewScenes).
-# NOTE: keep ONE entry per trigger — the single run_hook dispatch handles both maps, so a second entry for
+# Event hooks — fire the plugin automatically. A new scene that is really a converted copy of a scene that lost
+# its file is merged into that scene (the only case where a hook writes a scene; gated by autoReattachConverted).
+# Otherwise the hooks write ONLY served files (playability.json / thumbhashes.json), never a scene, so they
+# queue no Scene.Update/Sync tasks even on a big scan. Each served map is maintained independently, gated by
+# its own setting (autoReportNewScenes / autoThumbhashNewScenes).
+# NOTE: keep ONE entry per trigger — the single run_hook dispatch handles all of it, so a second entry for
 # the same event would just invoke the plugin twice.
 hooks:
   - name: Report + hash new scenes
-    description: "On a new scene (e.g. from a library Scan), ffprobe it into the served playability report and compute its ThumbHash blur placeholder — each gated by its own setting."
+    description: "On a new scene (e.g. from a library Scan): if it is a converted copy of a scene that lost its file, merge it into that scene; otherwise ffprobe it into the served playability report and compute its ThumbHash blur placeholder — each gated by its own setting."
     triggeredBy:
       - Scene.Create.Post
   - name: Drop deleted scenes from the served maps
@@ -199,3 +205,7 @@ tasks:
     description: "Delete the cached iPhone transcode(s) for ONE scene — called automatically by the Stashy app once it has finished downloading a server-transcoded file, so proxies don't accumulate on the server. Args (from runPluginTask): scene_id."
     defaultArgs:
       mode: delete
+  - name: Re-attach Converted Files
+    description: "Merge converted files back into the scenes they replaced. Finds scenes whose file has vanished (a converter deleted the original), and folds the converted copy — same name, same length — into each, keeping play history, tags, performers and rating. Also scans converted files sitting in a library's top-level folder that Stash has not seen yet (with the server's saved Scan defaults). Safe to run any time and from a scheduler. Args (runPluginTask): dry_run=true to only log what it would do; auto=true when scheduled (obeys the 're-attach converted files' setting). Ambiguous matches are logged and left alone."
+    defaultArgs:
+      mode: reattach
