@@ -380,6 +380,8 @@ struct SettingsView: View {
                                 .onSubmit { debugTopic = RemoteLog.topic }
                         }
                         .padding(.vertical, 2)
+                        DiagnosticsTokenField()
+                        DiagnosticsDeliveryStatus()
                         LabeledContent("Free space", value: downloads.freeSpaceLabel)
                             .font(.callout)
                         Button {
@@ -425,7 +427,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Diagnostics")
                 } footer: {
-                    Text("Streams playback/transcode diagnostics, browse-scroll frame-time metrics, and screenshots via the floating camera button to an ntfy server + topic. Scroll reports separate touch and inertial segments and include FPS, p95/p99/max frame time, hitch rate, missed 120 Hz intervals, and judder. Point \"Log server\" at a self-hosted ntfy (e.g. an Unraid container) to keep it private; on https://ntfy.sh the topic is readable by anyone who knows it. ntfy has no delete command — messages auto-expire (public: ~12h; attachments ~3h) and \"New topic\" abandons the old channel so it clears itself. Off by default.")
+                    Text("Streams playback/transcode diagnostics, browse-scroll frame-time metrics, and screenshots via the floating camera button to an ntfy server + topic. Scroll reports separate touch and inertial segments and include FPS, p95/p99/max frame time, hitch rate, missed 120 Hz intervals, and judder. Point \"Log server\" at a self-hosted ntfy (e.g. an Unraid container) to keep it private; on https://ntfy.sh the topic is readable by anyone who knows it, and its free daily limit is shared by everyone on your internet connection, so it can run out. If your server isn't open to everyone, paste its access token (kept in the Keychain). \"Send Test\" shows whether messages are getting through. ntfy has no delete command — messages auto-expire (public: ~12h; attachments ~3h) and \"New topic\" abandons the old channel so it clears itself. Off by default.")
                 }
 
                 // About section
@@ -512,4 +514,46 @@ struct SettingsView: View {
 
 private extension String {
     var trimmed: String { trimmingCharacters(in: .whitespacesAndNewlines) }
+}
+
+/// Settings → Diagnostics: the optional access token for a log server that isn't open to everyone. Own
+/// view so the Keychain is read once when it appears, not on every Settings re-render.
+private struct DiagnosticsTokenField: View {
+    @State private var token = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Access token (optional)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            SecureField("tk_…", text: $token)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .font(.callout.monospaced())
+                .onChange(of: token) { _, v in RemoteLog.token = v }
+        }
+        .padding(.vertical, 2)
+        .onAppear { token = RemoteLog.token }
+    }
+}
+
+/// Settings → Diagnostics: whether the log is actually getting through, and a Send Test button. Reads the
+/// main-actor snapshot `RemoteLog` publishes; the ticking timeline keeps "Sent 12 s ago" current.
+private struct DiagnosticsDeliveryStatus: View {
+    var body: some View {
+        let health = RemoteLogStatus.shared.health
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let line = health.line(now: context.date)
+            Text(line.text)
+                .font(.callout)
+                .foregroundStyle(line.isProblem ? Color.orange : Color.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        Button {
+            RemoteLog.shared.sendTest()
+        } label: {
+            Label("Send Test", systemImage: "paperplane")
+        }
+        .disabled(health.testInFlight)
+    }
 }

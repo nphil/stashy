@@ -2,14 +2,19 @@ import Foundation
 import Security
 
 enum KeychainService {
-    static func write(_ key: String, value: String) {
+    /// `afterFirstUnlock` keeps the item readable while the phone is locked (after the first unlock since
+    /// boot) — for a secret a background task needs, e.g. the diagnostics token. The default stays
+    /// "only while unlocked".
+    static func write(_ key: String, value: String, afterFirstUnlock: Bool = false) {
         let data = Data(value.utf8)
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrAccount: key,
             kSecAttrService: "com.nphil.stashy",
             kSecValueData: data,
-            kSecAttrAccessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            kSecAttrAccessible: afterFirstUnlock
+                ? kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+                : kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         ]
         SecItemDelete(query as CFDictionary)
         SecItemAdd(query as CFDictionary, nil)

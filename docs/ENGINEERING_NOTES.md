@@ -1359,6 +1359,13 @@ magnifier is tapped. Applied to Scenes & Performers.
   `docs/OPTIMIZATION_PLAN_2026-06-30.md` is reference only. Privacy note: on the default public
   `ntfy.sh`, anyone with the topic name can read the stream — the topic is a random burner ("New topic"
   rotates it); point at a self-hosted ntfy for full privacy.
+  **Delivery is never silent** (2026-11): ntfy.sh's free quota is per public IP (a shared home IP gets
+  HTTP 429 `daily message quota reached`), and a self-hosted server can answer 403 (deny-all ACL). Every
+  POST/PUT now reports into `RemoteLogHealth` (queue-confined in `RemoteLog`, published to the main
+  actor as `RemoteLogStatus.shared`); Settings → Diagnostics shows a status line + **Send Test** + an
+  optional **Access token** (Keychain `stashy.debug.token`, `Authorization: Bearer`, cached in memory
+  because the item is unreadable while locked). Failures back off (10 s→5 min; 429: ≥1 min, honours
+  `Retry-After`, cap 30 min), probe with one message, and re-buffer — no line is dropped.
 
 ---
 

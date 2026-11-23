@@ -1,5 +1,6 @@
 import UIKit
 import Darwin
+import Observation
 
 /// Lightweight remote logger for on-device debugging. Buffers log lines and POSTs them (batched) to a
 /// public **ntfy.sh** topic that can be read back over HTTP — so playback/remux behaviour streams off the
@@ -19,6 +20,7 @@ final class RemoteLog: @unchecked Sendable {
     private static let serverKey = "stashy.debug.server"
     private static let topicKey = "stashy.debug.topic"
     private static let downloadTraceKey = "stashy.debug.downloadTrace"
+    private static let tokenKey = "stashy.debug.token"
 
     /// Whether debug log streaming is enabled (off by default — it broadcasts to a public ntfy topic).
     static var isLoggingEnabled: Bool {
@@ -46,7 +48,9 @@ final class RemoteLog: @unchecked Sendable {
             let v = newValue.trimmingCharacters(in: .whitespaces)
             // Strip a trailing slash so `server + "/" + topic` never doubles up.
             let clean = v.hasSuffix("/") ? String(v.dropLast()) : v
+            let before = UserDefaults.standard.string(forKey: serverKey)
             UserDefaults.standard.set(clean, forKey: serverKey)
+            if before != clean { shared.configChanged() }
         }
     }
     /// ntfy topic (the channel path). Defaults to an obscure-but-public topic.
@@ -57,12 +61,127 @@ final class RemoteLog: @unchecked Sendable {
         }
         set {
             let v = newValue.trimmingCharacters(in: .whitespaces)
+            let before = UserDefaults.standard.string(forKey: topicKey)
             UserDefaults.standard.set(v, forKey: topicKey)
+            if before != v { shared.configChanged() }
+        }
+    }
+    /// ntfy access token (`tk_…` or any bearer token), for a server that isn't open to everyone. Kept in
+    /// the Keychain — never in UserDefaults and never logged. Empty = no `Authorization` header.
+    static var token: String {
+        get { KeychainService.read(tokenKey) ?? "" }
+        set {
+            let v = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Unchanged (e.g. the Settings field loading the stored value) must not reset the delivery status.
+            if v == (KeychainService.read(tokenKey) ?? "") { return }
+            if v.isEmpty {
+                KeychainService.delete(tokenKey)
+            } else {
+                // Readable while the phone is locked (after first unlock): a download running in the
+                // background must still be able to authenticate its log posts.
+                KeychainService.write(tokenKey, value: v, afterFirstUnlock: true)
+            }
+            shared.configChanged(token: v)
         }
     }
     /// The full POST/read URL — computed each use so a Settings change takes effect without a relaunch.
     private var endpoint: URL {
         URL(string: "\(RemoteLog.server)/\(RemoteLog.topic)") ?? URL(string: "\(RemoteLog.defaultServer)/\(RemoteLog.defaultTopic)")!
+    }
+
+    // MARK: Delivery health (all queue-confined; published to SwiftUI through `RemoteLogStatus`)
+    private var health = RemoteLogHealth()
+    /// No flush before this instant — set by a failed send, cleared by a success / config change / test.
+    private var backoffUntil = Date.distantPast
+    /// The token, cached in memory: the Keychain item is unreadable while the phone is locked (before first
+    /// unlock after boot), and a locked phone is exactly when a background download is logging. `nil` =
+    /// not loaded yet; an empty string = "no token" (set explicitly).
+    private var tokenCache: String?
+
+    /// Queue-confined. Every POST / PUT is built here so the bearer token is attached the same way.
+    private func makeRequest(method: String, body: Data, contentType: String,
+                             configure: (inout URLRequest) -> Void = { _ in }) -> URLRequest {
+        var req = URLRequest(url: endpoint)
+        req.httpMethod = method
+        req.httpBody = body
+        req.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        if tokenCache == nil, let stored = KeychainService.read(RemoteLog.tokenKey) { tokenCache = stored }
+        if let token = tokenCache, !token.isEmpty {
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        configure(&req)
+        return req
+    }
+
+    /// Record one send's result (queue-confined) and publish it. A failure sets the back-off: exponential
+    /// 10 s → 5 min for refusals / outages; for a 429 (quota) start at 1 min, honour `Retry-After`, cap 30 min.
+    private func settle(_ outcome: Outcome, wasTest: Bool = false) {
+        let now = Date()
+        switch outcome {
+        case .delivered:
+            health.lastSuccess = now
+            health.consecutiveFailures = 0
+            backoffUntil = .distantPast
+        case .failed(let failure, let retryAfter):
+            health.lastFailure = failure
+            health.consecutiveFailures += 1
+            let shift = min(max(health.consecutiveFailures - 1, 0), 8)
+            let doublings = Double(Int(1) << shift)
+            let delay: TimeInterval
+            if case .http(429) = failure.kind {
+                delay = min(max(retryAfter ?? 0, 60 * doublings), 1800)
+            } else {
+                delay = min(10 * doublings, 300)
+            }
+            backoffUntil = now.addingTimeInterval(delay)
+        }
+        if wasTest { health.testInFlight = false }
+        publish()
+    }
+
+    /// Queue-confined: hand the current health to the main actor. `main.async` from a serial queue keeps
+    /// snapshots in order, so a stale one can never overwrite a newer one.
+    private func publish() {
+        let snapshot = health
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { RemoteLogStatus.shared.apply(snapshot) }
+        }
+    }
+
+    private enum Outcome: Sendable {
+        case delivered
+        case failed(RemoteLogHealth.Failure, retryAfter: TimeInterval?)
+    }
+
+    /// Classify a URLSession answer. 2xx = delivered; anything else (HTTP status, or a transport error with
+    /// no response) is a failure carrying the host it was addressed to.
+    private static func outcome(response: URLResponse?, error: Error?, url: URL?) -> Outcome {
+        let host = url?.host ?? ""
+        func fail(_ kind: RemoteLogHealth.Failure.Kind, retryAfter: TimeInterval? = nil) -> Outcome {
+            .failed(.init(kind: kind, at: Date(), host: host), retryAfter: retryAfter)
+        }
+        if let error { return fail(.transport(describe(error))) }
+        guard let http = response as? HTTPURLResponse else { return fail(.transport("no answer from the server")) }
+        if (200..<300).contains(http.statusCode) { return .delivered }
+        let retryAfter = http.value(forHTTPHeaderField: "Retry-After").flatMap { TimeInterval($0) }
+        return fail(.http(http.statusCode), retryAfter: retryAfter)
+    }
+
+    /// A short, plain-English reason for a transport error (the raw `localizedDescription` otherwise).
+    private static func describe(_ error: Error) -> String {
+        guard let e = error as? URLError else { return error.localizedDescription }
+        switch e.code {
+        case .notConnectedToInternet, .dataNotAllowed: return "no internet connection"
+        case .timedOut: return "the server didn't answer in time"
+        case .cannotFindHost, .dnsLookupFailed: return "that server name can't be found"
+        case .cannotConnectToHost: return "the server refused the connection"
+        case .networkConnectionLost: return "the connection dropped"
+        case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate,
+             .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid, .clientCertificateRejected,
+             .appTransportSecurityRequiresSecureConnection:
+            return "the secure connection failed"
+        default: return e.localizedDescription
+        }
     }
     private let session: URLSession
     private let queue = DispatchQueue(label: "stashy.remotelog")
@@ -143,6 +262,46 @@ final class RemoteLog: @unchecked Sendable {
             self.memTimer?.cancel(); self.memTimer = nil
             self.buffer.removeAll()
             self.enabled = false
+            self.resetDeliveryHealth()
+        }
+    }
+
+    /// Forget what the last send said — the server, topic or token changed (or logging was turned off), so
+    /// an old failure no longer describes the current setup — and lift any back-off. Safe from any thread.
+    fileprivate func configChanged(token: String? = nil) {
+        queue.async {
+            if let token { self.tokenCache = token }
+            self.resetDeliveryHealth()
+        }
+    }
+
+    /// Queue-confined.
+    private func resetDeliveryHealth() {
+        health.lastSuccess = nil
+        health.lastFailure = nil
+        health.consecutiveFailures = 0
+        backoffUntil = .distantPast
+        publish()
+    }
+
+    /// Post one line right now — bypassing the buffer, the back-off and the daily budget — and report the
+    /// answer through the delivery health (the Settings status line). A success also releases anything held.
+    func sendTest() {
+        queue.async {
+            guard !self.health.testInFlight else { return }
+            self.health.testInFlight = true
+            self.publish()
+            let stamp = Date().formatted(date: .omitted, time: .standard)
+            let body = "✅ Stashy test message at \(stamp) — iOS \(ProcessInfo.processInfo.operatingSystemVersionString)"
+            let req = self.makeRequest(method: "POST", body: Data(body.utf8), contentType: "text/plain")
+            self.session.dataTask(with: req) { [weak self] _, response, error in
+                let outcome = RemoteLog.outcome(response: response, error: error, url: req.url)
+                self?.queue.async {
+                    guard let self else { return }
+                    self.settle(outcome, wasTest: true)
+                    if case .delivered = outcome { self.flushLocked() }
+                }
+            }.resume()
         }
     }
 
@@ -209,11 +368,17 @@ final class RemoteLog: @unchecked Sendable {
         if !tail.isEmpty {
             try? tail.joined(separator: "\n").write(to: tailFile, atomically: true, encoding: .utf8)
         }
+        // Back off after a failed send (429 / refused / unreachable) instead of hammering the server every
+        // 10 s. Lines stay buffered meanwhile; `sendTest()` and a config change clear the back-off.
+        guard Date() >= backoffUntil else { return }
         guard !buffer.isEmpty else { return }
 
         // Roll the daily message counter over at UTC midnight.
         let day = Int(Date().timeIntervalSince1970 / 86_400)
-        if day != sentDayStamp { sentDayStamp = day; sentToday = 0; budgetWarned = false }
+        if day != sentDayStamp {
+            sentDayStamp = day; sentToday = 0; budgetWarned = false
+            if health.budgetPaused { health.budgetPaused = false; publish() }
+        }
 
         // Pack the buffered lines into as few messages as possible, each ≤ the 4096-byte per-message cap.
         let lines = buffer
@@ -232,7 +397,15 @@ final class RemoteLog: @unchecked Sendable {
         }
         if !current.isEmpty { chunks.append(current) }
 
+        // While the last send failed, probe with ONE message — a still-broken server / quota answers one
+        // request instead of a burst — and keep the rest buffered until it gets through.
+        let probing = health.consecutiveFailures > 0
         for (i, chunk) in chunks.enumerated() {
+            if probing && i > 0 {
+                buffer.insert(contentsOf: chunks[i...], at: 0)
+                trimBufferKeepingFront()
+                return
+            }
             // Daily budget guard: rather than 429-hammer the public server, re-buffer the remainder and
             // stop for now (it drains on the next UTC day, or immediately on a self-hosted server).
             if sentToday >= dailyMessageBudget {
@@ -240,6 +413,7 @@ final class RemoteLog: @unchecked Sendable {
                     budgetWarned = true
                     tail.append("⚠︎ ntfy daily message budget (\(dailyMessageBudget)) reached — pausing sends")
                 }
+                if !health.budgetPaused { health.budgetPaused = true; publish() }
                 buffer.insert(contentsOf: chunks[i...], at: 0)
                 trimBufferKeepingFront()
                 return
@@ -249,20 +423,20 @@ final class RemoteLog: @unchecked Sendable {
         }
     }
 
-    /// POST one ≤4096-byte message; on failure (e.g. 429) refund the budget and re-queue it for next flush.
+    /// POST one ≤4096-byte message; on failure (e.g. 429) refund the budget, re-queue it for the next flush
+    /// and record the failure in the delivery health (which also sets the back-off).
     private func postChunk(_ body: String) {
-        var req = URLRequest(url: endpoint)
-        req.httpMethod = "POST"
-        req.httpBody = Data(body.utf8)
-        req.setValue("text/plain", forHTTPHeaderField: "Content-Type")
+        let req = makeRequest(method: "POST", body: Data(body.utf8), contentType: "text/plain")
         session.dataTask(with: req) { [weak self] _, response, error in
-            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-            guard error != nil || !(200..<300).contains(code) else { return }
+            let outcome = RemoteLog.outcome(response: response, error: error, url: req.url)
             self?.queue.async {
                 guard let self else { return }
-                self.sentToday = max(0, self.sentToday - 1)   // it didn't actually land
-                self.buffer.insert(body, at: 0)
-                self.trimBufferKeepingFront()
+                if case .failed = outcome {
+                    self.sentToday = max(0, self.sentToday - 1)   // it didn't actually land
+                    self.buffer.insert(body, at: 0)
+                    self.trimBufferKeepingFront()
+                }
+                self.settle(outcome)
             }
         }.resume()
     }
@@ -295,18 +469,24 @@ final class RemoteLog: @unchecked Sendable {
         }
     }
 
+    /// POST one message from the log queue. A failure puts the body back in the buffer (it is re-sent on a
+    /// later flush) and is recorded in the delivery health; `wait` blocks the caller for the answer.
     private func post(_ body: String, wait: TimeInterval?) {
-        var req = URLRequest(url: endpoint)
-        req.httpMethod = "POST"
-        req.httpBody = Data(body.utf8)
-        req.setValue("text/plain", forHTTPHeaderField: "Content-Type")
-        if let wait {
-            let sem = DispatchSemaphore(value: 0)
-            session.dataTask(with: req) { _, _, _ in sem.signal() }.resume()
-            _ = sem.wait(timeout: .now() + wait)
-        } else {
-            session.dataTask(with: req).resume()
-        }
+        let req = makeRequest(method: "POST", body: Data(body.utf8), contentType: "text/plain")
+        let sem = wait == nil ? nil : DispatchSemaphore(value: 0)
+        session.dataTask(with: req) { [weak self] _, response, error in
+            let outcome = RemoteLog.outcome(response: response, error: error, url: req.url)
+            self?.queue.async {
+                guard let self else { return }
+                if case .failed = outcome {
+                    self.buffer.insert(body, at: 0)
+                    self.trimBufferKeepingFront()
+                }
+                self.settle(outcome)
+            }
+            sem?.signal()
+        }.resume()
+        if let sem, let wait { _ = sem.wait(timeout: .now() + wait) }
     }
 
     /// Upload a screenshot (or any image) as an ntfy **attachment**. ntfy hosts a PUT body at a public URL
@@ -322,28 +502,37 @@ final class RemoteLog: @unchecked Sendable {
             log("📷 screenshot \(data.count / 1024) KB exceeds ntfy 2 MB cap — skipped")
             return
         }
+        // (request is built on the log queue — the access token cache lives there)
         let name = "shot-\(Int(Date().timeIntervalSince1970)).jpg"
-        var req = URLRequest(url: endpoint)
-        req.httpMethod = "PUT"
-        req.httpBody = data
-        req.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
-        req.setValue(name, forHTTPHeaderField: "Filename")
-        // ntfy header values must be ASCII; strip anything else out of the caption title.
         let asciiCaption = caption.unicodeScalars.filter { $0.isASCII }.map(String.init).joined()
-        if !asciiCaption.isEmpty { req.setValue(asciiCaption, forHTTPHeaderField: "Title") }
         log("📷 uploading screenshot \(name) (\(data.count / 1024) KB)…")
-        session.dataTask(with: req) { [weak self] respData, response, error in
-            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-            if error == nil, (200..<300).contains(code) {
-                // Echo the hosted attachment URL into the text stream so it can be fetched back.
-                let url = respData
-                    .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-                    .flatMap { ($0["attachment"] as? [String: Any])?["url"] as? String }
-                self?.log("📷 screenshot posted\(url.map { " → \($0)" } ?? "")")
-            } else {
-                self?.log("📷 screenshot upload failed (code \(code) \(error?.localizedDescription ?? ""))")
+        queue.async {
+            let req = self.makeRequest(method: "PUT", body: data, contentType: "image/jpeg") { req in
+                req.setValue(name, forHTTPHeaderField: "Filename")
+                // ntfy header values must be ASCII; strip anything else out of the caption title.
+                if !asciiCaption.isEmpty { req.setValue(asciiCaption, forHTTPHeaderField: "Title") }
             }
-        }.resume()
+            self.session.dataTask(with: req) { [weak self] respData, response, error in
+                let outcome = RemoteLog.outcome(response: response, error: error, url: req.url)
+                if case .delivered = outcome {
+                    // Echo the hosted attachment URL into the text stream so it can be fetched back.
+                    let url = respData
+                        .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                        .flatMap { ($0["attachment"] as? [String: Any])?["url"] as? String }
+                    self?.log("📷 screenshot posted\(url.map { " → \($0)" } ?? "")")
+                } else {
+                    let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+                    self?.log("📷 screenshot upload failed (code \(code) \(error?.localizedDescription ?? ""))")
+                }
+                self?.queue.async {
+                    // 400 / 413 mean "this attachment is not accepted", not "the server is unreachable" —
+                    // they say nothing about whether the text log is getting through.
+                    if case .failed(let failure, _) = outcome, case .http(let status) = failure.kind,
+                       status == 400 || status == 413 { return }
+                    self?.settle(outcome)
+                }
+            }.resume()
+        }
     }
 
     private func observeMemoryWarning() {
@@ -374,5 +563,90 @@ final class RemoteLog: @unchecked Sendable {
             }
         }
         return kr == KERN_SUCCESS ? Double(info.phys_footprint) / 1_048_576 : 0
+    }
+}
+
+/// How the log stream's delivery is going — what Settings → Diagnostics shows. A plain value: `RemoteLog`
+/// builds it on its own serial queue and hands copies to the main actor (`RemoteLogStatus`).
+struct RemoteLogHealth: Sendable, Equatable {
+    struct Failure: Sendable, Equatable {
+        enum Kind: Sendable, Equatable {
+            /// The server answered, but not with 2xx.
+            case http(Int)
+            /// No usable answer (offline, DNS, TLS, timeout …) — a plain-English reason.
+            case transport(String)
+        }
+        var kind: Kind
+        var at: Date
+        /// Host the post was addressed to, so the wording can name the public server specifically.
+        var host: String
+    }
+
+    var lastSuccess: Date?
+    var lastFailure: Failure?
+    /// Sends failed since the last success; 0 = healthy.
+    var consecutiveFailures = 0
+    /// Today's message budget is used up, so sends are held until UTC midnight.
+    var budgetPaused = false
+    /// A "Send Test" is waiting for its answer.
+    var testInFlight = false
+
+    /// One plain-English status line; `isProblem` is true when nothing is getting through.
+    func line(now: Date) -> (text: String, isProblem: Bool) {
+        if testInFlight { return ("Sending a test message…", false) }
+        if consecutiveFailures > 0, let failure = lastFailure {
+            return ("Not sending — " + Self.reason(failure) + ".", true)
+        }
+        if budgetPaused {
+            return ("Paused — today's message limit is used up. Sending resumes at midnight UTC.", true)
+        }
+        if let lastSuccess {
+            return ("Sent " + Self.ago(now.timeIntervalSince(lastSuccess)), false)
+        }
+        return ("Nothing sent yet. Tap Send Test to check the connection.", false)
+    }
+
+    private static func reason(_ failure: Failure) -> String {
+        switch failure.kind {
+        case .transport(let why):
+            return "can't reach the server (\(why))"
+        case .http(let status):
+            switch status {
+            case 429:
+                return failure.host == "ntfy.sh"
+                    ? "ntfy.sh's daily limit for your internet connection is used up (429). Use your own server"
+                    : "the server is limiting how fast this phone can send (429). Retrying shortly"
+            case 403:
+                return "the server refused this topic (403). It needs permission or an access token"
+            case 401:
+                return "the server wants an access token, or doesn't accept this one (401)"
+            case 404:
+                return "the server doesn't know this address (404). Check the server and topic"
+            default:
+                return "the server answered with an error (\(status)). Retrying shortly"
+            }
+        }
+    }
+
+    private static func ago(_ seconds: TimeInterval) -> String {
+        let s = max(0, Int(seconds))
+        if s < 2 { return "just now" }
+        if s < 60 { return "\(s) s ago" }
+        if s < 3600 { return "\(s / 60) min ago" }
+        return "\(s / 3600) h ago"
+    }
+}
+
+/// Main-actor mirror of `RemoteLog`'s delivery health, for SwiftUI. `RemoteLog` runs on its own serial
+/// queue; it only ever writes here through `apply(_:)` on the main actor.
+@MainActor
+@Observable
+final class RemoteLogStatus {
+    static let shared = RemoteLogStatus()
+    private(set) var health = RemoteLogHealth()
+    private init() {}
+
+    func apply(_ snapshot: RemoteLogHealth) {
+        if snapshot != health { health = snapshot }
     }
 }
