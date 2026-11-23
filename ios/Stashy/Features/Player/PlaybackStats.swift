@@ -140,6 +140,50 @@ struct StatSection: Identifiable {
     let lines: [StatLine]
 }
 
+/// How long this start took to reach each step, from the moment the player began loading the scene, for the
+/// Stats overlay's Start row. A step counts its first arrival only, so a later restart of the stream (a far
+/// seek, the fallback to server HLS) leaves the start's own times as they were.
+struct StartTiming: Sendable {
+    enum Step: String, CaseIterable, Sendable {
+        /// The player has its address: at once for a direct stream or file, once the first part is remuxed
+        /// for an on-device remux.
+        case stream
+        /// The player can play.
+        case ready
+        /// The first picture is decoded (its size is known).
+        case picture
+        /// The player plays (a start left paused never gets here).
+        case playing
+    }
+
+    private let begun: ContinuousClock.Instant
+    private var marks: [Step: Duration] = [:]
+
+    init(begun: ContinuousClock.Instant = .now) { self.begun = begun }
+
+    mutating func mark(_ step: Step, at now: ContinuousClock.Instant = .now) {
+        guard marks[step] == nil else { return }
+        marks[step] = now - begun
+    }
+
+    /// Milliseconds from the start to `step`, once reached.
+    func milliseconds(_ step: Step) -> Int? {
+        marks[step].map { elapsed in
+            let parts = elapsed.components
+            return Int((Double(parts.seconds) * 1000 + Double(parts.attoseconds) / 1e15).rounded())
+        }
+    }
+
+    /// The steps reached, in the order reached: "stream 15 · ready 480 · picture 500 · playing 520 ms".
+    var summary: String {
+        let reached = Step.allCases.enumerated()
+            .compactMap { order, step in milliseconds(step).map { (step: step, ms: $0, order: order) } }
+            .sorted { ($0.ms, $0.order) < ($1.ms, $1.order) }
+        guard !reached.isEmpty else { return "–" }
+        return reached.map { "\($0.step.rawValue) \($0.ms)" }.joined(separator: " · ") + " ms"
+    }
+}
+
 /// A full snapshot of player diagnostics. Section-based so the future Stash transcoder can add its own
 /// section without reworking the overlay.
 struct PlaybackStats {

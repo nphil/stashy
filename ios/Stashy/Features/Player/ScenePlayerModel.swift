@@ -180,6 +180,9 @@ final class ScenePlayerModel {
     /// user taps play to continue, matching iOS norms (a pushed-then-popped video shouldn't silently resume).
     /// Consumed once, on the first `adopt`.
     @ObservationIgnored private var startPaused = false
+    /// How long this start took to reach each step, for the Stats overlay's Start row. A real `start` begins a
+    /// new one. Not observed: the overlay polls it with the rest of the stats snapshot.
+    @ObservationIgnored private var startTiming = StartTiming()
 
     // Loading-donut estimate: blend the real buffer fill with a time-based curve paced by a learned
     // per-tier average, so the ring never sits at 0 (server transcode) nor snaps 0→100.
@@ -283,6 +286,7 @@ final class ScenePlayerModel {
         startInProgress = true
         startPaused = !autoplay
         stopped = false
+        startTiming = StartTiming()
         // ONE watch history for both surfaces. It was glasses-only, so the wall's "Recently Watched"
         // shelf ignored everything played on the phone — and on a first-ever glasses session it was
         // empty. Idempotent (the id is moved to the head), so an engine rebuild costs nothing.
@@ -393,6 +397,7 @@ final class ScenePlayerModel {
             return
         }
         self.engine = engine
+        startTiming.mark(.stream)
         // A return-from-navigation start adopts paused: keep the engine parked so the video resumes at the
         // remembered position (via the first-ready seek) but doesn't silently start playing. The user taps
         // play. Consumed here so any later engine rebuild (seek-reinit / quality / fallback) auto-plays.
@@ -466,12 +471,15 @@ final class ScenePlayerModel {
             }
         }
         engine.onReady = { [weak self] ready in
-            guard let self, self.isReady != ready else { return }
+            guard let self else { return }
+            if ready { self.startTiming.mark(.ready) }
+            guard self.isReady != ready else { return }
             self.isReady = ready
         }
         engine.onState = { [weak self] phase in
             guard let self else { return }
             let playing = phase == .playing
+            if playing { self.startTiming.mark(.playing) }
             if self.isPlaying != playing { self.isPlaying = playing }
             let buffering = phase == .waiting
             if self.isBuffering != buffering { self.isBuffering = buffering }
@@ -493,6 +501,7 @@ final class ScenePlayerModel {
         }
         engine.onPresentationSize = { [weak self] size in
             guard let self, size.width > 0, size.height > 0 else { return }
+            self.startTiming.mark(.picture)
             let aspect = size.width / size.height
             if self.videoAspect != aspect { self.videoAspect = aspect }
             let firstFrame = self.presentationSize == .zero
@@ -935,6 +944,7 @@ final class ScenePlayerModel {
             StatLine(label: "Playing", value: presentationSize.width > 0
                      ? "\(Int(presentationSize.width))×\(Int(presentationSize.height))"
                      : "—"),
+            StatLine(label: "Start", value: startTiming.summary),
             // The exact URL being played, apikey redacted — so a manual server-quality switch can be
             // verified: the `resolution=…` query param must be present and byte-for-byte one of
             // LOW / STANDARD / STANDARD_HD / FULL_HD / FOUR_K / ORIGINAL (Stash matches it case-sensitively).
