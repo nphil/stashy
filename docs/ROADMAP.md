@@ -390,6 +390,35 @@ nothing to switch between.
     videos). Purely local + private (fits the no-server-load, on-device tenet). Could later fuse with the
     Vision motion-analysis idea to seed a heat curve even on first watch.
 
+## TODO — lift from 1letzgo/stashy (owner-requested 2026-11-23; start only when Nitin says "begin")
+Source: https://github.com/1letzgo/stashy (MIT — re-implement in Stashy's own style; credit in About if code is
+adapted). Their app is now iOS + tvOS + Android, App Store, on AetherEngine. Our playback pipeline stays ours
+(engine work is the VideoEngine chat's AetherEngine to-do). Build each as a small single-purpose release.
+
+**Features (suggested order):**
+1. **Saved filters + quick filters** — one-tap presets above the Scenes grid; read/write Stash's own saved
+   filters so web and app share them.
+2. **Feeds (Reels)** — vertical swipe feed over scenes/markers/clips; muted unless headphones; reuses fast start.
+3. **Markers browser** — a Markers tab/section: every marker library-wide, tap to play from that second (chapters
+   in the player shipped v1.0.376).
+4. **Configurable Home** — user-ordered rows: continue watching, recent, favourites, "forgotten favourites",
+   recommendations, stats.
+5. **Studios** browse + detail (smallest content-type lift), then **Tags** and **Groups** detail pages.
+6. **Galleries + Images** — grid, zoomable viewer (we have `ZoomableImageView`), slideshow.
+7. **Universal search** across scenes/performers/studios/tags/markers.
+8. **Tab show/hide/reorder** in Settings.
+9. **Match (hot-or-not)** rating game feeding `rating100`; stay compatible with Ascension custom fields.
+10. **Watch stats** — overview + O-count/plays heatmap.
+11. **Tools:** duplicate merge helper; AI tag suggestions (on-device).
+12. **Multi-server** (server list, Keychain per server, server-scoped `ImageCache` keys) + **settings export/import**.
+13. **401 handling** — say plainly when the API key is wrong/expired.
+
+**UX/UI polish to study in their iOS code before building (read, then decide per item):** scene-detail layout
+options (`SceneDetailLayout`), scene-title normaliser for messy file names, name-regex filters, per-area default
+sort/filter, last-played rows, image caching keys, filter editor UI.
+
+**Out of scope unless asked:** stashy+ paywall, TheHandy/Intiface device sync, Android/tvOS ports.
+
 ## Comparative study — ideas from 1letzgo/stashy (2026-07-01)
 Studied a second, broader Stash iOS/tvOS client (README, CLAUDE.md, GraphQLClient, PaginatedLoader,
 VideoAnalysisManager). It leans on **server-side transcode + KSPlayer + a manual quality picker** rather
