@@ -1039,12 +1039,20 @@ engine's `TranscodeSettings`):
   Any other terminal failure on a server route asks the server for one byte of `/scene/<id>/stream` AFTER the failure
   (3 s limit; the donut stays up meanwhile) and says "missing" only on a clear 404. Never before playback, never for
   downloaded files. Device-unverified.
+- **Chapters from Stash markers (`ChapterMarks.swift`; Marquee `4e1776b`).** The scene queries (list AND detail) select
+  `scene_markers { id title seconds primary_tag { id name } }` (the fields Stash's own scene cards use; the player is
+  handed the LIST scene, so the list needs them). No `end_seconds`: chapters only need starts, and a field an older
+  server lacks would fail every scene fetch. `ChapterMarks` is built once per scene (`PlayerControlsView` `.task`):
+  sorted, one per start, named by title, else primary tag, else "Marker N"; lookups are a binary search (no
+  allocation per scrub event). `ScrubBar` cuts the track with a 2 pt gap at each start (a mask applied ONLY when
+  markers exist), shows the name inside the scrub picture or, with none, above the track, and a light tap marks each
+  crossing (`PlayerControlsView.tickChapter`, covers the bar drag and the video hold-scrub; touch-down is no crossing).
+  Nothing is drawn before the first marker. Device-unverified.
 - **Marquee parity (commits since 2026-11-07, checked):** adopted: engine pin, async audio session, resume after an
-  interruption, Start timing. Already here: seeking only inside AVPlayer's seekable range. Skipped on purpose: Plex
-  route / link-speed logic, Marquee's tap-zoom change (the owner wants Apple-Photos double-tap zoom), Dolby Vision 7
-  (the engine default already strips it), the orientation setting. Not done: chapters in the progress bar (needs Stash
-  scene markers: `scene_markers { id title seconds primary_tag { name } }` on the detail query, ScrubBar cuts, a haptic
-  tick) and the Dynamic Island waveform rule (`657b552`, applies once Now Playing exists).
+  interruption, Start timing, chapters. Already here: seeking only inside AVPlayer's seekable range. Skipped on
+  purpose: Plex route / link-speed logic, Marquee's tap-zoom change (the owner wants Apple-Photos double-tap zoom),
+  Dolby Vision 7 (the engine default already strips it), the orientation setting. Not done: the Dynamic Island waveform
+  rule (`657b552`, applies once Now Playing exists).
 
 ---
 
