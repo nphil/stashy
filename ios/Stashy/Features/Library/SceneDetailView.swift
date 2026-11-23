@@ -31,15 +31,6 @@ struct SceneDetailView: View {
     @State private var windowBounds: CGRect = .zero
     @State private var windowSafeArea = EdgeInsets()
 
-    init(scene: StashScene, path: Binding<[Route]>) {
-        self.scene = scene
-        _path = path
-        // Re-opened from the mini player: start at the quality that is playing, so the resolved stream matches the
-        // docked one and the player adopts it instead of reloading. (Position is never read here — `init` runs on
-        // every parent update, and reading the playhead would re-render the parent on every tick.)
-        _quality = State(initialValue: NowPlaying.shared.dockedQuality(sceneID: scene.id) ?? .auto)
-    }
-
     /// Full performers if the detail fetch has landed, otherwise the slim (id+name) list.
     private var performers: [Performer] { (fullScene ?? scene).performers }
 

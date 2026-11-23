@@ -247,7 +247,7 @@ final class AVPlaybackEngine: PlaybackEngine {
         setFrameRateProbeActive(false)
         player.pause()
         // Close the Picture in Picture window while the layer still has its player (it holds the layer), and
-        // stop it reporting into the mini player.
+        // stop it reporting.
         pictureInPicture?.tearDown()
         pictureInPicture = nil
         // Detach the render layer + backdrop so an engine swap (far-seek reinit / HLS fallback) doesn't

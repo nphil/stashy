@@ -125,11 +125,7 @@ final class NowPlaying {
 
     private func finishRetirement(_ key: ObjectIdentifier) {
         guard let retirement = retiring.removeValue(forKey: key) else { return }
-        let began = ProcessInfo.processInfo.systemUptime
         retirement.model.stop()
-        // Diagnostics (opt-in): how long the deferred teardown holds the main thread, so a surviving hitch can be pinned.
-        let ms = Int(((ProcessInfo.processInfo.systemUptime - began) * 1000).rounded())
-        RemoteLog.shared.event("player-teardown", [("scene", retirement.sceneID), ("mainMs", ms)])
     }
 
     // MARK: - Picture in Picture window events
@@ -137,10 +133,6 @@ final class NowPlaying {
     /// Events from a window that isn't the on-screen playback's (a torn-down engine's late callback) are ignored.
     private func isCurrent(_ window: PictureInPictureWindow) -> Bool {
         presented?.model.pictureInPicture === window
-    }
-
-    func pictureInPicturePossibleChanged(_ window: PictureInPictureWindow) {
-        syncPictureInPicture()
     }
 
     /// The window's "restore" button: the page it came from is still up, so there is nothing to reopen.

@@ -290,10 +290,10 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
         }
 
         @objc func handleSwipe(_ gr: UIPanGestureRecognizer) {
-            guard let scroll = scrollView else { return }
+            guard parent.zoomEnabled, let scroll = scrollView else { return }
             if gr.state == .began { swipeDuringScrub = isScrubbing }
-            // Inline too (there it minimises into the mini player; fullscreen leaves fullscreen first). Only when not
-            // zoomed: a downward fling dismisses (when zoomed, panning moves the video).
+            // Only when not zoomed: a downward fling dismisses (when zoomed, panning moves the video). A pan that began
+            // during a hold-scrub never does — its vertical travel picked the scrub gear.
             guard !swipeDuringScrub, scroll.zoomScale <= scroll.minimumZoomScale + 0.01 else { return }
             if gr.state == .ended {
                 let t = gr.translation(in: scroll)

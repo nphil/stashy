@@ -1053,43 +1053,33 @@ engine's `TranscodeSettings`):
   purpose: Plex route / link-speed logic, Marquee's tap-zoom change (the owner wants Apple-Photos double-tap zoom),
   Dolby Vision 7 (the engine default already strips it), the orientation setting. Not done: the Dynamic Island waveform
   rule (`657b552`, applies once Now Playing exists).
-- **Mini player + Picture in Picture (`NowPlaying.swift`, `MiniPlayer.swift`, `PictureInPicture.swift`).**
-  - *Ownership.* A page (`ScenePlayerView`) still creates its `ScenePlayerModel`. Minimising — the chevron in the inline
-    chrome, a swipe down on the inline video, or opening the system PiP window from the chrome button — hands that SAME
-    model to `NowPlaying.shared.docked`; the page leaves WITHOUT `stop()`. `MiniPlayerBar` (glass; drawn by
-    `.miniBarInset(for:)`, a `safeAreaInset(.bottom)` on each tab's content in `LibraryView`) re-parents the model's
-    `renderView` into its tile, and only after the page's `onDisappear` (`Docked.showsPicture`) so the two never fight
-    over the one view. Tapping the bar presents `NowPlayingCover` (root `fullScreenCover`, the shape of
-    `DownloadPlayerCover`); its page ADOPTS the docked model (`adoptableModel`: same scene AND same stream URL —
-    `SceneDetailView.init` seeds `quality` from `dockedQuality` so the resolved URL matches). No reload. Back,
-    swipe-back, a tab switch, the bar's ✕ and another scene replacing it all end the playback through `retire`.
+- **Automatic Picture in Picture + deferred teardown (`NowPlaying.swift`, `PictureInPicture.swift`).** The mini player
+  (bar, minimise chevron, swipe-down-to-dock, the root cover, `docked`/adopt) and the PiP chrome button were SHIPPED
+  in v1.0.376 and REMOVED on 2026-11-23 at the owner's request. The first build also broke the fullscreen ✕ (it did
+  not close fullscreen or return to portrait); ✕ is `isFullscreen = false` again, and an inline swipe down does
+  nothing (fullscreen swipe-down still exits fullscreen; `handleSwipe` is guarded by `zoomEnabled` again, and a pan
+  that began in a hold-scrub never dismisses). Do not re-add a docked playback without re-reading why the old one broke.
+  - *PiP.* Automatic only: `canStartPictureInPictureAutomaticallyFromInline` when the app backgrounds mid-playback,
+    no button. `PictureInPictureWindow` is one per `AVPlaybackEngine`, built on `hostView.playerLayer` and closed in
+    `teardown()` BEFORE the layer drops the player. `AVPictureInPictureController(playerLayer:)` is FAILABLE. Policy is
+    `NowPlaying.syncPictureInPicture`: off under Privacy Mode (a system window can't be blurred), App Lock, glasses and
+    slow-mo (`overlayActive`: the smoothed frames live in an overlay the window can't show). Its restore button just
+    returns to the page that is already up (`completion(true)`); its ✕ pauses, and only with the app in the background
+    (`applicationState == .background`).
   - *Teardown is deferred — the first-fling hitch.* Device telemetry: the only severe scroll hitch (53 ms freeze, 26 %
     judder) was the FIRST fling on the grid right after closing a playing video (the player tore down on the main thread
-    during the dismiss). `retire` = `ScenePlayerModel.quiesce()` at once (silent, nothing can start) + a DEFAULT-mode
-    `Timer` (0.6 s; it cannot fire while a scroll view is tracking or decelerating) → `model.stop()` →
+    during the dismiss). `NowPlaying.retire` = `ScenePlayerModel.quiesce()` at once (silent, nothing can start) + a
+    DEFAULT-mode `Timer` (0.6 s; it cannot fire while a scroll view is tracking or decelerating) → `model.stop()` →
     `AVPlaybackEngine.teardown()` → `PlayerGraveyard` releases the AVPlayer / item / video output off the main thread
     0.5 s later. A rebuilt page for the same scene (quality switch) stops the old model immediately. Never call
     `model.stop()` straight from `onDisappear` again; UIViews are never released off-main. The hitch's cause was
     inferred from timing, NOT measured, and `RemuxSession.stop()` (inside VideoEngine) is unmeasured — if the hitch
     survives, measure there.
-  - *PiP.* `PictureInPictureWindow`: one per `AVPlaybackEngine`, built on `hostView.playerLayer`, closed in
-    `teardown()` BEFORE the layer drops the player. `AVPictureInPictureController(playerLayer:)` is FAILABLE. The
-    automatic window (`canStartPictureInPictureAutomaticallyFromInline`) is policy in
-    `NowPlaying.syncPictureInPicture`: off under Privacy Mode (a system window can't be blurred; the chrome button hides
-    too), App Lock, glasses, and slow-mo (`overlayActive`: the smoothed frames live in an overlay the window can't
-    show). The window's restore button reopens the cover (`completion(true)` after 400 ms — Marquee's value); its ✕ ends
-    the playback ONLY with the app in the background (`applicationState == .background`) — in front, a window that
-    closes just hands the picture back. An automatic window never docks the page; one the user opened does.
-  - *Audio session / keep-alive.* This code adds NO audio-session writes and NO `beginBackgroundTask` — either would pin
-    the ~26 s window or fight `DownloadKeepAlive`'s renewal (§3). The engine's `.playback` session is PiP's
-    prerequisite; `DownloadKeepAlive` swaps the options to `.mixWithOthers` in the background (PiP under that is
-    device-unverified). VideoEngine 2.1.0 reopens the loopback server on a background/PiP resume.
-  - *Glasses.* The bar hides while `GlassesSession.isConnected` (what is docked pauses); `minimise` refuses then.
-  - *Gestures.* `ZoomablePlayerSurface.handleSwipe` now also fires inline (the page minimises; fullscreen still exits
-    fullscreen first) and never after a hold-scrub (its vertical travel picks the scrub gear).
-  - Device-unverified: PiP under the mixing session; the safe-area bar with the minimising tab bar; the pushed page's pop
-    on minimise; whether AVKit calls restore or just stops when an automatic window ends on returning to the app; the
-    off-main AVPlayer release.
+  - *Audio session / keep-alive.* No audio-session writes and no `beginBackgroundTask` — either would pin the ~26 s
+    window or fight `DownloadKeepAlive`'s renewal (§3). The engine's `.playback` session is PiP's prerequisite;
+    `DownloadKeepAlive` swaps the options to `.mixWithOthers` in the background (PiP under that is device-unverified).
+  - Device-unverified: automatic PiP under the mixing session; whether AVKit calls restore or just stops when a window
+    ends on returning to the app; the off-main AVPlayer release.
 
 ---
 

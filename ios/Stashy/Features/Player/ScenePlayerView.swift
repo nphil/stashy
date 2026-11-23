@@ -23,10 +23,8 @@ struct ScenePlayerView: View {
     @State private var sprites = SpriteThumbnails()
     /// Observable glasses session — reading `isConnected` in body re-renders on plug/unplug.
     @State private var glasses = GlassesSession.shared
-    /// The stream this page plays: what a docked playback must match to be adopted, and what a minimise records.
-    private let routeURL: URL
-    /// The mini player / Picture in Picture owner: the minimise hand-off and the chrome's window button.
-    @State private var nowPlaying = NowPlaying.shared
+    /// Owns the automatic-PiP policy and the deferred teardown of a playback that leaves the screen.
+    private let nowPlaying = NowPlaying.shared
     @Environment(\.scenePhase) private var scenePhase
     /// After exiting fullscreen while the phone is still physically landscape, suppress re-entering
     /// fullscreen until the device returns to portrait (so ✕ doesn't immediately bounce back to landscape).
@@ -60,15 +58,8 @@ struct ScenePlayerView: View {
         // Seed the (rebuilt) model with the position captured just before the source changed, plus the
         // file's load weight so the loading donut's expected time scales with how heavy this scene is.
         // The scene ID feeds watch-heat accumulation (the route itself carries no scene identity).
-        self.routeURL = route.url
-        if let adopted = NowPlaying.shared.adoptableModel(sceneID: scene.id, routeURL: route.url) {
-            // Re-opened from the mini player: take over the docked playback — same model, same engine, nothing
-            // reloads. A pure lookup (`init` runs on every parent update); `onAppear` claims it.
-            _model = State(initialValue: adopted)
-        } else {
-            _model = State(initialValue: ScenePlayerModel(route: route, startAt: resumeTime.wrappedValue,
-                                                          loadProfile: scene.loadProfile, sceneID: scene.id))
-        }
+        _model = State(initialValue: ScenePlayerModel(route: route, startAt: resumeTime.wrappedValue,
+                                                      loadProfile: scene.loadProfile, sceneID: scene.id))
     }
 
     /// The video's display aspect. Prefer the *actual* decoded size reported by the player (correct
@@ -78,12 +69,6 @@ struct ScenePlayerView: View {
 
     /// True when the video is taller than wide — from the actual decoded size when known, else metadata.
     private var isPortraitVideo: Bool { (model.videoAspect ?? scene.videoAspect).map { $0 < 1 } ?? false }
-
-    /// The chrome offers Picture in Picture only when the system window can show what the player shows: not while
-    /// glasses own the picture, and not during slow-mo (its smoothed frames live in an overlay the window can't see).
-    private var pictureInPictureOffered: Bool {
-        nowPlaying.pictureInPictureAvailable && !model.overlayActive && !model.glassesActive
-    }
 
     var body: some View {
         GeometryReader { geo in
@@ -149,7 +134,7 @@ struct ScenePlayerView: View {
                     onSingleTap: { toggleControls() },
                     onScrubStart: { hideTask?.cancel(); showControls = true },
                     onScrubEnd: { scheduleHide() },
-                    onSwipeDownDismiss: { if isFullscreen { isFullscreen = false } else { minimise() } },
+                    onSwipeDownDismiss: { if isFullscreen { isFullscreen = false } },
                     cueIndex: { sprites.cueIndex(at: $0) }
                 )
                 .frame(width: surfaceSize.width, height: surfaceSize.height)
@@ -205,10 +190,7 @@ struct ScenePlayerView: View {
                     safeArea: safe,
                     spritePreviewTopLeading: false,   // always anchor the scrub preview above the bar
                     scheduleHide: { scheduleHide() },
-                    onBack: onBack,
-                    onMinimise: { minimise() },
-                    onPictureInPicture: pictureInPictureOffered ? { nowPlaying.togglePictureInPicture(model) } : nil,
-                    isPictureInPictureActive: nowPlaying.pictureInPictureActive
+                    onBack: onBack
                 )
                 .frame(width: avail.width, height: avail.height)
 
@@ -313,20 +295,10 @@ struct ScenePlayerView: View {
         .onChange(of: model.isReady) { _, ready in
             if ready, glasses.isConnected { syncGlassesRouting(true) }
         }
-        // Keep the system window's policy and the chrome's button in step with what decides them: the engine (a
-        // rebuilt one has a fresh window), glasses, and slow-mo.
+        // Keep the automatic-PiP policy in step with what decides it: the engine (a rebuilt one has a fresh window),
+        // glasses, and slow-mo.
         .onChange(of: [model.isReady, glasses.isConnected, model.overlayActive], initial: true) { _, _ in
             nowPlaying.syncPictureInPicture()
-        }
-        // Minimised (chevron, swipe down, or a window opened from the button): the playback is now the bar's and this
-        // page leaves WITHOUT stopping it — a cover slides down, a pushed page pops.
-        .onChange(of: nowPlaying.docked?.id) { _, _ in
-            guard nowPlaying.docked?.model === model else { return }
-            if nowPlaying.expansion != nil {
-                nowPlaying.expansion = nil
-            } else {
-                onBack?()
-            }
         }
         // Backgrounding while the glasses are up: iOS takes the external screen back, so pause in place
         // (never stop — that's the navigation path). The blackout cover in GlassesRootController has
@@ -344,9 +316,8 @@ struct ScenePlayerView: View {
         }
         .onAppear {
             UIDevice.current.beginGeneratingDeviceOrientationNotifications()
-            // Claim the playback BEFORE starting it: adopts the docked one (a re-opened mini player) or registers this
-            // page's own, and closes a docked playback of another scene that this page replaces.
-            nowPlaying.present(model, scene: scene, routeURL: routeURL, quality: quality)
+            // Register this page's playback BEFORE starting it (and settle a retiring one of the same scene).
+            nowPlaying.present(model, scene: scene)
             // First open auto-plays; a re-appear (returned from a pushed performer / external link) resumes
             // at the remembered position but stays paused — tap play to continue.
             model.start(autoplay: !didAppear)
@@ -361,9 +332,9 @@ struct ScenePlayerView: View {
         .onDisappear {
             EnableSwipeBack.suppressed = false   // never leave the app-wide back-swipe parked
             hideTask?.cancel()
-            // Leaving the scene ends playback so audio can't keep running in the background — unless it was minimised
-            // into the mini player, which carries it on. `NowPlaying` decides, and defers the heavy teardown until after
-            // the transition (never during the dismiss animation or the first scroll after it).
+            // Leaving the scene ends playback so audio can't keep running in the background. `NowPlaying` silences it
+            // now and defers the heavy teardown until after the transition (never during the dismiss animation or the
+            // first scroll after it).
             // NOTE: no orientation reset here — this view is rebuilt (`.id(route.url)`) on every
             // quality switch, and resetting to portrait here would kick fullscreen landscape back to
             // portrait mid-switch. Restoring portrait on a real exit is owned by SceneDetailView.
@@ -387,11 +358,6 @@ struct ScenePlayerView: View {
         } else {
             model.glassesActive = false
         }
-    }
-
-    /// Minimise: the playback moves into the mini player (see `NowPlaying`) and this page leaves without stopping it.
-    private func minimise() {
-        nowPlaying.minimise(model, scene: scene, routeURL: routeURL, quality: quality)
     }
 
     /// Aspect-fit a video of `aspect` (w/h) inside `size`, returning the displayed size.
