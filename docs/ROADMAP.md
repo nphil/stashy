@@ -292,15 +292,16 @@ nothing to switch between.
     Rate Conversion (quality path) with a per-rate `interpolationPhase` for arbitrary-factor smoothness.
     **Phase 3 (optional)** — an "export smooth slow-mo clip" action (on-device or P40 plugin) for a max-quality
     result.
-- **Mini-player / undock the player (owner-requested 2026-07-04).** Let the player detach from the scene
-  screen into a floating, draggable mini-player (à la Apple Podcasts / YouTube PiP) so it keeps playing
-  while the user browses performers, links, other scenes, etc. Would make navigation-away seamless (see
-  below) and enable true picture-in-picture. Needs the player model + engine to outlive `SceneDetailView`
-  — hoist it to an app-level holder (an environment-scoped `NowPlaying` coordinator that owns the single
-  `ScenePlayerModel`) rather than per-screen `@State`, and reuse `AVPictureInPictureController` for system
-  PiP. **Related:** the current "resume where you were on return from a performer/link" is a *safe reload*
-  (teardown + resume-seek), because keeping the engine alive across a `path=[]` pop-to-root would crash on
-  dealloc; the mini-player's app-level model is what makes a *zero-cost* pause/hand-off safe.
+- **Mini-player / undock the player (owner-requested 2026-07-04) — ✅ SHIPPED (built, device-unverified).** Minimise
+  (chevron in the inline chrome, or swipe down on the video) docks the playback in a glass bar above the tab bar while
+  the owner browses any tab; tap the bar to reopen the full player on the same model and engine (no reload), ✕ or
+  another scene ends it. System Picture in Picture from the player chrome, plus automatic PiP when the app backgrounds
+  mid-playback. The app-level `NowPlaying` holder owns the docked model; closing a player no longer tears down on the
+  main thread during the dismiss (the first-fling hitch). Reference: `docs/ENGINEERING_NOTES.md` §5 "Mini player +
+  Picture in Picture". **Still open:** a draggable free-floating mini-player, docking automatically on tab switch or
+  pop (today only an explicit minimise docks), `tabViewBottomAccessory` instead of a safe-area inset, and a zero-cost
+  pause/hand-off for the performer-link detour (that still does a *safe reload* — teardown + resume-seek — because an
+  engine deallocated with its time observer attached traps).
 - **★ Zoom-follow / auto-tracking zoom (owner-requested 2026-07-04) — spike needed.** While zoomed into a
   video, a player tool lets the user **pause, free-draw a region/shape with a finger on the frozen frame,
   confirm it, and then on play the zoom auto-pans/scales to keep that region framed as it moves** — so the

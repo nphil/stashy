@@ -6,7 +6,7 @@ import CoreVideo
 /// compositing. Sized by the zoom surface (already aspect-fitted), so `.resizeAspect` fills it.
 final class AVPlayerHostView: UIView {
     override class var layerClass: AnyClass { AVPlayerLayer.self }
-    private var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
 
     var player: AVPlayer? {
         get { playerLayer.player }
@@ -78,6 +78,11 @@ final class AVPlaybackEngine: PlaybackEngine {
         return v
     }
 
+    /// The system Picture in Picture window for `hostView`'s layer (nil where the device has none). It lives
+    /// and dies with this engine — a rebuilt engine gets a fresh one — and `teardown()` closes it BEFORE the
+    /// layer lets go of the player.
+    private(set) var pictureInPicture: PictureInPictureWindow?
+
     init(url: URL, normalizationGain: Float = 1) {
         self.normalizationGain = normalizationGain
         // Claim the session so sound plays through the ringer switch. The category is re-asserted
@@ -118,6 +123,7 @@ final class AVPlaybackEngine: PlaybackEngine {
         player.volume = 0
         player.isMuted = false
         hostView.player = player
+        pictureInPicture = PictureInPictureWindow(layer: hostView.playerLayer)
         blurBackdrop.configure(output: videoOutput)
 
         stallObserver = NotificationCenter.default.addObserver(
@@ -240,6 +246,10 @@ final class AVPlaybackEngine: PlaybackEngine {
         interruption = .none
         setFrameRateProbeActive(false)
         player.pause()
+        // Close the Picture in Picture window while the layer still has its player (it holds the layer), and
+        // stop it reporting into the mini player.
+        pictureInPicture?.tearDown()
+        pictureInPicture = nil
         // Detach the render layer + backdrop so an engine swap (far-seek reinit / HLS fallback) doesn't
         // strand the whole previous AVPlayer stack: `AVPlayerLayer.player` is a strong ref (tens of MB with
         // the 15s forward buffer on 4K), and the backdrop's CADisplayLink would keep ticking at 20 Hz. Both
@@ -251,6 +261,10 @@ final class AVPlaybackEngine: PlaybackEngine {
         externalHostView = nil
         blurBackdrop.invalidate()
         blurBackdrop.removeFromSuperview()
+        // The LAST release of an AVPlayer tears its whole media pipeline down on the releasing thread — here the main
+        // thread, right as the user closes the player and flicks the grid. Everything above is already detached, so
+        // keep the stack alive a beat and let it go off the main thread.
+        PlayerGraveyard.bury([player, item, videoOutput])
     }
 
     /// Compute the start-up buffer fill (0…1) and push it for the loading donut.
@@ -563,5 +577,26 @@ private final class FrameProbeLinkProxy: NSObject {
     @objc func tick() {
         guard let target else { link?.invalidate(); link = nil; return }
         MainActor.assumeIsolated { target.probeTick() }
+    }
+}
+
+/// Lets go of an engine's `AVPlayer` stack off the main thread.
+///
+/// Dropping the last reference to an `AVPlayer` / `AVPlayerItem` tears down its media pipeline synchronously on the
+/// releasing thread — main-thread milliseconds at exactly the moment a closed player hands the screen back to a
+/// scrolling grid. The engine detaches everything first (observers, layer, views), then buries the objects here; the
+/// final release runs on a utility queue half a second later, by which time the engine's own release (on the main
+/// thread, right after `teardown()`) has certainly happened, so ours is the last.
+private enum PlayerGraveyard {
+    private final class Plot: @unchecked Sendable {
+        var objects: [AnyObject]
+        init(_ objects: [AnyObject]) { self.objects = objects }
+    }
+
+    static func bury(_ objects: [AnyObject]) {
+        let plot = Plot(objects)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5) {
+            plot.objects.removeAll()
+        }
     }
 }

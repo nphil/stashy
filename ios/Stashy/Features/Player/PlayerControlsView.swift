@@ -46,6 +46,11 @@ struct PlayerControlsView: View {
     var spritePreviewTopLeading = false
     let scheduleHide: () -> Void
     var onBack: (() -> Void)? = nil
+    /// Minimise into the mini player (the inline chevron); nil where the host can't minimise.
+    var onMinimise: (() -> Void)? = nil
+    /// Open or close the system Picture in Picture window; nil while it isn't on offer.
+    var onPictureInPicture: (() -> Void)? = nil
+    var isPictureInPictureActive = false
     /// Watch-heat curve shown on the scrubber while dragging (Settings → Player toggle).
     @AppStorage("watchHeatEnabled") private var watchHeatEnabled = true
 
@@ -120,6 +125,25 @@ struct PlayerControlsView: View {
                         .padding(.trailing, landscape ? corner : safeArea.trailing + 12)
                         .padding(.top, landscape ? corner : safeArea.top + 8)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .transition(.opacity)
+                    }
+
+                    // Top-leading corner: minimise into the mini player (inline) and Picture in Picture. Fullscreen keeps
+                    // just the window button here — its ✕ is on the other side (the stats overlay already leaves this
+                    // corner clear).
+                    if (onMinimise != nil && !isFullscreen) || onPictureInPicture != nil {
+                        let landscape = proxy.size.width > proxy.size.height
+                        HStack(spacing: 8) {
+                            if !isFullscreen, let onMinimise {
+                                cornerButton("chevron.down", action: onMinimise)
+                            }
+                            if let onPictureInPicture {
+                                cornerButton(isPictureInPictureActive ? "pip.exit" : "pip.enter", action: onPictureInPicture)
+                            }
+                        }
+                        .padding(.leading, isFullscreen ? (landscape ? 24 : safeArea.leading + 12) : videoRect.minX + 12)
+                        .padding(.top, isFullscreen ? (landscape ? 24 : safeArea.top + 8) : videoRect.minY + 8)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         .transition(.opacity)
                     }
                 }
@@ -226,6 +250,21 @@ struct PlayerControlsView: View {
                 .shadow(radius: 4)
                 .frame(width: 60, height: 60)
                 .contentShape(Rectangle())
+        }
+    }
+
+    /// A round chip in a top corner of the video (same look as the fullscreen ✕).
+    private func cornerButton(_ symbol: String, action: @escaping () -> Void) -> some View {
+        Button {
+            Haptics.tap(soft: true)
+            action()
+        } label: {
+            Image(systemName: symbol)
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(10)
+                .background(.black.opacity(0.4), in: Circle())
+                .shadow(radius: 4)
         }
     }
 

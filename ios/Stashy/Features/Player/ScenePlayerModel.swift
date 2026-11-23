@@ -223,6 +223,8 @@ final class ScenePlayerModel {
     var renderView: UIView? { engine?.renderView }
     /// A live, frame-matched blurred backdrop vended by the engine.
     var liveBlurView: UIView? { engine?.liveBlurView }
+    /// The system Picture in Picture window of the engine's picture, or nil when the engine can't drive one.
+    var pictureInPicture: PictureInPictureWindow? { (engine as? AVPlaybackEngine)?.pictureInPicture }
 
     var backendName: String {
         if didFallback { return "AVPlayer (HLS fallback)" }
@@ -602,6 +604,15 @@ final class ScenePlayerModel {
         loadingStage = missing ? MissingFile.title : "Playback failed"
         didFail = true
         if missing { RemoteLog.shared.log("✖︎ video file missing: the server answers 404 for it") }
+    }
+
+    /// First half of `stop()`, cheap enough to run during a transition: parks the model so nothing can start playing
+    /// (an in-flight start or rebuild sees `stopped` and discards its engine) and silences what plays now. `stop()`
+    /// finishes the job once the transition is over.
+    func quiesce() {
+        stopped = true
+        startInProgress = false
+        pause()
     }
 
     /// Tear down on leaving the scene: stop playback, remove the engine's observers (so the AVPlayer

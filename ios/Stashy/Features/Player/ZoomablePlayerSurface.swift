@@ -152,6 +152,9 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
         private var scrubSpeedTier = 0
         private var scrubAccumTime: TimeInterval = 0   // running scrub position (own accumulator, no read-back)
         private var lastCueIndex = -1
+        /// True when the current pan began during a hold-scrub: its vertical travel picks the scrub gear, so releasing
+        /// downward is never a dismissal.
+        private var swipeDuringScrub = false
 
         init(_ parent: ZoomablePlayerSurface) { self.parent = parent }
 
@@ -287,9 +290,11 @@ struct ZoomablePlayerSurface: UIViewRepresentable {
         }
 
         @objc func handleSwipe(_ gr: UIPanGestureRecognizer) {
-            guard parent.zoomEnabled, let scroll = scrollView else { return }
-            // Only when not zoomed: a downward fling dismisses (when zoomed, panning moves the video).
-            guard scroll.zoomScale <= scroll.minimumZoomScale + 0.01 else { return }
+            guard let scroll = scrollView else { return }
+            if gr.state == .began { swipeDuringScrub = isScrubbing }
+            // Inline too (there it minimises into the mini player; fullscreen leaves fullscreen first). Only when not
+            // zoomed: a downward fling dismisses (when zoomed, panning moves the video).
+            guard !swipeDuringScrub, scroll.zoomScale <= scroll.minimumZoomScale + 0.01 else { return }
             if gr.state == .ended {
                 let t = gr.translation(in: scroll)
                 let v = gr.velocity(in: scroll)
