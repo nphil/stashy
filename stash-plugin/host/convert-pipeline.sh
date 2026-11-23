@@ -4,18 +4,22 @@
 #  1. HAND-OFF  Asks the Stashy Companion plugin in Stash to run "Re-attach Converted Files": each file
 #     FileFlows has converted is moved into the Stash scene it replaced, so play history, tags,
 #     performers and rating stay and no duplicate scene appears.
+#  1b. NEW VIDEOS  Stash never scans on its own, so a converted video that has no scene to merge into would
+#     never show up. This hands Stash every new video in the Stuff library that it has no scene for.
 #  2. WATCHDOG  Sends an ntfy alert (topic "homelabber") when something breaks: FileFlows stopped, no
 #     working ffmpeg, an add-on failing, videos stuck in the RecycleBin, failed conversions, a FileFlows
 #     image update, or an error from the Stash hand-off. Each problem repeats at most once a day.
 #
 # The ntfy token is in .ntfytoken next to this script (write-only access to that one topic).
-# Run it by hand with --test to send a single test alert.
+# Run it by hand with --test to send a single test alert.  /boot is mounted noexec: run it as `bash <file>`.
 
 export LC_ALL=C
 TOKEN_FILE=/boot/config/plugins/user.scripts/scripts/convert-pipeline/.ntfytoken
 STATE=/mnt/user/appdata/fileflows/watchdog
 FFDB=/mnt/user/appdata/fileflows/data/Data/FileFlows.sqlite
 BIN=/mnt/user/Download/torrents/RecycleBin
+LIB_HOST=/mnt/user/Stuff      # the Stash library that FileFlows writes into ...
+LIB_STASH=/stuff2             # ... as Stash sees it
 NTFY=http://127.0.0.1:8150/homelabber
 STASH=http://localhost:6969/graphql
 FF=FileFlows
@@ -58,8 +62,10 @@ stash_fail() {
     "$1 Converted videos will not be moved into their Stash scenes until this is fixed."
 }
 
+stash_ok=0
 reply=$(gql '{"query":"{ jobQueue { description } }"}')
 if echo "$reply" | jq -e '.data' > /dev/null 2>&1; then
+  stash_ok=1
   if ! echo "$reply" | jq -e '[.data.jobQueue[]? | select((.description // "") | test("re-attach"; "i"))] | length > 0' > /dev/null; then
     out=$(gql '{"query":"mutation { runPluginTask(plugin_id: \"stashy-companion\", task_name: \"Re-attach Converted Files\", description: \"re-attach converted files (scheduled)\", args_map: {auto: true}) }"}')
     if echo "$out" | jq -e '.data.runPluginTask' > /dev/null 2>&1; then
@@ -88,6 +94,60 @@ else
     fi
   done <<< "$plog"
   tail -n 300 "$STATE/seen.logs" > "$STATE/seen.logs.tmp" && mv "$STATE/seen.logs.tmp" "$STATE/seen.logs"
+fi
+
+# ---------------------------------------------------------------- 1b. New videos that have no Stash scene
+# The generate flags Stash's own Tasks page shows ticked. Stash applies NO defaults itself: a scan that omits
+# them generates nothing (no cover, preview, sprite or phash) and cannot be repaired by scanning again.
+scan_options() {
+  local d
+  d=$(gql '{"query":"{ configuration { defaults { scan { scanGenerateCovers scanGeneratePreviews scanGenerateImagePreviews scanGenerateSprites scanGeneratePhashes scanGenerateImagePhashes scanGenerateThumbnails scanGenerateClipPreviews } } } }"}' \
+    | jq -c '.data.configuration.defaults.scan // empty | with_entries(select(.value | type == "boolean"))' 2> /dev/null)
+  if [ -z "$d" ] || ! echo "$d" | jq -e 'any(.[]; . == true)' > /dev/null 2>&1; then
+    d='{"scanGenerateCovers":true,"scanGeneratePreviews":true,"scanGenerateSprites":true,"scanGeneratePhashes":true}'
+  fi
+  echo "$d"
+}
+
+# A file must keep the same size for one whole run first (the converter may still be copying it), is only
+# handed over when Stash has no scene at that exact path, and is handed over once. Only top-level videos
+# changed in the last 2 days are looked at (the converter drops its output there). Scoped to those paths.
+TAB=$'\t'
+if [ "$stash_ok" = 1 ] && [ -d "$LIB_HOST" ]; then
+  touch "$STATE/new.prev" "$STATE/new.scanned"
+  find "$LIB_HOST" -maxdepth 1 -type f \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.m4v' -o -iname '*.mov' -o -iname '*.avi' \
+    -o -iname '*.wmv' -o -iname '*.webm' -o -iname '*.mpg' -o -iname '*.mpeg' -o -iname '*.ts' -o -iname '*.flv' \) \
+    -cmin -2880 -printf '%s\t%f\n' 2> /dev/null | sort -t "$TAB" -k2 > "$STATE/new.now"
+  scan_busy=$(echo "$reply" | jq -r '[.data.jobQueue[]? | select((.description // "") | test("scan"; "i"))] | length')
+  ready=()
+  keys=()
+  if [ "${scan_busy:-0}" = 0 ]; then
+    while IFS="$TAB" read -r size name; do
+      [ -z "$name" ] && continue
+      key="$size$TAB$name"
+      grep -qxF -- "$key" "$STATE/new.scanned" && continue
+      grep -qxF -- "$key" "$STATE/new.prev" || continue
+      cnt=$(gql "$(jq -nc --arg p "$LIB_STASH/$name" '{query: "query($p: String!) { findScenes(scene_filter: {path: {value: $p, modifier: EQUALS}}) { count } }", variables: {p: $p}}')" | jq -r '.data.findScenes.count // empty')
+      if [ "$cnt" = 0 ]; then
+        ready+=("$LIB_STASH/$name")
+        keys+=("$key")
+      elif [ -n "$cnt" ]; then
+        echo "$key" >> "$STATE/new.scanned"
+      fi
+    done < "$STATE/new.now"
+  fi
+  if [ "${#ready[@]}" -gt 0 ]; then
+    input=$(jq -nc --argjson o "$(scan_options)" --argjson p "$(printf '%s\n' "${ready[@]}" | jq -R . | jq -sc .)" '$o + {paths: $p}')
+    out=$(gql "$(jq -nc --argjson i "$input" '{query: "mutation($i: ScanMetadataInput!) { metadataScan(input: $i) }", variables: {i: $i}}')")
+    if echo "$out" | jq -e '.data.metadataScan' > /dev/null 2>&1; then
+      printf '%s\n' "${keys[@]}" >> "$STATE/new.scanned"
+      log "queued a Stash scan of ${#ready[@]} new video(s) that had no scene"
+    else
+      log "Stash refused the scan of ${#ready[@]} new video(s); will retry next run"
+    fi
+  fi
+  cp "$STATE/new.now" "$STATE/new.prev"
+  tail -n 3000 "$STATE/new.scanned" > "$STATE/new.scanned.tmp" && mv "$STATE/new.scanned.tmp" "$STATE/new.scanned"
 fi
 
 # ---------------------------------------------------------------- 2. FileFlows watchdog

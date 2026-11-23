@@ -166,9 +166,12 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   (`revenz/fileflows:stable`, auto-updating on purpose — NOT pinned) converts RecycleBin → `/mnt/user/Stuff`; the
   plugin's `Re-attach Converted Files` task + `Scene.Create` hook merge each result into the lost scene (same name
   key, length ±1 s, one candidate) so history/tags/rating survive. Host User Script `convert-pipeline` (every 5 min;
-  source `stash-plugin/host/convert-pipeline.sh`) runs the task and ntfy-alerts `homelabber` on breakage. Its FFmpeg is the
-  "FFmpeg FileFlows Edition" DockerMod +
-  `/app/common` volume (the old `FFmpeg6` mod cannot install on the Ubuntu 26.04 base). Stash never scans on its own.
+  source `stash-plugin/host/convert-pipeline.sh`) runs the task, scans (saved scan defaults, those paths only) any new
+  `/stuff2` video Stash has no scene for once its size held for a run, and ntfy-alerts `homelabber` on breakage. Its
+  FFmpeg is the "FFmpeg FileFlows Edition" DockerMod + `/app/common` volume (the old `FFmpeg6` mod cannot install on
+  the Ubuntu 26.04 base). Stash never scans on its own. Outputs are tagged `hev1`: a `FFMPEG Builder: Video Tag` node
+  (Tag `hvc1`) after Video Encode would make them iPhone direct-play, but FileFlows' REST API is off and a direct DB
+  edit failed (reverted) — change the flow in its web UI.
 - **Jobs panel is a real status readout** (v1.0.370): title (plugin boilerplate trimmed) → bar → `79% ·
   3m 12s · +1 queued` → the live `subTasks` Stash is working on right now → the job's error. Task chips
   are a 2-column grid, not a flow. §6.
