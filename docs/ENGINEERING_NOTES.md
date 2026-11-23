@@ -914,14 +914,14 @@ engine's `TranscodeSettings`):
   linear remux over loopback HLS** for HEVC / foreign-container H.264 (MKV etc.) → Stash server HLS
   for anything Apple can't decode.
 - **The video engine is the SPM package `nphil/videoengine`, product `VideoEngine`, pinned
-  `exactVersion` in `ios/project.yml`** (2.0.3 since 2026-11-09, v1.0.375; any public API change is a major version,
+  `exactVersion` in `ios/project.yml`** (2.1.0; it was 2.0.3 in v1.0.375; any public API change is a major version,
   so a bump is a deliberate edit). It owns FFmpeg (9.0.2, LGPL + VideoToolbox; encoders only
   h264/hevc_videotoolbox + AAC), the remux, both transcoders, the hardware snapshot and the diagnostics
   report. Its `docs/ENGINE.md` is the API reference + device test sheets. The app imports only
   `VideoEngine` — no `Libav*` modules. App-side glue: `Services/EngineAdapters.swift`.
   **2026-11-09 migration:** The engine repository was renamed in place to
   [`nphil/videoengine`](https://github.com/nphil/videoengine); its Swift package identity is `videoengine`.
-  The `VideoEngine` product, exact `2.0.3` pin and Stashy app name are unchanged.
+  The `VideoEngine` product and Stashy app name are unchanged by the rename; 2.1.0 is additive (it adds `FrameExtractor`).
 - **Remux (`ScenePlayerModel`):** one `RemuxSession` per playback (`RemuxSession.stash(source:)` moves
   the `apikey` query item into the `ApiKey` header — Stash accepts either). `start(at: 0)`, then each far
   seek is `seek(to:)` — a new run with its own loopback URL. Launches are chained and generation-checked
@@ -930,7 +930,7 @@ engine's `TranscodeSettings`):
   movie time `t + origin`. `timeOffset` is provisional until `remux.timelineOrigin` appears in `onTime`,
   then the item is moved to `target − origin` (frame-exact landing). `events`: `.opened` runs the
   4:2:2/4:4:4/12-bit check (`isAppleDecodable`, cached in `AppleDecodeCache`) — there is no separate
-  pre-probe any more; `.failed` falls back to server HLS. Temp files: `RemuxSession.sweepStaleFiles` at
+  pre-probe any more; `.failed` falls back to server HLS (HTTP 404 = file missing, no fallback; see below). Temp files: `RemuxSession.sweepStaleFiles` at
   launch. **Engine-claimed, not yet device-verified (its F/T/S test sheets):** HDR10/HLG/Dolby Vision
   survive the remux (hvc1/dvh1; DV P7 → HDR10 base), AC-3/E-AC-3 copy, DTS/TrueHD/Opus → AAC, text
   subtitles appear as AVPlayer legible options (picture subtitles are `SubtitleOverlayTrack`s the app
@@ -961,6 +961,39 @@ engine's `TranscodeSettings`):
 - **Sprite scrubbing:** `SpriteThumbnails` parses WebVTT + crops a sprite sheet (no decode =
   instant). It accepts `file://` URLs (URLSession + ImageCache handle them) — that's how offline
   sprites work.
+- **Scrub previews without a sprite sheet (engine 2.1.0).** `ScrubFrameProvider` (one per `ScenePlayerModel`;
+  `stop()` ends it) fills in when Stash has no sprite sheet. The sprite wins wherever it exists (instant, no server
+  load). A local file on the AVPlayer route keeps `.exact` (`AVAssetImageGenerator`, zero tolerance, <=480 px); a local
+  file on the on-device route (MKV) or a remote direct/remux stream uses `.keyframes` = the engine's `FrameExtractor`
+  (`EngineSource` moves `?apikey=` into the `ApiKey` header). A remote stream asks only once
+  `SpriteThumbnails.status == .missing` (sprite load finished empty, or the scene lists no sprite paths:
+  `PlayerControlsView.requestScrubFrame` maps that to `.missing`). Server HLS (`.m3u8`, manual quality, after
+  `didFallback`) has no source: only the time shows. One `wanted` slot (newest request wins), 80 ms quiet except the
+  first request of a scrub, slots every 10 s, width 320 px, 48-picture cache (~11 MB). `scrubEnded()` cancels the worker
+  task (the engine throws `CancellationError` at once and keeps the demuxer open) but keeps the cache; `stop()` also
+  cancels the byte source and clears the cache. Three failures in a row with an empty cache = time only. No background
+  fill, no disk cache (minimal server load). Device-unverified.
+- **Audio session + interruptions.** `AVPlaybackEngine.init` sets the category synchronously and activates off the main
+  thread (iOS 27 `AVAudioSession.activate` where available, else a global-queue `setActive`); Marquee `fd6167b`/`9307cad`.
+  The engine keeps `wantsPlay`: an interruption's pause ends with `play()` only when the system recommends resuming AND
+  play was wanted when it began (a start still loading counts). `wantsPlay` follows the player's own state through KVO, so a
+  pause made from Picture in Picture or the Lock Screen is never undone. Both the legacy interruption notification
+  (deprecated on iOS 27, which may not post `.ended`) and the iOS 27 inactive / resumption-recommendation pair are
+  observed; the handlers are idempotent. Device-unverified.
+- **Stats > Playback > Start:** `StartTiming` (`PlaybackStats.swift`): ms from `start()` to `stream` (engine built: ~0
+  direct, remux = first segments), `ready`, `picture`, `playing`; first arrival only. Use it to judge Marquee's remux
+  playlist hand-off (`00f388e`), deliberately NOT adopted yet because it changes the load-bearing start path.
+- **Video file missing (`MissingFile.swift`):** a 404 for the scene's file shows "Video file missing" and no "try again".
+  Remux: `VideoEngineError.sourceUnreachable(status: 404)` from `.failed` is final at once (no doomed HLS fallback).
+  Any other terminal failure on a server route asks the server for one byte of `/scene/<id>/stream` AFTER the failure
+  (3 s limit; the donut stays up meanwhile) and says "missing" only on a clear 404. Never before playback, never for
+  downloaded files. Device-unverified.
+- **Marquee parity (commits since 2026-11-07, checked):** adopted: engine pin, async audio session, resume after an
+  interruption, Start timing. Already here: seeking only inside AVPlayer's seekable range. Skipped on purpose: Plex
+  route / link-speed logic, Marquee's tap-zoom change (the owner wants Apple-Photos double-tap zoom), Dolby Vision 7
+  (the engine default already strips it), the orientation setting. Not done: chapters in the progress bar (needs Stash
+  scene markers: `scene_markers { id title seconds primary_tag { name } }` on the detail query, ScrubBar cuts, a haptic
+  tick) and the Dynamic Island waveform rule (`657b552`, applies once Now Playing exists).
 
 ---
 
