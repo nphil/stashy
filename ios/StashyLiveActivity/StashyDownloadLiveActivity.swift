@@ -22,7 +22,7 @@ struct StashyDownloadLiveActivity: Widget {
                     HStack(spacing: 7) {
                         LiveRing(state: context.state)
                             .frame(width: 24, height: 24)
-                        Text("STASHY")
+                        Text(context.state.phase.wordmark)
                             .font(.system(size: 10, weight: .bold, design: .rounded))
                             .foregroundStyle(.secondary)
                     }
@@ -66,8 +66,7 @@ struct StashyDownloadLiveActivity: Widget {
                 LiveRing(state: context.state)
                     .frame(width: 19, height: 19)
             } compactTrailing: {
-                LivePercent(state: context.state)
-                    .font(.caption2.weight(.semibold).monospacedDigit())
+                CompactTrailing(state: context.state)
             } minimal: {
                 LiveRing(state: context.state)
                     .frame(width: 18, height: 18)
@@ -88,10 +87,18 @@ private struct LockScreenTransferView: View {
                 .frame(width: 32, height: 32)
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(context.state.displayTitle(stale: context.isStale))
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    HStack(alignment: .firstTextBaseline, spacing: 5) {
+                        if context.state.phase == .onServer {
+                            // The bytes aren't crossing this phone — say where the work is happening.
+                            Image(systemName: "server.rack")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(context.state.displayTitle(stale: context.isStale))
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
                     Spacer(minLength: 4)
                     LivePercent(state: context.state)
                         .font(.subheadline.weight(.semibold).monospacedDigit())
@@ -158,14 +165,54 @@ private struct LiveBar: View {
     }
 }
 
+/// The compact trailing slot. iOS 27 renders compact and minimal presentations at a reduced width — iPhone
+/// in landscape, iPhone Duo, or iPhone 18 Pro with two or more Live Activities — and says so through
+/// `isDynamicIslandLimitedInWidth` (SwiftUI, iOS 27.0+; Apple documents it for those two presentations, so
+/// the expanded regions are not adapted). The widget targets iOS 26, so the value is only read behind an
+/// availability check, and iOS 26 is simply "never limited". Limited: the percentage drops its "%" so it
+/// isn't truncated. Never make this slot EMPTY — an empty one has been seen to make the island grow on
+/// iOS 27 — so a short form is always shown.
+private struct CompactTrailing: View {
+    let state: DownloadActivityAttributes.ContentState
+
+    var body: some View {
+        if #available(iOS 27.0, *) {
+            Adaptive(state: state)
+        } else {
+            LivePercent(state: state)
+                .font(.caption2.weight(.semibold).monospacedDigit())
+        }
+    }
+
+    @available(iOS 27.0, *)
+    private struct Adaptive: View {
+        let state: DownloadActivityAttributes.ContentState
+        @Environment(\.isDynamicIslandLimitedInWidth) private var limited
+
+        var body: some View {
+            LivePercent(state: state, bare: limited)
+                .font(.caption2.weight(.semibold).monospacedDigit())
+        }
+    }
+}
+
 private struct LivePercent: View {
     let state: DownloadActivityAttributes.ContentState
+    /// Digits only, no "%": the compact trailing slot of a narrow island (iOS 27). Never empty.
+    var bare = false
 
     var body: some View {
         TimelineView(.periodic(from: Date.now, by: 1)) { timeline in
             if let progress = state.projectedProgress(at: timeline.date) {
-                Text(progress, format: .percent.precision(.fractionLength(0)))
-                    .contentTransition(.numericText())
+                if bare {
+                    Text(Int((progress * 100).rounded()), format: .number)
+                        .contentTransition(.numericText())
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                } else {
+                    Text(progress, format: .percent.precision(.fractionLength(0)))
+                        .contentTransition(.numericText())
+                }
             } else {
                 Text("•••")
             }
@@ -230,6 +277,7 @@ private extension DownloadActivityAttributes.ContentState.Phase {
         case .downloading: "Downloading"
         case .waitingForNetwork: "Waiting for network"
         case .preparing: "Preparing download"
+        case .onServer: "Fetching on server"
         }
     }
 
@@ -238,6 +286,10 @@ private extension DownloadActivityAttributes.ContentState.Phase {
         case .downloading: Color(red: 0.42, green: 0.55, blue: 1.00)
         case .waitingForNetwork: .orange
         case .preparing: .cyan
+        case .onServer: .mint
         }
     }
+
+    /// The expanded island's leading label. A server fetch says so; everything else is the app's name.
+    var wordmark: String { self == .onServer ? "ON SERVER" : "STASHY" }
 }

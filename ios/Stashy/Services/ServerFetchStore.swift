@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 /// The app-side ledger of SERVER-side URL fetches (companion plugin ≥0.5.0, "Fetch URL to Library").
 ///
@@ -14,12 +15,22 @@ import Foundation
 ///  * remove = drop the finished/failed card (the finished FILE is library content now — deleting
 ///    library media is the library's business, not a download card's).
 ///
-/// Polling runs ONLY while the Downloads screen is visible, at 1 Hz, and follows the house rule: a
-/// poll behind visible UI never self-terminates — transient errors back off and keep trying.
+/// Polling follows INTENT, not the screen: it runs while any fetch is queued or running — 1 Hz with the
+/// Downloads screen up and the app active, every 3 s otherwise (another tab, minimised, locked) — so the
+/// Lock Screen / Dynamic Island card has real numbers with nobody looking. House rule: a poll never
+/// self-terminates while intent remains — transient errors back off (capped at 10 s) and keep trying;
+/// it stops only when nothing is queued or running, and `submit` / `resume` / a relaunch / `setVisible`
+/// start it again. `confirmedAt` records what the server has vouched for THIS session, which is what
+/// gates the card and the background keep-alive (never the persisted phase).
 @MainActor @Observable
 final class ServerFetchStore {
     static let shared = ServerFetchStore()
-    private init() { load() }
+    private init() {
+        load()
+        // A fetch restored mid-run keeps being tracked (and its card re-earned) without Downloads
+        // ever being opened this launch.
+        startPolling()
+    }
 
     // MARK: - Model
 
@@ -66,17 +77,58 @@ final class ServerFetchStore {
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var visible = false
 
-    private var companion: StashCompanion? { client.map(StashCompanion.init(client:)) }
+    /// Fires when a fetch is queued, paused, resumed, removed, or changes phase — deliberately NOT on
+    /// every telemetry tick (the card's own 2 s loop carries those). `DownloadManager` hooks it in
+    /// `init` to start or end the Lock Screen card at once, and to hold the process alive for a fetch
+    /// that becomes live while the app is already minimised.
+    @ObservationIgnored var onChange: (@MainActor () -> Void)?
+
+    /// When the SERVER last vouched for each fetch (its job was queued/running, or the request that
+    /// created it was accepted). In memory only, on purpose: a persisted phase can't be trusted after
+    /// a relaunch — it can describe a fetch that finished while the app was dead — so nothing counts
+    /// as live work, or earns a card, until the server confirms it again this session. A key here
+    /// also means "this session owns it" (like `DownloadManager.activityOwned`): only owned fetches
+    /// may show as paused/failed on the card, so last week's failure never resurrects one.
+    @ObservationIgnored private var confirmedAt: [String: Date] = [:]
+    @ObservationIgnored private var lastReachable: Bool?
+
+    /// Longer than one slow poll cycle (10 s backoff cap + a status fetch), so a single dropped poll
+    /// doesn't flicker the card to "can't reach".
+    private static let confirmWindow: TimeInterval = 45
+
+    /// How much longer the background keep-alive holds than the card trusts the numbers. At
+    /// `confirmWindow` the card says "Can't reach your server", and the process must still be awake for
+    /// the 2 s sync that pushes that line — so the pump may not let go in the same breath. The sum
+    /// (~1 min) is also the most a dead server can keep the app awake: the battery bound.
+    private static let keepAliveGrace: TimeInterval = 15
+
+    /// The Downloads screen hands over its client, but a fetch must keep being tracked when that screen
+    /// was never opened this launch (the Lock Screen card is the point), so fall back to the saved
+    /// login — the same Keychain pair `DownloadManager` builds its companion calls from. Read per use,
+    /// not cached: a disconnect clears the Keychain and tracking should stop with it. (The items are
+    /// `WhenUnlocked`, so a locked relaunch just finds no client and tries again next sweep.)
+    private var activeClient: StashClient? {
+        if let client { return client }
+        guard let url = KeychainService.read("serverURL"), !url.isEmpty else { return nil }
+        return StashClient(serverURL: url, apiKey: KeychainService.read("apiKey") ?? "")
+    }
+
+    private var companion: StashCompanion? { activeClient.map(StashCompanion.init(client:)) }
 
     func configure(client: StashClient?) {
         self.client = client
     }
 
-    /// Downloads-screen visibility gates the poll loop (1 Hz is pointless with nobody looking; the
-    /// server job runs regardless and cards refresh the moment the screen returns).
+    /// Downloads-screen visibility only picks the poll CADENCE (1 Hz with the screen up, slower
+    /// otherwise — see `pollInterval`); it never decides whether the poll runs. Restarting the loop
+    /// makes a new cadence take effect now rather than after the old sleep.
     func setVisible(_ nowVisible: Bool) {
-        visible = nowVisible
-        if nowVisible { startPolling() } else { pollTask?.cancel(); pollTask = nil }
+        if visible != nowVisible {
+            visible = nowVisible
+            pollTask?.cancel()
+            pollTask = nil
+        }
+        startPolling()
     }
 
     // MARK: - Verbs
@@ -91,8 +143,10 @@ final class ServerFetchStore {
                                                     headers: headers, filename: filenameHint)
         item.jobID = jobID
         items.insert(item, at: 0)
+        confirmedAt[fetchID] = Date()    // the server just accepted it, and this session started it
         save()
         startPolling()
+        onChange?()
     }
 
     /// Stop the server job, keep the partial. Resume continues it byte-exact.
@@ -106,6 +160,7 @@ final class ServerFetchStore {
         items[idx].speed = nil
         items[idx].eta = nil
         save()
+        onChange?()
     }
 
     /// Resubmit — same fetchID, same URL, same captured headers → the plugin reuses the status entry
@@ -120,13 +175,16 @@ final class ServerFetchStore {
             items[idx].jobID = jobID
             items[idx].phase = .queued
             items[idx].error = nil
+            confirmedAt[id] = Date()     // accepted just now; this session owns it
             save()
             startPolling()
+            onChange?()
         } catch {
             guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
             items[idx].phase = .failed
             items[idx].error = "Couldn't resume: \(error.localizedDescription)"
             save()
+            onChange?()
         }
     }
 
@@ -141,13 +199,17 @@ final class ServerFetchStore {
             try? await companion.deleteFetched(fetchID: item.id, filename: item.filename)
         }
         items.removeAll { $0.id == id }
+        pruneConfirmations()
         save()
+        onChange?()
     }
 
     /// Drop a terminal card. The fetched FILE stays — it's library content now.
     func remove(_ id: String) {
         items.removeAll { $0.id == id }
+        pruneConfirmations()
         save()
+        onChange?()
         Task { [companion] in try? await companion?.deleteStatusEntry(fetchID: id) }
     }
 
@@ -162,21 +224,34 @@ final class ServerFetchStore {
         items.contains { $0.phase == .queued || $0.phase == .running }
     }
 
+    /// 1 Hz when somebody is looking (Downloads on screen, app active), every 3 s otherwise — enough
+    /// to keep the Lock Screen card moving with the app minimised, gentle on the battery and the server.
+    private var pollInterval: Double {
+        visible && UIApplication.shared.applicationState == .active ? 1 : 3
+    }
+
+    /// The loop's ONLY off-switch is `needsPolling` going false — the loss of intent (nothing is
+    /// queued or running any more). It never depends on the screen: the card needs these numbers with
+    /// nobody looking. Everything that can create intent again calls this — `submit`, `resume`, a
+    /// relaunch (`init`), the screen appearing (`setVisible`).
     private func startPolling() {
-        guard visible, needsPolling, pollTask == nil else { return }
+        guard needsPolling, pollTask == nil else { return }
+        trace("dl-fetch", [("poll", "start"), ("visible", visible), ("fetches", items.count)])
         pollTask = Task { @MainActor [weak self] in
             var backoff: Double = 1
             while !Task.isCancelled {
                 guard let self else { return }
-                guard self.visible else { return }
-                if !self.needsPolling {
-                    // Idle wait — cheap, and a new submit() calls startPolling() anyway.
-                    try? await Task.sleep(for: .seconds(2))
-                    continue
+                // Checked and cleared in one main-actor turn, so a submit() can't land between the two
+                // and find a dead loop it believes is alive.
+                guard self.needsPolling else {
+                    self.pollTask = nil
+                    self.trace("dl-fetch", [("poll", "stop")])
+                    return
                 }
                 let ok = await self.pollOnce()
+                let base = self.pollInterval
                 backoff = ok ? 1 : min(10, backoff * 1.7)
-                try? await Task.sleep(for: .seconds(backoff))
+                try? await Task.sleep(for: .seconds(ok ? base : max(base, backoff)))
             }
         }
     }
@@ -184,7 +259,8 @@ final class ServerFetchStore {
     /// One sweep: job statuses first (authoritative for phase), then the served status file for
     /// telemetry. Returns false on transport trouble so the loop backs off — but NEVER stops.
     private func pollOnce() async -> Bool {
-        guard let companion, let client else { return false }
+        guard let client = activeClient else { return false }
+        let companion = StashCompanion(client: client)
         var healthy = true
         let before = items
 
@@ -199,6 +275,7 @@ final class ServerFetchStore {
                 switch job.status {
                 case "RUNNING", "STOPPING":
                     items[idx].phase = .running
+                    confirmedAt[id] = Date()
                 case "FINISHED":
                     items[idx].phase = .done
                     items[idx].speed = nil
@@ -210,6 +287,7 @@ final class ServerFetchStore {
                     items[idx].phase = .paused    // stopJob'd (maybe from Stash's UI) — resumable
                 default:
                     items[idx].phase = .queued    // READY — waiting in Stash's serial queue
+                    confirmedAt[id] = Date()
                 }
             } catch {
                 // "job not found" after Stash GC'd a finished queue is terminal-ish, but we cannot
@@ -239,7 +317,10 @@ final class ServerFetchStore {
                 }
             }
         }
+        pruneConfirmations()
+        noteReachability()
         if items != before { save() }   // ~1 Hz of identical UserDefaults writes is pointless churn
+        if items.map(\.phase) != before.map(\.phase) { onChange?() }
         return healthy
     }
 
@@ -267,6 +348,74 @@ final class ServerFetchStore {
         guard let (data, resp) = try? await URLSession.shared.data(for: req),
               (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         return (try? JSONDecoder().decode(StatusPayload.self, from: data))?.entries
+    }
+
+    // MARK: - Lock Screen card + keep-alive
+
+    /// A fetch the Lock Screen card should describe, and whether its numbers can still be trusted.
+    struct CardFetch {
+        let item: Item
+        /// False once the server hasn't vouched for it within `confirmWindow` — the card then says it
+        /// can't reach the server rather than keep showing a speed and ETA that may no longer exist.
+        let reachable: Bool
+    }
+
+    /// The fetches that belong on the card right now. Only fetches the server confirmed THIS session
+    /// qualify (see `confirmedAt`): `live` are queued/running — running first, then oldest first (the
+    /// order Stash's serial queue runs them) — and `halted` are the paused/failed ones this session
+    /// started, newest first. A finished fetch has nothing left to show and drops out, which is what
+    /// ends the card.
+    func cardFetches(now: Date = .now) -> (live: [CardFetch], halted: [Item]) {
+        var live: [CardFetch] = []
+        var halted: [Item] = []
+        for item in items {
+            guard let seen = confirmedAt[item.id] else { continue }
+            switch item.phase {
+            case .queued, .running:
+                live.append(CardFetch(item: item,
+                                      reachable: now.timeIntervalSince(seen) <= Self.confirmWindow))
+            case .paused, .failed:
+                halted.append(item)
+            case .done:
+                break
+            }
+        }
+        live.sort {
+            if ($0.item.phase == .running) != ($1.item.phase == .running) { return $0.item.phase == .running }
+            return $0.item.submittedAt < $1.item.submittedAt
+        }
+        return (live, halted)
+    }
+
+    /// True while the server has vouched for a queued/running fetch within `confirmWindow` +
+    /// `keepAliveGrace`. This — never the persisted phase — is what lets `DownloadManager` hold the
+    /// process alive in the background: a relaunch restores `.running` for fetches that finished while
+    /// the app was dead, and an unreachable server never refreshes them, so counting persisted phases
+    /// would pump forever.
+    var hasLiveWork: Bool {
+        // Judge it `keepAliveGrace` earlier than the card does (see there).
+        cardFetches(now: Date.now.addingTimeInterval(-Self.keepAliveGrace)).live.contains { $0.reachable }
+    }
+
+    /// An id leaves the ledger when its fetch is gone or finished.
+    private func pruneConfirmations() {
+        let keep = Set(items.filter { $0.phase != .done }.map(\.id))
+        confirmedAt = confirmedAt.filter { keep.contains($0.key) }
+    }
+
+    /// Log the moment tracking loses or regains the server, so a "card said can't reach" report can
+    /// be matched to the poll that caused it.
+    private func noteReachability() {
+        let live = cardFetches().live
+        guard !live.isEmpty else { lastReachable = nil; return }
+        let reachable = live.contains { $0.reachable }
+        guard reachable != lastReachable else { return }
+        lastReachable = reachable
+        trace("dl-fetch", [("reach", reachable ? 1 : 0), ("live", live.count)])
+    }
+
+    private func trace(_ tag: String, _ fields: [(String, Any?)]) {
+        RemoteLog.shared.event(tag, fields)
     }
 
     // MARK: - Persistence (survives relaunch; the server job runs regardless)

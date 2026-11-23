@@ -511,8 +511,9 @@ Any future state that represents "work still outstanding" must be added there as
 alongside the original phase/progress/ETA fields. Two things to remember:
 - The struct is compiled into BOTH targets via `project.yml`'s
   `- path: Stashy/Services/DownloadActivityAttributes.swift`, so app and widget can never drift — but
-  adding a field means checking every `.init(` call site in `liveActivityState()` (there are seven) for
-  **declaration-order** argument matching, which this project has lost a CI cycle to before.
+  adding a field means checking every `.init(` call site in `liveActivityState()` (there are seven) and
+  `serverFetchState()` (two) for **declaration-order** argument matching, which this project has lost a
+  CI cycle to before.
 - ActivityKit caps combined static + dynamic payload at 4 KB; the title is clamped to 48 characters.
 
 `.queued` is deliberately eligible to be FEATURED on the card. Without that, the instant between one
@@ -531,6 +532,56 @@ horizontal space the card needed for byte counts. Do not reintroduce it. Separat
 Island's expanded regions sit inside the island's rounded shape and the system does NOT inset content
 away from that curve — 2 pt was tried and still clipped on device; 13 pt clears it. `minimumScaleFactor`
 does not help, because shrinking text does not move it away from the curve.
+
+### Server fetches on the Live Activity / Dynamic Island (after v1.0.375)
+"On Server" fetch cards (Fetch URL → server) used to have NO Live Activity — nothing on the Lock Screen or
+Dynamic Island once minimised — and their store polled only while Downloads was on screen. They now share
+the phone downloads' card.
+
+**One card, one featured job.** `liveActivityState()` features a MOVING transfer over a halted one (phone or
+server); within a class the phone wins, so phone-only sessions behave exactly as before. A paused phone
+queue counts as idle. `activeJobCount` = phone active + fetches (live + halted). The fetch look is
+`Phase.onServer` (widget: mint, "ON SERVER" wordmark, `server.rack` glyph on the Lock Screen): running =
+real bytes + yt-dlp's own speed/ETA, projected like a phone transfer; queued = "Queued on server"; paused /
+failed = the orange `.waitingForNetwork` look ("Paused on server · resume in Stashy" / "Failed · <error>");
+no server confirmation for 45 s = "Can't reach your server"; minimised with no keep-alive (or the window
+closing) = "Open Stashy to refresh · running on server" — no speed, no projection, never glide a bar nobody
+is feeding. A finished fetch drops out and the card ends, like a phone item.
+
+**OWNERSHIP + LIVENESS COME FROM `ServerFetchStore.confirmedAt`, NEVER FROM THE PERSISTED PHASE.** A relaunch
+restores `.running` for a fetch that finished while the app was dead, and an unreachable server never
+refreshes it. A keep-alive predicate or card built on persisted phases would pump forever (the worst
+battery outcome) and resurrect last week's failures. `confirmedAt` is in memory only: stamped by `submit`, a
+successful `resume`, and any poll that sees the job READY/RUNNING/STOPPING. The card trusts a fetch's numbers
+for `confirmWindow` (45 s) after that, then says "Can't reach your server"; `hasLiveWork` — the keep-alive
+predicate's new line — looks `keepAliveGrace` (15 s) further back, so the process is certainly awake for the
+sync that pushes that line and a dead server can pin the app awake for ~1 min at most. Paused/failed fetches
+earn a card only if this session owns them (a key in the ledger). Pruned when an item is done or removed.
+
+**Polling follows intent.** The store polls whenever any fetch is queued/running — 1 s with Downloads visible
+AND the app active, 3 s otherwise — and starts itself at launch (`init`), `submit`, `resume` and
+`setVisible`. It stops ONLY when nothing is queued/running (`pollTask = nil` is set in the same main-actor
+turn as the check, so a `submit` can't land on a dead loop); errors back off ×1.7 to 10 s and keep going.
+`setVisible` only changes the cadence. With Downloads never opened this launch the client falls back to the
+Keychain login.
+
+**Update cadence.** `ServerFetchStore.onChange` fires on structure (submit / pause / resume / cancel /
+remove / phase change), not per telemetry tick. `DownloadManager` hooks it → `serverFetchesChanged()`
+(starts the keep-alive if already minimised, then `syncLiveActivity()`), so a fetch started in the
+foreground gets its card at once. The numbers ride the existing 2 s sync loop. Logs: `dl-la` and `dl-phase`
+carry `fetches=`; `dl-fetch` logs poll start/stop and server-reachability flips.
+
+**Narrow island (iOS 27).** `EnvironmentValues.isDynamicIslandLimitedInWidth` (SwiftUI, iOS 27.0+, verified
+from the doc JSON) tells a widget its COMPACT and MINIMAL presentations are rendered narrow — iPhone in
+landscape, iPhone Duo, iPhone 18 Pro with 2+ Live Activities. Apple documents it for those two only, so only
+`CompactTrailing` adapts: limited ⇒ digits without the "%". It is read behind `#available` because the
+widget's deployment target is 26. **Never make a compact slot empty to save width** — an empty
+`compactTrailing` is reported to make the island grow on iOS 27 (not device-verified; Apple's own doc
+allows an empty trailing slot when a short form is impossible). `islandInset = 13` still holds.
+
+**Known hole:** a fetch whose Stash job vanished (server restart) stays `.running` forever. It no longer
+holds the keep-alive or earns a card, but the poll retries at ≤10 s while the process lives. Don't
+auto-mark it failed — that risks a duplicate download.
 
 ### The download queue manager (v1.0.341) — invariants, not preferences
 Five of these were shipped bugs found in one review pass. Read before touching the queue.
@@ -1832,8 +1883,9 @@ Newest first.
     fetch folder). Removing a DONE card passes `entry_only=1` — without it the plugin resolves the
     recorded filename and would delete LIBRARY content.
   - **App (`ServerFetchStore`, "On Server" cards in Downloads)**: @MainActor @Observable singleton,
-    persisted in UserDefaults; 1 Hz poll only while Downloads is visible, backoff ×1.7 cap 10 s,
-    never self-terminates (house rule). **Every verb re-resolves the item index by id AFTER each
+    persisted in UserDefaults; polls while any fetch is queued/running (1 s with Downloads up and the app
+    active, else 3 s — it also feeds the Lock Screen card, §3), backoff ×1.7 cap 10 s, stops only when
+    nothing is queued/running (house rule). **Every verb re-resolves the item index by id AFTER each
     `await`** — MainActor reentrancy means a cancel tap mid-request shrinks the array and a
     pre-suspension index traps. Queueing = just submit again; Stash's job queue is serial.
   - **Resolver (`LinkResolverView`) for button-gated hosts**: WKWebView (non-persistent store, fixed

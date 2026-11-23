@@ -669,6 +669,10 @@ final class DownloadManager {
             self.syncLiveActivity()
         }
         observeAppPhase()
+        // Server fetches share the card: their store says when one is queued, paused, resumed, removed
+        // or changes phase, so the card starts/ends at once and a fetch that turns live while minimised
+        // still gets the keep-alive. Byte-level telemetry rides the 2 s loop started below.
+        ServerFetchStore.shared.onChange = { [weak self] in self?.serverFetchesChanged() }
         startNetworkMonitor()
         startPolling()
         startLiveActivitySync()
@@ -2123,6 +2127,9 @@ final class DownloadManager {
             guard let self, self.inBackground else { return }
             for item in self.items where item.state == .downloading { self.holdTransferAssertion(item.id) }
             self.noteBackgroundWindowClosing()
+            // A server fetch has no transfer to hold an assertion for, so the line above can do nothing
+            // for it — but the card must still stop promising live numbers the moment the pump is gone.
+            self.syncLiveActivity()
         }
         DownloadKeepAlive.shared.start { [weak self] in
             guard let self else { return false }
@@ -2142,6 +2149,17 @@ final class DownloadManager {
             // stop a server-side encode. Gating here would blank the card for work that is still running.
             // Waiting (`companionQueued`) items count as well, for the same reason `.queued` does — the
             // gap between one transcode finishing and the pump starting the next must not suspend us.
+            //
+            // A SERVER FETCH (Fetch URL → server) counts by the same decision and for the same reason:
+            // yt-dlp runs inside Stash whether or not we do, so this holds the process alive purely so the
+            // card keeps showing real progress. It asks the fetch store instead of reading persisted
+            // phases: a relaunch restores `.running` for fetches that finished while the app was dead, and
+            // an unreachable server never refreshes them — counting those would pump forever, the worst
+            // battery outcome. Only a fetch the server vouched for within the last minute or so counts
+            // (the card's own 45 s trust window plus a 15 s grace, so the "Can't reach your server" push
+            // still goes out before the pump lets go), so a dead server releases the window within about
+            // a minute. Not gated on `queuePaused` either: that flag is the phone's transfer queue.
+            if ServerFetchStore.shared.hasLiveWork { return true }
             return self.items.contains {
                 $0.state == .downloading || $0.state == .merging || $0.state == .serverProcessing ||
                 (!self.queuePaused && ($0.state == .waitingForNetwork || $0.state == .queued))
@@ -2403,8 +2421,19 @@ final class DownloadManager {
         }
     }
 
+    /// A server fetch was queued, paused, resumed, removed, or changed phase (`ServerFetchStore.onChange`).
+    private func serverFetchesChanged() {
+        // A fetch that turns live while the app is already minimised — a poll landing just after the
+        // owner left, or a launch the system made in the background — still needs the process kept alive.
+        // `start(while:)` no-ops when the pump is already running.
+        if inBackground { startKeepAliveIfNeeded() }
+        syncLiveActivity()
+    }
+
     @ObservationIgnored private var lastLoggedActivityPct = -1
     @ObservationIgnored private var lastLoggedActivityPhase = ""
+    /// Server fetches (queued/running/paused/failed) counted into the last card — logged next to `jobs`.
+    @ObservationIgnored private var fetchesOnCard = 0
 
     /// Record what the Live Activity was actually handed, so a Dynamic Island report can be checked
     /// against the values the app pushed. Emitted on a phase change, a ≥2 point move, or ANY decrease —
@@ -2427,8 +2456,9 @@ final class DownloadManager {
         lastLoggedActivityPct = pct
         lastLoggedActivityPhase = phase
         let regressed: Int? = decreased ? 1 : nil
+        let fetches: Int? = fetchesOnCard > 0 ? fetchesOnCard : nil   // how many of `jobs` are server fetches
         RemoteLog.shared.event("dl-la", [
-            ("pct", pct), ("phase", phase), ("jobs", state.activeJobCount),
+            ("pct", pct), ("phase", phase), ("jobs", state.activeJobCount), ("fetches", fetches),
             ("down", regressed), ("status", String(state.status.prefix(40)))])
     }
 
@@ -2443,9 +2473,12 @@ final class DownloadManager {
     /// Second boundary: XR mode. While the glasses are connected the phone is face-up by definition,
     /// and the Dynamic Island draws ABOVE every window including the remote takeover — it is the one
     /// surface the black remote cannot cover, so it is the biggest identity leak in glasses mode.
-    private func activityTitle(_ item: DownloadItem) -> String {
+    private func activityTitle(_ item: DownloadItem) -> String { activityTitle(named: item.title) }
+
+    /// The one privacy gate for any name that goes on the card (phone downloads and server fetches).
+    private func activityTitle(named title: String) -> String {
         guard !Privacy.isOn, !GlassesSession.shared.isConnected else { return "" }
-        return String(item.title.prefix(48))   // ActivityKit caps the whole payload at 4 KB
+        return String(title.prefix(48))   // ActivityKit caps the whole payload at 4 KB
     }
 
     /// Select one transfer to feature, and describe it.
@@ -2468,7 +2501,30 @@ final class DownloadManager {
             $0.state == .merging || $0.state == .serverProcessing || $0.state == .queued ||
             (($0.state == .paused || $0.state == .failed) && activityOwned.contains($0.id))
         }
-        guard !active.isEmpty else { return nil }
+
+        // Server fetches (Fetch URL → server) share this card. One rule decides who is featured: a
+        // transfer that is actually MOVING — on this phone or on the server — outranks a halted one, so
+        // the island never shows an old paused download while a fetch runs; within a class the phone
+        // wins, which keeps every phone-only session exactly as it was. The count covers both.
+        let fetches = ServerFetchStore.shared.cardFetches()
+        fetchesOnCard = fetches.live.count + fetches.halted.count
+        let phoneMoving = active.contains {
+            switch $0.state {
+            case .paused, .failed: return false
+            case .queued: return !queuePaused    // a paused queue is idle, not work in progress
+            default: return true
+            }
+        }
+        if !phoneMoving, let fetch = fetches.live.first {
+            return serverFetchState(fetch.item, reachable: fetch.reachable,
+                                    count: active.count + fetchesOnCard)
+        }
+        guard !active.isEmpty else {
+            // Nothing on the phone: a halted fetch is all that can be left on the card.
+            return fetches.halted.first.map {
+                serverFetchState($0, reachable: true, count: fetchesOnCard)
+            }
+        }
 
         // Prefer bytes actively moving, then recoverable waits/finalization, then a server preparing the
         // downloadable file. This keeps a queued companion job from displacing an actual phone transfer.
@@ -2479,7 +2535,7 @@ final class DownloadManager {
             ?? active.first(where: { $0.state == .queued })
             ?? active.first!
         let now = Date.now
-        let count = active.count
+        let count = active.count + fetchesOnCard
 
         switch item.state {
         case .downloading where backgroundWindowClosing:
@@ -2606,6 +2662,77 @@ final class DownloadManager {
         }
     }
 
+    /// Describe one server fetch for the card. What it shows, by state:
+    ///  * running — `.onServer`: real bytes plus the server's own speed and ETA, projected so the bar
+    ///    glides between pushes exactly like a phone transfer.
+    ///  * queued — `.onServer`: "Queued on server" (Stash runs its jobs one at a time).
+    ///  * paused / failed — the orange `.waitingForNetwork` look the phone's own halted transfers use:
+    ///    "Paused on server · resume in Stashy", or the server's error.
+    ///  * the server hasn't vouched for it lately — "Can't reach your server", no speed.
+    ///  * running/queued but this process can't keep the card fed (minimised with no keep-alive, or the
+    ///    window is closing) — "Open Stashy to refresh · running on server": no speed, no projection.
+    /// A finished fetch never gets here: it drops out of `ServerFetchStore.cardFetches`, which ends the card.
+    private func serverFetchState(_ item: ServerFetchStore.Item, reachable: Bool, count: Int)
+        -> DownloadActivityAttributes.ContentState {
+        let now = Date.now
+        let received = max(0, item.downloaded ?? 0)
+        let total = max(0, item.total ?? 0)
+        let progress: Double? = total > 0 ? min(1, max(0, Double(received) / Double(total))) : nil
+        let title = activityTitle(named: item.displayName)
+
+        // Everything that isn't actively moving: no speed, no projection.
+        func parked(_ status: String, phase: DownloadActivityAttributes.ContentState.Phase = .waitingForNetwork)
+            -> DownloadActivityAttributes.ContentState {
+            .init(phase: phase, title: title, receivedBytes: received, totalBytes: total, speed: 0,
+                  progress: progress, estimatedStart: nil, estimatedEnd: nil, updatedAt: now,
+                  status: status, activeJobCount: count)
+        }
+
+        if item.phase == .paused { return parked("Paused on server · resume in Stashy") }
+        if item.phase == .failed {
+            return parked("Failed · " + String((item.error ?? "open Stashy to retry").prefix(80)))
+        }
+        guard reachable else { return parked("Can't reach your server") }
+
+        // Running or queued. The pump is what keeps this process — and so this card — fed while we are
+        // minimised. With it gone, or iOS about to suspend us, the numbers would freeze while the widget
+        // kept gliding the bar along a projection nobody refreshes. Say what is true instead.
+        if (inBackground && !DownloadKeepAlive.shared.isRunning) || backgroundWindowClosing {
+            return parked("Open Stashy to refresh · running on server", phase: .onServer)
+        }
+        if item.phase == .queued { return parked("Queued on server", phase: .onServer) }
+
+        var parts: [String] = []
+        if let speed = item.speed, speed > 0 { parts.append(Self.bytesLabel(speed) + "/s") }
+        if let eta = item.eta, eta > 0 { parts.append(Self.etaText(eta)) }
+
+        // The server's own ETA (yt-dlp's, from its measured speed) as a full interval the card can animate
+        // while we're suspended; the next real push replaces it. Needs a known total — without one there
+        // is no elapsed fraction to anchor the start on.
+        var estimatedStart: Date?
+        var estimatedEnd: Date?
+        if let eta = item.eta, eta > 0, let progress, progress < 1 {
+            let remaining = Double(min(eta, 99 * 3600))
+            estimatedEnd = now.addingTimeInterval(remaining)
+            estimatedStart = now.addingTimeInterval(-remaining * progress / (1 - progress))
+        }
+        return .init(
+            phase: .onServer, title: title, receivedBytes: received, totalBytes: total,
+            speed: Double(max(0, item.speed ?? 0)), progress: progress,
+            estimatedStart: estimatedStart, estimatedEnd: estimatedEnd, updatedAt: now,
+            status: parts.isEmpty ? "Downloading on server" : parts.joined(separator: " · "),
+            activeJobCount: count
+        )
+    }
+
+    /// "3m 5s left" / "1h 5m left". Seconds come from the server as an Int, so there is no Double→Int hop
+    /// to trap; the clamp only keeps an absurd ETA from a stalled transfer readable.
+    private static func etaText(_ seconds: Int) -> String {
+        let s = min(seconds, 99 * 3600)
+        if s >= 3600 { return "\(s / 3600)h \(s % 3600 / 60)m left" }
+        return s >= 60 ? "\(s / 60)m \(s % 60)s left" : "\(s)s left"
+    }
+
     // MARK: - App phase
 
     /// Downloads already run in the system background session. Phase changes only pause/resume work that
@@ -2670,6 +2797,7 @@ final class DownloadManager {
         // finishing; nothing here has to watch for that.
         startKeepAliveIfNeeded()
         RemoteLog.shared.event("dl-phase", [("to", "background"), ("active", live.count),
+                                            ("fetches", ServerFetchStore.shared.cardFetches().live.count),
                                             ("la", liveActivity.diagnostic),
                                             ("keepalive", DownloadKeepAlive.shared.isRunning ? 1 : 0)])
         for item in live { partCensus(item, "enter-bg") }
@@ -2691,7 +2819,8 @@ final class DownloadManager {
         // on-disk state before any engine restarts and overwrites the evidence.
         RemoteLog.shared.flushNow()
         let live = items.filter { $0.state == .downloading || $0.state == .paused }
-        RemoteLog.shared.event("dl-phase", [("to", "foreground"), ("active", live.count)])
+        RemoteLog.shared.event("dl-phase", [("to", "foreground"), ("active", live.count),
+                                            ("fetches", ServerFetchStore.shared.cardFetches().live.count)])
         for item in live { partCensus(item, "enter-fg") }
         // Auto-resume transcodes that were paused by backgrounding — no manual tap needed.
         let resumes = transcodeResumeOnForeground

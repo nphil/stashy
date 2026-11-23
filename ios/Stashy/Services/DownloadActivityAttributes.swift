@@ -9,6 +9,12 @@ struct DownloadActivityAttributes: ActivityAttributes {
             case downloading
             case waitingForNetwork
             case preparing
+            /// A URL fetch running (or queued) on the SERVER — Fetch URL → server, yt-dlp inside Stash.
+            /// No bytes cross this phone: the card exists to show the work is happening, with the
+            /// server's own speed/ETA in `status`. The widget gives it its own tint and wording. Fetches
+            /// that stall (paused, failed, server unreachable) reuse `.waitingForNetwork`, like the
+            /// phone's own paused/failed transfers.
+            case onServer
         }
 
         var phase: Phase
