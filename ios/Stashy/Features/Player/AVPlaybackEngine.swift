@@ -53,6 +53,15 @@ final class AVPlaybackEngine: PlaybackEngine {
     var onEnded: (() -> Void)?
     private var didFail = false
     private var lastPresentation: CGSize = .zero
+    /// Whether playback is wanted. The start and `play()` set it and `pause()` clears it; the player's own state
+    /// moves it too when something outside the app plays or pauses the player (Picture in Picture, the Lock
+    /// Screen), so a pause made there isn't undone when an interruption ends.
+    private var wantsPlay = false
+    /// An audio interruption (a call, an alarm, another app's audio) took the session and hasn't given it back:
+    /// `resumes` when playback was wanted as it began, so its end plays on; `stays` when it wasn't.
+    private enum Interruption { case none, resumes, stays }
+    private var interruption = Interruption.none
+    private var interruptionObservers: [NSObjectProtocol] = []
 
     var renderView: UIView? { hostView }
     var liveBlurView: UIView? { blurBackdrop }
@@ -182,7 +191,10 @@ final class AVPlaybackEngine: PlaybackEngine {
             case .playing: phase = .playing
             @unknown default: phase = .paused
             }
-            Task { @MainActor in self?.onState?(phase) }
+            Task { @MainActor in
+                self?.followPlayerState()
+                self?.onState?(phase)
+            }
         }
 
         // Buffer fill drives the loading donut. loadedTimeRanges changes as data arrives (including while
@@ -191,6 +203,8 @@ final class AVPlaybackEngine: PlaybackEngine {
             Task { @MainActor in self?.pushLoadProgress() }
         }
 
+        observeInterruptions()
+        wantsPlay = true
         player.play()
     }
 
@@ -220,6 +234,10 @@ final class AVPlaybackEngine: PlaybackEngine {
         bufferObservation?.invalidate(); bufferObservation = nil
         if let stallObserver { NotificationCenter.default.removeObserver(stallObserver); self.stallObserver = nil }
         if let endObserver { NotificationCenter.default.removeObserver(endObserver); self.endObserver = nil }
+        for observer in interruptionObservers { NotificationCenter.default.removeObserver(observer) }
+        interruptionObservers = []
+        wantsPlay = false
+        interruption = .none
         setFrameRateProbeActive(false)
         player.pause()
         // Detach the render layer + backdrop so an engine swap (far-seek reinit / HLS fallback) doesn't
@@ -317,8 +335,81 @@ final class AVPlaybackEngine: PlaybackEngine {
         return AVAudioSession.sharedInstance().currentRoute.outputs.contains { privatePorts.contains($0.portType) }
     }
 
-    func play() { player.play() }
-    func pause() { player.pause() }
+    func play() { wantsPlay = true; interruption = .none; player.play() }
+    func pause() { wantsPlay = false; interruption = .none; player.pause() }
+
+    // MARK: - Audio interruptions
+
+    /// When a call, an alarm or another app's audio takes the session the system pauses the player, and when it
+    /// gives the session back the app decides what happens next. So an interruption's pause ends with playback
+    /// resuming if it was wanted, including a start that was still loading when the interruption came. iOS 27
+    /// reports this as the session going inactive and, later, a recommendation to resume, and deprecates the
+    /// begin/end notification of earlier releases, so both are watched; they feed one state that is safe to
+    /// hear twice.
+    private func observeInterruptions() {
+        let center = NotificationCenter.default
+        interruptionObservers = [
+            center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
+                let type = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt)
+                    .flatMap { AVAudioSession.InterruptionType(rawValue: $0) }
+                let options = (note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt)
+                    .map { AVAudioSession.InterruptionOptions(rawValue: $0) } ?? []
+                guard let type else { return }
+                let began = type == .began
+                let shouldResume = options.contains(.shouldResume)
+                MainActor.assumeIsolated { self?.interrupted(began: began, shouldResume: shouldResume) }
+            }
+        ]
+        if #available(iOS 27.0, *) {
+            interruptionObservers.append(center.addObserver(
+                forName: AVAudioSession.didBecomeInactiveNotification, object: nil, queue: .main) { [weak self] note in
+                let context = note.userInfo?[AVAudioSession.deactivationContextKey] as? AVAudioSession.DeactivationContext
+                guard context?.source == .system else { return }
+                MainActor.assumeIsolated { self?.interrupted(began: true, shouldResume: false) }
+            })
+            interruptionObservers.append(center.addObserver(
+                forName: AVAudioSession.resumptionRecommendationNotification, object: nil, queue: .main) { [weak self] note in
+                let context = note.userInfo?[AVAudioSession.resumptionContextKey] as? AVAudioSession.ResumptionContext
+                guard let recommendation = context?.recommendation else { return }
+                let shouldResume = recommendation == .shouldResume
+                MainActor.assumeIsolated { self?.resumptionRecommended(shouldResume) }
+            })
+        }
+    }
+
+    private func interrupted(began: Bool, shouldResume: Bool) {
+        RemoteLog.shared.log("audio interruption \(began ? "began" : "ended") (resume \(shouldResume), wanted \(wantsPlay))")
+        if began {
+            // The wish to play is what counts, not the player's state: a stream still loading, or one AVPlayer
+            // paused before the news reached us, plays on all the same.
+            if interruption != .resumes { interruption = wantsPlay ? .resumes : .stays }
+        } else {
+            let resumes = interruption == .resumes
+            interruption = .none
+            if shouldResume, resumes { play() }
+        }
+    }
+
+    /// iOS 27: the system says whether to carry on, after an interruption or after refusing a start that came
+    /// while a call was under way. No interruption was seen in the second case, so a player that is paused
+    /// while playback is wanted resumes as well.
+    private func resumptionRecommended(_ shouldResume: Bool) {
+        RemoteLog.shared.log("audio resumption recommended: \(shouldResume) (wanted \(wantsPlay))")
+        let resumes = interruption == .resumes || (wantsPlay && player.timeControlStatus == .paused)
+        interruption = .none
+        if shouldResume, resumes { play() }
+    }
+
+    /// The player's own state tells a pause from outside apart from an interruption's: one that arrives with
+    /// no interruption under way came from Picture in Picture, the Lock Screen or pulled headphones, and is
+    /// kept. A play from outside is kept too.
+    private func followPlayerState() {
+        switch player.timeControlStatus {
+        case .paused: if interruption == .none { wantsPlay = false }
+        case .waitingToPlayAtSpecifiedRate, .playing: wantsPlay = true
+        @unknown default: break
+        }
+    }
 
     func seek(to time: TimeInterval, precise: Bool) {
         // Precise = zero tolerance → the player lands on the exact frame the scrub sprite previewed,
