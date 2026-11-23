@@ -15,11 +15,21 @@ final class SpriteThumbnails {
     private var sprite: UIImage?
     private var cropCache: [Int: UIImage] = [:]
     private(set) var isReady = false
+    /// True once a `load` has run to its end, with a usable sheet or without.
+    private var finished = false
+
+    /// Where the sheet stands. Stash hands out the sprite and VTT URLs for every scene whether or not the
+    /// sheet was ever generated (a 404 reads as no cues), so "missing" is only known once the load is over.
+    enum Status { case loading, ready, missing }
+    var status: Status { isReady ? .ready : (finished ? .missing : .loading) }
 
     func load(vttURL: URL, spriteURL: URL, imageCache: ImageCache) async {
+        defer { finished = true }
         let parsed = await Self.fetchCues(vttURL)
         // Full-res: VTT crop rects are in the sprite's original pixel space, so it must not be downsampled.
-        let image = try? await imageCache.originalImage(for: spriteURL)
+        // No cues means nothing to crop with, so the sheet isn't requested from a server that has none.
+        var image: UIImage?
+        if !parsed.isEmpty { image = try? await imageCache.originalImage(for: spriteURL) }
         sprite = image
         cues = parsed
         isReady = sprite != nil && !cues.isEmpty

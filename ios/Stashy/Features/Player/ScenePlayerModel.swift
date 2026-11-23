@@ -134,8 +134,9 @@ final class ScenePlayerModel {
     /// A run starts at the keyframe at or before the request, so the item is then moved to
     /// `target - origin` to land on the exact frame.
     @ObservationIgnored private var originTarget: TimeInterval?
-    /// Set once if the local pipeline fails and we switch to the HLS fallback (so we never loop).
-    @ObservationIgnored private var didFallback = false
+    /// Set once if the local pipeline fails and we switch to the HLS fallback (so we never loop). The server is
+    /// converting from then on, so the scrub previews made from the original file stop with it.
+    @ObservationIgnored private var didFallback = false { didSet { if didFallback { scrubFrames.configure(nil) } } }
     /// Movie time at which the current remux output starts (its timeline origin): the player's local time +
     /// this offset = the real scrub position. Provisionally the requested start until the run reports it.
     @ObservationIgnored private var timeOffset: TimeInterval = 0
@@ -156,9 +157,21 @@ final class ScenePlayerModel {
         if route.engine == .localFFmpeg { return true }
         return route.url.pathExtension.lowercased() != "m3u8"
     }
-    /// The on-disk file to decode exact scrub-preview frames from — non-nil only for a downloaded (local)
-    /// file, where decoding arbitrary frames is cheap. nil for streaming (would need the network per frame).
-    var scrubFrameURL: URL? { route.url.isFileURL ? route.url : nil }
+    /// Scrub previews made from the playing file when Stash has no sprite sheet for the scene, and for a
+    /// downloaded file. Owned here rather than by the view: a rebuilt view keeps its pictures, and `stop()` ends
+    /// the connection they are read through.
+    let scrubFrames = ScrubFrameProvider()
+    /// Where those pictures come from: the file the route plays. A server conversion (an `.m3u8` route, or the
+    /// fallback to one) has none and shows the time alone: reading the original file next to the stream would
+    /// compete with it for the link.
+    private static func scrubSource(for route: PlaybackRoute) -> ScrubPreviewSource? {
+        if route.url.isFileURL {
+            // AVFoundation opens what plays directly; a remuxed file (MKV, HEVC) it may not, so the engine reads it.
+            return route.engine == .avPlayer ? .exact(route.url) : .keyframes(EngineSource(route.url))
+        }
+        guard route.url.pathExtension.lowercased() != "m3u8" else { return nil }
+        return .keyframes(EngineSource(route.url))
+    }
     /// Guards re-entrant starts, and discards an engine built after the scene was already left.
     @ObservationIgnored private var startInProgress = false
     @ObservationIgnored private var stopped = false
@@ -245,6 +258,8 @@ final class ScenePlayerModel {
         self.duration = max(0, route.duration)
         // Show the scrubber at the resume point immediately so it doesn't flash 0:00 before the seek lands.
         self.currentTime = self.resumeAt
+        // Nothing is opened or read until the first scrub.
+        scrubFrames.configure(Self.scrubSource(for: route))
     }
 
     /// Scene identity for watch-heat accumulation (the route itself carries no scene ID). nil ⇒ no heat.
@@ -566,6 +581,7 @@ final class ScenePlayerModel {
         stopRemux()
         timeOffset = 0
         seekTarget = nil
+        scrubFrames.stop()
     }
 
     // MARK: - Stall watch

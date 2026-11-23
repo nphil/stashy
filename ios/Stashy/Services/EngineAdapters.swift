@@ -141,12 +141,16 @@ enum EngineHardware {
     }
 }
 
-// MARK: - Remux
+// MARK: - Sources
 
-extension RemuxSession {
-    /// A remux of a Stash stream URL or a downloaded file. Stash URLs carry the API key as `?apikey=`; the
-    /// engine sends it as the `ApiKey` header instead (Stash accepts either), so it never sits in a URL.
-    static func stash(source: URL) -> RemuxSession {
+/// A Stash stream URL, or a downloaded file, the way the engine reads it. Stash URLs carry the API key as
+/// `?apikey=`; the engine sends it as the `ApiKey` header instead (Stash accepts either), so the key never
+/// sits in a URL. The remux and the scrub-preview reader both take their source through this.
+struct EngineSource: Equatable, Sendable {
+    let url: URL
+    let headers: [String: String]
+
+    init(_ source: URL) {
         var url = source
         var headers: [String: String] = [:]
         if !source.isFileURL, var parts = URLComponents(url: source, resolvingAgainstBaseURL: false) {
@@ -158,6 +162,17 @@ extension RemuxSession {
                 url = parts.url ?? source
             }
         }
-        return RemuxSession(url: url, headers: headers, logger: .remoteLog)
+        self.url = url
+        self.headers = headers
+    }
+}
+
+// MARK: - Remux
+
+extension RemuxSession {
+    /// A remux of a Stash stream URL or a downloaded file.
+    static func stash(source: URL) -> RemuxSession {
+        let input = EngineSource(source)
+        return RemuxSession(url: input.url, headers: input.headers, logger: .remoteLog)
     }
 }

@@ -7,8 +7,8 @@ struct PlayerControlsView: View {
     let sprites: SpriteThumbnails
     /// The scene, for the quality/codec status badge (resolution + codec of what's playing).
     let scene: StashScene
-    /// Exact-frame scrub previews for downloaded (local) files; falls back to sprite tiles otherwise.
-    var scrubFrames: ScrubFrameProvider? = nil
+    /// Scrub previews made from the playing file where Stash has no sprite sheet; the model owns them.
+    private var scrubFrames: ScrubFrameProvider { model.scrubFrames }
     @Binding var isFullscreen: Bool
     @Binding var showControls: Bool
     @Binding var showStats: Bool
@@ -145,7 +145,7 @@ struct PlayerControlsView: View {
                 }
 
                 // Portrait-fullscreen scrub preview, pinned top-left (shows whenever scrubbing).
-                if spritePreviewTopLeading, isScrubbing, let image = scrubFrames?.image ?? sprites.thumbnail(at: scrubTime) {
+                if spritePreviewTopLeading, isScrubbing, let image = scrubFrames.image ?? sprites.thumbnail(at: scrubTime) {
                     Image(uiImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
@@ -162,15 +162,24 @@ struct PlayerControlsView: View {
         }
         .animation(.easeInOut(duration: 0.2), value: showControls)
         .onAppear { scheduleHide() }
-        // Feed the exact-frame decoder from the live scrub position (covers BOTH the bar drag and the
-        // video hold-scrub, which both write `scrubTime`). Cleared when the scrub ends so the next one
-        // doesn't flash the last frame.
+        // Feed the scrub previews from the live scrub position (covers BOTH the bar drag and the video
+        // hold-scrub, which both write `scrubTime`). Cleared when the scrub ends so the next one doesn't
+        // flash the last picture, and so pictures still being made for it are dropped.
         .onChange(of: scrubTime) { _, t in
-            if isScrubbing { scrubFrames?.request(t) }
+            if isScrubbing { requestScrubFrame(t) }
         }
         .onChange(of: isScrubbing) { _, scrubbing in
-            if scrubbing { scrubFrames?.request(scrubTime) } else { scrubFrames?.clear() }
+            if scrubbing { requestScrubFrame(scrubTime) } else { scrubFrames.scrubEnded() }
         }
+    }
+
+    /// Ask for the scrub picture at `time`. The sprite sheet's state rides along: the stream's own pictures are
+    /// only made where Stash has no sheet to show instead. A scene that lists no sprite paths never starts a
+    /// sheet load, so there is nothing to wait for.
+    private func requestScrubFrame(_ time: TimeInterval) {
+        let listed = scene.paths?.sprite != nil && scene.paths?.vtt != nil
+        let sheet: SpriteThumbnails.Status = sprites.status == .loading && !listed ? .missing : sprites.status
+        scrubFrames.request(time, duration: model.duration, sprites: sheet)
     }
 
     /// Half the fixed width of the quality menu (see `qualityMenu`), used to clamp its pop-up position.
@@ -213,7 +222,7 @@ struct PlayerControlsView: View {
                 sprites: sprites,
                 showSpritePreview: !spritePreviewTopLeading, // top-left variant renders separately
                 heat: watchHeatEnabled ? WatchHeat.shared.curve(sceneID: scene.id) : nil,
-                exactFrame: scrubFrames?.image,
+                exactFrame: scrubFrames.image,
                 speedTier: $scrubSpeedTier,
                 isScrubbing: $isScrubbing,
                 scrubTime: $scrubTime,
@@ -468,7 +477,8 @@ struct ScrubBar: View {
     var showSpritePreview = true
     /// Watch-heat curve (normalised 0…1 bins) drawn above the track while scrubbing — nil hides it.
     var heat: [Double]? = nil
-    /// Exact decoded frame at the scrub position (local downloads) — preferred over the sprite tile.
+    /// A picture made from the file at the scrub position (`ScrubFrameProvider`), preferred over the sprite
+    /// tile; nil where Stash has a sprite sheet to show instead, and between scrubs.
     var exactFrame: UIImage? = nil
     /// Current variable-scrub gear (0 = full … 3 = fine). A binding so the video hold-scrub can drive the
     /// same on-screen label (both scrub methods share it).
@@ -546,7 +556,7 @@ struct ScrubBar: View {
                     }
             )
             .overlay(alignment: .topLeading) {
-                // Prefer the exact decoded frame (local downloads); fall back to the instant sprite tile.
+                // Prefer the picture made from the file; fall back to the instant sprite tile.
                 if showSpritePreview, isScrubbing, let image = exactFrame ?? sprites.thumbnail(at: scrubTime) {
                     let x = min(max(width * clampedProgress - previewWidth / 2, 0), width - previewWidth)
                     Image(uiImage: image)
