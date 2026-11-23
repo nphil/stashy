@@ -270,64 +270,108 @@ struct StashScraper: Sendable {
         "No StashDB / ThePornDB / FansDB source is configured on your Stash server."
     } }
 
-    /// The outcome of querying every allowed source: what came back, and which sources were UNREACHABLE
-    /// (errored / timed out). A source that simply had no match is neither in `items` nor in `failed`.
-    /// This lets the sheet tell "nothing matched" apart from "the source is down", and note a partial
-    /// failure ("merged what was found; FansDB was unreachable") when only some sources answered.
+    /// Live state of a multi-source run, one entry per queried source in priority order. Handed to the
+    /// sheets (via `ProgressHandler`) so they can draw a real "2 of 3" progress bar, and returned inside
+    /// `MultiSourceResult` as the final per-source outcome so an empty result can say exactly which
+    /// sources were searched and which of them were unreachable.
+    struct ScrapeProgress: Sendable, Equatable {
+        struct Entry: Sendable, Equatable, Identifiable {
+            enum State: Sendable, Equatable { case searching, matched, noMatch, unreachable }
+            let id: String
+            let name: String
+            var state: State
+        }
+        var entries: [Entry]
+
+        init(sources: [Source]) {
+            entries = sources.map { Entry(id: $0.id, name: $0.name, state: .searching) }
+        }
+
+        var total: Int { entries.count }
+        var finished: Int { entries.filter { $0.state != .searching }.count }
+        var matched: [String] { entries.filter { $0.state == .matched }.map(\.name) }
+        var noMatch: [String] { entries.filter { $0.state == .noMatch }.map(\.name) }
+        var unreachable: [String] { entries.filter { $0.state == .unreachable }.map(\.name) }
+        var names: [String] { entries.map(\.name) }
+    }
+
+    /// Called on the main actor each time a source starts/finishes, so views can assign it straight into
+    /// `@State` without hopping.
+    typealias ProgressHandler = @MainActor @Sendable (ScrapeProgress) -> Void
+
+    /// The outcome of querying every allowed source: what came back, plus the per-source outcome
+    /// (`progress`). A source that ERRORS is `unreachable`; one that simply had no hit is `noMatch` — the
+    /// sheet must never confuse the two ("nothing matched" vs "the source is down").
     struct MultiSourceResult<Item: Sendable>: Sendable {
         let items: [Item]
-        let failed: [String]     // display names of sources that errored
+        let progress: ScrapeProgress
+        var failed: [String] { progress.unreachable }     // display names of sources that errored
     }
 
     /// Scrape a stored scene against EVERY allowed source in parallel, one best match per source (scene
-    /// fingerprint matches are unique). A source that ERRORS is recorded in `failed` (so "unreachable" is
-    /// distinguishable from "no match") but never blocks the others. Matches are priority-ordered. Throws
-    /// only when the source list itself can't be read or no allowed source exists.
-    func scrapeSceneEverywhere(sceneID: String) async throws -> MultiSourceResult<SourcedScene> {
+    /// fingerprint matches are unique). A source that ERRORS is recorded as unreachable (so "unreachable"
+    /// is distinguishable from "no match") but never blocks the others. Matches are priority-ordered.
+    /// `onProgress` fires once when the sources are known and again each time one finishes. Throws only
+    /// when the source list itself can't be read or no allowed source exists.
+    func scrapeSceneEverywhere(sceneID: String,
+                               onProgress: ProgressHandler? = nil) async throws -> MultiSourceResult<SourcedScene> {
         let sources = try await sceneSources()
         guard !sources.isEmpty else { throw NoSourcesError() }
-        let outcomes = await withTaskGroup(of: (SourcedScene?, String?).self) { group in
-            for source in sources {
+        await onProgress?(ScrapeProgress(sources: sources))
+        let (matches, progress) = await withTaskGroup(of: (Int, SourcedScene?, Bool).self) { group in
+            for (index, source) in sources.enumerated() {
                 group.addTask {
                     do {
                         if let first = try await self.scrapeScene(source: source, sceneID: sceneID).first {
-                            return (SourcedScene(source: source, scene: first), nil)
+                            return (index, SourcedScene(source: source, scene: first), false)
                         }
-                        return (nil, nil)                    // reached, no match
+                        return (index, nil, false)           // reached, no match
                     } catch {
-                        return (nil, source.name)            // unreachable / errored
+                        return (index, nil, true)            // unreachable / errored
                     }
                 }
             }
-            var acc: [(SourcedScene?, String?)] = []
-            for await outcome in group { acc.append(outcome) }
-            return acc
+            var running = ScrapeProgress(sources: sources)
+            var found: [SourcedScene] = []
+            for await (index, match, failed) in group {
+                if let match { found.append(match) }
+                running.entries[index].state = failed ? .unreachable : (match == nil ? .noMatch : .matched)
+                await onProgress?(running)
+            }
+            return (found, running)
         }
-        let matches = outcomes.compactMap { $0.0 }.sorted { Self.rank($0.source) < Self.rank($1.source) }
-        return MultiSourceResult(items: matches, failed: outcomes.compactMap { $0.1 })
+        return MultiSourceResult(items: matches.sorted { Self.rank($0.source) < Self.rank($1.source) },
+                                 progress: progress)
     }
 
     /// Search performers by name against EVERY allowed source in parallel; returns every candidate tagged
-    /// with its source, plus the names of any sources that errored. Group `items` with `groupPerformers`.
-    func searchPerformersEverywhere(name: String) async throws -> MultiSourceResult<SourcedPerformer> {
+    /// with its source, plus the per-source outcome. Group `items` with `groupPerformers`.
+    func searchPerformersEverywhere(name: String,
+                                    onProgress: ProgressHandler? = nil) async throws -> MultiSourceResult<SourcedPerformer> {
         let sources = try await performerSources()
         guard !sources.isEmpty else { throw NoSourcesError() }
-        let outcomes = await withTaskGroup(of: ([SourcedPerformer], String?).self) { group in
-            for source in sources {
+        await onProgress?(ScrapeProgress(sources: sources))
+        let (items, progress) = await withTaskGroup(of: (Int, [SourcedPerformer], Bool).self) { group in
+            for (index, source) in sources.enumerated() {
                 group.addTask {
                     do {
                         let found = try await self.searchPerformers(source: source, name: name)
-                        return (found.map { SourcedPerformer(source: source, candidate: $0) }, nil)
+                        return (index, found.map { SourcedPerformer(source: source, candidate: $0) }, false)
                     } catch {
-                        return ([], source.name)             // unreachable / errored
+                        return (index, [], true)             // unreachable / errored
                     }
                 }
             }
-            var acc: [([SourcedPerformer], String?)] = []
-            for await outcome in group { acc.append(outcome) }
-            return acc
+            var running = ScrapeProgress(sources: sources)
+            var found: [SourcedPerformer] = []
+            for await (index, hits, failed) in group {
+                found += hits
+                running.entries[index].state = failed ? .unreachable : (hits.isEmpty ? .noMatch : .matched)
+                await onProgress?(running)
+            }
+            return (found, running)
         }
-        return MultiSourceResult(items: outcomes.flatMap { $0.0 }, failed: outcomes.compactMap { $0.1 })
+        return MultiSourceResult(items: items, progress: progress)
     }
 
     /// One merged candidate the picker shows: the same person as reported by one or more sources. Same

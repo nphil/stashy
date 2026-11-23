@@ -17,7 +17,7 @@ struct PerformerCreateSheet: View {
     @State private var name = ""
     @State private var candidates: [StashScraper.MergedPerformerCandidate] = []
     @State private var searching = false
-    @State private var searchError: String?
+    @State private var phase: ScrapePhase = .idle
     @State private var applyingID: String?
 
     @State private var draft = PerformerDraft()
@@ -63,14 +63,23 @@ struct PerformerCreateSheet: View {
                 EditFieldRow(label: "Performer name", placeholder: "Name", text: $name)
                     .onSubmit { searchAll() }
 
-                if let searchError { SheetErrorLine(message: searchError) }
+                if phase.showsStatusCard {
+                    ScrapeStatusCard(
+                        phase: phase,
+                        hint: "Try the name the way the databases list it — a stage name, another spelling, or fewer words. Edit the name above and search again.",
+                        onRetry: { searchAll() },
+                        secondaryTitle: "Create Manually",
+                        onSecondary: { createManually() },
+                        onDismiss: phase.isSearching ? nil : { dismissStatusCard() })
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
 
                 Button {
                     searchAll()
                 } label: {
                     HStack(spacing: 8) {
                         if searching { ProgressView().controlSize(.small) }
-                        Label(searching ? "Searching StashDB · ThePornDB · FansDB…" : "Search",
+                        Label(searching ? "Searching…" : "Search",
                               systemImage: "sparkle.magnifyingglass")
                             .font(.subheadline.weight(.semibold))
                     }
@@ -84,12 +93,7 @@ struct PerformerCreateSheet: View {
 
                 // Manual path for performers no source knows — straight to the empty form.
                 Button {
-                    draft = PerformerDraft()
-                    draft.name = name.trimmingCharacters(in: .whitespaces)
-                    scrapedImages = []
-                    selectedImage = nil
-                    pendingStashIDs = nil
-                    stage = .form
+                    createManually()
                 } label: {
                     Label("Create manually without scraping", systemImage: "square.and.pencil")
                         .font(.caption.weight(.semibold))
@@ -103,29 +107,49 @@ struct PerformerCreateSheet: View {
         .scrollDismissesKeyboard(.interactively)
     }
 
+    /// Phase changes always animate, so the status card glides in/out and its bar fills smoothly.
+    private func setPhase(_ new: ScrapePhase) {
+        withAnimation(.smooth(duration: 0.3)) { phase = new }
+    }
+
+    private func dismissStatusCard() { setPhase(.idle) }
+
+    /// The manual path for performers no source knows — straight to the empty form with the typed name.
+    private func createManually() {
+        draft = PerformerDraft()
+        draft.name = name.trimmingCharacters(in: .whitespaces)
+        scrapedImages = []
+        selectedImage = nil
+        pendingStashIDs = nil
+        setPhase(.idle)
+        stage = .form
+    }
+
     private func searchAll() {
         guard let scraper, !searching else { return }
         let query = name.trimmingCharacters(in: .whitespaces)
-        guard !query.isEmpty else { searchError = "Type a name to search for."; return }
+        guard !query.isEmpty else {
+            setPhase(.failed(title: "Nothing to search for", detail: "Type a name to search for.", progress: nil))
+            return
+        }
         searching = true
-        searchError = nil
+        setPhase(.searching(nil))
         Task {
             defer { searching = false }
             do {
-                let result = try await scraper.searchPerformersEverywhere(name: query)
-                let grouped = StashScraper.groupPerformers(result.items)
-                guard !grouped.isEmpty else {
-                    searchError = result.failed.isEmpty
-                        ? "No match found on StashDB, ThePornDB or FansDB for “\(query)”."
-                        : "Couldn't reach \(StashScraper.sourceList(result.failed)) — check they're online and try again."
-                    return
+                let result = try await scraper.searchPerformersEverywhere(name: query) { progress in
+                    setPhase(.searching(progress))
                 }
-                candidates = grouped
-                searchError = result.failed.isEmpty ? nil
-                    : "\(StashScraper.sourceList(result.failed)) \(result.failed.count == 1 ? "was" : "were") unreachable — showing the rest."
-                stage = .results
+                let grouped = StashScraper.groupPerformers(result.items)
+                if !grouped.isEmpty {
+                    candidates = grouped
+                    stage = .results
+                }
+                // "Nothing found" (every source reached, none matched) and "failed" (some source was
+                // unreachable) are different phases; a partial failure after a find is a note on the list.
+                setPhase(.finished(result.progress, matched: !grouped.isEmpty, how: "for “\(query)”"))
             } catch {
-                searchError = message(error)
+                setPhase(.thrown(error))
             }
         }
     }
@@ -137,7 +161,9 @@ struct PerformerCreateSheet: View {
             Text("\(candidates.count) \(candidates.count == 1 ? "match" : "matches") — pick the right person.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            if let searchError { SheetErrorLine(message: searchError) }
+            if !phase.unreachableAfterFind.isEmpty {
+                SheetErrorLine(message: "\(StashScraper.sourceList(phase.unreachableAfterFind)) \(ScrapePhase.wasWere(phase.unreachableAfterFind)) unreachable — showing the rest.")
+            }
             ScrollView {
                 VStack(spacing: 8) {
                     ForEach(candidates) { candidate in

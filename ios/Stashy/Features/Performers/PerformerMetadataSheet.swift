@@ -37,7 +37,8 @@ struct PerformerMetadataSheet: View {
 
     @State private var candidates: [StashScraper.MergedPerformerCandidate] = []
     @State private var searching = false
-    @State private var scrapeError: String?
+    @State private var phase: ScrapePhase = .idle
+    @State private var searchName = ""        // what the next search will look for (form name or retyped)
     @State private var applyingID: String?
 
     @State private var saving = false
@@ -60,6 +61,23 @@ struct PerformerMetadataSheet: View {
 
             if let loadError { SheetErrorLine(message: loadError) }
 
+            if stage == .edit && phase.showsStatusCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    ScrapeStatusCard(
+                        phase: phase,
+                        hint: "Try the name the way the databases list it — a stage name, another spelling, or fewer words.",
+                        onRetry: { searchAll() },
+                        secondaryTitle: "Edit Manually",
+                        onSecondary: { dismissStatusCard() },
+                        onDismiss: phase.isSearching ? nil : { dismissStatusCard() })
+                    if !phase.isSearching {
+                        ScrapeRetryField(label: "Search a different name", placeholder: "Name",
+                                         text: $searchName, disabled: searching, onSubmit: { searchAll() })
+                    }
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
             switch stage {
             case .edit: editStage
             case .results: resultsStage
@@ -75,17 +93,21 @@ struct PerformerMetadataSheet: View {
 
     private func load() async {
         guard !loaded, let scraper else { return }
+        // Opening straight into a scrape: show the search state immediately, not after the fetch.
+        if mode == .scrape { phase = .searching(nil) }
         do {
             guard let data = try await scraper.performerEditData(id: performerID) else {
                 loadError = "Performer not found"
+                phase = .idle
                 return
             }
             draft = PerformerDraft(data: data)
             existingStashIDs = data.stash_ids ?? []
             loaded = true
-            if mode == .scrape { searchAll() }
+            if mode == .scrape { scrapeFromForm() }
         } catch {
             loadError = message(error)
+            phase = .idle
         }
     }
 
@@ -109,37 +131,39 @@ struct PerformerMetadataSheet: View {
     }
 
     private var scrapeButton: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Button {
-                searchAll()
-            } label: {
-                HStack(spacing: 8) {
-                    if searching { ProgressView().controlSize(.small) }
-                    Label(searching ? "Searching StashDB · ThePornDB · FansDB…" : "Scrape Metadata",
-                          systemImage: "sparkle.magnifyingglass")
-                        .font(.subheadline.weight(.semibold))
-                }
-                .foregroundStyle(themeManager.current.accentColor)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .background(themeManager.current.accentColor.opacity(0.12), in: Capsule())
+        Button {
+            scrapeFromForm()
+        } label: {
+            HStack(spacing: 8) {
+                if searching { ProgressView().controlSize(.small) }
+                Label(searching ? "Searching…" : "Scrape Metadata",
+                      systemImage: "sparkle.magnifyingglass")
+                    .font(.subheadline.weight(.semibold))
             }
-            .buttonStyle(.plain)
-            .disabled(searching)
-
-            if let scrapeError, stage == .edit { SheetErrorLine(message: scrapeError) }
+            .foregroundStyle(themeManager.current.accentColor)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(themeManager.current.accentColor.opacity(0.12), in: Capsule())
         }
+        .buttonStyle(.plain)
+        .disabled(searching)
+    }
+
+    /// Shown above the results when a search found people but some source was down.
+    private var partialNote: String {
+        let down = phase.unreachableAfterFind
+        return "\(StashScraper.sourceList(down)) \(ScrapePhase.wasWere(down)) unreachable — showing the rest."
     }
 
     // MARK: - Results stage
 
     @ViewBuilder private var resultsStage: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("\(candidates.count) \(candidates.count == 1 ? "match" : "matches") for “\(draft.name)” — tap the right person to merge their details in.")
+            Text("\(candidates.count) \(candidates.count == 1 ? "match" : "matches") for “\(searchName.trimmingCharacters(in: .whitespaces))” — tap the right person to merge their details in.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            if let scrapeError { SheetErrorLine(message: scrapeError) }
+            if !phase.unreachableAfterFind.isEmpty { SheetErrorLine(message: partialNote) }
             ScrollView {
                 VStack(spacing: 8) {
                     ForEach(candidates) { candidate in
@@ -168,29 +192,48 @@ struct PerformerMetadataSheet: View {
 
     // MARK: - Scrape
 
+    /// Phase changes always animate, so the pinned status card glides in/out and its bar fills smoothly.
+    private func setPhase(_ new: ScrapePhase) {
+        withAnimation(.smooth(duration: 0.3)) { phase = new }
+    }
+
+    private func dismissStatusCard() { setPhase(.idle) }
+
+    /// The Scrape Metadata button: search for whatever name is on the form right now.
+    private func scrapeFromForm() {
+        searchName = draft.name
+        searchAll()
+    }
+
+    /// Search every source for `searchName` (the form name, or whatever the user retyped in the
+    /// nothing-found card).
     private func searchAll() {
         guard let scraper, !searching else { return }
-        let name = draft.name.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty else { scrapeError = "The performer has no name to search for."; return }
+        let name = searchName.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else {
+            setPhase(.failed(title: "Nothing to search for",
+                             detail: "The performer has no name to search for — type one below.",
+                             progress: nil))
+            return
+        }
         searching = true
-        scrapeError = nil
+        setPhase(.searching(nil))
         Task {
             defer { searching = false }
             do {
-                let result = try await scraper.searchPerformersEverywhere(name: name)
-                let grouped = StashScraper.groupPerformers(result.items)
-                guard !grouped.isEmpty else {
-                    scrapeError = result.failed.isEmpty
-                        ? "No match found on StashDB, ThePornDB or FansDB for “\(name)”."
-                        : "Couldn't reach \(StashScraper.sourceList(result.failed)) — check they're online and try again."
-                    return
+                let result = try await scraper.searchPerformersEverywhere(name: name) { progress in
+                    setPhase(.searching(progress))
                 }
-                candidates = grouped
-                scrapeError = result.failed.isEmpty ? nil
-                    : "\(StashScraper.sourceList(result.failed)) \(result.failed.count == 1 ? "was" : "were") unreachable — showing the rest."
-                stage = .results
+                let grouped = StashScraper.groupPerformers(result.items)
+                if !grouped.isEmpty {
+                    candidates = grouped
+                    stage = .results
+                }
+                // "Nothing found" (every source reached, none matched) and "failed" (some source was
+                // unreachable) are different phases; a partial failure after a find is a note on the list.
+                setPhase(.finished(result.progress, matched: !grouped.isEmpty, how: "for “\(name)”"))
             } catch {
-                scrapeError = message(error)
+                setPhase(.thrown(error))
             }
         }
     }

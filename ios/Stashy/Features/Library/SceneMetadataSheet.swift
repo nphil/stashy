@@ -72,7 +72,7 @@ struct SceneMetadataSheet: View {
     @State private var coverOptions: [SourcedValue] = []   // value = image string; "Current" = keep
 
     @State private var scraping = false
-    @State private var scrapeError: String?
+    @State private var phase: ScrapePhase = .idle
 
     // Tag add-search.
     @State private var tagSearch = ""
@@ -100,6 +100,17 @@ struct SceneMetadataSheet: View {
                 SheetErrorLine(message: loadError)
             }
 
+            if phase != .idle {
+                ScrapeStatusCard(
+                    phase: phase,
+                    hint: "Fingerprint matching only finds the exact same file that was submitted to these databases — re-encoded, trimmed or re-muxed copies often have no match. You can still fill in the details by hand.",
+                    onRetry: { scrapeAll() },
+                    secondaryTitle: "Edit Manually",
+                    onSecondary: { dismissStatusCard() },
+                    onDismiss: phase.isSearching ? nil : { dismissStatusCard() })
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
             editStage
         }
         .padding(16)
@@ -114,9 +125,12 @@ struct SceneMetadataSheet: View {
 
     private func load() async {
         guard !loaded, let scraper else { return }
+        // Opening straight into a scrape: show the search state immediately, not after the fetch.
+        if mode == .scrape { phase = .searching(nil) }
         do {
             guard let data = try await scraper.sceneEditData(id: sceneID) else {
                 loadError = "Scene not found"
+                phase = .idle
                 return
             }
             title = data.title ?? ""
@@ -132,6 +146,7 @@ struct SceneMetadataSheet: View {
             if mode == .scrape { scrapeAll() }
         } catch {
             loadError = message(error)
+            phase = .idle
         }
     }
 
@@ -382,51 +397,50 @@ struct SceneMetadataSheet: View {
     }
 
     private var scrapeButton: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Button {
-                scrapeAll()
-            } label: {
-                HStack(spacing: 8) {
-                    if scraping { ProgressView().controlSize(.small) }
-                    Label(scraping ? "Scraping StashDB · ThePornDB · FansDB…" : "Scrape Metadata",
-                          systemImage: "sparkle.magnifyingglass")
-                        .font(.subheadline.weight(.semibold))
-                }
-                .foregroundStyle(themeManager.current.accentColor)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .background(themeManager.current.accentColor.opacity(0.12), in: Capsule())
+        Button {
+            scrapeAll()
+        } label: {
+            HStack(spacing: 8) {
+                if scraping { ProgressView().controlSize(.small) }
+                Label(scraping ? "Searching…" : "Scrape Metadata",
+                      systemImage: "sparkle.magnifyingglass")
+                    .font(.subheadline.weight(.semibold))
             }
-            .buttonStyle(.plain)
-            .disabled(scraping)
-
-            if let scrapeError { SheetErrorLine(message: scrapeError) }
+            .foregroundStyle(themeManager.current.accentColor)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(themeManager.current.accentColor.opacity(0.12), in: Capsule())
         }
+        .buttonStyle(.plain)
+        .disabled(scraping)
     }
 
     // MARK: - Scrape all sources + merge
 
+    /// Phase changes always animate, so the pinned status card glides in/out and its bar fills smoothly.
+    private func setPhase(_ new: ScrapePhase) {
+        withAnimation(.smooth(duration: 0.3)) { phase = new }
+    }
+
+    private func dismissStatusCard() { setPhase(.idle) }
+
     private func scrapeAll() {
         guard let scraper, !scraping else { return }
         scraping = true
-        scrapeError = nil
+        setPhase(.searching(nil))
         Task {
             defer { scraping = false }
             do {
-                let result = try await scraper.scrapeSceneEverywhere(sceneID: sceneID)
-                guard !result.items.isEmpty else {
-                    // Distinguish "sources reached, nothing matched" from "sources unreachable".
-                    scrapeError = result.failed.isEmpty
-                        ? "No match found on StashDB, ThePornDB or FansDB for this scene."
-                        : "Couldn't reach \(StashScraper.sourceList(result.failed)) — check they're online and try again."
-                    return
+                let result = try await scraper.scrapeSceneEverywhere(sceneID: sceneID) { progress in
+                    setPhase(.searching(progress))
                 }
-                applyMerged(result.items)
-                // Partial failure: we still merged what answered, but say which source was down.
-                scrapeError = result.failed.isEmpty ? nil
-                    : "Merged what was found — \(StashScraper.sourceList(result.failed)) \(result.failed.count == 1 ? "was" : "were") unreachable."
+                if !result.items.isEmpty { applyMerged(result.items) }
+                // "Nothing found" (every source reached, none matched) and "failed" (some source was
+                // unreachable) are different phases; a partial failure after a find is a warning.
+                setPhase(.finished(result.progress, matched: !result.items.isEmpty,
+                                   how: "by this scene's file fingerprints"))
             } catch {
-                scrapeError = message(error)
+                setPhase(.thrown(error))
             }
         }
     }

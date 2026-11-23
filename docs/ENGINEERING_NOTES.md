@@ -1144,6 +1144,17 @@ re-derive, and do not "simplify" any of it back to an empty input.
   task and hands it back via `onSaved(fresh)` — SceneDetailView assigns `fullScene` (read as `shown =
   fullScene ?? scene`), PerformerDetailView assigns `refreshed` (read as `current = refreshed ?? performer`),
   and the portrait task keys on `image_path` (not id) so a changed/uploaded photo reloads.
+- **Search status = `ScrapePhase` + `ScrapeStatusCard`** (`Features/Shared/ScrapeUI.swift`; used by the scene,
+  performer and add-performer sheets — keep them identical). The multi-source calls take an `onProgress`
+  (`@MainActor @Sendable`) and fire it once the source list is known and again as each source finishes
+  (`StashScraper.ScrapeProgress`, one `Entry` per source: searching / matched / noMatch / unreachable); the
+  final snapshot rides in `MultiSourceResult.progress`. The card is PINNED above the form (not in the scroll
+  view, so it's visible wherever the user tapped Scrape): determinate bar + "2 of 3" + a live row per source;
+  `.nothingFound` (every source reached, none matched — says what was searched and where) is deliberately a
+  different phase and colour from `.failed` (a source/server was unreachable — can never claim "not found").
+  Set phases through `setPhase` (wraps `withAnimation`) so the bar glides. Scene scraping is by fingerprint
+  only (`scene_id`); there is no title-query search in the flow, so its nothing-found card offers Try Again /
+  Edit Manually, while the performer sheets also get a retype-the-name field.
 
 ### Stores and loaders
 - **`PaginatedLoader<T>`** (generic, `@Observable @MainActor`): dedups pages by id,
