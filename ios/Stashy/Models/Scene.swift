@@ -13,6 +13,9 @@ struct StashScene: Codable, Identifiable, Sendable, Hashable {
     let performers: [Performer]
     let tags: [Tag]
     let sceneStreams: [SceneStreamEndpoint]
+    /// Titled points in the scene (Stash markers), shown as chapters in the player's progress bar. Nil when the
+    /// scene was fetched without them.
+    let scene_markers: [SceneMarker]?
 
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
     static func == (lhs: StashScene, rhs: StashScene) -> Bool { lhs.id == rhs.id }
@@ -41,6 +44,14 @@ struct ScenePaths: Codable, Sendable {
     let preview: String?
     let sprite: String?
     let vtt: String?
+}
+
+/// A titled point in a scene. Stash lets the title be empty, and then the primary tag names the marker.
+struct SceneMarker: Codable, Sendable, Hashable {
+    let id: String
+    let title: String?
+    let seconds: Double
+    let primary_tag: Tag?
 }
 
 struct SceneStreamEndpoint: Codable, Sendable {
@@ -425,7 +436,7 @@ extension StashScene {
         updatedFiles[0] = updatedFile
         return StashScene(id: id, title: title, date: date, rating100: rating100, files: updatedFiles,
                           paths: paths, studio: studio, performers: performers, tags: tags,
-                          sceneStreams: sceneStreams)
+                          sceneStreams: sceneStreams, scene_markers: scene_markers)
     }
 }
 

@@ -31,6 +31,10 @@ struct PlayerControlsView: View {
     @State private var showSpeed = false
     @State private var speedFrame: CGRect = .zero
     @State private var speedMenuHeight: CGFloat = 0
+    /// The scene's markers as chapters, built once per scene (`.task`) rather than on every progress tick.
+    @State private var chapters = ChapterMarks()
+    /// The marker the scrub position was last in (-2 = no scrub under way), so the tap comes once per crossing.
+    @State private var lastChapter = -2
     /// The rectangle the video actually occupies (in the controls' coordinate space) — used to centre
     /// the play/pause control and anchor the bottom bar on the real video, not the full player frame.
     var videoRect: CGRect = .zero
@@ -166,11 +170,22 @@ struct PlayerControlsView: View {
         // hold-scrub, which both write `scrubTime`). Cleared when the scrub ends so the next one doesn't
         // flash the last picture, and so pictures still being made for it are dropped.
         .onChange(of: scrubTime) { _, t in
-            if isScrubbing { requestScrubFrame(t) }
+            if isScrubbing { requestScrubFrame(t); tickChapter(at: t) }
         }
         .onChange(of: isScrubbing) { _, scrubbing in
-            if scrubbing { requestScrubFrame(scrubTime) } else { scrubFrames.scrubEnded() }
+            if scrubbing { requestScrubFrame(scrubTime) } else { scrubFrames.scrubEnded(); lastChapter = -2 }
         }
+        .task(id: scene.id) { chapters = ChapterMarks(scene.scene_markers) }
+    }
+
+    /// A light tap each time the scrub position crosses a marker. A scrub's first position only sets the
+    /// reference: touching down is a jump, not a crossing.
+    private func tickChapter(at time: TimeInterval) {
+        guard chapters.isShown else { return }
+        let index = chapters.index(at: time)
+        guard index != lastChapter else { return }
+        if lastChapter != -2 { Haptics.tap(soft: true) }
+        lastChapter = index
     }
 
     /// Ask for the scrub picture at `time`. The sprite sheet's state rides along: the stream's own pictures are
@@ -223,6 +238,7 @@ struct PlayerControlsView: View {
                 showSpritePreview: !spritePreviewTopLeading, // top-left variant renders separately
                 heat: watchHeatEnabled ? WatchHeat.shared.curve(sceneID: scene.id) : nil,
                 exactFrame: scrubFrames.image,
+                chapters: chapters,
                 speedTier: $scrubSpeedTier,
                 isScrubbing: $isScrubbing,
                 scrubTime: $scrubTime,
@@ -480,6 +496,8 @@ struct ScrubBar: View {
     /// A picture made from the file at the scrub position (`ScrubFrameProvider`), preferred over the sprite
     /// tile; nil where Stash has a sprite sheet to show instead, and between scrubs.
     var exactFrame: UIImage? = nil
+    /// The scene's markers, drawn as cuts in the track and named in the scrub preview; empty shows nothing.
+    var chapters = ChapterMarks()
     /// Current variable-scrub gear (0 = full … 3 = fine). A binding so the video hold-scrub can drive the
     /// same on-screen label (both scrub methods share it).
     @Binding var speedTier: Int
@@ -499,6 +517,11 @@ struct ScrubBar: View {
             let width = geo.size.width
             let progress = duration > 0 ? CGFloat((isScrubbing ? scrubTime : currentTime) / duration) : 0
             let clampedProgress = max(0, min(1, progress))
+            // The picture above the bar while scrubbing: made from the file, else the instant sprite tile. Looked
+            // up once per pass, because the marker's name sits in it, or above the track when there is none.
+            let picture: UIImage? = showSpritePreview && isScrubbing ? (exactFrame ?? sprites.thumbnail(at: scrubTime)) : nil
+            let pictureX = min(max(width * clampedProgress - previewWidth / 2, 0), width - previewWidth)
+            let chapter = isScrubbing ? chapters.name(at: scrubTime) : nil
 
             ZStack(alignment: .leading) {
                 // Watch-heat ("most replayed") curve: rises from the track's top edge, YouTube-style.
@@ -513,8 +536,7 @@ struct ScrubBar: View {
                         .animation(.easeInOut(duration: 0.18), value: isScrubbing)
                         .allowsHitTesting(false)
                 }
-                Capsule().fill(.white.opacity(0.3)).frame(height: 4)
-                Capsule().fill(.white).frame(width: width * clampedProgress, height: 4)
+                track(width: width, filled: clampedProgress)
                 Circle()
                     .fill(.white)
                     .frame(width: 14, height: 14)
@@ -556,16 +578,26 @@ struct ScrubBar: View {
                     }
             )
             .overlay(alignment: .topLeading) {
-                // Prefer the picture made from the file; fall back to the instant sprite tile.
-                if showSpritePreview, isScrubbing, let image = exactFrame ?? sprites.thumbnail(at: scrubTime) {
-                    let x = min(max(width * clampedProgress - previewWidth / 2, 0), width - previewWidth)
-                    Image(uiImage: image)
+                if let picture {
+                    Image(uiImage: picture)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
                         .frame(width: previewWidth, height: previewHeight)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.7), lineWidth: 1))
-                        .offset(x: x, y: -(previewHeight + 16))
+                        .overlay(alignment: .bottom) {
+                            if let chapter { ChapterPill(name: chapter).padding(6) }
+                        }
+                        .offset(x: pictureX, y: -(previewHeight + 16))
+                }
+            }
+            // With no picture to sit in, the marker's name hangs above the track instead (clear of the gear label).
+            .overlay(alignment: .bottomLeading) {
+                if picture == nil, let chapter {
+                    ChapterPill(name: chapter)
+                        .frame(width: previewWidth)
+                        .offset(x: pictureX, y: speedTier > 0 ? -56 : -30)
+                        .allowsHitTesting(false)
                 }
             }
             // Subtle current-gear label, centred just above the track — only past full speed, so normal
@@ -587,6 +619,61 @@ struct ScrubBar: View {
             }
         }
         .frame(height: 22)
+    }
+
+    /// The track and its filled part, cut at the start of each marker. Masked only when the scene has markers,
+    /// so the usual case adds no layer.
+    @ViewBuilder
+    private func track(width: CGFloat, filled: CGFloat) -> some View {
+        let layers = ZStack(alignment: .leading) {
+            Capsule().fill(.white.opacity(0.3)).frame(height: 4)
+            Capsule().fill(.white).frame(width: width * filled, height: 4)
+        }
+        if chapters.isShown {
+            layers.mask { ChapterGaps(starts: chapters.starts, duration: duration) }
+        } else {
+            layers
+        }
+    }
+}
+
+/// The track's footprint with a 2 pt gap at each marker start: used as a mask, it cuts the bar into chapters.
+private struct ChapterGaps: Shape {
+    let starts: [Double]
+    let duration: TimeInterval
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        guard duration > 0, rect.width > 0 else {
+            path.addRect(rect)
+            return path
+        }
+        var left = rect.minX
+        for start in starts {
+            let x = rect.minX + rect.width * CGFloat(min(1, start / duration))
+            // A cut at either end, or crowding the last one, would draw as a sliver: leave it out.
+            guard x - 1 >= left + 3, x + 3 <= rect.maxX else { continue }
+            path.addRect(CGRect(x: left, y: rect.minY, width: x - 1 - left, height: rect.height))
+            left = x + 1
+        }
+        path.addRect(CGRect(x: left, y: rect.minY, width: rect.maxX - left, height: rect.height))
+        return path
+    }
+}
+
+/// The marker's name over the scrub preview, in the same dark glass as the gear label.
+private struct ChapterPill: View {
+    let name: String
+
+    var body: some View {
+        Text(name)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.white.opacity(0.95))
+            .lineLimit(2)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 9).padding(.vertical, 3)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+            .environment(\.colorScheme, .dark)
     }
 }
 

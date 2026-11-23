@@ -93,6 +93,7 @@ struct StashClient: Sendable {
       performers { id name image_path }
       tags { id name }
       sceneStreams { url mime_type label }
+      scene_markers { id title seconds primary_tag { id name } }
     """
 
     // Full scene selection set for the single-scene detail fetch: complete performer profiles for the
@@ -105,6 +106,7 @@ struct StashClient: Sendable {
       performers { \(performerFields) }
       tags { id name }
       sceneStreams { url mime_type label }
+      scene_markers { id title seconds primary_tag { id name } }
     """
 
     private static let performerFields = "id name image_path rating100 favorite scene_count country birthdate gender urls tags { id name }"
