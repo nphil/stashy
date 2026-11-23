@@ -161,6 +161,13 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   NOTHING (covers/previews/sprites/phashes) because Stash applies no server-side defaults; the app and
   the plugin now send `configuration.defaults.scan`. New **Generate** chip (jobs panel, library-wide)
   and **Generate Media** (scene •••, one scene) backfill scenes that came in bare — a rescan can't. §6.
+- **Converted files re-attach to their Stash scene** (plugin 0.6.0, 2026-11-23; server-side, no app build): FileFlows
+  (`revenz/fileflows:stable`, auto-updating on purpose — NOT pinned) converts RecycleBin → `/mnt/user/Stuff`; the
+  plugin's `Re-attach Converted Files` task + `Scene.Create` hook merge each result into the lost scene (same name
+  key, length ±1 s, one candidate) so history/tags/rating survive. Host User Script `convert-pipeline` (every 5 min;
+  source `stash-plugin/host/convert-pipeline.sh`) runs the task and ntfy-alerts `homelabber` on breakage. Its FFmpeg is the
+  "FFmpeg FileFlows Edition" DockerMod +
+  `/app/common` volume (the old `FFmpeg6` mod cannot install on the Ubuntu 26.04 base). Stash never scans on its own.
 - **Jobs panel is a real status readout** (v1.0.370): title (plugin boilerplate trimmed) → bar → `79% ·
   3m 12s · +1 queued` → the live `subTasks` Stash is working on right now → the job's error. Task chips
   are a 2-column grid, not a flow. §6.
