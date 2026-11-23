@@ -205,6 +205,11 @@ final class ScenePlayerModel {
     /// a loading donut that would otherwise spin forever. Resets naturally: reopening the scene builds a
     /// fresh model.
     var didFail = false
+    /// The failure is the server answering 404 for the scene's file (moved or deleted outside Stash), not a
+    /// playback fault: set with `didFail`, and it changes the overlay's wording. Retrying can't help.
+    var fileMissing = false
+    /// The server check that runs before a failure is shown (`concludeFailure`).
+    @ObservationIgnored private var failureCheck: Task<Void, Never>?
     /// Fires a fallback if the local path produces no frames in time (covers stalls AVPlayer never
     /// reports as a hard failure).
     @ObservationIgnored private var watchdog: Task<Void, Never>?
@@ -361,7 +366,10 @@ final class ScenePlayerModel {
                         self.fallbackToHLS(error: "Apple can't decode \(video.pixelFormat ?? video.codec)")
                     }
                 case .failed(let error, _):
-                    self.fallbackToHLS(error: error.localizedDescription)
+                    // The remux's own read of the file got a 404: no stream for this scene can play, so skip the
+                    // server transcode, which would only fail the same way.
+                    if error == .sourceUnreachable(status: 404) { self.fileGone(error: error.localizedDescription) }
+                    else { self.fallbackToHLS(error: error.localizedDescription) }
                 default:
                     break
                 }
@@ -535,14 +543,13 @@ final class ScenePlayerModel {
     /// The local remux/loopback path failed (or stalled) — switch to the Stash HLS stream, once.
     /// Resetting `isReady` makes the zoom surface re-attach the new engine's render view.
     private func fallbackToHLS(error: String? = nil) {
-        guard !stopped else { return }   // the scene was already left — don't resurrect a zombie engine
+        guard !stopped, !didFail else { return }   // the scene was already left, or the failure is final — don't resurrect a zombie engine
         guard !didFallback, let fallback = route.fallbackURL else {
             // No fallback route (direct play / server-HLS / downloaded / last-resort), or the HLS fallback
             // itself already failed — this is terminal. Surface it instead of spinning the donut forever.
             if let error { lastError = error }
             isBuffering = false
-            loadingStage = "Playback failed"
-            didFail = true
+            concludeFailure()
             return
         }
         didFallback = true
@@ -564,6 +571,39 @@ final class ScenePlayerModel {
         isPlaying = true
     }
 
+    /// The remux was told 404 by the server for the scene's file.
+    private func fileGone(error: String) {
+        guard !stopped, !didFail else { return }
+        lastError = error
+        isBuffering = false
+        watchdog?.cancel()
+        stopRemux()
+        engine?.pause()
+        finishFailure(missing: true)
+    }
+
+    /// Nothing is left to try. Before saying so, ask the server whether the scene's file is there: a 404 means it
+    /// was moved or deleted outside Stash, which retrying never fixes, and the player's own error doesn't say so.
+    /// The loading indicator stays up for that one request (it gives up after 3 s), so the wording never changes
+    /// under the viewer.
+    private func concludeFailure() {
+        guard !didFail, failureCheck == nil else { return }
+        guard let probe = MissingFile.probeURL(for: route.url) else { finishFailure(missing: false); return }
+        failureCheck = Task { [weak self] in
+            let missing = await MissingFile.serverSaysMissing(probe)
+            guard let self, !Task.isCancelled, !self.stopped else { return }
+            self.finishFailure(missing: missing)
+        }
+    }
+
+    private func finishFailure(missing: Bool) {
+        failureCheck = nil
+        fileMissing = missing
+        loadingStage = missing ? MissingFile.title : "Playback failed"
+        didFail = true
+        if missing { RemoteLog.shared.log("✖︎ video file missing: the server answers 404 for it") }
+    }
+
     /// Tear down on leaving the scene: stop playback, remove the engine's observers (so the AVPlayer
     /// can't crash on dealloc), and stop the on-device remux + loopback server. Niling the engine lets
     /// `start()` rebuild cleanly if the scene is reopened.
@@ -573,6 +613,7 @@ final class ScenePlayerModel {
         if currentTime > 1 { pendingResume = currentTime }
         stopped = true
         startInProgress = false
+        failureCheck?.cancel(); failureCheck = nil
         slowMoReengage?.cancel(); slowMoReengage = nil
         slowMoRunner?.stop()
         slowMoRunner = nil

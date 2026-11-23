@@ -145,13 +145,19 @@ struct ScenePlayerView: View {
 
                 if model.didFail {
                     VStack(spacing: 10) {
-                        Image(systemName: "exclamationmark.triangle.fill").font(.largeTitle)
-                        Text("Playback failed").font(.headline)
-                        if let err = model.lastError {
-                            Text(err).font(.caption).foregroundStyle(.white.opacity(0.7))
+                        Image(systemName: model.fileMissing ? "video.slash.fill" : "exclamationmark.triangle.fill").font(.largeTitle)
+                        Text(model.fileMissing ? MissingFile.title : "Playback failed").font(.headline)
+                        if model.fileMissing {
+                            // The file isn't on the server, so there is nothing to retry.
+                            Text(MissingFile.detail).font(.caption).foregroundStyle(.white.opacity(0.7))
                                 .multilineTextAlignment(.center)
+                        } else {
+                            if let err = model.lastError {
+                                Text(err).font(.caption).foregroundStyle(.white.opacity(0.7))
+                                    .multilineTextAlignment(.center)
+                            }
+                            Text("Go back and try again.").font(.caption).foregroundStyle(.white.opacity(0.7))
                         }
-                        Text("Go back and try again.").font(.caption).foregroundStyle(.white.opacity(0.7))
                     }
                     .foregroundStyle(.white)
                     .padding()
