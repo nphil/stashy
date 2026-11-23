@@ -78,7 +78,7 @@ final class AVPlaybackEngine: PlaybackEngine {
         // apps, so the right moment is here, when the user has actually pressed play. Setting a
         // category is cheap and idempotent; activating an already-active session is a no-op.
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
-        try? AVAudioSession.sharedInstance().setActive(true)
+        Self.activateAudioSession()
 
         // Inject the Stash apikey as an HTTP header so HLS segment requests — which can drop the query
         // param when AVPlayer resolves relative segment URLs — still authenticate (otherwise HLS plays
@@ -192,6 +192,17 @@ final class AVPlaybackEngine: PlaybackEngine {
         }
 
         player.play()
+    }
+
+    /// Claim the session without stalling the main thread: activation waits while the system settles audio with
+    /// other apps (a call, music), and iOS 27 warns about doing that on the main thread. Nothing waits for it:
+    /// the player starts muted, and a claim that fails is as ignored as the synchronous one was.
+    private nonisolated static func activateAudioSession() {
+        if #available(iOS 27.0, *) {
+            AVAudioSession.sharedInstance().activate { _, _ in }
+        } else {
+            DispatchQueue.global(qos: .userInitiated).async { try? AVAudioSession.sharedInstance().setActive(true) }
+        }
     }
 
     /// Deterministic teardown, called from the facade when leaving the scene. Removing the periodic time
