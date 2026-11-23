@@ -70,6 +70,9 @@ final class DownloadKeepAlive {
     private var ticks = 0
     private var refusals = 0
     private var startedAt = Date()
+    /// Consecutive cycles in which the tone failed to start (the session is held by someone else).
+    private var silentTicks = 0
+    private var sessionReclaimFailures = 0
 
     // MARK: - Lifecycle
 
@@ -102,6 +105,8 @@ final class DownloadKeepAlive {
         stillNeeded = needed
         isRunning = true
         ticks = 0
+        silentTicks = 0
+        sessionReclaimFailures = 0
         refusals = 0
         startedAt = Date()
         observeInterruptions()
@@ -151,10 +156,21 @@ final class DownloadKeepAlive {
     private func run() async {
         while !Task.isCancelled {
             guard isRunning, stillNeeded?() == true else { stop(); return }
+            // Re-claim the session every cycle, not only on an interruption notification. iOS 27.0 has
+            // been reported to interrupt a backgrounded app's session and never post the `.ended` half,
+            // so `recoverFromInterruption` alone can leave the pump renewing assertions with no audio
+            // behind them. A mixable session may be activated from the background, and re-activating
+            // an already-active one is a no-op, so this costs nothing when all is well.
+            await reclaimSessionIfNeeded()
+            guard !Task.isCancelled, isRunning else { return }
             // Give the audio unit a real (if inaudible) render window before swapping assertions —
             // iTorrent pulses play/stop back-to-back, and a few frames of actual output can only help
             // whatever iOS is checking.
-            player?.play()
+            let playing = player?.play() ?? false
+            if !playing { silentTicks += 1 } else { silentTicks = 0 }
+            if silentTicks == 1 || (silentTicks > 0 && silentTicks % 6 == 0) {
+                RemoteLog.shared.event("dl-keepalive", [("play", "refused"), ("n", silentTicks)])
+            }
             try? await Task.sleep(for: .milliseconds(150))
             guard !Task.isCancelled, isRunning else { return }
             endAssertion()
@@ -238,6 +254,34 @@ final class DownloadKeepAlive {
         let ok = (try? AVAudioSession.sharedInstance().setActive(true)) != nil
         if ok, player?.isPlaying == false { player?.play() }
         RemoteLog.shared.event("dl-keepalive", [("interrupt", ok ? "reclaimed" : "held")])
+    }
+
+    /// Make sure our mixable session is active. Logs only the transitions (fail → recover), so a
+    /// session that stays held doesn't flood the trace. `setActive` can block while the system settles
+    /// audio with other apps (iOS 27 warns when that happens on the main thread), so it runs detached.
+    private func reclaimSessionIfNeeded() async {
+        let errorCode = await Task.detached { Self.activateSession() }.value
+        if errorCode == nil {
+            if sessionReclaimFailures > 0 {
+                RemoteLog.shared.event("dl-keepalive", [("session", "reclaimed"), ("after", sessionReclaimFailures)])
+            }
+            sessionReclaimFailures = 0
+        } else {
+            sessionReclaimFailures += 1
+            if sessionReclaimFailures == 1 {
+                RemoteLog.shared.event("dl-keepalive", [("session", "held"), ("err", errorCode)])
+            }
+        }
+    }
+
+    /// nil on success, else the `NSError` code.
+    private nonisolated static func activateSession() -> Int? {
+        do {
+            try AVAudioSession.sharedInstance().setActive(true)
+            return nil
+        } catch {
+            return (error as NSError).code
+        }
     }
 
     // MARK: - The tone

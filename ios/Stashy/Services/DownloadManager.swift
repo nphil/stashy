@@ -2615,6 +2615,12 @@ final class DownloadManager {
         nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.enterBackground() }
         }
+        // ActivityKit only STARTS a Live Activity for a foreground app. `didEnterBackground` is too late
+        // for that, so make the last request while we are still active: a transfer that began less than
+        // one sync tick (2 s) before the owner swiped home would otherwise never get its card.
+        nc.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.syncLiveActivity() }
+        }
         nc.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.enterForeground() }
         }
@@ -2663,7 +2669,9 @@ final class DownloadManager {
         // is re-checked each cycle, so it tears itself down within one tick of the last transfer
         // finishing; nothing here has to watch for that.
         startKeepAliveIfNeeded()
-        RemoteLog.shared.event("dl-phase", [("to", "background"), ("active", live.count)])
+        RemoteLog.shared.event("dl-phase", [("to", "background"), ("active", live.count),
+                                            ("la", liveActivity.diagnostic),
+                                            ("keepalive", DownloadKeepAlive.shared.isRunning ? 1 : 0)])
         for item in live { partCensus(item, "enter-bg") }
         syncLiveActivity()
         RemoteLog.shared.flushNow()   // the periodic timer stops once we're suspended

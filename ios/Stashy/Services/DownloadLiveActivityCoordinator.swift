@@ -8,6 +8,20 @@ final class DownloadLiveActivityCoordinator {
     private var activity: Activity<DownloadActivityAttributes>?
     private var lastState: DownloadActivityAttributes.ContentState?
     var hasActivity: Bool { activity != nil }
+    /// One word for the trace: what the card is doing right now ("none", "active", "stale", "ended",
+    /// "dismissed"), suffixed "-off" when iOS reports Live Activities switched off for Stashy.
+    var diagnostic: String {
+        let state: String
+        switch activity?.activityState {
+        case .none: state = "none"
+        case .active?: state = "active"
+        case .stale?: state = "stale"
+        case .ended?: state = "ended"
+        case .dismissed?: state = "dismissed"
+        case _?: state = "unknown"
+        }
+        return ActivityAuthorizationInfo().areActivitiesEnabled ? state : state + "-off"
+    }
 
     init() {
         // Reattach after a system/background relaunch instead of starting a duplicate activity.
