@@ -140,11 +140,18 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   do not re-apply). Check before re-analyzing perf.
 
 ## Current state (keep short — current release + work queue only)
-- **Latest release: v1.0.375** (plugin **0.5.4**; engine 2.0.3 + stall recovery, untested on device). CI green. The -3000 investigation is closed.
+- **Latest release: v1.0.376** (plugin **0.5.4**; engine 2.1.0, mini player + PiP, chapters, server-fetch Live Activity, scrape progress, ntfy delivery status — all untested on device). CI green. The -3000 investigation is closed.
 - **CI builds with Xcode 27 / the iOS 27 SDK** (`xcode-27` runner, 2026-11-06); deployment target stays
   26. Glasses register via `UISceneAccessory` on iOS 27 (`GlassesSession.registerAccessory`), the plist
-  route still serves iOS 26. **Video engine 2.0.3** (v1.0.375: Stashy's remux/transcoders/device facts
-  come from `VideoEngine`); its HDR/audio/subtitle claims await the engine's device test sheets. §5.
+  route still serves iOS 26. **Video engine 2.1.0** (v1.0.376: `FrameExtractor` scrub previews when Stash has no
+  sprite); its HDR/audio/subtitle claims await the engine's device test sheets. §5.
+- **Mini player + PiP** (v1.0.376): `NowPlaying.shared` owns a docked model; player teardown is DEFERRED off the
+  dismiss (it caused the only 120 Hz scroll hitch). Never `model.stop()` straight from `onDisappear`. §5.
+- **Server fetches have a Live Activity** (v1.0.376); `ServerFetchStore` polls 3 s while minimised. The owner's
+  "missing card" report was server fetches, which never had one — not an iOS 27 regression. §3.
+- **RemoteLog**: ntfy.sh's quota is per home IP and is usually exhausted — use `https://ntfy.nateshome.net`
+  (anonymous write-only on `stashy`/`stashy-*`; read via HomeLabber `sqlite3 -readonly
+  /mnt/nvme/appdata/Ntfy/cache.db`). Settings shows delivery status + Send Test. §7.
 - **Scene names fall back to the file name** (v1.0.366): `StashScene.displayTitle` everywhere, middle
   truncation, card capped at 52 chars. §6.
 - **Downloads** work end-to-end: app-open ~100 MB/s, byte-exact resume through crashes / relaunch /
