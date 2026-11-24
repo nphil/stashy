@@ -140,7 +140,7 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   do not re-apply). Check before re-analyzing perf.
 
 ## Current state (keep short — current release + work queue only)
-- **Latest release: v1.0.376** (plugin **0.5.4**; engine 2.1.0, automatic PiP, chapters, server-fetch Live Activity, scrape progress, ntfy delivery status — all untested on device). CI green. The -3000 investigation is closed.
+- **Latest release: v1.0.382** (plugin **0.5.4**; engine 2.1.0, ranked by-name scene scrape over community scrapers when stash-boxes find nothing (§6), automatic PiP, chapters, server-fetch Live Activity, scrape progress, ntfy delivery status — all untested on device). CI green. The -3000 investigation is closed.
 - **CI builds with Xcode 27 / the iOS 27 SDK** (`xcode-27` runner, 2026-11-06); deployment target stays
   26. Glasses register via `UISceneAccessory` on iOS 27 (`GlassesSession.registerAccessory`), the plist
   route still serves iOS 26. **Video engine 2.1.0** (v1.0.376: `FrameExtractor` scrub previews when Stash has no

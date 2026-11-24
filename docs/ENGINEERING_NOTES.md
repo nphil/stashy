@@ -1273,7 +1273,7 @@ re-derive, and do not "simplify" any of it back to an empty input.
   different phase and colour from `.failed` (a source/server was unreachable — can never claim "not found").
   Set phases through `setPhase` (wraps `withAnimation`) so the bar glides. The performer sheets also get a
   retype-the-name field; the scene sheet's is the by-name search below.
-- **Ranked by-name scene search (v1.0.377)** — runs automatically when the stash-box fingerprint pass finds
+- **Ranked by-name scene search (v1.0.382)** — runs automatically when the stash-box fingerprint pass finds
   nothing (skipped only if every stash-box was unreachable = server down). `StashScraper.nameSceneSources()`
   = `listScrapers(types:[SCENE])` filtered to `scene.supported_scrapes` ∋ `NAME`, ordered by the ONE constant
   `rankedNameScraperIDs` (case-insensitive id match; unlisted NAME scrapers last, alphabetical).
