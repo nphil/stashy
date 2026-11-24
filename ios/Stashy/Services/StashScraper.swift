@@ -167,6 +167,9 @@ struct StashScraper: Sendable {
 
     struct ScrapedSceneData: Decodable, Sendable, Hashable {
         let title: String?
+        let code: String?             // only requested by the name-search queries
+        let director: String?         // ditto
+        let production_date: String?  // ditto
         let details: String?
         let date: String?
         let urls: [String]?
@@ -192,20 +195,31 @@ struct StashScraper: Sendable {
     /// can return several fingerprint matches.
     func scrapeScene(source: Source, sceneID: String) async throws -> [ScrapedSceneData] {
         struct Input: Encodable, Sendable { let scene_id: String }
-        struct Vars: Encodable, Sendable { let source: SourceInput; let input: Input }
+        return try await scrapeSingleScene(source: source, input: Input(scene_id: sceneID), nameFlow: false)
+    }
+
+    private struct SceneScrapeVars<I: Encodable & Sendable>: Encodable, Sendable {
+        let source: SourceInput
+        let input: I
+    }
+
+    /// `scrapeSingleScene` for any `ScrapeSingleSceneInput` shape. `nameFlow` also requests the
+    /// code/director/production_date fields a classic scraper's fragment re-query wants echoed back
+    /// (`ScrapedSceneInput` has them; the stash-box fingerprint query never needed them).
+    private func scrapeSingleScene<Input: Encodable & Sendable>(source: Source, input: Input,
+                                                                nameFlow: Bool) async throws -> [ScrapedSceneData] {
         struct Resp: Decodable, Sendable { let scrapeSingleScene: [ScrapedSceneData]? }
         let gql = """
         query ScrapeSingleScene($source: ScraperSourceInput!, $input: ScrapeSingleSceneInput!) {
           scrapeSingleScene(source: $source, input: $input) {
-            title details date urls image remote_site_id
+            title \(nameFlow ? "code director production_date" : "") details date urls image remote_site_id
             studio { stored_id name remote_site_id }
             tags { stored_id name }
             performers { \(Self.scrapedPerformerFields) }
           }
         }
         """
-        let resp: Resp = try await client.query(
-            gql, variables: Vars(source: SourceInput(source), input: Input(scene_id: sceneID)))
+        let resp: Resp = try await client.query(gql, variables: SceneScrapeVars(source: SourceInput(source), input: input))
         return resp.scrapeSingleScene ?? []
     }
 
@@ -276,19 +290,36 @@ struct StashScraper: Sendable {
     /// sources were searched and which of them were unreachable.
     struct ScrapeProgress: Sendable, Equatable {
         struct Entry: Sendable, Equatable, Identifiable {
-            enum State: Sendable, Equatable { case searching, matched, noMatch, unreachable }
+            /// `pending` = queued behind the one being tried (sequential ranked runs only).
+            enum State: Sendable, Equatable { case pending, searching, matched, noMatch, unreachable }
             let id: String
             let name: String
             var state: State
         }
         var entries: [Entry]
+        /// True once a ranked, one-at-a-time name search is part of the run: the card then names the
+        /// scraper being tried instead of a generic title.
+        var sequential = false
 
         init(sources: [Source]) {
             entries = sources.map { Entry(id: $0.id, name: $0.name, state: .searching) }
         }
 
+        /// This run plus `sources` queued behind it (the ranked name-search phase).
+        func appendingPending(_ sources: [Source]) -> ScrapeProgress {
+            var copy = self
+            copy.entries += sources.map { Entry(id: $0.id, name: $0.name, state: .pending) }
+            copy.sequential = true
+            return copy
+        }
+
+        mutating func set(_ state: Entry.State, for id: String) {
+            if let i = entries.firstIndex(where: { $0.id == id }) { entries[i].state = state }
+        }
+
         var total: Int { entries.count }
-        var finished: Int { entries.filter { $0.state != .searching }.count }
+        var finished: Int { entries.filter { $0.state != .searching && $0.state != .pending }.count }
+        var current: Entry? { entries.first { $0.state == .searching } }
         var matched: [String] { entries.filter { $0.state == .matched }.map(\.name) }
         var noMatch: [String] { entries.filter { $0.state == .noMatch }.map(\.name) }
         var unreachable: [String] { entries.filter { $0.state == .unreachable }.map(\.name) }
@@ -342,6 +373,179 @@ struct StashScraper: Sendable {
         }
         return MultiSourceResult(items: matches.sorted { Self.rank($0.source) < Self.rank($1.source) },
                                  progress: progress)
+    }
+
+    // MARK: - Ranked name search (community scrapers)
+
+    /// Community scrapers worth trying when no stash-box has the scene, best first for this library.
+    /// Matched against the installed scraper's `id`, case-insensitively. Installed NAME-capable scrapers
+    /// that aren't listed go after these, alphabetically. This is the ONE place the order lives.
+    static let rankedNameScraperIDs: [String] = [
+        "ThePornDBJAV", "R18.dev", "javdb", "JavDatabase", "JavBus", "JavGuru", "JavHD", "fc2db", "avbase",
+        "ManyVids", "Clips4Sale", "Loyalfans", "Pornhub", "Xhamster", "EvilAngel", "AdultTime",
+        "ThePornDBMovies", "FreeonesCommunity", "AdultEmpire", "xEmpire", "vixenNetwork", "DMM",
+    ]
+
+    /// One scraper gets this long to answer before it counts as failed and the pass moves on.
+    static let nameSearchTimeout: Duration = .seconds(15)
+
+    struct TimeoutError: LocalizedError { var errorDescription: String? { "The scraper took too long to answer." } }
+
+    /// Installed scene scrapers that support NAME search, in `rankedNameScraperIDs` order.
+    func nameSceneSources() async throws -> [Source] {
+        struct Resp: Decodable, Sendable { let listScrapers: [ScrapersAndBoxes.Scraper]? }
+        let gql = """
+        query SceneNameScrapers {
+          listScrapers(types: [SCENE]) { id name scene { supported_scrapes } }
+        }
+        """
+        let resp: Resp = try await client.query(gql)
+        let ranked = Self.rankedNameScraperIDs.map { $0.lowercased() }
+        let position = Dictionary(zip(ranked, ranked.indices), uniquingKeysWith: { first, _ in first })
+        return (resp.listScrapers ?? [])
+            .filter { $0.scene?.supported_scrapes?.contains("NAME") == true }
+            .sorted { a, b in
+                let pa = position[a.id.lowercased()] ?? Int.max
+                let pb = position[b.id.lowercased()] ?? Int.max
+                if pa != pb { return pa < pb }
+                return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+            }
+            .map { Source(kind: .scraper(id: $0.id), name: $0.name) }
+    }
+
+    /// The text to search by: the scene title when set, else the file's basename without extension
+    /// (dots/underscores read as spaces when the name has none). A JAV product code found in it
+    /// (`ABC-123`, `FC2-PPV-1234567`) is searched ALONE, normalised to upper-case with a hyphen.
+    static func nameQuery(title: String?, fileBasename: String?) -> String {
+        let t = (title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        var raw = t
+        if raw.isEmpty {
+            let base = (fileBasename ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            raw = (base as NSString).deletingPathExtension
+        }
+        if let code = javCode(in: raw) { return code }
+        if t.isEmpty, !raw.contains(" ") {
+            raw = raw.replacingOccurrences(of: ".", with: " ").replacingOccurrences(of: "_", with: " ")
+        }
+        return raw.split(separator: " ", omittingEmptySubsequences: true).joined(separator: " ")
+    }
+
+    /// Release-name words that look like a code (`HEVC-10`, `AAC-51`…) but never are one.
+    private static let notCodePrefixes: Set<String> = [
+        "HEVC", "AVC", "AAC", "AC", "DDP", "DTS", "EAC", "MP", "WEB", "SCENE", "PART", "EP", "EPISODE", "VOL",
+        "CD", "DISC", "FHD", "UHD", "HD", "SD", "HDR", "DVD", "MPEG", "XVID", "DIVX", "BD", "BR", "BLURAY",
+        "CAM", "SEASON", "TAKE", "NO", "PT", "VIDEO", "CLIP", "MOVIE", "IMG", "VID", "DSC",
+    ]
+
+    /// `ABC-123` / `ABC123` / `FC2-PPV-1234567` → normalised code, else nil. A bare 4-digit year
+    /// ("Studio2024") is not a code.
+    static func javCode(in text: String) -> String? {
+        let ns = text as NSString
+        let full = NSRange(location: 0, length: ns.length)
+        if let fc2 = try? NSRegularExpression(
+            pattern: #"(?<![A-Za-z0-9])FC2[-_]?(?:PPV[-_]?)?(\d{5,8})(?!\d)"#, options: .caseInsensitive),
+           let m = fc2.firstMatch(in: text, range: full) {
+            return "FC2-PPV-" + ns.substring(with: m.range(at: 1))
+        }
+        guard let re = try? NSRegularExpression(pattern: #"(?<![A-Za-z0-9])([A-Za-z]{2,6})(-?)(\d{2,5})(?!\d)"#)
+        else { return nil }
+        for m in re.matches(in: text, range: full) {
+            let letters = ns.substring(with: m.range(at: 1)).uppercased()
+            let digits = ns.substring(with: m.range(at: 3))
+            if notCodePrefixes.contains(letters) { continue }
+            if m.range(at: 2).length == 0, digits.count == 4, let year = Int(digits), (1900...2099).contains(year) {
+                continue
+            }
+            return letters + "-" + digits
+        }
+        return nil
+    }
+
+    /// Search one scraper by name (`input: {query}`). Candidates arrive with title/date/studio/image/url;
+    /// classic scrapers return skeletons — complete one with `sceneDetail`.
+    func searchScenes(source: Source, query: String) async throws -> [ScrapedSceneData] {
+        struct Input: Encodable, Sendable { let query: String }
+        return try await scrapeSingleScene(source: source, input: Input(query: query), nameFlow: true)
+    }
+
+    /// Full detail for a chosen candidate, as Stash's own web UI does it: re-query the same scraper with
+    /// the candidate as a fragment (`input: {scene_input}` — no image or relationships, per the schema).
+    /// Stash-box results are already complete. Falls back to the candidate when the re-query is empty.
+    func sceneDetail(source: Source, candidate: ScrapedSceneData) async throws -> ScrapedSceneData {
+        guard !source.isStashBox else { return candidate }
+        struct Fragment: Encodable, Sendable {
+            let title: String?
+            let code: String?
+            let details: String?
+            let director: String?
+            let urls: [String]?
+            let date: String?
+            let production_date: String?
+            let remote_site_id: String?
+        }
+        struct Input: Encodable, Sendable { let scene_input: Fragment }
+        let fragment = Fragment(
+            title: candidate.title, code: candidate.code, details: candidate.details,
+            director: candidate.director, urls: candidate.urls, date: candidate.date,
+            production_date: candidate.production_date, remote_site_id: candidate.remote_site_id)
+        let full = try await Self.withTimeout(Self.nameSearchTimeout) {
+            try await self.scrapeSingleScene(source: source, input: Input(scene_input: fragment), nameFlow: true)
+        }
+        return full.first ?? candidate
+    }
+
+    /// What one pass over the ranked scrapers produced before it stopped.
+    struct NameSearchRun: Sendable {
+        let hits: [SourcedScene]        // candidates from the scraper that matched (empty = list exhausted)
+        let progress: ScrapeProgress
+        let nextIndex: Int              // first scraper not tried yet — resume from here to keep searching
+    }
+
+    /// Try `scrapers[start...]` strictly one after another and stop at the FIRST scraper that returns
+    /// candidates (the caller resumes at `nextIndex` for "Keep searching"). Each scraper is bounded by
+    /// `nameSearchTimeout`; an error or timeout marks that scraper `unreachable` and moves on — it never
+    /// aborts the pass. Stops quietly when the calling task is cancelled (sheet dismissed).
+    func searchScenesByName(query: String, scrapers: [Source], start: Int, progress initial: ScrapeProgress,
+                            onProgress: ProgressHandler? = nil) async -> NameSearchRun {
+        var progress = initial
+        var index = start
+        while index < scrapers.count, !Task.isCancelled {
+            let source = scrapers[index]
+            index += 1
+            progress.set(.searching, for: source.id)
+            await onProgress?(progress)
+            var found: [SourcedScene] = []
+            var state = ScrapeProgress.Entry.State.noMatch
+            do {
+                let results = try await Self.withTimeout(Self.nameSearchTimeout) {
+                    try await self.searchScenes(source: source, query: query)
+                }
+                found = results.map { SourcedScene(source: source, scene: $0) }
+                state = found.isEmpty ? .noMatch : .matched
+            } catch {
+                state = .unreachable
+            }
+            if Task.isCancelled { break }
+            progress.set(state, for: source.id)
+            await onProgress?(progress)
+            if !found.isEmpty { return NameSearchRun(hits: found, progress: progress, nextIndex: index) }
+        }
+        return NameSearchRun(hits: [], progress: progress, nextIndex: index)
+    }
+
+    /// Race `op` against a timer; whichever loses is cancelled (URLSession honours cancellation).
+    private static func withTimeout<T: Sendable>(_ limit: Duration,
+                                                 _ op: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await op() }
+            group.addTask {
+                try await Task.sleep(for: limit)
+                throw TimeoutError()
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else { throw TimeoutError() }
+            return first
+        }
     }
 
     /// Search performers by name against EVERY allowed source in parallel; returns every candidate tagged
@@ -468,6 +672,8 @@ struct StashScraper: Sendable {
         let tags: [Entity]?
         let stash_ids: [StashIDPair]?
         let paths: Paths?
+        let files: [File]?
+        struct File: Decodable, Sendable { let basename: String? }
     }
 
     func sceneEditData(id: String) async throws -> SceneEditData? {
@@ -482,6 +688,7 @@ struct StashScraper: Sendable {
             tags { id name }
             stash_ids { endpoint stash_id }
             paths { screenshot }
+            files { basename }
           }
         }
         """

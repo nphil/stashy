@@ -81,6 +81,33 @@ struct SceneMetadataSheet: View {
     @State private var saving = false
     @State private var saveError: String?
 
+    // Ranked by-name search (community scrapers), run when no stash-box matched the fingerprint.
+    private struct FormSnapshot {
+        let title: String
+        let date: String
+        let details: String
+        let urls: [String]
+        let studio: EntityRef?
+        let performers: [EntityRef]
+        let tags: [EntityRef]
+        let coverOverride: String?
+        let pendingStashIDs: [StashScraper.StashIDPair]?
+    }
+    private static let fingerprintHow = "by this scene's file fingerprints"
+
+    @State private var fileBasename: String?
+    @State private var nameQuery = ""                                  // editable search term
+    @State private var nameScrapers: [StashScraper.Source] = []         // ranked, installed, NAME-capable
+    @State private var nameCursor = 0                                  // next scraper to try
+    @State private var nameProgress: StashScraper.ScrapeProgress?       // fingerprint rows + ranked rows
+    @State private var fingerprintProgress: StashScraper.ScrapeProgress? // the stash-box pass, if it ran
+    @State private var nameHits: [StashScraper.SourcedScene] = []
+    @State private var pickerOpen = false
+    @State private var resolvingHit: Int?
+    @State private var baseline: FormSnapshot?                         // form before the first pick
+    @State private var searchTask: Task<Void, Never>?
+    @State private var pickTask: Task<Void, Never>?
+
     private var scraper: StashScraper? {
         appState.client.map { StashScraper(client: $0) }
     }
@@ -90,7 +117,7 @@ struct SceneMetadataSheet: View {
             SheetHeader(
                 title: "Scene Metadata",
                 actionTitle: "Save",
-                actionDisabled: !loaded || saving || scraping,
+                actionDisabled: !loaded || saving || scraping || resolvingHit != nil,
                 busy: saving,
                 onCancel: { dismiss() },
                 onAction: { save() }
@@ -100,15 +127,30 @@ struct SceneMetadataSheet: View {
                 SheetErrorLine(message: loadError)
             }
 
-            if phase != .idle {
+            if pickerOpen {
+                SceneCandidatePicker(
+                    hits: nameHits,
+                    resolving: resolvingHit,
+                    remaining: max(0, nameScrapers.count - nameCursor),
+                    query: $nameQuery,
+                    onPick: { choose($0) },
+                    onKeepSearching: { keepSearching() },
+                    onSearch: { searchAgain() },
+                    onDismiss: { pickerOpen = false })
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            } else if phase != .idle {
                 ScrapeStatusCard(
                     phase: phase,
-                    hint: "Fingerprint matching only finds the exact same file that was submitted to these databases — re-encoded, trimmed or re-muxed copies often have no match. You can still fill in the details by hand.",
+                    hint: statusHint,
                     onRetry: { scrapeAll() },
                     secondaryTitle: "Edit Manually",
                     onSecondary: { dismissStatusCard() },
                     onDismiss: phase.isSearching ? nil : { dismissStatusCard() })
                     .transition(.opacity.combined(with: .move(edge: .top)))
+                if deadEnd && !scraping {
+                    ScrapeRetryField(label: "Search by name", placeholder: "Title or product code",
+                                     text: $nameQuery, onSubmit: { searchAgain() })
+                }
             }
 
             editStage
@@ -119,6 +161,10 @@ struct SceneMetadataSheet: View {
         .presentationDragIndicator(.visible)
         .presentationBackgroundInteraction(.enabled(upThrough: .medium))
         .task { await load() }
+        .onDisappear {
+            searchTask?.cancel()
+            pickTask?.cancel()
+        }
     }
 
     // MARK: - Load / seed
@@ -142,6 +188,7 @@ struct SceneMetadataSheet: View {
             tags = (data.tags ?? []).map { EntityRef(storedID: $0.id, name: $0.name) }
             existingStashIDs = data.stash_ids ?? []
             screenshotPath = data.paths?.screenshot
+            fileBasename = data.files?.first?.basename
             loaded = true
             if mode == .scrape { scrapeAll() }
         } catch {
@@ -217,6 +264,20 @@ struct SceneMetadataSheet: View {
                 }
 
                 scrapeButton
+
+                if !nameHits.isEmpty && !pickerOpen && !scraping {
+                    Button {
+                        withAnimation(.smooth(duration: 0.3)) { pickerOpen = true }
+                    } label: {
+                        Label("Other matches (\(nameHits.count))", systemImage: "list.bullet")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(themeManager.current.foregroundColor)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(themeManager.current.foregroundColor.opacity(0.10), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
 
                 if let saveError { SheetErrorLine(message: saveError) }
             }
@@ -424,25 +485,183 @@ struct SceneMetadataSheet: View {
 
     private func dismissStatusCard() { setPhase(.idle) }
 
+    /// The two outcomes that leave nothing on the form — where the by-name search field belongs.
+    private var deadEnd: Bool {
+        switch phase {
+        case .nothingFound, .failed: return true
+        default: return false
+        }
+    }
+
+    private var statusHint: String {
+        let base = "Fingerprint matching only finds the exact same file that was submitted to these databases — re-encoded, trimmed or re-muxed copies often have no match."
+        if nameScrapers.isEmpty {
+            return base + " Your Stash server has no community scrapers installed that can search by name — add some under Settings → Metadata Providers. You can still fill in the details by hand."
+        }
+        return base + " The name search tried each installed community scraper in turn; edit the search term and try again, or fill in the details by hand."
+    }
+
+    /// Stage 1: stash-box fingerprint pass (all three at once). Stage 2, only when that finds nothing:
+    /// the ranked by-name pass over the server's community scrapers.
     private func scrapeAll() {
         guard let scraper, !scraping else { return }
         scraping = true
+        resetNameSearch()
+        nameQuery = StashScraper.nameQuery(title: title, fileBasename: fileBasename)
+        fingerprintProgress = nil
         setPhase(.searching(nil))
-        Task {
+        searchTask = Task {
             defer { scraping = false }
             do {
                 let result = try await scraper.scrapeSceneEverywhere(sceneID: sceneID) { progress in
                     setPhase(.searching(progress))
                 }
                 if !result.items.isEmpty { applyMerged(result.items) }
-                // "Nothing found" (every source reached, none matched) and "failed" (some source was
-                // unreachable) are different phases; a partial failure after a find is a warning.
-                setPhase(.finished(result.progress, matched: !result.items.isEmpty,
-                                   how: "by this scene's file fingerprints"))
+                // A find, or every stash-box unreachable (the server itself is down, so a name search
+                // would only fail the same way) ends here; otherwise go on to the name search.
+                if !result.items.isEmpty || result.progress.unreachable.count == result.progress.total {
+                    setPhase(.finished(result.progress, matched: !result.items.isEmpty, how: Self.fingerprintHow))
+                    return
+                }
+                fingerprintProgress = result.progress
+            } catch is StashScraper.NoSourcesError {
+                fingerprintProgress = nil               // no stash-box configured — community scrapers may still work
             } catch {
                 setPhase(.thrown(error))
+                return
             }
+            await beginNameSearch()
         }
+    }
+
+    /// Search again by the (possibly edited) term, from the first ranked scraper.
+    private func searchAgain() {
+        guard !scraping, resolvingHit == nil,
+              !nameQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        scraping = true
+        resetNameSearch()
+        setPhase(.searching(nil))
+        searchTask = Task {
+            defer { scraping = false }
+            await beginNameSearch()
+        }
+    }
+
+    /// "Keep searching": carry on down the ranked list from where the last pass stopped.
+    private func keepSearching() {
+        guard !scraping, resolvingHit == nil else { return }
+        scraping = true
+        pickerOpen = false
+        searchTask = Task {
+            defer { scraping = false }
+            await runNameSearch()
+        }
+    }
+
+    private var nameHow: String {
+        let q = "by name “\(nameQuery.trimmingCharacters(in: .whitespacesAndNewlines))”"
+        return fingerprintProgress == nil ? q : "by file fingerprint and " + q
+    }
+
+    /// List the installed NAME scrapers (ranked), queue them behind the fingerprint rows, and start.
+    private func beginNameSearch() async {
+        guard let scraper else { return }
+        do {
+            let sources = try await scraper.nameSceneSources()
+            guard !Task.isCancelled else { return }
+            nameScrapers = sources
+            nameCursor = 0
+            nameProgress = (fingerprintProgress ?? StashScraper.ScrapeProgress(sources: [])).appendingPending(sources)
+            let blank = nameQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if sources.isEmpty || blank {
+                if let fingerprintProgress {
+                    setPhase(.finished(fingerprintProgress, matched: false, how: Self.fingerprintHow))
+                } else {
+                    setPhase(.thrown(StashScraper.NoSourcesError()))
+                }
+                return
+            }
+            await runNameSearch()
+        } catch {
+            setPhase(.thrown(error))
+        }
+    }
+
+    /// One leg of the ranked pass: sequential, stops at the first scraper with candidates.
+    private func runNameSearch() async {
+        guard let scraper, let progress = nameProgress else { return }
+        let query = nameQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        setPhase(.searching(progress))
+        let run = await scraper.searchScenesByName(
+            query: query, scrapers: nameScrapers, start: nameCursor, progress: progress
+        ) { update in
+            nameProgress = update
+            setPhase(.searching(update))
+        }
+        guard !Task.isCancelled else { return }
+        nameProgress = run.progress
+        nameCursor = run.nextIndex
+        if !run.hits.isEmpty {
+            nameHits += run.hits
+            withAnimation(.smooth(duration: 0.3)) { pickerOpen = true }
+            setPhase(.idle)
+        } else if !nameHits.isEmpty {
+            withAnimation(.smooth(duration: 0.3)) { pickerOpen = true }     // "keep searching" ran dry
+            setPhase(.idle)
+        } else if run.progress.noMatch.isEmpty {
+            setPhase(.finished(run.progress, matched: false, how: nameHow))  // nothing even answered
+        } else {
+            // Individual scrapers failing is routine (sites down, blocked) — the rows show which; the
+            // verdict is still "nothing found" as long as some source was actually reached.
+            setPhase(.nothingFound(how: nameHow, progress: run.progress))
+        }
+    }
+
+    /// Pick a candidate: complete it the way Stash's own UI does (second fetch), then fill the form.
+    /// The form is snapshotted before the FIRST pick and restored before each later one, so switching
+    /// candidates replaces — rather than unions with — the previous one.
+    private func choose(_ index: Int) {
+        guard let scraper, resolvingHit == nil, nameHits.indices.contains(index) else { return }
+        let hit = nameHits[index]
+        resolvingHit = index
+        pickTask = Task {
+            defer { resolvingHit = nil }
+            var full = hit.scene
+            var note: String?
+            do {
+                full = try await scraper.sceneDetail(source: hit.source, candidate: hit.scene)
+            } catch {
+                note = "Couldn't fetch full details from \(hit.source.name) — filled in what the search result had."
+            }
+            guard !Task.isCancelled else { return }
+            if let baseline { restore(baseline) } else { baseline = snapshot() }
+            applyMerged([StashScraper.SourcedScene(source: hit.source, scene: full)])
+            loadError = note
+            withAnimation(.smooth(duration: 0.3)) { pickerOpen = false }
+            setPhase(.found(sources: [hit.source.name], unreachable: []))
+        }
+    }
+
+    /// Drop any previous search's candidates (and undo a picked one) before a fresh search.
+    private func resetNameSearch() {
+        if let baseline { restore(baseline) }
+        baseline = nil
+        nameHits = []
+        pickerOpen = false
+        loadError = nil
+    }
+
+    private func snapshot() -> FormSnapshot {
+        FormSnapshot(title: title, date: date, details: details, urls: urls, studio: studio,
+                     performers: performers, tags: tags, coverOverride: coverOverride,
+                     pendingStashIDs: pendingStashIDs)
+    }
+
+    private func restore(_ s: FormSnapshot) {
+        title = s.title; date = s.date; details = s.details; urls = s.urls; studio = s.studio
+        performers = s.performers; tags = s.tags; coverOverride = s.coverOverride
+        pendingStashIDs = s.pendingStashIDs
+        titleOptions = []; dateOptions = []; detailsOptions = []; studioOptions = []; coverOptions = []
     }
 
     /// Build per-field conflict options and union entities from every source's result. Sources arrive

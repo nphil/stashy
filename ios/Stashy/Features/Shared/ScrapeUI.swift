@@ -360,7 +360,7 @@ struct ScrapeStatusCard: View {
         card(tint: accent) {
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                Text("Searching for metadata…")
+                Text(searchingTitle(progress))
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(fg)
                 Spacer(minLength: 0)
@@ -374,7 +374,7 @@ struct ScrapeStatusCard: View {
                 fraction: progress.map { $0.total == 0 ? 0 : Double($0.finished) / Double($0.total) },
                 tint: accent)
             if let progress {
-                ForEach(progress.entries) { entry in sourceRow(entry) }
+                rows(progress)
             } else {
                 Text("Contacting your Stash server…")
                     .font(.caption)
@@ -404,11 +404,11 @@ struct ScrapeStatusCard: View {
     private func nothingFound(how: String, progress: StashScraper.ScrapeProgress) -> some View {
         card(tint: accent) {
             headerRow(icon: "magnifyingglass", tint: accent, title: "No metadata found")
-            Text("Searched \(how) on \(StashScraper.sourceList(progress.names)) — none of them has a match.")
+            Text("Searched \(how) on \(sourceCount(progress)) — \(progress.unreachable.isEmpty ? "none of them has" : "none that answered had") a match.")
                 .font(.caption)
                 .foregroundStyle(fg)
                 .fixedSize(horizontal: false, vertical: true)
-            ForEach(progress.entries) { entry in sourceRow(entry) }
+            rows(progress)
             if let hint {
                 Text(hint)
                     .font(.caption2)
@@ -427,7 +427,7 @@ struct ScrapeStatusCard: View {
                 .foregroundStyle(fg)
                 .fixedSize(horizontal: false, vertical: true)
             if let progress {
-                ForEach(progress.entries) { entry in sourceRow(entry) }
+                rows(progress)
             }
             actions
         }
@@ -470,11 +470,45 @@ struct ScrapeStatusCard: View {
         }
     }
 
+    /// "Searching…" for a plain run; the scraper being tried ("Searching R18.dev…") once a ranked
+    /// one-at-a-time pass is under way. The "N of M" on the right then counts the whole queue.
+    private func searchingTitle(_ progress: StashScraper.ScrapeProgress?) -> String {
+        guard let progress, progress.sequential, let current = progress.current else {
+            return "Searching for metadata…"
+        }
+        return "Searching \(current.name)…"
+    }
+
+    /// Source names for the "Searched … on …" sentence; a 20-scraper ranked run says how many instead.
+    private func sourceCount(_ progress: StashScraper.ScrapeProgress) -> String {
+        progress.names.count > 6 ? "\(progress.names.count) sources" : StashScraper.sourceList(progress.names)
+    }
+
+    /// One row per source that has started. A long ranked run (20+ scrapers) keeps the in-flight,
+    /// matched and failed rows and folds every "no match" into a single line, so the pinned card stays
+    /// short. Queued sources stay hidden until their turn.
+    @ViewBuilder private func rows(_ progress: StashScraper.ScrapeProgress) -> some View {
+        let started = progress.entries.filter { $0.state != .pending }
+        if progress.entries.count <= 6 {
+            ForEach(started) { entry in sourceRow(entry) }
+        } else {
+            ForEach(started.filter { $0.state != .noMatch }) { entry in sourceRow(entry) }
+            let none = started.filter { $0.state == .noMatch }.map(\.name)
+            if !none.isEmpty {
+                let shown = none.prefix(8).joined(separator: ", ")
+                Text("No match on \(shown)\(none.count > 8 ? " and \(none.count - 8) more" : "")")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
     private func sourceRow(_ entry: StashScraper.ScrapeProgress.Entry) -> some View {
         HStack(spacing: 8) {
             Group {
                 switch entry.state {
-                case .searching:
+                case .searching, .pending:
                     ProgressView().controlSize(.mini)
                 case .matched:
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
@@ -491,14 +525,14 @@ struct ScrapeStatusCard: View {
                 .foregroundStyle(fg)
             Spacer(minLength: 0)
             switch entry.state {
-            case .searching:
-                Text("Searching…").font(.caption).foregroundStyle(.secondary)
+            case .searching, .pending:
+                Text(entry.state == .pending ? "Queued" : "Searching…").font(.caption).foregroundStyle(.secondary)
             case .matched:
                 Text("Match found").font(.caption).foregroundStyle(.green)
             case .noMatch:
                 Text("No match").font(.caption).foregroundStyle(.secondary)
             case .unreachable:
-                Text("Unreachable").font(.caption).foregroundStyle(.orange)
+                Text("Failed").font(.caption).foregroundStyle(.orange)
             }
         }
     }

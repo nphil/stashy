@@ -1271,9 +1271,23 @@ re-derive, and do not "simplify" any of it back to an empty input.
   view, so it's visible wherever the user tapped Scrape): determinate bar + "2 of 3" + a live row per source;
   `.nothingFound` (every source reached, none matched — says what was searched and where) is deliberately a
   different phase and colour from `.failed` (a source/server was unreachable — can never claim "not found").
-  Set phases through `setPhase` (wraps `withAnimation`) so the bar glides. Scene scraping is by fingerprint
-  only (`scene_id`); there is no title-query search in the flow, so its nothing-found card offers Try Again /
-  Edit Manually, while the performer sheets also get a retype-the-name field.
+  Set phases through `setPhase` (wraps `withAnimation`) so the bar glides. The performer sheets also get a
+  retype-the-name field; the scene sheet's is the by-name search below.
+- **Ranked by-name scene search (v1.0.377)** — runs automatically when the stash-box fingerprint pass finds
+  nothing (skipped only if every stash-box was unreachable = server down). `StashScraper.nameSceneSources()`
+  = `listScrapers(types:[SCENE])` filtered to `scene.supported_scrapes` ∋ `NAME`, ordered by the ONE constant
+  `rankedNameScraperIDs` (case-insensitive id match; unlisted NAME scrapers last, alphabetical).
+  `searchScenesByName` runs them strictly sequentially (15 s timeout each via `withTimeout`; error/timeout =
+  that row `unreachable`, never aborts), stops at the FIRST scraper with candidates and hands back
+  `nextIndex` for "Keep searching". Query = `nameQuery(title:fileBasename:)`: title, else basename minus
+  extension; a JAV code (`javCode(in:)`, `ABC-123`, `FC2-PPV-n`, year/codec words rejected) is searched alone.
+  Wire shapes (verified against stashapp/stash `scraper.graphql`): `scrapeSingleScene(source:{scraper_id},
+  input:{query})` → candidates; completing one = `input:{scene_input:{title code details director urls date
+  production_date remote_site_id}}` (the web UI's own fragment re-query; stash-box results skip it). The
+  progress card reuses `ScrapeProgress` with a new `.pending` state (queued scrapers) — fingerprint rows +
+  ranked rows share one list, the card says "Searching <name>…", and with >6 entries folds "no match" rows
+  into one line. `SceneCandidatePicker` (cover/title/studio·date) fills the form via `applyMerged`; the form is
+  snapshotted before the first pick and restored before each later pick/search so candidates replace, not union.
 
 ### Stores and loaders
 - **`PaginatedLoader<T>`** (generic, `@Observable @MainActor`): dedups pages by id,
