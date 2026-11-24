@@ -16,7 +16,14 @@ struct Performer: Codable, Identifiable, Sendable, Hashable {
     let tags: [Tag]?
 
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
-    static func == (lhs: Performer, rhs: Performer) -> Bool { lhs.id == rhs.id }
+    /// Covers what the UI shows, not only the id — see `StashScene.==` (an id-only `==` hid a fresh scrape).
+    static func == (lhs: Performer, rhs: Performer) -> Bool {
+        lhs.id == rhs.id && lhs.name == rhs.name && lhs.image_path == rhs.image_path
+            && lhs.rating100 == rhs.rating100 && lhs.favorite == rhs.favorite && lhs.scene_count == rhs.scene_count
+            && lhs.country == rhs.country && lhs.birthdate == rhs.birthdate && lhs.gender == rhs.gender
+            && lhs.urls == rhs.urls
+            && (lhs.tags ?? []).elementsEqual(rhs.tags ?? []) { $0.id == $1.id && $0.name == $1.name }
+    }
 
     func imageURL(apiKey: String) -> URL? {
         guard let path = image_path else { return nil }

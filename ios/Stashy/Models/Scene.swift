@@ -5,7 +5,7 @@ struct StashScene: Codable, Identifiable, Sendable, Hashable {
     let title: String?
     let date: String?
     /// 0–100 rating (Stash's scale). Mutable so optimistic rating updates reflect immediately in the
-    /// owning list/detail without a refetch. Identity is id-based, so this never affects hashing/equality.
+    /// owning list/detail without a refetch. Hashing is id-based.
     var rating100: Int?
     let files: [SceneFile]
     let paths: ScenePaths?
@@ -18,7 +18,19 @@ struct StashScene: Codable, Identifiable, Sendable, Hashable {
     let scene_markers: [SceneMarker]?
 
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
-    static func == (lhs: StashScene, rhs: StashScene) -> Bool { lhs.id == rhs.id }
+    /// Equality covers what the UI shows, not only the id. SwiftUI skips updating a view (and an `@State`) whose new
+    /// value compares equal, so an id-only `==` made a freshly scraped scene look "unchanged": the detail page and
+    /// the library card kept the old title/cover/performers until a manual refresh (owner, 2026-11-24). Hashing stays
+    /// id-based (equal scenes still hash alike).
+    static func == (lhs: StashScene, rhs: StashScene) -> Bool {
+        lhs.id == rhs.id && lhs.title == rhs.title && lhs.date == rhs.date && lhs.rating100 == rhs.rating100
+            && lhs.paths?.screenshot == rhs.paths?.screenshot
+            && lhs.studio?.id == rhs.studio?.id && lhs.studio?.name == rhs.studio?.name
+            && lhs.files.count == rhs.files.count
+            && lhs.performers.elementsEqual(rhs.performers) { $0.id == $1.id && $0.name == $1.name && $0.image_path == $1.image_path }
+            && lhs.tags.elementsEqual(rhs.tags) { $0.id == $1.id && $0.name == $1.name }
+            && (lhs.scene_markers?.count ?? -1) == (rhs.scene_markers?.count ?? -1)
+    }
 
     /// Star rating on a 0–5 scale (Stash stores rating100 as 0–100).
     var ratingStars: Double? {
