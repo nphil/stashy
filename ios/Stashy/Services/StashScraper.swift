@@ -202,13 +202,13 @@ struct StashScraper: Sendable {
         let source: SourceInput
         let input: I
     }
+    private struct SceneScrapeResp: Decodable, Sendable { let scrapeSingleScene: [ScrapedSceneData]? }
 
     /// `scrapeSingleScene` for any `ScrapeSingleSceneInput` shape. `nameFlow` also requests the
     /// code/director/production_date fields a classic scraper's fragment re-query wants echoed back
     /// (`ScrapedSceneInput` has them; the stash-box fingerprint query never needed them).
     private func scrapeSingleScene<Input: Encodable & Sendable>(source: Source, input: Input,
                                                                 nameFlow: Bool) async throws -> [ScrapedSceneData] {
-        struct Resp: Decodable, Sendable { let scrapeSingleScene: [ScrapedSceneData]? }
         let gql = """
         query ScrapeSingleScene($source: ScraperSourceInput!, $input: ScrapeSingleSceneInput!) {
           scrapeSingleScene(source: $source, input: $input) {
@@ -219,7 +219,8 @@ struct StashScraper: Sendable {
           }
         }
         """
-        let resp: Resp = try await client.query(gql, variables: SceneScrapeVars(source: SourceInput(source), input: input))
+        let resp: SceneScrapeResp = try await client.query(
+            gql, variables: SceneScrapeVars(source: SourceInput(source), input: input))
         return resp.scrapeSingleScene ?? []
     }
 
