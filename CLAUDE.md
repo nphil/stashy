@@ -5,7 +5,7 @@ Lean entry point, kept short on purpose (it loads into every session). The deep 
 Update both as you work; the next model inherits them.
 
 ## What Stashy is
-Native **iOS 26 SwiftUI** app (Liquid Glass) — a client for a self-hosted **Stash** media server
+Native **iOS 27 SwiftUI** app (Liquid Glass) — a client for a self-hosted **Stash** media server
 (`stashapp/stash`). Sideloaded via **Feather/AltStore** (unsigned IPA) onto an iPhone 17 Pro.
 Priorities in order: **fast playback/scrubbing → direct-play first → on-device FFmpeg fallback →
 minimal server load → privacy.** The owner (Nitin) is on Windows: **no local Mac — CI is the only
@@ -29,7 +29,7 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   `git push`.**
 - **After every push, verify a NEW release with a CHANGED IPA byte size** (`get_latest_release`).
 - XcodeGen-generated from `ios/project.yml` (globs `Stashy/` — new `.swift` auto-included; never touch
-  a `.pbxproj`). iOS 26, Swift 6, `SWIFT_STRICT_CONCURRENCY: complete`.
+  a `.pbxproj`). iOS 27 minimum (owner, 2026-11-24), Swift 6, `SWIFT_STRICT_CONCURRENCY: complete`.
 - **Never hand-edit versions or `apps.json`** — CI owns them.
 - You cannot run the app. Reason hard about compile correctness (especially concurrency) before
   pushing; the owner tests each build on device.
