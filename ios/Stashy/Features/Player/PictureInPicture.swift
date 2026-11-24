@@ -14,7 +14,14 @@ final class PictureInPictureWindow: NSObject {
     private let controller: AVPictureInPictureController
 
     /// True from the moment the system starts opening the window until it has closed.
-    private(set) var isActive = false
+    private(set) var isActive = false {
+        didSet {
+            if isActive != oldValue { onActiveChange?(isActive) }
+        }
+    }
+    /// Told when the window opens or closes: the engine steps "Enhance picture" aside while it is up (the window
+    /// shows the plain player layer).
+    var onActiveChange: ((Bool) -> Void)?
     /// A stop WE asked for is in flight (the page leaving, Privacy Mode turning on, teardown), so the
     /// `didStop` that follows is not mistaken for the owner tapping the window's ✕.
     private var stopRequested = false

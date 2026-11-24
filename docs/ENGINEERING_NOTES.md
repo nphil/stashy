@@ -998,6 +998,21 @@ engine's `TranscodeSettings`):
   gear-menu path). There is deliberately NO fixed stall timer (Nitin's design). While waiting, a phone
   picture tap only shows the controls (the skip row is already hidden while loading) and the glasses
   remote neither pauses nor skips. Device-unverified until the owner reports back.
+- **Enhance picture (engine 3.0.0, opt-in, OFF by default, device-unverified).** Gear menu → Enhance → Off / Automatic /
+  Line art, plus Sharpen (default 0.3) and Deband (0.2) sliders; stored in `player.enhance.{mode,sharpen,deband}`
+  (`EnhanceSettings.swift`), read by `ScenePlayerModel` and applied live (`applyEnhance`) and again in `makeEngine`, so a
+  seek-reinit / quality switch / fallback keeps it. The enhancer lives in `AVPlaybackEngine` and exists ONLY while the
+  mode is on (Off = no object, no layer). Its `layer` is a SUBLAYER of the host view's `AVPlayerLayer`
+  (`AVPlayerHostView.hostEnhanceLayer`), so the zoom surface scales it with the picture and the render view is never
+  re-parented; `layoutSubviews` keeps its frame = bounds (no implicit animation) and feeds `displaySize` in pixels. It
+  attaches when the item is `readyToPlay` and is `detach()`ed first thing in `teardown()`. `setActive(false)` while:
+  paused (`timeControlStatus`), app in background, the PiP window is open (`PictureInPictureWindow.onActiveChange`; the
+  window stays on the plain player layer), and while AI slow-mo's overlay or glasses own the picture
+  (`enhanceHeld`, phone-only for now). HDR / unsupported just shows the plain picture. Stats has one "Enhance" row;
+  RemoteLog gets the engine's `enhance-*` lines (via `EngineLogger.remoteLog`; `enhance-perf` every 120 frames) plus the
+  app's `enhance-probe by=app` lines (state changes and active/inactive with the reasons). Unverified on device: the
+  Apple super-resolution and MetalFX rungs (the engine's own Lanczos / line-art floor is what the simulator proves),
+  the extra frame cost beside the blur backdrop's own video output, and the picture flipping to the plain layer on pause.
 - **Hardware:** `EngineHardware.refresh()` takes the engine's `LiveHardwareCapabilityProvider` snapshot
   at launch; routing reads `EngineHardware.av1HardwareDecode` synchronously. Settings → Diagnostics →
   **Share Video Engine Report** = `EngineDiagnostics.report()` (`hw-*`, `perf-remux`, `perf-run` lines)

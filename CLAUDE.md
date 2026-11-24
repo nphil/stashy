@@ -140,10 +140,11 @@ compiler.** Repo `nphil/stashy` is the ONLY repo you may read/write. App code: `
   do not re-apply). Check before re-analyzing perf.
 
 ## Current state (keep short — current release + work queue only)
+- **Enhance picture (engine 3.0.0, opt-in, OFF by default, device-unverified):** gear menu → Enhance (scaler + sharpen + deband on the GPU, SDR only); see §5. Supersedes the reverted AI-upscaling attempt.
 - **Latest release: v1.0.382** (plugin **0.5.4**; engine 2.1.0, ranked by-name scene scrape over community scrapers when stash-boxes find nothing (§6), automatic PiP, chapters, server-fetch Live Activity, scrape progress, ntfy delivery status — all untested on device). CI green. The -3000 investigation is closed.
 - **CI builds with Xcode 27 / the iOS 27 SDK** (`xcode-27` runner, 2026-11-06); deployment target stays
   26. Glasses register via `UISceneAccessory` on iOS 27 (`GlassesSession.registerAccessory`), the plist
-  route still serves iOS 26. **Video engine 3.0.0** (pinned 2026-11-24, iOS 27 only; its opt-in `PictureEnhancer` is NOT adopted; v1.0.376: `FrameExtractor` scrub previews when Stash has no
+  route still serves iOS 26. **Video engine 3.0.0** (pinned 2026-11-24, iOS 27 only; its opt-in `PictureEnhancer` is adopted as "Enhance picture", above; v1.0.376: `FrameExtractor` scrub previews when Stash has no
   sprite); its HDR/audio/subtitle claims await the engine's device test sheets. §5.
 - **Mini player REMOVED, PiP is automatic only** (2026-11-23): no mini bar, no PiP button; the window opens by itself
   when the app backgrounds mid-playback. Player teardown is still DEFERRED off the dismiss (`NowPlaying.retire`; it

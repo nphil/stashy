@@ -1,6 +1,7 @@
 import UIKit
 import AVFoundation
 import CoreVideo
+import VideoEngine
 
 /// A UIView whose backing layer is an `AVPlayerLayer`, so the sharp video renders with no extra
 /// compositing. Sized by the zoom surface (already aspect-fitted), so `.resizeAspect` fills it.
@@ -14,6 +15,38 @@ final class AVPlayerHostView: UIView {
             playerLayer.player = newValue
             playerLayer.videoGravity = .resizeAspect
         }
+    }
+
+    /// The "Enhance picture" layer (engine 3.0.0), a sublayer of the player layer so it draws right above the video
+    /// and shares this view's frame, zoom and transforms. Nil unless the setting is on.
+    private var enhanceLayer: CALayer?
+    /// Told the picture area in screen pixels whenever the layout changes (the enhancer sizes its upscale by it).
+    var onPixelSize: ((CGSize) -> Void)?
+
+    /// Host `layer` above the video (nil removes the current one). The layer is never re-parented afterwards.
+    func hostEnhanceLayer(_ layer: CALayer?) {
+        enhanceLayer?.removeFromSuperlayer()
+        enhanceLayer = layer
+        guard let layer else { return }
+        layer.contentsScale = pixelScale
+        playerLayer.addSublayer(layer)
+        setNeedsLayout()
+        layoutIfNeeded()
+    }
+
+    /// Screen pixels per point; never 0 (an unconfigured trait collection reports 0).
+    var pixelScale: CGFloat { max(traitCollection.displayScale, 1) }
+    var pixelSize: CGSize { CGSize(width: bounds.width * pixelScale, height: bounds.height * pixelScale) }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard let enhanceLayer else { return }
+        // Same frame as the player layer, with no implicit animation so it never trails the video through a rotation.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        enhanceLayer.frame = bounds
+        CATransaction.commit()
+        onPixelSize?(pixelSize)
     }
 }
 
@@ -83,6 +116,31 @@ final class AVPlaybackEngine: PlaybackEngine {
     /// layer lets go of the player.
     private(set) var pictureInPicture: PictureInPictureWindow?
 
+    // MARK: Enhance picture state (engine 3.0.0)
+
+    /// What the viewer asked for. `.off` (the default) means NO enhancer object and NO layer exist at all.
+    var enhanceOptions: EnhanceOptions = .off {
+        didSet {
+            guard enhanceOptions != oldValue else { return }
+            syncEnhancer()
+        }
+    }
+    /// The model's hold: AI slow-mo's overlay or the glasses own the picture, so the enhancer steps aside.
+    var enhanceHeld = false {
+        didSet {
+            guard enhanceHeld != oldValue else { return }
+            updateEnhanceActive()
+        }
+    }
+    private var enhancer: PictureEnhancer?
+    private var enhanceStateTask: Task<Void, Never>?
+    private var enhanceObservers: [NSObjectProtocol] = []
+    /// Last value handed to `setActive` (the enhancer starts active).
+    private var enhanceActive = true
+    private var itemReady = false
+    private var appInBackground = false
+    private var pipOpen = false
+
     init(url: URL, normalizationGain: Float = 1) {
         self.normalizationGain = normalizationGain
         // Claim the session so sound plays through the ringer switch. The category is re-asserted
@@ -124,6 +182,11 @@ final class AVPlaybackEngine: PlaybackEngine {
         player.isMuted = false
         hostView.player = player
         pictureInPicture = PictureInPictureWindow(layer: hostView.playerLayer)
+        pictureInPicture?.onActiveChange = { [weak self] open in
+            guard let self else { return }
+            self.pipOpen = open
+            self.updateEnhanceActive()
+        }
         blurBackdrop.configure(output: videoOutput)
 
         stallObserver = NotificationCenter.default.addObserver(
@@ -181,6 +244,7 @@ final class AVPlaybackEngine: PlaybackEngine {
             let failed = item.status == .failed
             let errorText = item.error?.localizedDescription
             Task { @MainActor in
+                self?.attachEnhancerIfReady(ready)
                 guard let self else { return }
                 self.onReady?(ready)
                 if failed, !self.didFail {
@@ -245,6 +309,7 @@ final class AVPlaybackEngine: PlaybackEngine {
         wantsPlay = false
         interruption = .none
         setFrameRateProbeActive(false)
+        dropEnhancer()
         player.pause()
         // Close the Picture in Picture window while the layer still has its player (it holds the layer), and
         // stop it reporting.
@@ -423,6 +488,7 @@ final class AVPlaybackEngine: PlaybackEngine {
         case .waitingToPlayAtSpecifiedRate, .playing: wantsPlay = true
         @unknown default: break
         }
+        updateEnhanceActive()
     }
 
     func seek(to time: TimeInterval, precise: Bool) {
@@ -482,6 +548,108 @@ final class AVPlaybackEngine: PlaybackEngine {
             _ = probeOutput.copyPixelBuffer(forItemTime: t, itemTimeForDisplay: nil)
             presentedFrames &+= 1
         }
+    }
+
+    // MARK: - Enhance picture (engine 3.0.0, opt-in, device-unverified)
+
+    /// Create, update or destroy the enhancer to match `enhanceOptions`. Off = nothing exists.
+    private func syncEnhancer() {
+        guard enhanceOptions.isEnabled else { dropEnhancer(); return }
+        if let enhancer { enhancer.options = enhanceOptions; return }
+        let made = PictureEnhancer(options: enhanceOptions, logger: .remoteLog)
+        made.layer.videoGravity = .resizeAspect
+        enhancer = made
+        enhanceActive = true
+        appInBackground = UIApplication.shared.applicationState == .background
+        pipOpen = pictureInPicture?.isActive ?? false
+        hostView.hostEnhanceLayer(made.layer)
+        made.displaySize = hostView.pixelSize
+        hostView.onPixelSize = { [weak made] size in made?.displaySize = size }
+        let center = NotificationCenter.default
+        enhanceObservers = [
+            center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.appInBackground = true; self?.updateEnhanceActive() }
+            },
+            center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.appInBackground = false; self?.updateEnhanceActive() }
+            },
+        ]
+        let stream = made.updates()
+        enhanceStateTask = Task { @MainActor [weak self] in
+            for await state in stream { self?.enhanceStateChanged(state) }
+        }
+        if itemReady { made.attach(to: item) }
+        updateEnhanceActive()
+    }
+
+    /// Attach once the player item is ready (and every time the setting later creates an enhancer).
+    private func attachEnhancerIfReady(_ ready: Bool) {
+        itemReady = ready
+        if ready, let enhancer { enhancer.attach(to: item) }
+    }
+
+    /// Detach before release (the engine's rule), take the layer off the player layer, forget everything.
+    private func dropEnhancer() {
+        enhanceStateTask?.cancel(); enhanceStateTask = nil
+        for observer in enhanceObservers { NotificationCenter.default.removeObserver(observer) }
+        enhanceObservers = []
+        hostView.onPixelSize = nil
+        hostView.hostEnhanceLayer(nil)
+        enhancer?.detach()
+        enhancer = nil
+        enhanceActive = true
+    }
+
+    /// The enhancer works only while the plain player is playing in the foreground in this app's own window and nobody
+    /// else owns the picture: it stops on pause, in the background, while Picture in Picture is open (the window
+    /// stays on the plain AVPlayerLayer) and while the model holds it (AI slow-mo overlay, glasses).
+    private func updateEnhanceActive() {
+        guard let enhancer else { return }
+        let paused = player.timeControlStatus == .paused
+        let run = !paused && !appInBackground && !pipOpen && !enhanceHeld
+        guard run != enhanceActive else { return }
+        enhanceActive = run
+        enhancer.setActive(run)
+        RemoteLog.shared.event("enhance-probe", [
+            ("by", "app"), ("active", run ? 1 : 0), ("paused", paused ? 1 : 0), ("background", appInBackground ? 1 : 0),
+            ("pip", pipOpen ? 1 : 0), ("held", enhanceHeld ? 1 : 0),
+        ])
+    }
+
+    /// One line per state change (the engine already de-duplicates), never per frame. The engine's own `enhance-probe`
+    /// (per scaler), `enhance-plan`, `enhance-demote/pause/resume` and `enhance-perf` (every 120 frames) arrive through
+    /// the same log.
+    private func enhanceStateChanged(_ state: EnhanceState) {
+        RemoteLog.shared.event("enhance-probe", [("by", "app"), ("state", Self.describe(state))])
+    }
+
+    /// "Running · scaler 1280x720 → 1920x1080 · sharpen 0.30 · deband 0.20", "Paused (powerSaving)", …
+    private static func describe(_ state: EnhanceState) -> String {
+        switch state {
+        case .idle: return "Idle"
+        case .running(let plan):
+            let scaler = plan.upscaler?.rawValue ?? "no scaler"
+            return String(format: "Running · %@ %dx%d → %dx%d · sharpen %.2f · deband %.2f", scaler,
+                          plan.sourceWidth, plan.sourceHeight, plan.outputWidth, plan.outputHeight,
+                          plan.sharpen, plan.deband)
+        case .paused(let reason): return "Paused (\(reason.rawValue))"
+        case .unavailable(let reason): return "Unavailable (\(reason.rawValue))"
+        }
+    }
+
+    /// The Stats overlay's "Enhance" row: the chain's state and plan, plus why the app has it standing aside.
+    var enhanceSummary: String {
+        guard let enhancer else { return "Off" }
+        var text = Self.describe(enhancer.state)
+        if !enhanceActive {
+            var why: [String] = []
+            if player.timeControlStatus == .paused { why.append("paused") }
+            if appInBackground { why.append("background") }
+            if pipOpen { why.append("picture in picture") }
+            if enhanceHeld { why.append("slow-mo / glasses") }
+            text += " · stopped: " + why.joined(separator: ", ")
+        }
+        return text
     }
 
     // MARK: - Stats

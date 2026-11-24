@@ -21,6 +21,8 @@ struct PlayerControlsView: View {
     /// Captured right before a quality switch so the rebuilt player resumes at the exact position.
     @Binding var resumeTime: Double
     @State private var showQuality = false
+    /// The gear menu's second page ("Enhance picture"); the first page is the server-quality list.
+    @State private var showEnhance = false
     /// Live frame of the gear button (in the "playerControls" space) so the quality menu can pop up
     /// directly above it instead of floating off in a corner.
     @State private var gearFrame: CGRect = .zero
@@ -309,7 +311,7 @@ struct PlayerControlsView: View {
                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("playerControls")) } action: { speedFrame = $0 }
                 // Server-quality gear (M-B): pick a manual server-transcode resolution. Its frame is
                 // published so the quality menu can pop up directly above it.
-                Button { withAnimation(.easeOut(duration: 0.15)) { showSpeed = false; showQuality.toggle() }; scheduleHide() } label: {
+                Button { withAnimation(.easeOut(duration: 0.15)) { showSpeed = false; showEnhance = false; showQuality.toggle() }; scheduleHide() } label: {
                     Image(systemName: quality == .auto ? "gearshape" : "gearshape.fill")
                         .modifier(ControlIcon())
                 }
@@ -334,6 +336,18 @@ struct PlayerControlsView: View {
 
     /// Custom translucent quality picker that blends with the video behind it but stays legible.
     private var qualityMenu: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if showEnhance { enhancePage } else { qualityPage }
+        }
+        .frame(width: 200)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(.white.opacity(0.15), lineWidth: 1))
+        .shadow(color: .black.opacity(0.5), radius: 16, y: 6)
+        .environment(\.colorScheme, .dark)   // keep the material dark/legible over video
+    }
+
+    /// The gear menu's first page: what is playing, the server-quality rungs, and the way into "Enhance picture".
+    private var qualityPage: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Status badges header (replaces the old "Server Quality" title): what's actually on screen
             // (resolution + codec, left) and how it's being played (cost tier, right).
@@ -362,12 +376,89 @@ struct PlayerControlsView: View {
                 }
                 .buttonStyle(.plain)
             }
+            Divider().overlay(.white.opacity(0.15))
+            Button {
+                Haptics.tap(soft: true)
+                showEnhance = true
+                scheduleHide()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "wand.and.stars").frame(width: 18)
+                    Text("Enhance")
+                    Spacer(minLength: 8)
+                    Text(model.enhanceMode.label)
+                        .font(.footnote)
+                        .foregroundStyle(model.enhanceMode == .off ? Color.white.opacity(0.5) : Color.accentColor)
+                    Image(systemName: "chevron.right").font(.caption2.weight(.bold)).foregroundStyle(.white.opacity(0.5))
+                }
+                .font(.subheadline)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14).padding(.vertical, 9)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
-        .frame(width: 200)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(.white.opacity(0.15), lineWidth: 1))
-        .shadow(color: .black.opacity(0.5), radius: 16, y: 6)
-        .environment(\.colorScheme, .dark)   // keep the material dark/legible over video
+    }
+
+    /// The gear menu's second page: Off / Automatic / Line art, and (once on) the Sharpen and Deband sliders. Every
+    /// change applies live and is remembered. SDR only; HDR just plays plain (the Stats "Enhance" row says why).
+    private var enhancePage: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                Haptics.tap(soft: true)
+                showEnhance = false
+                scheduleHide()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.left").font(.caption.weight(.bold))
+                    Text("Enhance picture").font(.subheadline.weight(.semibold))
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14).padding(.top, 11).padding(.bottom, 7)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            ForEach(EnhanceMode.allCases) { mode in
+                Button {
+                    Haptics.tap(soft: true)
+                    model.enhanceMode = mode
+                    scheduleHide()
+                } label: {
+                    HStack(spacing: 8) {
+                        Text(mode.label)
+                        Spacer(minLength: 12)
+                        if mode == model.enhanceMode { Image(systemName: "checkmark").font(.caption.weight(.bold)) }
+                    }
+                    .font(.subheadline.weight(mode == model.enhanceMode ? .semibold : .regular))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            if model.enhanceMode != .off {
+                Divider().overlay(.white.opacity(0.15))
+                enhanceSlider("Sharpen", value: Binding(get: { model.enhanceSharpen }, set: { model.enhanceSharpen = $0 }))
+                enhanceSlider("Deband", value: Binding(get: { model.enhanceDeband }, set: { model.enhanceDeband = $0 }))
+                    .padding(.bottom, 4)
+            }
+        }
+    }
+
+    private func enhanceSlider(_ title: String, value: Binding<Double>) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(title)
+                Spacer(minLength: 8)
+                Text(String(format: "%.2f", value.wrappedValue)).monospacedDigit().foregroundStyle(.white.opacity(0.6))
+            }
+            .font(.caption)
+            .foregroundStyle(.white)
+            Slider(value: value, in: 0...1, step: 0.05, onEditingChanged: { _ in scheduleHide() })
+                .tint(.white)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 5)
     }
 
     /// Playback-speed picker (same translucent style as the quality menu). Selecting a rung keeps the menu

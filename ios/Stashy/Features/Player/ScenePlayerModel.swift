@@ -67,6 +67,33 @@ final class ScenePlayerModel {
             updateSlowMo()
         }
     }
+    /// **Opt-in "Enhance picture"** (engine 3.0.0; default OFF): a GPU scaler + sharpen + deband drawn over the plain
+    /// picture. Persisted; every change applies live to the running engine, and `makeEngine` re-applies it to every
+    /// rebuilt engine. Off means the engine builds no enhancer and no layer. The sliders only matter while a mode is on.
+    var enhanceMode: EnhanceMode = EnhanceSettings.storedMode {
+        didSet {
+            UserDefaults.standard.set(enhanceMode.rawValue, forKey: EnhanceSettings.modeKey)
+            applyEnhance()
+        }
+    }
+    var enhanceSharpen: Double = EnhanceSettings.storedSharpen {
+        didSet {
+            UserDefaults.standard.set(enhanceSharpen, forKey: EnhanceSettings.sharpenKey)
+            applyEnhance()
+        }
+    }
+    var enhanceDeband: Double = EnhanceSettings.storedDeband {
+        didSet {
+            UserDefaults.standard.set(enhanceDeband, forKey: EnhanceSettings.debandKey)
+            applyEnhance()
+        }
+    }
+    private var enhanceOptions: EnhanceOptions {
+        enhanceMode == .off ? .off : EnhanceOptions(upscaler: enhanceMode.upscaler, sharpen: enhanceSharpen, deband: enhanceDeband)
+    }
+    private func applyEnhance() { (engine as? AVPlaybackEngine)?.enhanceOptions = enhanceOptions }
+    /// AI slow-mo's overlay and the glasses own the picture: the enhancer steps aside (phone-only for now).
+    private func syncEnhanceHold() { (engine as? AVPlaybackEngine)?.enhanceHeld = slowMoActive || glassesActive }
     /// On-device AI slow-mo (VTFrameProcessor frame interpolation) live telemetry, surfaced in the Stats
     /// overlay. Driven by `slowMoRunner` while playback is ≤0.5×. Read ~1 Hz by the overlay, so it needn't
     /// be observable — it's snapshotted on each poll.
@@ -82,7 +109,9 @@ final class ScenePlayerModel {
     @ObservationIgnored private var slowMoReengage: Task<Void, Never>?
     /// True while the AI slow-mo render overlay should be shown — drives `ScenePlayerView` to overlay the
     /// interpolated frame stream on top of the (hidden) player surface.
-    var slowMoActive = false
+    var slowMoActive = false {
+        didSet { if slowMoActive != oldValue { syncEnhanceHold() } }
+    }
     /// The runner's render view (interpolated frame stream). Read by `ScenePlayerView` when `slowMoActive`.
     @ObservationIgnored var slowMoRenderView: UIView?
     /// The overlay the zoom surface hosts INSIDE its zoom container (slow-mo's synthesised frame stream —
@@ -112,6 +141,7 @@ final class ScenePlayerModel {
             guard glassesActive != oldValue else { return }
             // Rebuild the runner so its render view hosts on the right SIDE (glasses overlay vs phone
             // surface) for the new state.
+            syncEnhanceHold()
             suspendSlowMo()
             scheduleSlowMoReengage()
         }
@@ -442,6 +472,10 @@ final class ScenePlayerModel {
         // …and the current playback speed + slow-mute policy, so a mid-scene rate change survives reinit.
         engine.playbackRate = Float(playbackRate)
         engine.slowMute = playbackRate < 1 && muteWhenSlowed
+        if let av = engine as? AVPlaybackEngine {
+            av.enhanceHeld = slowMoActive || glassesActive
+            av.enhanceOptions = enhanceOptions
+        }
         engine.onTime = { [weak self] current, duration in
             guard let self else { return }
             // The remux run's timeline origin arrives with its first packets: adopt it as the offset and
@@ -1007,6 +1041,7 @@ final class ScenePlayerModel {
                      ? "\(Int(presentationSize.width))×\(Int(presentationSize.height))"
                      : "—"),
             StatLine(label: "Start", value: startTiming.summary),
+            StatLine(label: "Enhance", value: (engine as? AVPlaybackEngine)?.enhanceSummary ?? "Off"),
             // The exact URL being played, apikey redacted — so a manual server-quality switch can be
             // verified: the `resolution=…` query param must be present and byte-for-byte one of
             // LOW / STANDARD / STANDARD_HD / FULL_HD / FOUR_K / ORIGINAL (Stash matches it case-sensitively).

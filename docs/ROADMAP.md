@@ -466,6 +466,10 @@ Scope as: fetch a few recent posts (text + first media), render compact rows ins
 tap-through to open the profile. Treat as best-effort/optional given the API constraints.
 
 ### AI upscaling — "high quality from low bandwidth"
+> **2026-11-24 update:** the engine's opt-in **Enhance picture** (VideoEngine 3.0.0: scaler + sharpen + deband on the GPU,
+> OFF by default, player gear menu → Enhance) supersedes the reverted attempt below for the SDR, whole-picture case.
+> It is a general picture improver, not the per-video neural model this section describes. Device-unverified. See
+> ENGINEERING_NOTES §5.
 **Core goal:** usable video quality on **very low-quality / low-reliability networks** (poor cellular,
 remote access, congested links) — get a watchable, good-looking stream when bandwidth is too low for
 the real bitrate, by reconstructing quality on-device instead of shipping more bytes.
