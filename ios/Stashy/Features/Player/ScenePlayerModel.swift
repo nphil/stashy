@@ -218,6 +218,11 @@ final class ScenePlayerModel {
     /// Silent remux restarts in the last minute (a fourth falls back to the server) and in this playback.
     @ObservationIgnored private var recentStallRestarts: [Date] = []
     @ObservationIgnored private var stallRestarts = 0
+    /// The current remux run wrote its last byte (reached the end of the file). A finished run that adds nothing
+    /// is COMPLETE, not stuck: seeking near the end finishes the run in 2-4 s on the LAN, before AVPlayer (about
+    /// 3 s to its first frame) has started, and the stall watch used to restart it four times and fall back to
+    /// the server transcode (device log 2026-11-24). Reset when a new run starts.
+    @ObservationIgnored private var remuxRunFinished = false
 
     /// The sharp-video render surface (re-parented into the zoom container).
     var renderView: UIView? { engine?.renderView }
@@ -331,6 +336,7 @@ final class ScenePlayerModel {
     private func launchRemux(at time: TimeInterval, restart: Bool) {
         guard let session = remux else { return }
         remuxGeneration += 1
+        remuxRunFinished = false
         let generation = remuxGeneration
         let previous = remuxLaunch
         remuxLaunch = Task { [weak self] in
@@ -372,6 +378,10 @@ final class ScenePlayerModel {
                     // server transcode, which would only fail the same way.
                     if error == .sourceUnreachable(status: 404) { self.fileGone(error: error.localizedDescription) }
                     else { self.fallbackToHLS(error: error.localizedDescription) }
+                case .headerWritten:
+                    self.remuxRunFinished = false   // a new run's output began (events arrive in order)
+                case .finished:
+                    self.remuxRunFinished = true
                 default:
                     break
                 }
@@ -677,7 +687,7 @@ final class ScenePlayerModel {
                 if progress.isFetching || progress.bytesWritten != lastBytes {
                     lastBytes = progress.bytesWritten
                     lastActivity = now
-                } else if now.timeIntervalSince(lastActivity) >= 1,
+                } else if !remuxRunFinished, now.timeIntervalSince(lastActivity) >= 1,
                           duration <= 0 || currentTime < duration - 1 {
                     recoverStalledRemux(progress)
                     return
