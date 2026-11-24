@@ -45,8 +45,8 @@ struct PlayerControlsView: View {
     /// is pinned to the top-left instead of floating above the thumb.
     var spritePreviewTopLeading = false
     /// True while the finger is on the progress bar itself. A scrub that is NOT a bar drag is the video hold-scrub
-    /// (one-handed): in landscape its preview sits in the middle of the picture, clear of the thumb, instead of
-    /// above the bar (owner, 2026-11-24).
+    /// (one-handed): its preview sits in the middle of the picture, larger and clear of the thumb, instead of above
+    /// the bar (owner, 2026-11-24).
     @State private var barDragging = false
     let scheduleHide: () -> Void
     var onBack: (() -> Void)? = nil
@@ -152,20 +152,21 @@ struct PlayerControlsView: View {
                         .transition(.opacity)
                 }
 
-                // Video hold-scrub in landscape: the preview sits in the middle of the picture.
-                if isScrubbing, !barDragging, !spritePreviewTopLeading, proxy.size.width > proxy.size.height,
+                // Video hold-scrub: a larger preview in the middle of the picture (double the bar's in landscape).
+                if isScrubbing, !barDragging, !spritePreviewTopLeading,
                    let image = scrubFrames.image ?? sprites.thumbnail(at: scrubTime) {
+                    let previewWidth = min(320, videoRect.width * 0.62)
                     Image(uiImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
-                        .frame(width: 240, height: 135)
+                        .frame(width: previewWidth, height: previewWidth * 9 / 16)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                         .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.7), lineWidth: 1))
                         .overlay(alignment: .bottom) {
                             if let chapter = chapters.name(at: scrubTime) { ChapterPill(name: chapter).padding(8) }
                         }
                         .shadow(radius: 8)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                        .position(x: videoRect.midX, y: videoRect.midY)
                         .allowsHitTesting(false)
                 }
 
@@ -256,8 +257,8 @@ struct PlayerControlsView: View {
                 duration: model.duration,
                 currentTime: model.currentTime,
                 sprites: sprites,
-                // The top-left and the centred (landscape hold-scrub) variants render separately.
-                showSpritePreview: !spritePreviewTopLeading && (barDragging || !landscape),
+                // The top-left and the centred (hold-scrub) variants render separately.
+                showSpritePreview: !spritePreviewTopLeading && barDragging,
                 heat: watchHeatEnabled ? WatchHeat.shared.curve(sceneID: scene.id) : nil,
                 exactFrame: scrubFrames.image,
                 chapters: chapters,
