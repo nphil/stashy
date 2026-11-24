@@ -687,7 +687,7 @@ final class ScenePlayerModel {
                 if progress.isFetching || progress.bytesWritten != lastBytes {
                     lastBytes = progress.bytesWritten
                     lastActivity = now
-                } else if !remuxRunFinished, now.timeIntervalSince(lastActivity) >= 1,
+                } else if !remuxRunFinished, !progress.isFinished, now.timeIntervalSince(lastActivity) >= 1,
                           duration <= 0 || currentTime < duration - 1 {
                     recoverStalledRemux(progress)
                     return
