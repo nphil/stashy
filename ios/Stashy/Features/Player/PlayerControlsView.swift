@@ -44,6 +44,10 @@ struct PlayerControlsView: View {
     /// In portrait-video fullscreen the scrubber sits low on a tall screen, so the sprite preview
     /// is pinned to the top-left instead of floating above the thumb.
     var spritePreviewTopLeading = false
+    /// True while the finger is on the progress bar itself. A scrub that is NOT a bar drag is the video hold-scrub
+    /// (one-handed): in landscape its preview sits in the middle of the picture, clear of the thumb, instead of
+    /// above the bar (owner, 2026-11-24).
+    @State private var barDragging = false
     let scheduleHide: () -> Void
     var onBack: (() -> Void)? = nil
     /// Watch-heat curve shown on the scrubber while dragging (Settings → Player toggle).
@@ -148,6 +152,23 @@ struct PlayerControlsView: View {
                         .transition(.opacity)
                 }
 
+                // Video hold-scrub in landscape: the preview sits in the middle of the picture.
+                if isScrubbing, !barDragging, !spritePreviewTopLeading, proxy.size.width > proxy.size.height,
+                   let image = scrubFrames.image ?? sprites.thumbnail(at: scrubTime) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 240, height: 135)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.7), lineWidth: 1))
+                        .overlay(alignment: .bottom) {
+                            if let chapter = chapters.name(at: scrubTime) { ChapterPill(name: chapter).padding(8) }
+                        }
+                        .shadow(radius: 8)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                        .allowsHitTesting(false)
+                }
+
                 // Portrait-fullscreen scrub preview, pinned top-left (shows whenever scrubbing).
                 if spritePreviewTopLeading, isScrubbing, let image = scrubFrames.image ?? sprites.thumbnail(at: scrubTime) {
                     Image(uiImage: image)
@@ -235,14 +256,16 @@ struct PlayerControlsView: View {
                 duration: model.duration,
                 currentTime: model.currentTime,
                 sprites: sprites,
-                showSpritePreview: !spritePreviewTopLeading, // top-left variant renders separately
+                // The top-left and the centred (landscape hold-scrub) variants render separately.
+                showSpritePreview: !spritePreviewTopLeading && (barDragging || !landscape),
                 heat: watchHeatEnabled ? WatchHeat.shared.curve(sceneID: scene.id) : nil,
                 exactFrame: scrubFrames.image,
                 chapters: chapters,
                 speedTier: $scrubSpeedTier,
                 isScrubbing: $isScrubbing,
                 scrubTime: $scrubTime,
-                onSeek: { model.seek(to: $0); scheduleHide() }
+                onSeek: { model.seek(to: $0); scheduleHide() },
+                onBarDrag: { barDragging = $0 }
             )
 
             // One control row: elapsed · stacked badges · stats ‖ volume ‖ duration · speed · gear ·
@@ -504,6 +527,8 @@ struct ScrubBar: View {
     @Binding var isScrubbing: Bool
     @Binding var scrubTime: TimeInterval
     let onSeek: (TimeInterval) -> Void
+    /// Told when a drag on the bar itself begins (true) and ends (false).
+    var onBarDrag: (Bool) -> Void = { _ in }
 
     @State private var lastCueIndex = -1
     /// Last horizontal touch position (nil = drag not begun) — variable-speed scrubbing is incremental.
@@ -550,6 +575,7 @@ struct ScrubBar: View {
                         if lastDragX == nil {
                             // Drag begins: warm haptics and jump to the touched position (tap-to-seek feel).
                             Haptics.prepareSelection()
+                            onBarDrag(true)
                             isScrubbing = true
                             speedTier = 0
                             scrubTime = Double(max(0, min(1, value.location.x / width))) * duration
@@ -572,6 +598,7 @@ struct ScrubBar: View {
                     .onEnded { _ in
                         onSeek(scrubTime)
                         isScrubbing = false
+                        onBarDrag(false)
                         lastCueIndex = -1
                         lastDragX = nil
                         speedTier = 0
