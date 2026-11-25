@@ -190,8 +190,17 @@ final class AVPlaybackEngine: PlaybackEngine {
         blurBackdrop.configure(output: videoOutput)
 
         stallObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemPlaybackStalled, object: item, queue: .main) { _ in
+            forName: .AVPlayerItemPlaybackStalled, object: item, queue: .main) { [weak self] _ in
             RemoteLog.shared.log("⏸ AVPlayer playback STALLED")
+            MainActor.assumeIsolated {
+                self?.logStallSnapshot("stalled")
+                // And once more if it is still waiting 5 s on: what the player holds when the app's net restarts it.
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .milliseconds(4500))
+                    guard let self, self.player.timeControlStatus == .waitingToPlayAtSpecifiedRate else { return }
+                    self.logStallSnapshot("wait5")
+                }
+            }
         }
 
         // Playback reached the end — the player stays parked at the end (actionAtItemEnd = .pause), so
@@ -583,6 +592,32 @@ final class AVPlaybackEngine: PlaybackEngine {
     }
 
     /// Attach once the player item is ready (and every time the setting later creates an enhancer).
+    /// What AVPlayer holds at a stall, for the engine's loopback log to be read against (VideoEngine 3.0.2):
+    /// none of its `loop-req` lines after the last refill means the player stopped asking.
+    private func logStallSnapshot(_ why: String) {
+        func whole(_ time: CMTime) -> Int {
+            let seconds = time.seconds
+            return seconds.isFinite && abs(seconds) < 1_000_000 ? Int(seconds) : -1
+        }
+        let loaded = item.loadedTimeRanges.map { value -> String in
+            let range = value.timeRangeValue
+            return "\(whole(range.start))-\(whole(CMTimeRangeGetEnd(range)))"
+        }.joined(separator: ",")
+        let access = item.accessLog()?.events.last
+        let failure = item.errorLog()?.events.last
+        RemoteLog.shared.event("player-stall", [
+            ("why", why), ("at", whole(player.currentTime())), ("loaded", loaded),
+            ("full", item.isPlaybackBufferFull ? 1 : 0), ("empty", item.isPlaybackBufferEmpty ? 1 : 0),
+            ("keepUp", item.isPlaybackLikelyToKeepUp ? 1 : 0),
+            ("status", player.timeControlStatus.rawValue),
+            ("reason", player.reasonForWaitingToPlay?.rawValue),
+            ("outputs", item.outputs.count),
+            ("requests", access?.numberOfMediaRequests), ("stalls", access?.numberOfStalls),
+            ("bytes", access?.numberOfBytesTransferred),
+            ("err", failure.map { "\($0.errorStatusCode) \($0.errorDomain) \($0.errorComment ?? "")" }),
+        ])
+    }
+
     private func attachEnhancerIfReady(_ ready: Bool) {
         itemReady = ready
         if ready, let enhancer { enhancer.attach(to: item) }
