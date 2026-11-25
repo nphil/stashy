@@ -23,6 +23,11 @@ struct PlayerControlsView: View {
     @State private var showQuality = false
     /// The gear menu's second page ("Enhance picture"); the first page is the server-quality list.
     @State private var showEnhance = false
+    /// The Enhance slider being dragged ("Sharpen" / "Deband"), else nil. While set, the menu and every control fade
+    /// away so the picture is unobstructed, and only a slim copy of that slider stays (owner, 2026-11-25).
+    @State private var enhanceDragging: String?
+    /// Where each Enhance slider sits in the controls' space, so the slim copy lies exactly under the finger.
+    @State private var enhanceSliderFrames: [String: CGRect] = [:]
     /// Live frame of the gear button (in the "playerControls" space) so the quality menu can pop up
     /// directly above it instead of floating off in a corner.
     @State private var gearFrame: CGRect = .zero
@@ -187,6 +192,42 @@ struct PlayerControlsView: View {
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
             .coordinateSpace(name: "playerControls")
+            // Nearly, not fully, transparent: the slider under the finger must stay hit-testable to keep its drag.
+            .opacity(enhanceDragging == nil ? 1 : 0.02)
+            .overlay(alignment: .topLeading) {
+                if let title = enhanceDragging, let frame = enhanceSliderFrames[title] {
+                    let value = title == "Sharpen" ? model.enhanceSharpen : model.enhanceDeband
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(title)
+                            Spacer(minLength: 8)
+                            Text("\(Int((value * 100).rounded()))%").monospacedDigit()
+                        }
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .shadow(color: .black.opacity(0.7), radius: 3)
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(.white.opacity(0.3)).frame(height: 3)
+                            Capsule().fill(.white).frame(width: max(3, frame.width * value), height: 3)
+                        }
+                        .shadow(color: .black.opacity(0.5), radius: 2)
+                    }
+                    .frame(width: frame.width)
+                    .offset(x: frame.minX, y: frame.midY - 24)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+                }
+            }
+            // Keep the controls alive for as long as the drag lasts (the auto-hide would remove the slider mid-drag).
+            .task(id: enhanceDragging) {
+                while enhanceDragging != nil, !Task.isCancelled {
+                    scheduleHide()
+                    try? await Task.sleep(for: .seconds(1))
+                }
+            }
+            // Never leave the controls faded if the menu goes away under the finger.
+            .onChange(of: showControls) { _, shown in if !shown { enhanceDragging = nil } }
+            .onChange(of: showQuality) { _, shown in if !shown { enhanceDragging = nil } }
         }
         .animation(.easeInOut(duration: 0.2), value: showControls)
         .onAppear { scheduleHide() }
@@ -455,8 +496,14 @@ struct PlayerControlsView: View {
             }
             .font(.caption)
             .foregroundStyle(.white)
-            Slider(value: value, in: 0...1, step: 0.05, onEditingChanged: { _ in scheduleHide() })
-                .tint(.white)
+            Slider(value: value, in: 0...1, step: 0.05, onEditingChanged: { editing in
+                withAnimation(.easeInOut(duration: 0.18)) { enhanceDragging = editing ? title : nil }
+                scheduleHide()
+            })
+            .tint(.white)
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("playerControls")) } action: { frame in
+                enhanceSliderFrames[title] = frame
+            }
         }
         .padding(.horizontal, 14).padding(.vertical, 5)
     }
