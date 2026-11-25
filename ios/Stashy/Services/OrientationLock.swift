@@ -112,7 +112,31 @@ enum OrientationController {
         guard let scene = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
             .first(where: { $0.session.role == .windowApplication }) else { return }
-        scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { _ in }
-        scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        // Have iOS ask again which ways the screen may turn BEFORE asking it to turn, on every controller up the
+        // presentation chain. Asking in the other order let iOS judge the turn against the OLD answer (portrait
+        // only) and refuse it: a landscape video then went "fullscreen" upright (owner, 2026-11-24, iOS 27).
+        var controller = scene.keyWindow?.rootViewController
+        while let current = controller {
+            current.setNeedsUpdateOfSupportedInterfaceOrientations()
+            controller = current.presentedViewController
+        }
+        request(mask, in: scene, retry: true)
+    }
+
+    /// Ask for the turn; a refusal is logged and tried once more 0.3 s later, if that turn is still wanted.
+    @MainActor
+    private static func request(_ mask: UIInterfaceOrientationMask, in scene: UIWindowScene, retry: Bool) {
+        let name = mask == .portrait ? "portrait" : "landscape"
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { error in
+            let reason = error.localizedDescription
+            Task { @MainActor in
+                RemoteLog.shared.event("orientation-refused", [("turn", name), ("retry", retry ? 1 : 0), ("err", String(reason.prefix(120)))])
+                guard retry else { return }
+                try? await Task.sleep(for: .milliseconds(300))
+                guard AppDelegate.orientationLock == mask else { return }
+                scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+                request(mask, in: scene, retry: false)
+            }
+        }
     }
 }
