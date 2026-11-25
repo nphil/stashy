@@ -88,6 +88,12 @@ private final class DebugOverlayWindow: UIWindow {
 private final class DebugOverlayViewController: UIViewController {
     private let button = UIButton(type: .system)
 
+    /// Follow the app's orientation lock. This window sits above the app's, and iOS judges a rotation request
+    /// against its controller too: left at the default it vetoed fullscreen landscape whenever the camera button
+    /// was on (owner, 2026-11-24: fullscreen stayed upright, then lost its controls).
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { AppDelegate.orientationLock }
+    override var shouldAutorotate: Bool { true }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .clear

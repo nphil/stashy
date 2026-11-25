@@ -115,10 +115,14 @@ enum OrientationController {
         // Have iOS ask again which ways the screen may turn BEFORE asking it to turn, on every controller up the
         // presentation chain. Asking in the other order let iOS judge the turn against the OLD answer (portrait
         // only) and refuse it: a landscape video then went "fullscreen" upright (owner, 2026-11-24, iOS 27).
-        var controller = scene.keyWindow?.rootViewController
-        while let current = controller {
-            current.setNeedsUpdateOfSupportedInterfaceOrientations()
-            controller = current.presentedViewController
+        // EVERY window of the scene, not only the key one: an overlay window (the diagnostics camera button) has
+        // its own controller, and a stale answer from it vetoes the turn.
+        for window in scene.windows {
+            var controller = window.rootViewController
+            while let current = controller {
+                current.setNeedsUpdateOfSupportedInterfaceOrientations()
+                controller = current.presentedViewController
+            }
         }
         request(mask, in: scene, retry: true)
     }
@@ -130,11 +134,11 @@ enum OrientationController {
         scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { error in
             let reason = error.localizedDescription
             Task { @MainActor in
-                RemoteLog.shared.event("orientation-refused", [("turn", name), ("retry", retry ? 1 : 0), ("err", String(reason.prefix(120)))])
+                RemoteLog.shared.event("orientation-refused", [("turn", name), ("retry", retry ? 1 : 0), ("err", String(reason.prefix(300)))])
                 guard retry else { return }
                 try? await Task.sleep(for: .milliseconds(300))
                 guard AppDelegate.orientationLock == mask else { return }
-                scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+                for window in scene.windows { window.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations() }
                 request(mask, in: scene, retry: false)
             }
         }
