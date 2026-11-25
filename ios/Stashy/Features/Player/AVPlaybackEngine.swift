@@ -612,6 +612,7 @@ final class AVPlaybackEngine: PlaybackEngine {
             ("status", player.timeControlStatus.rawValue),
             ("reason", player.reasonForWaitingToPlay?.rawValue),
             ("outputs", item.outputs.count),
+            ("videoOutputs", item.outputs.filter { $0 is AVPlayerItemVideoOutput }.count),
             ("requests", access?.numberOfMediaRequests), ("stalls", access?.numberOfStalls),
             ("bytes", access?.numberOfBytesTransferred),
             ("err", failure.map { "\($0.errorStatusCode) \($0.errorDomain) \($0.errorComment ?? "")" }),
