@@ -721,10 +721,18 @@ final class ScenePlayerModel {
                 if progress.isFetching || progress.bytesWritten != lastBytes {
                     lastBytes = progress.bytesWritten
                     lastActivity = now
-                } else if !remuxRunFinished, !progress.isFinished, now.timeIntervalSince(lastActivity) >= 1,
-                          duration <= 0 || currentTime < duration - 1 {
-                    recoverStalledRemux(progress)
-                    return
+                } else if duration <= 0 || currentTime < duration - 1 {
+                    let finished = remuxRunFinished || progress.isFinished
+                    // A run still producing is stuck after 1 s of nothing. A FINISHED run has the whole video on the
+                    // phone, so a wait is never the network: AVPlayer's first frame after a restart takes about 3 s
+                    // (never restart inside that), but a longer wait means the player stopped reading the local
+                    // stream (device log 2026-11-24: buffer drained to 0 mid-play 58 s after the run finished and
+                    // playback sat on "Waiting for the network" for good). Restart at the playhead.
+                    if finished ? now.timeIntervalSince(began) >= 5 : now.timeIntervalSince(lastActivity) >= 1 {
+                        recoverStalledRemux(progress, finished: finished)
+                        return
+                    }
+                    if finished { continue }   // everything is local: never say "network"
                 }
             }
             guard remote else { continue }
@@ -739,13 +747,13 @@ final class ScenePlayerModel {
 
     /// Restart the remux at the playhead without any on-screen text. Four in a minute means restarting
     /// doesn't help, so hand over to the server stream instead of looping.
-    private func recoverStalledRemux(_ progress: RemuxProgress) {
+    private func recoverStalledRemux(_ progress: RemuxProgress, finished: Bool = false) {
         let now = Date()
         recentStallRestarts = recentStallRestarts.filter { now.timeIntervalSince($0) < 60 } + [now]
         stallRestarts += 1
         RemoteLog.shared.event("stall-restart", [
             ("at", Int(currentTime)), ("bytes", progress.bytesWritten), ("media_s", Int(progress.mediaSeconds)),
-            ("paced", progress.isPaced ? 1 : 0), ("n", stallRestarts)])
+            ("paced", progress.isPaced ? 1 : 0), ("finished", finished ? 1 : 0), ("n", stallRestarts)])
         if recentStallRestarts.count > 3 {
             fallbackToHLS(error: "on-device remux stalled 4 times in a minute")
             return
