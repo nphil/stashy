@@ -88,8 +88,26 @@ final class ScenePlayerModel {
             applyEnhance()
         }
     }
+    var enhanceNoise: Double = EnhanceSettings.storedNoise {
+        didSet {
+            UserDefaults.standard.set(enhanceNoise, forKey: EnhanceSettings.noiseKey)
+            applyEnhance()
+        }
+    }
+    var enhanceDeblock: Double = EnhanceSettings.storedDeblock {
+        didSet {
+            UserDefaults.standard.set(enhanceDeblock, forKey: EnhanceSettings.deblockKey)
+            applyEnhance()
+        }
+    }
+    var enhanceVivid: Double = EnhanceSettings.storedVivid {
+        didSet {
+            UserDefaults.standard.set(enhanceVivid, forKey: EnhanceSettings.vividKey)
+            applyEnhance()
+        }
+    }
     private var enhanceOptions: EnhanceOptions {
-        enhanceMode == .off ? .off : EnhanceOptions(upscaler: enhanceMode.upscaler, sharpen: enhanceSharpen, deband: enhanceDeband)
+        enhanceMode == .off ? .off : EnhanceOptions(upscaler: enhanceMode.upscaler, sharpen: enhanceSharpen, deband: enhanceDeband, noiseReduction: enhanceNoise, deblock: enhanceDeblock, vivid: enhanceVivid)
     }
     private func applyEnhance() { (engine as? AVPlaybackEngine)?.enhanceOptions = enhanceOptions }
     /// AI slow-mo's overlay and the glasses own the picture: the enhancer steps aside (phone-only for now).

@@ -31,7 +31,11 @@ enum EnhanceSettings {
     static let sharpenKey = "player.enhance.sharpen"
     static let debandKey = "player.enhance.deband"
 
-    static let defaultSharpen = 0.3
+    static let noiseKey = "player.enhance.noise"
+    static let deblockKey = "player.enhance.deblock"
+    static let vividKey = "player.enhance.vivid"
+
+    static let defaultSharpen = 0.25
     static let defaultDeband = 0.2
 
     static var storedMode: EnhanceMode {
@@ -40,6 +44,9 @@ enum EnhanceSettings {
     static var storedSharpen: Double {
         UserDefaults.standard.object(forKey: sharpenKey) as? Double ?? defaultSharpen
     }
+    static var storedNoise: Double { UserDefaults.standard.object(forKey: noiseKey) as? Double ?? 0 }
+    static var storedDeblock: Double { UserDefaults.standard.object(forKey: deblockKey) as? Double ?? 0 }
+    static var storedVivid: Double { UserDefaults.standard.object(forKey: vividKey) as? Double ?? 0 }
     static var storedDeband: Double {
         UserDefaults.standard.object(forKey: debandKey) as? Double ?? defaultDeband
     }

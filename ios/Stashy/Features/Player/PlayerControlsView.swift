@@ -196,7 +196,13 @@ struct PlayerControlsView: View {
             .opacity(enhanceDragging == nil ? 1 : 0.02)
             .overlay(alignment: .topLeading) {
                 if let title = enhanceDragging, let frame = enhanceSliderFrames[title] {
-                    let value = title == "Sharpen" ? model.enhanceSharpen : model.enhanceDeband
+                    let value: Double = switch title {
+                    case "Sharpen": model.enhanceSharpen
+                    case "Deband": model.enhanceDeband
+                    case "Noise Reduction": model.enhanceNoise
+                    case "Deblock": model.enhanceDeblock
+                    default: model.enhanceVivid
+                    }
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
                             Text(title)
@@ -482,6 +488,9 @@ struct PlayerControlsView: View {
                 Divider().overlay(.white.opacity(0.15))
                 enhanceSlider("Sharpen", value: Binding(get: { model.enhanceSharpen }, set: { model.enhanceSharpen = $0 }))
                 enhanceSlider("Deband", value: Binding(get: { model.enhanceDeband }, set: { model.enhanceDeband = $0 }))
+                enhanceSlider("Noise Reduction", value: Binding(get: { model.enhanceNoise }, set: { model.enhanceNoise = $0 }))
+                enhanceSlider("Deblock", value: Binding(get: { model.enhanceDeblock }, set: { model.enhanceDeblock = $0 }))
+                enhanceSlider("Vivid", value: Binding(get: { model.enhanceVivid }, set: { model.enhanceVivid = $0 }))
                     .padding(.bottom, 4)
             }
         }
